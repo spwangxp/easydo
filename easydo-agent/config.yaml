@@ -1,0 +1,41 @@
+# Server URL configuration
+server_url: "http://localhost:8080"
+
+# Health check server configuration
+server:
+  port: 8080  # Port for health check endpoints (/health, /ready)
+
+# Agent configuration
+agent:
+  # Agent name (defaults to hostname if empty)
+  name: ""
+  
+  # Token file path (in container: /data/agent/token)
+  token_file: "/data/agent/token"
+
+# Heartbeat configuration
+heartbeat:
+  # Initial interval in seconds (default 10s)
+  initial_interval: 10
+  
+  # Retry count on failure
+  retry_count: 3
+  
+  # Retry interval in seconds
+  retry_interval: 5
+
+# Task configuration
+task:
+  # Poll interval in seconds
+  poll_interval: 5
+  
+  # Execution timeout in seconds
+  execution_timeout: 3600
+  
+  # Workspace path for task execution (in container: /data/agent/workspace)
+  workspace_path: "/data/agent/workspace"
+
+# Logging configuration
+logging:
+  level: "debug"  # debug, info, warn, error
+  format: "text" # json, text

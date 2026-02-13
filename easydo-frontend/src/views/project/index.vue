@@ -1,0 +1,692 @@
+<template>
+  <div class="project-container">
+    <div class="project-header">
+      <h1 class="page-title">项目</h1>
+      <el-button type="primary" @click="handleCreate">
+        <el-icon><Plus /></el-icon>
+        添加项目
+      </el-button>
+    </div>
+
+    <div class="project-filters">
+      <div class="filter-tabs">
+        <div class="tab-item active">
+          <span>常用</span>
+        </div>
+        <div class="tab-divider"></div>
+        <div
+          class="tab-item"
+          :class="{ active: activeTab === 'all' }"
+          @click="activeTab = 'all'; fetchProjects()"
+        >
+          <span>所有</span>
+          <span class="tab-count">{{ total }}</span>
+        </div>
+        <div
+          class="tab-item"
+          :class="{ active: activeTab === 'created' }"
+          @click="activeTab = 'created'; fetchProjects()"
+        >
+          <span>我创建的</span>
+          <span class="tab-count">{{ createdCount }}</span>
+        </div>
+        <div
+          class="tab-item"
+          :class="{ active: activeTab === 'favorited' }"
+          @click="activeTab = 'favorited'; fetchProjects()"
+        >
+          <span>我收藏的</span>
+          <span class="tab-count">{{ favoritedCount }}</span>
+        </div>
+      </div>
+
+      <div class="filter-search">
+        <el-input
+          v-model="searchKeyword"
+          placeholder="搜索名称"
+          prefix-icon="Search"
+          clearable
+          style="width: 240px"
+          @input="handleSearch"
+        />
+      </div>
+    </div>
+
+    <div class="project-table" v-loading="loading">
+      <el-table :data="projectList" style="width: 100%" row-key="id">
+        <el-table-column prop="name" label="名称" min-width="240">
+          <template #default="{ row }">
+            <div class="project-name-cell">
+              <div class="project-icon" :style="{ background: row.color || '#409EFF' }">
+                {{ row.name.charAt(0).toUpperCase() }}
+              </div>
+              <span class="project-name-text">{{ row.name }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="pipeline_count" label="流水线数" width="100" align="center" />
+        <el-table-column label="最新执行人" width="120" align="center">
+          <template #default="{ row }">
+            <span>{{ row.latest_runner || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="最新执行时间" width="160" align="center">
+          <template #default="{ row }">
+            <span v-if="row.latest_run_time && row.latest_run_time !== '0001-01-01T00:00:00Z'">{{ formatDateTime(row.latest_run_time) }}</span>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="执行结果" width="100" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.latest_run_status" :type="getStatusType(row.latest_run_status)" size="small">
+              {{ getStatusText(row.latest_run_status) }}
+            </el-tag>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="创建人" width="120" align="center">
+          <template #default="{ row }">
+            <span>{{ row.owner?.nickname || row.owner?.username || '未知' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="创建时间" width="120" align="center">
+          <template #default="{ row }">
+            <span>{{ formatDate(row.created_at) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="80" align="center">
+          <template #default="{ row }">
+            <div class="action-cell">
+              <el-tooltip :content="row.is_favorited ? '取消收藏' : '收藏'" placement="top">
+                <el-icon
+                  class="action-icon"
+                  :class="{ active: row.is_favorited }"
+                  @click="handleFavorite(row)"
+                >
+                  <Star v-if="row.is_favorited" />
+                  <StarFilled v-else />
+                </el-icon>
+              </el-tooltip>
+              <el-dropdown trigger="click" @command="(cmd) => handleCommand(cmd, row)">
+                <el-icon class="action-icon more-icon"><MoreFilled /></el-icon>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="edit">编辑</el-dropdown-item>
+                    <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-empty v-if="!loading && projectList.length === 0" description="暂无项目" />
+    </div>
+
+    <!-- 创建/编辑项目弹窗 -->
+    <el-dialog
+      v-model="dialogVisible"
+      :title="isEdit ? '编辑项目' : '创建项目'"
+      width="480px"
+      :close-on-click-modal="false"
+    >
+      <el-form
+        ref="formRef"
+        :model="formData"
+        :rules="formRules"
+        label-width="80px"
+      >
+        <el-form-item label="项目名称" prop="name">
+          <el-input v-model="formData.name" placeholder="请输入项目名称" maxlength="64" show-word-limit />
+        </el-form-item>
+        <el-form-item label="描述" prop="description">
+          <el-input
+            v-model="formData.description"
+            type="textarea"
+            placeholder="请输入项目描述"
+            :rows="3"
+            maxlength="500"
+            show-word-limit
+          />
+        </el-form-item>
+        <el-form-item label="颜色" prop="color">
+          <el-color-picker v-model="formData.color" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="submitting" @click="handleSubmit">
+          确定
+        </el-button>
+      </template>
+    </el-dialog>
+    
+    <!-- 删除确认对话框 -->
+    <el-dialog
+      v-model="deleteDialogVisible"
+      title="确认删除"
+      width="400px"
+      :close-on-click-modal="false"
+    >
+      <div class="delete-warning">
+        <el-icon color="#E6A23C" size="24"><Warning /></el-icon>
+        <p>确定要删除项目 <strong>{{ deleteForm.name }}</strong> 吗？</p>
+        <p class="delete-tip">此操作不可恢复，请输入项目名称以确认。</p>
+      </div>
+      <el-form :model="deleteForm" label-width="0">
+        <el-form-item>
+          <el-input
+            v-model="deleteForm.confirmName"
+            :placeholder="`请输入 '${deleteForm.name}' 以确认`"
+          />
+        </el-form-item>
+      </el-form>
+      
+      <template #footer>
+        <el-button @click="deleteDialogVisible = false">取消</el-button>
+        <el-button
+          type="danger"
+          :loading="deleteLoading"
+          :disabled="deleteForm.confirmName !== deleteForm.name"
+          @click="handleDeleteConfirm"
+        >
+          删除
+        </el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, onMounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  Plus,
+  Search,
+  Star,
+  StarFilled,
+  MoreFilled,
+  Warning
+} from '@element-plus/icons-vue'
+import { getProjectList, createProject, updateProject, deleteProject, toggleFavorite } from '@/api/project'
+
+const activeTab = ref('all')
+const searchKeyword = ref('')
+const total = ref(0)
+const createdCount = ref(0)
+const favoritedCount = ref(0)
+const loading = ref(false)
+const projectList = ref([])
+
+const dialogVisible = ref(false)
+const isEdit = ref(false)
+const submitting = ref(false)
+const currentProjectId = ref(null)
+const formRef = ref(null)
+
+// 删除对话框相关
+const deleteDialogVisible = ref(false)
+const deleteLoading = ref(false)
+const deleteForm = reactive({
+  id: null,
+  name: '',
+  confirmName: ''
+})
+
+const formData = reactive({
+  name: '',
+  description: '',
+  color: '#409EFF'
+})
+
+const formRules = {
+  name: [
+    { required: true, message: '请输入项目名称', trigger: 'blur' },
+    { min: 2, max: 64, message: '项目名称长度为2-64个字符', trigger: 'blur' }
+  ]
+}
+
+let searchTimer = null
+
+const formatDate = (dateStr) => {
+  if (!dateStr) return '-'
+  // 处理 Unix 时间戳（秒）
+  const timestamp = typeof dateStr === 'number' ? dateStr * 1000 : dateStr
+  const date = new Date(timestamp)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const formatDateTime = (dateStr) => {
+  if (!dateStr) return '-'
+  // 处理 Unix 时间戳（秒）
+  const timestamp = typeof dateStr === 'number' ? dateStr * 1000 : dateStr
+  const date = new Date(timestamp)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  const hours = String(date.getHours()).padStart(2, '0')
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  return `${year}-${month}-${day} ${hours}:${minutes}`
+}
+
+const getStatusType = (status) => {
+  switch (status) {
+    case 'success':
+      return 'success'
+    case 'running':
+      return 'warning'
+    case 'failed':
+      return 'danger'
+    case 'pending':
+      return 'info'
+    default:
+      return 'info'
+  }
+}
+
+const getStatusText = (status) => {
+  switch (status) {
+    case 'success':
+      return '成功'
+    case 'running':
+      return '运行中'
+    case 'failed':
+      return '失败'
+    case 'pending':
+      return '等待中'
+    default:
+      return status
+  }
+}
+
+const fetchProjects = async () => {
+  loading.value = true
+  try {
+    const params = {
+      page: 1,
+      page_size: 100,
+      tab: activeTab.value
+    }
+
+    if (searchKeyword.value) {
+      params.keyword = searchKeyword.value
+    }
+
+    const res = await getProjectList(params)
+    if (res.code === 200) {
+      projectList.value = res.data.list || []
+      total.value = res.data.total || 0
+      // 更新统计数据
+      createdCount.value = projectList.value.length
+      favoritedCount.value = projectList.value.filter(p => p.is_favorited).length
+    }
+  } catch (error) {
+    console.error('获取项目列表失败:', error)
+    ElMessage.error('获取项目列表失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+const handleSearch = () => {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    fetchProjects()
+  }, 300)
+}
+
+const handleCreate = () => {
+  isEdit.value = false
+  currentProjectId.value = null
+  formData.name = ''
+  formData.description = ''
+  formData.color = '#409EFF'
+  dialogVisible.value = true
+}
+
+const handleEdit = (project) => {
+  isEdit.value = true
+  currentProjectId.value = project.id
+  formData.name = project.name
+  formData.description = project.description || ''
+  formData.color = project.color || '#409EFF'
+  dialogVisible.value = true
+}
+
+const handleDelete = (project) => {
+  deleteForm.id = project.id
+  deleteForm.name = project.name
+  deleteForm.confirmName = ''
+  deleteDialogVisible.value = true
+}
+
+const handleDeleteConfirm = async () => {
+  if (deleteForm.confirmName !== deleteForm.name) {
+    ElMessage.error('名称不匹配')
+    return
+  }
+  
+  deleteLoading.value = true
+  try {
+    const res = await deleteProject(deleteForm.id)
+    if (res.code === 200) {
+      ElMessage.success('删除成功')
+      deleteDialogVisible.value = false
+      fetchProjects()
+    } else {
+      ElMessage.error(res.message || '删除失败')
+    }
+  } catch (error) {
+    console.error('删除项目失败:', error)
+    ElMessage.error('删除失败')
+  } finally {
+    deleteLoading.value = false
+  }
+}
+
+const handleFavorite = async (project) => {
+  try {
+    const res = await toggleFavorite(project.id)
+    if (res.code === 200) {
+      project.is_favorited = !project.is_favorited
+      ElMessage.success(project.is_favorited ? '收藏成功' : '取消收藏')
+      // 重新获取项目列表以更新排序
+      fetchProjects()
+    } else {
+      ElMessage.error(res.message || '操作失败')
+    }
+  } catch (error) {
+    console.error('收藏操作失败:', error)
+    ElMessage.error('操作失败')
+  }
+}
+
+const handleCommand = (command, project) => {
+  switch (command) {
+    case 'edit':
+      handleEdit(project)
+      break
+    case 'delete':
+      handleDelete(project)
+      break
+  }
+}
+
+const handleSubmit = async () => {
+  if (!formRef.value) return
+
+  try {
+    await formRef.value.validate()
+    submitting.value = true
+
+    if (isEdit.value) {
+      const res = await updateProject(currentProjectId.value, formData)
+      if (res.code === 200) {
+        ElMessage.success('更新成功')
+        dialogVisible.value = false
+        fetchProjects()
+      } else {
+        ElMessage.error(res.message || '更新失败')
+      }
+    } else {
+      const res = await createProject(formData)
+      if (res.code === 200) {
+        ElMessage.success('创建成功')
+        dialogVisible.value = false
+        fetchProjects()
+      } else {
+        ElMessage.error(res.message || '创建失败')
+      }
+    }
+  } catch (error) {
+    console.error('提交失败:', error)
+  } finally {
+    submitting.value = false
+  }
+}
+
+onMounted(() => {
+  fetchProjects()
+})
+</script>
+
+<style lang="scss" scoped>
+@import '@/assets/styles/variables.scss';
+
+.project-container {
+  .project-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 28px;
+
+    .page-title {
+      font-family: $font-family-display;
+      font-size: 28px;
+      font-weight: 700;
+      color: $text-primary;
+      letter-spacing: -0.02em;
+    }
+    
+    :deep(.el-button--primary) {
+      height: 44px;
+      padding: 0 24px;
+      border-radius: $radius-md;
+      font-weight: 600;
+      background: linear-gradient(135deg, $primary-color 0%, $primary-hover 100%);
+      border: none;
+      box-shadow: $shadow-md;
+      
+      &:hover {
+        transform: translateY(-2px);
+        box-shadow: $shadow-lg;
+      }
+    }
+  }
+
+  .project-filters {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    margin-bottom: 24px;
+    padding: 14px 20px;
+    background: $bg-card;
+    border-radius: $radius-xl;
+    box-shadow: $shadow-sm;
+
+    .filter-tabs {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+
+      .tab-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 16px;
+        color: $text-secondary;
+        cursor: pointer;
+        border-radius: $radius-full;
+        transition: all $transition-base;
+        font-weight: 500;
+        font-size: 14px;
+
+        &:hover {
+          background: rgba($primary-color, 0.06);
+          color: $primary-color;
+        }
+
+        &.active {
+          color: $primary-color;
+          background: rgba($primary-color, 0.1);
+          box-shadow: inset 0 0 0 1px rgba($primary-color, 0.15);
+        }
+
+        .tab-count {
+          font-size: 12px;
+          color: $text-muted;
+          background: $bg-secondary;
+          padding: 2px 8px;
+          border-radius: $radius-full;
+        }
+      }
+
+      .tab-divider {
+        width: 1px;
+        height: 20px;
+        background: $border-color;
+        margin: 0 8px;
+      }
+    }
+
+    .filter-search {
+      flex: 1;
+      
+      :deep(.el-input__wrapper) {
+        background: $bg-secondary;
+        border-radius: $radius-md;
+        box-shadow: $shadow-inset;
+        border: 1px solid $border-color-light;
+        
+        &:hover, &.is-focus {
+          border-color: rgba($primary-color, 0.4);
+        }
+      }
+    }
+  }
+
+  .project-table {
+    background: $bg-card;
+    border-radius: $radius-xl;
+    padding: 20px;
+    box-shadow: $shadow-md;
+
+    :deep(.el-table) {
+      background: transparent;
+
+      th.el-table__cell {
+        background: $bg-secondary;
+        color: $text-secondary;
+        font-weight: 600;
+        font-size: 13px;
+        height: 50px;
+        border-bottom: 1px solid $border-color;
+      }
+
+      td.el-table__cell {
+        height: 56px;
+        color: $text-primary;
+        border-bottom: 1px solid $border-color-light;
+      }
+
+      .el-table__row:hover > td.el-table__cell {
+        background: rgba($primary-color, 0.04);
+      }
+      
+      .el-tag {
+        border-radius: $radius-full;
+        padding: 4px 12px;
+        font-weight: 500;
+        border: none;
+        
+        &.el-tag--success {
+          background: $success-light;
+          color: darken($success-color, 20%);
+        }
+        
+        &.el-tag--info {
+          background: $info-light;
+          color: darken($info-color, 20%);
+        }
+      }
+    }
+
+    .project-name-cell {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+
+      .project-icon {
+        width: 32px;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: 13px;
+        font-weight: 600;
+        border-radius: $radius-md;
+        flex-shrink: 0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      }
+
+      .project-name-text {
+        font-size: 14px;
+        color: $text-primary;
+        font-weight: 500;
+      }
+    }
+
+    .action-cell {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+
+      .action-icon {
+        width: 32px;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        color: $text-secondary;
+        cursor: pointer;
+        border-radius: $radius-md;
+        transition: all $transition-fast;
+
+        &:hover {
+          color: $primary-color;
+          background: rgba($primary-color, 0.08);
+        }
+
+        &.active {
+          color: $warning-color;
+          background: $warning-light;
+        }
+
+        &.more-icon {
+          font-size: 18px;
+        }
+      }
+    }
+    
+    .el-empty {
+      padding: 60px 0;
+    }
+  }
+}
+
+.delete-warning {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px 0;
+  
+  p {
+    margin: 16px 0 8px;
+    color: $text-primary;
+    font-size: 15px;
+    font-weight: 500;
+  }
+  
+  .delete-tip {
+    color: $text-muted;
+    font-size: 13px;
+  }
+}
+</style>

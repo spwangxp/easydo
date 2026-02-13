@@ -1,0 +1,382 @@
+<template>
+  <div class="pending-container">
+    <div class="pending-header">
+      <h1 class="page-title">待接纳执行器</h1>
+    </div>
+
+    <div class="pending-table" v-loading="loading">
+      <el-table :data="pendingList" style="width: 100%" row-key="id">
+        <el-table-column prop="name" label="名称" min-width="200">
+          <template #default="{ row }">
+            <div class="agent-name-cell">
+              <div class="agent-icon">
+                <el-icon><Monitor /></el-icon>
+              </div>
+              <div class="agent-info">
+                <span class="agent-name-text">{{ row.name }}</span>
+                <span class="agent-host">{{ row.host }}:{{ row.port }}</span>
+              </div>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="标签" min-width="150" align="center">
+          <template #default="{ row }">
+            <div class="agent-tags" v-if="row.labels">
+              <el-tag
+                v-for="(label, idx) in parseLabels(row.labels)"
+                :key="idx"
+                size="small"
+                type="info"
+                class="agent-tag"
+              >
+                {{ label }}
+              </el-tag>
+            </div>
+            <span v-else class="text-muted">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="系统" width="120" align="center">
+          <template #default="{ row }">
+            <span>{{ row.os }} {{ row.arch }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="资源" width="150" align="center">
+          <template #default="{ row }">
+            <span class="resource-info">
+              <el-icon><Cpu /></el-icon>
+              {{ row.cpu_cores }}C
+            </span>
+            <span class="resource-info">
+              <el-icon><Grid /></el-icon>
+              {{ formatMemory(row.memory_total) }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="注册时间" width="180" align="center">
+          <template #default="{ row }">
+            <span>{{ formatDateTime(row.created_at) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="180" align="center">
+          <template #default="{ row }">
+            <el-button type="primary" size="small" @click="handleApprove(row)">接纳</el-button>
+            <el-button type="danger" size="small" @click="handleReject(row)">拒绝</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-empty v-if="!loading && pendingList.length === 0" description="暂无待接纳的执行器" />
+    </div>
+
+    <!-- 接纳确认弹窗 -->
+    <el-dialog
+      v-model="approveDialogVisible"
+      title="接纳执行器"
+      width="500px"
+      :close-on-click-modal="false"
+    >
+      <div class="approve-info" v-if="currentAgent">
+        <el-descriptions :column="1" border>
+          <el-descriptions-item label="名称">{{ currentAgent.name }}</el-descriptions-item>
+          <el-descriptions-item label="主机">{{ currentAgent.host }}:{{ currentAgent.port }}</el-descriptions-item>
+          <el-descriptions-item label="操作系统">{{ currentAgent.os }} {{ currentAgent.arch }}</el-descriptions-item>
+          <el-descriptions-item label="CPU">{{ currentAgent.cpu_cores }} 核</el-descriptions-item>
+          <el-descriptions-item label="内存">{{ formatMemory(currentAgent.memory_total) }}</el-descriptions-item>
+        </el-descriptions>
+      </div>
+      <el-form :model="approveForm" label-width="80px" style="margin-top: 20px">
+        <el-form-item label="备注">
+          <el-input
+            v-model="approveForm.remark"
+            type="textarea"
+            placeholder="可选填写备注信息"
+            :rows="3"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="approveDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="approveLoading" @click="handleApproveConfirm">
+          确认接纳
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 拒绝确认弹窗 -->
+    <el-dialog
+      v-model="rejectDialogVisible"
+      title="拒绝执行器"
+      width="500px"
+      :close-on-click-modal="false"
+    >
+      <div class="reject-warning">
+        <el-icon color="#F56C6C" size="24"><Warning /></el-icon>
+        <p>确定要拒绝执行器 <strong>{{ currentAgent?.name }}</strong> 的注册申请吗？</p>
+      </div>
+      <el-form :model="rejectForm" label-width="80px" style="margin-top: 20px">
+        <el-form-item label="拒绝原因" required>
+          <el-input
+            v-model="rejectForm.remark"
+            type="textarea"
+            placeholder="请输入拒绝原因"
+            :rows="3"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="rejectDialogVisible = false">取消</el-button>
+        <el-button
+          type="danger"
+          :loading="rejectLoading"
+          :disabled="!rejectForm.remark"
+          @click="handleRejectConfirm"
+        >
+          确认拒绝
+        </el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
+import { Monitor, Cpu, Grid, Warning } from '@element-plus/icons-vue'
+import { getPendingAgents, approveAgent, rejectAgent } from '@/api/agent'
+
+const loading = ref(false)
+const pendingList = ref([])
+
+const approveDialogVisible = ref(false)
+const rejectDialogVisible = ref(false)
+const approveLoading = ref(false)
+const rejectLoading = ref(false)
+const currentAgent = ref(null)
+
+const approveForm = reactive({
+  remark: ''
+})
+
+const rejectForm = reactive({
+  remark: ''
+})
+
+const parseLabels = (labelsStr) => {
+  if (!labelsStr) return []
+  try {
+    const labels = JSON.parse(labelsStr)
+    return Array.isArray(labels) ? labels : []
+  } catch {
+    return labelsStr.split(',').map(l => l.trim()).filter(l => l)
+  }
+}
+
+const formatMemory = (bytes) => {
+  if (!bytes) return '-'
+  const gb = bytes / (1024 * 1024 * 1024)
+  if (gb >= 1) return gb.toFixed(1) + 'GB'
+  const mb = bytes / (1024 * 1024)
+  return mb.toFixed(0) + 'MB'
+}
+
+const formatDateTime = (timestamp) => {
+  if (!timestamp) return '-'
+  const date = new Date(timestamp * 1000)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  const hour = String(date.getHours()).padStart(2, '0')
+  const minute = String(date.getMinutes()).padStart(2, '0')
+  return `${year}-${month}-${day} ${hour}:${minute}`
+}
+
+const fetchPendingAgents = async () => {
+  loading.value = true
+  try {
+    const res = await getPendingAgents({ page: 1, page_size: 100 })
+    if (res.code === 200) {
+      pendingList.value = res.data.list || []
+    }
+  } catch (error) {
+    console.error('获取待接纳列表失败:', error)
+    ElMessage.error('获取待接纳列表失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+const handleApprove = (agent) => {
+  currentAgent.value = agent
+  approveForm.remark = ''
+  approveDialogVisible.value = true
+}
+
+const handleApproveConfirm = async () => {
+  approveLoading.value = true
+  try {
+    const res = await approveAgent(currentAgent.value.id, { remark: approveForm.remark })
+    if (res.code === 200) {
+      ElMessage.success('接纳成功')
+      approveDialogVisible.value = false
+      fetchPendingAgents()
+    } else {
+      ElMessage.error(res.message || '接纳失败')
+    }
+  } catch (error) {
+    console.error('接纳失败:', error)
+    ElMessage.error('接纳失败')
+  } finally {
+    approveLoading.value = false
+  }
+}
+
+const handleReject = (agent) => {
+  currentAgent.value = agent
+  rejectForm.remark = ''
+  rejectDialogVisible.value = true
+}
+
+const handleRejectConfirm = async () => {
+  if (!rejectForm.remark) {
+    ElMessage.warning('请输入拒绝原因')
+    return
+  }
+  
+  rejectLoading.value = true
+  try {
+    const res = await rejectAgent(currentAgent.value.id, { remark: rejectForm.remark })
+    if (res.code === 200) {
+      ElMessage.success('已拒绝该执行器的注册申请')
+      rejectDialogVisible.value = false
+      fetchPendingAgents()
+    } else {
+      ElMessage.error(res.message || '操作失败')
+    }
+  } catch (error) {
+    console.error('拒绝失败:', error)
+    ElMessage.error('操作失败')
+  } finally {
+    rejectLoading.value = false
+  }
+}
+
+onMounted(() => {
+  fetchPendingAgents()
+})
+</script>
+
+<style lang="scss" scoped>
+.pending-container {
+  .pending-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+
+    .page-title {
+      font-size: 24px;
+      font-weight: 600;
+      color: #303133;
+    }
+  }
+
+  .pending-table {
+    background: white;
+    border-radius: 8px;
+    padding: 16px;
+
+    :deep(.el-table) {
+      --el-table-border-color: #ebeef5;
+      --el-table-header-bg-color: #fafafa;
+
+      th.el-table__cell {
+        background-color: #fafafa;
+        color: #606266;
+        font-weight: 500;
+        height: 44px;
+      }
+
+      td.el-table__cell {
+        height: 48px;
+      }
+    }
+
+    .agent-name-cell {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+
+      .agent-icon {
+        width: 40px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #409EFF;
+        color: white;
+        font-size: 20px;
+        border-radius: 8px;
+        flex-shrink: 0;
+      }
+
+      .agent-info {
+        display: flex;
+        flex-direction: column;
+
+        .agent-name-text {
+          font-size: 14px;
+          color: #303133;
+        }
+
+        .agent-host {
+          font-size: 12px;
+          color: #909399;
+        }
+      }
+    }
+
+    .agent-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+
+      .agent-tag {
+        margin: 0;
+      }
+    }
+
+    .resource-info {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-right: 12px;
+      color: #606266;
+
+      .el-icon {
+        font-size: 14px;
+      }
+    }
+  }
+}
+
+.approve-info {
+  margin-bottom: 10px;
+}
+
+.reject-warning {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px 0;
+
+  p {
+    margin: 12px 0 4px;
+    color: #303133;
+    font-size: 14px;
+  }
+}
+
+.text-muted {
+  color: #909399;
+}
+</style>

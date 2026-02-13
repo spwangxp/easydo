@@ -1,0 +1,106 @@
+services:
+  frontend:
+    build:
+      context: ./easydo-frontend
+      dockerfile: Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_COMMIT_SHORT: ${GIT_COMMIT_SHORT:-unknown}
+        GIT_DATE: ${GIT_DATE:-unknown}
+    ports:
+      - "80:80"
+    depends_on:
+      - server
+    networks:
+      - easydo-network
+    restart: unless-stopped
+
+  server:
+    build:
+      context: ./easydo-server
+      dockerfile: Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_COMMIT_SHORT: ${GIT_COMMIT_SHORT:-unknown}
+        GIT_DATE: ${GIT_DATE:-unknown}
+    ports:
+      - "8080:8080"
+    environment:
+      # Server配置
+      - SERVER_PORT=8080
+      - SERVER_MODE=debug
+      
+      # Database配置 (通过环境变量注入，覆盖config.yaml)
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_USERNAME=root
+      - DB_PASSWORD=password
+      - DB_NAME=easydo
+      
+      # Redis配置
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      - REDIS_DB=0
+      
+      # JWT配置
+      - JWT_SECRET=easydo-secret-key
+    depends_on:
+      - db
+      - redis
+    networks:
+      - easydo-network
+    restart: unless-stopped
+
+  db:
+    image: mysql:8.0
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=password
+      - MYSQL_DATABASE=easydo
+      - MYSQL_CHARSET=utf8mb4
+      - MYSQL_COLLATION=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - easydo-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - easydo-network
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ./easydo-agent
+      dockerfile: Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_COMMIT_SHORT: ${GIT_COMMIT_SHORT:-unknown}
+        GIT_DATE: ${GIT_DATE:-unknown}
+    environment:
+      # Agent配置
+      - EASYDO_SERVER_URL=http://server:8080
+      - AGENT_NAME=${AGENT_NAME:-easydo-agent}
+    volumes:
+      - agent_data:/data/agent
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - easydo-network
+    restart: unless-stopped
+
+networks:
+  easydo-network:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  redis_data:
+  agent_data:

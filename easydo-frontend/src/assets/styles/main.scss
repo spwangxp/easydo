@@ -1,0 +1,359 @@
+@import './variables.scss';
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700&display=swap');
+
+// ============================================
+// CSS Variables for Theme System
+// ============================================
+:root {
+  // Light Theme (Default)
+  --primary-color: #{$primary-color};
+  --primary-hover: #{$primary-hover};
+  --primary-active: #{$primary-active};
+  --primary-light: #{$primary-light};
+  --primary-lighter: #{$primary-lighter};
+
+  --success-color: #{$success-color};
+  --success-light: #{$success-light};
+  --warning-color: #{$warning-color};
+  --warning-light: #{$warning-light};
+  --danger-color: #{$danger-color};
+  --danger-light: #{$danger-light};
+  --info-color: #{$info-color};
+  --info-light: #{$info-light};
+
+  --text-primary: #{$text-primary};
+  --text-secondary: #{$text-secondary};
+  --text-tertiary: #{$text-tertiary};
+  --text-muted: #{$text-muted};
+  --text-placeholder: #{$text-placeholder};
+
+  --bg-primary: #{$bg-primary};
+  --bg-secondary: #{$bg-secondary};
+  --bg-tertiary: #{$bg-tertiary};
+  --bg-sidebar: #{$bg-sidebar};
+  --bg-card: #{$bg-card};
+  --bg-elevated: #{$bg-elevated};
+
+  --border-color: #{$border-color};
+  --border-color-light: #{$border-color-light};
+  --border-color-medium: #{$border-color-medium};
+  --border-color-strong: #{$border-color-strong};
+  --border-color-hover: #{$border-color-hover};
+
+  --shadow-sm: #{$shadow-sm};
+  --shadow-md: #{$shadow-md};
+  --shadow-lg: #{$shadow-lg};
+  --shadow-xl: #{$shadow-xl};
+  --shadow-inset: #{$shadow-inset};
+
+  --glass-bg: #{$glass-bg};
+  --glass-border: #{$glass-border};
+}
+
+:root.dark {
+  --primary-color: #{$dark-primary-color};
+  --primary-hover: #{$dark-primary-hover};
+  --primary-active: #{$dark-primary-active};
+  --primary-light: #{$dark-primary-light};
+  --primary-lighter: #{$dark-primary-lighter};
+
+  --success-color: #{$dark-success-color};
+  --success-light: #{$dark-success-light};
+  --warning-color: #{$dark-warning-color};
+  --warning-light: #{$dark-warning-light};
+  --danger-color: #{$dark-danger-color};
+  --danger-light: #{$dark-danger-light};
+  --info-color: #{$dark-info-color};
+  --info-light: #{$dark-info-light};
+
+  --text-primary: #{$dark-text-primary};
+  --text-secondary: #{$dark-text-secondary};
+  --text-tertiary: #{$dark-text-tertiary};
+  --text-muted: #{$dark-text-muted};
+  --text-placeholder: #{$dark-text-placeholder};
+
+  --bg-primary: #{$dark-bg-primary};
+  --bg-secondary: #{$dark-bg-secondary};
+  --bg-tertiary: #{$dark-bg-tertiary};
+  --bg-sidebar: #{$dark-bg-sidebar};
+  --bg-card: #{$dark-bg-card};
+  --bg-elevated: #{$dark-bg-elevated};
+
+  --border-color: #{$dark-border-color};
+  --border-color-light: #{$dark-border-color-light};
+  --border-color-medium: #{$dark-border-color-medium};
+  --border-color-strong: #{$dark-border-color-strong};
+  --border-color-hover: #{$dark-border-color-hover};
+
+  --shadow-sm: #{$dark-shadow-sm};
+  --shadow-md: #{$dark-shadow-md};
+  --shadow-lg: #{$dark-shadow-lg};
+  --shadow-inset: #{$dark-shadow-inset};
+
+  --glass-bg: #{$dark-glass-bg};
+  --glass-border: #{$dark-glass-border};
+}
+
+// ============================================
+// Reset & Base Styles
+// ============================================
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  font-family: $font-family-body;
+  font-size: 14px;
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color $transition-base, color $transition-base;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+}
+
+// ============================================
+// Modern Scrollbar
+// ============================================
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: $radius-full;
+
+  &:hover {
+    background: var(--text-tertiary);
+  }
+}
+
+// ============================================
+// Utility Classes
+// ============================================
+.flex { display: flex; }
+.flex-center { display: flex; justify-content: center; align-items: center; }
+.flex-between { display: flex; justify-content: space-between; align-items: center; }
+.flex-1 { flex: 1; }
+.text-center { text-align: center; }
+.text-right { text-align: right; }
+
+// Spacing utilities
+.mt-20 { margin-top: 20px; }
+.mb-20 { margin-bottom: 20px; }
+.ml-20 { margin-left: 20px; }
+.mr-20 { margin-right: 20px; }
+.p-20 { padding: 20px; }
+
+// ============================================
+// Modern Page Container
+// ============================================
+.page-container {
+  padding: $space-6;
+  background-color: var(--bg-primary);
+  min-height: calc(100vh - $header-height);
+}
+
+// ============================================
+// Neumorphic Card Style
+// ============================================
+.card {
+  background-color: var(--bg-card);
+  border-radius: $radius-lg;
+  box-shadow: var(--shadow-md);
+  padding: $space-6;
+  transition: box-shadow $transition-base, background-color $transition-base;
+
+  &:hover {
+    box-shadow: var(--shadow-lg);
+  }
+}
+
+// ============================================
+// Modern Title Styles
+// ============================================
+.page-title {
+  font-family: $font-family-display;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: $space-6;
+  letter-spacing: -0.02em;
+}
+
+.section-title {
+  font-family: $font-family-display;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: $space-5;
+}
+
+// ============================================
+// Neumorphic Button Style
+// ============================================
+.btn-primary {
+  background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
+  border: none;
+  color: white;
+  border-radius: $radius-md;
+  padding: 10px 24px;
+  font-weight: 500;
+  box-shadow: var(--shadow-md);
+  transition: all $transition-base;
+
+  &:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-lg);
+  }
+
+  &:active {
+    transform: translateY(0);
+    box-shadow: var(--shadow-inset);
+  }
+}
+
+// ============================================
+// Glass Effect
+// ============================================
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: $blur-md;
+  -webkit-backdrop-filter: $blur-md;
+  border: 1px solid var(--glass-border);
+}
+
+// ============================================
+// Modern Table Styles Override
+// ============================================
+.modern-table {
+  background: var(--bg-card);
+  border-radius: $radius-lg;
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+
+  .el-table {
+    background: transparent;
+
+    th.el-table__cell {
+      background: var(--bg-secondary);
+      color: var(--text-secondary);
+      font-weight: 600;
+      font-size: 13px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    td.el-table__cell {
+      color: var(--text-primary);
+      border-bottom: 1px solid var(--border-color-light);
+    }
+
+    .el-table__row:hover > td.el-table__cell {
+      background: var(--primary-light);
+    }
+  }
+}
+
+// ============================================
+// Status Badge Styles
+// ============================================
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: $radius-full;
+  font-size: 12px;
+  font-weight: 500;
+
+  &--success {
+    background: var(--success-light);
+    color: #5a8a5a;
+  }
+
+  &--warning {
+    background: var(--warning-light);
+    color: #8f7550;
+  }
+
+  &--danger {
+    background: var(--danger-light);
+    color: #8f5a5a;
+  }
+
+  &--info {
+    background: var(--info-light);
+    color: #6b7b8f;
+  }
+
+  &::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+}
+
+// ============================================
+// Form Input Styles
+// ============================================
+.modern-input {
+  .el-input__wrapper {
+    background: var(--bg-secondary);
+    border-radius: $radius-md;
+    box-shadow: var(--shadow-inset);
+    border: 1px solid var(--border-color-light);
+    padding: 8px 16px;
+    transition: all $transition-base;
+
+    &:hover, &.is-focus {
+      border-color: var(--primary-color);
+      box-shadow: var(--shadow-inset), 0 0 0 3px var(--primary-light);
+    }
+  }
+
+  input {
+    color: var(--text-primary);
+    font-family: $font-family-body;
+
+    &::placeholder {
+      color: var(--text-placeholder);
+    }
+  }
+}
+
+// ============================================
+// Soft Gradient Backgrounds
+// ============================================
+.gradient-bg {
+  background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+}
+
+.gradient-bg-soft {
+  background: linear-gradient(135deg, var(--primary-lighter) 0%, var(--success-light) 100%);
+}
+
+// ============================================
+// Blur Background Shapes
+// ============================================
+.blur-shape {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(60px);
+  opacity: 0.5;
+  pointer-events: none;
+}
