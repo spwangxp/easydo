@@ -88,7 +88,7 @@ status:
 
 debug: stop
 	@echo "$(RED)[Frontend]$(NC) 调试部署..."
-	@docker rmi easydo3-frontend easydo-frontend:latest 2>/dev/null || true
+	@docker rmi easydo-frontend easydo-frontend:latest 2>/dev/null || true
 	@echo "[Frontend] Version: $(GIT_COMMIT_SHORT) @ $(GIT_DATE)"
 	@$(DC) build frontend \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT) \

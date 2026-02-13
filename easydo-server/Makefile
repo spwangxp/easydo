@@ -90,7 +90,7 @@ status:
 
 debug: stop
 	@echo "$(RED)[Server]$(NC) 调试部署..."
-	@docker rmi easydo3-server easydo-server:latest 2>/dev/null || true
+	@docker rmi easydo-server easydo-server:latest 2>/dev/null || true
 	@echo "[Server] Version: $(GIT_COMMIT_SHORT) @ $(GIT_DATE)"
 	@$(DC) build server \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT) \

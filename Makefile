@@ -237,19 +237,19 @@ clean-agent:
 rmi-front:
 	@echo ""
 	@echo "$(RED)🗑️ 删除 Frontend 镜像...$(NC)"
-	@docker rmi easydo3-frontend easydo3-frontend:latest 2>/dev/null || true
+	@docker rmi easydo-frontend easydo-frontend:latest 2>/dev/null || true
 	@echo "$(GREEN)✅ Frontend 镜像已删除!$(NC)"
 
 rmi-srv:
 	@echo ""
 	@echo "$(RED)🗑️ 删除 Server 镜像...$(NC)"
-	@docker rmi easydo3-server easydo3-server:latest 2>/dev/null || true
+	@docker rmi easydo-server easydo-server:latest 2>/dev/null || true
 	@echo "$(GREEN)✅ Server 镜像已删除!$(NC)"
 
 rmi-agent:
 	@echo ""
 	@echo "$(RED)🗑️ 删除 Agent 镜像...$(NC)"
-	@docker rmi easydo3-agent easydo3-agent:latest 2>/dev/null || true
+	@docker rmi easydo-agent easydo-agent:latest 2>/dev/null || true
 	@echo "$(GREEN)✅ Agent 镜像已删除!$(NC)"
 
 # ════════════════════════════════════════════════════════════════
@@ -327,9 +327,9 @@ prune:
 	@echo ""
 	@echo "$(RED)💥 完整清理 (停止+删除容器+镜像)...$(NC)"
 	@$(DC) down -v --remove-orphans 2>/dev/null || true
-	@docker rmi easydo3-frontend easydo-frontend:latest 2>/dev/null || true
-	@docker rmi easydo3-server easydo-server:latest 2>/dev/null || true
-	@docker rmi easydo3-agent easydo-agent:latest 2>/dev/null || true
+	@docker rmi easydo-frontend easydo-frontend:latest 2>/dev/null || true
+	@docker rmi easydo-server easydo-server:latest 2>/dev/null || true
+	@docker rmi easydo-agent easydo-agent:latest 2>/dev/null || true
 	@make -C $(FRONTEND_DIR) clean
 	@make -C $(SERVER_DIR) clean
 	@make -C $(AGENT_DIR) clean
@@ -373,9 +373,9 @@ debug:
 	@echo ""
 	@echo "$(RED)🔥 调试部署 (删除旧镜像)...$(NC)"
 	@$(DC) down -v --remove-orphans 2>/dev/null || true
-	@docker rmi easydo3-frontend easydo-frontend:latest 2>/dev/null || true
-	@docker rmi easydo3-server easydo-server:latest 2>/dev/null || true
-	@docker rmi easydo3-agent easydo-agent:latest 2>/dev/null || true
+	@docker rmi easydo-frontend easydo-frontend:latest 2>/dev/null || true
+	@docker rmi easydo-server easydo-server:latest 2>/dev/null || true
+	@docker rmi easydo-agent easydo-agent:latest 2>/dev/null || true
 	@make build
 	@$(DC) up -d
 	@echo "$(GREEN)✅ 调试部署完成!$(NC)"

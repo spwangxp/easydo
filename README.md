@@ -145,7 +145,7 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 ## 项目结构 / Project Structure
 
 ```
-easydo3/
+easydo/
 ├── 📁 easydo-frontend/          # 前端项目 (Vue 3) / Frontend Project (Vue 3)
 │   ├── 📁 src/
 │   │   ├── 📁 api/              # API 接口封装 / API Interfaces
@@ -238,7 +238,7 @@ make restart
 ```bash
 # 克隆项目 / Clone project
 git clone <repository-url>
-cd easydo3
+cd easydo
 
 # 构建并启动所有服务 / Build and start all services
 docker-compose up -d --build

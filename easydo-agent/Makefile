@@ -117,7 +117,7 @@ status:
 
 debug: stop
 	@echo "$(RED)[Agent]$(NC) 调试部署..."
-	@docker rmi easydo3-agent easydo-agent:latest 2>/dev/null || true
+	@docker rmi easydo-agent easydo-agent:latest 2>/dev/null || true
 	@echo "[Agent] Version: $(GIT_COMMIT_SHORT) @ $(GIT_DATE)"
 	@$(DC) build agent \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
@@ -142,7 +142,7 @@ clean:
 
 prune: clean
 	@echo "$(YELLOW)[Agent]$(NC) 清理镜像..."
-	@docker rmi easydo3-agent easydo-agent:latest 2>/dev/null || true
+	@docker rmi easydo-agent easydo-agent:latest 2>/dev/null || true
 	@echo "$(GREEN)✅ Agent 镜像已清理$(NC)"
 
 # ════════════════════════════════════════════════════════════════
