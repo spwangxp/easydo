@@ -43,10 +43,10 @@ func NewClient(cfg *config.Config, sysInfo *system.Info, agentName string, log *
 		agentName: agentName,
 		log:       log,
 
-		httpClient: httpClient,
-		tokenMgr:   tokenMgr,
-		register:   NewRegister(httpClient, tokenMgr, cfg, sysInfo, agentName, log),
-		heartbeat:  NewHeartbeat(httpClient, cfg, tokenMgr, 0, log),
+		httpClient:  httpClient,
+		tokenMgr:    tokenMgr,
+		register:    NewRegister(httpClient, tokenMgr, cfg, sysInfo, agentName, log),
+		heartbeat:   NewHeartbeat(httpClient, cfg, tokenMgr, 0, log),
 		taskHandler: NewTaskHandler(httpClient, nil, cfg, tokenMgr, log),
 	}
 }
@@ -148,9 +148,12 @@ func (c *Client) Start(ctx context.Context) error {
 
 	// Initialize WebSocket for real-time task handling
 	if err := c.initWebSocket(ctx); err != nil {
-		c.log.Warnf("WebSocket initialization failed: %v", err)
-		c.log.Info("Falling back to HTTP polling mode")
+		return fmt.Errorf("websocket initialization failed: %w", err)
 	}
+
+	// Runtime communication (task exchange/status/log/heartbeat) is websocket-only.
+	// Keep HTTP heartbeat for registration/approval stage only, then stop it.
+	c.heartbeat.Stop()
 
 	c.taskHandler.Start(ctx)
 

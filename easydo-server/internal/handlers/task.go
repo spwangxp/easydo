@@ -183,14 +183,23 @@ func (h *TaskHandler) GetTaskLogs(c *gin.Context) {
 	id := c.Param("id")
 	level := c.DefaultQuery("level", "")
 
-	var logs []models.AgentLog
-	query := h.DB.Where("task_id = ?", id)
-
-	if level != "" {
-		query = query.Where("level = ?", level)
+	var task models.AgentTask
+	if err := h.DB.First(&task, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "任务不存在",
+		})
+		return
 	}
 
-	query.Order("timestamp ASC").Find(&logs)
+	logs, err := agentFileLogs.QueryTaskLogs(task.PipelineRunID, task.ID, level)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "读取日志失败: " + err.Error(),
+		})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -273,8 +282,20 @@ func (h *TaskHandler) RetryTask(c *gin.Context) {
 		"start_time":  0,
 		"end_time":    0,
 		"duration":    0,
+		"exit_code":   0,
 		"error_msg":   "",
+		"result_data": "",
 	})
+
+	task.Status = models.TaskStatusPending
+	task.RetryCount = task.RetryCount + 1
+	task.StartTime = 0
+	task.EndTime = 0
+	task.Duration = 0
+	task.ExitCode = 0
+	task.ErrorMsg = ""
+	task.ResultData = ""
+	_ = SharedWebSocketHandler().sendTaskAssign(task)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
@@ -332,15 +353,34 @@ func (h *TaskHandler) AgentReportTaskStatus(c *gin.Context) {
 		})
 		return
 	}
+	if task.AgentID != req.AgentID {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "任务不属于当前执行器",
+		})
+		return
+	}
+	if !isValidTaskStatusTransition(task.Status, req.Status) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "非法任务状态迁移",
+		})
+		return
+	}
 
 	now := time.Now().Unix()
 
 	task.Status = req.Status
-	task.EndTime = now
+	if req.Status == models.TaskStatusRunning && task.StartTime == 0 {
+		task.StartTime = now
+	}
+	if req.Status == models.TaskStatusSuccess || req.Status == models.TaskStatusFailed || req.Status == models.TaskStatusCancelled {
+		task.EndTime = now
+	}
 	// 使用 agent 传递的 duration，如果为0则使用服务器计算的值
 	if req.Duration > 0 {
 		task.Duration = int(req.Duration)
-	} else if task.StartTime > 0 {
+	} else if task.StartTime > 0 && task.EndTime > 0 {
 		task.Duration = int(now - task.StartTime)
 	}
 	task.ExitCode = req.ExitCode
@@ -383,11 +423,11 @@ func (h *TaskHandler) AgentReportTaskStatus(c *gin.Context) {
 	h.checkAgentStatus(req.AgentID)
 
 	// Broadcast task status to all frontend clients subscribed to this run
-	wsHandler := NewWebSocketHandler()
+	wsHandler := SharedWebSocketHandler()
 	wsHandler.BroadcastTaskStatus(task.PipelineRunID, task.ID, task.Status, req.ExitCode, req.ErrorMsg, agent.Name)
 
-	// Check and update pipeline status if task is completed (success or failed)
-	if req.Status == models.TaskStatusSuccess || req.Status == models.TaskStatusFailed {
+	// Check and update pipeline status if task is completed
+	if req.Status == models.TaskStatusSuccess || req.Status == models.TaskStatusFailed || req.Status == models.TaskStatusCancelled {
 		// Trigger downstream tasks first, then update pipeline status
 		var completedTasks []models.AgentTask
 		h.DB.Where("pipeline_run_id = ?", task.PipelineRunID).Find(&completedTasks)
@@ -444,33 +484,75 @@ func (h *TaskHandler) AgentReportLog(c *gin.Context) {
 		})
 		return
 	}
+	if task.AgentID != req.AgentID {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "任务不属于当前执行器",
+		})
+		return
+	}
 
 	timestamp := req.Timestamp
 	if timestamp == 0 {
 		timestamp = time.Now().Unix()
 	}
 
-	log := &models.AgentLog{
-		TaskID:    req.TaskID,
-		Level:     req.Level,
-		Message:   req.Message,
-		Timestamp: timestamp,
-		Source:    req.Source,
+	if req.Source == "" {
+		req.Source = "stdout"
 	}
-	h.DB.Create(log)
+	if err := agentFileLogs.Append(fileLogEntry{
+		TaskID:        req.TaskID,
+		PipelineRunID: task.PipelineRunID,
+		Level:         req.Level,
+		Message:       req.Message,
+		Source:        req.Source,
+		Timestamp:     timestamp,
+		LineNumber:    req.LineNumber,
+		Attempt:       task.RetryCount + 1,
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "日志写入失败: " + err.Error(),
+		})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
-		"data": gin.H{"log_id": log.ID},
+		"data": gin.H{"log_id": 0},
 	})
 }
 
 // GetPendingTasks returns pending tasks for an agent
 func (h *TaskHandler) GetPendingTasks(c *gin.Context) {
 	agentID := c.Param("agent_id")
+	token := c.Query("token")
+	if token == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"code":    401,
+			"message": "缺少token",
+		})
+		return
+	}
+
+	var agent models.Agent
+	if err := h.DB.Where("id = ? AND token = ?", agentID, token).First(&agent).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"code":    401,
+			"message": "认证失败",
+		})
+		return
+	}
+	if agent.RegistrationStatus != models.AgentRegistrationStatusApproved {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "执行器未接纳",
+		})
+		return
+	}
 
 	var tasks []models.AgentTask
-	h.DB.Where("agent_id = ? AND status = ?", agentID, models.TaskStatusPending).Order("priority DESC, created_at ASC").Find(&tasks)
+	h.DB.Where("agent_id = ? AND status = ?", agent.ID, models.TaskStatusPending).Order("priority DESC, created_at ASC").Find(&tasks)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -503,17 +585,23 @@ func (h *TaskHandler) GetPipelineRunLogs(c *gin.Context) {
 	level := c.DefaultQuery("level", "")
 	source := c.DefaultQuery("source", "")
 
-	var logs []models.AgentLog
-	query := h.DB.Where("pipeline_run_id = ?", runID)
-
-	if level != "" {
-		query = query.Where("level = ?", level)
+	runIDNum, err := strconv.ParseUint(runID, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "无效的运行ID",
+		})
+		return
 	}
-	if source != "" {
-		query = query.Where("source = ?", source)
-	}
 
-	query.Order("timestamp ASC").Find(&logs)
+	logs, err := agentFileLogs.QueryRunLogs(runIDNum, level, source)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "读取日志失败: " + err.Error(),
+		})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,

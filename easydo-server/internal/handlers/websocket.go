@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"gorm.io/gorm/clause"
 )
 
 var upgrader = websocket.Upgrader{
@@ -32,12 +33,26 @@ type WebSocketHandler struct {
 	clientIDMu      sync.Mutex
 }
 
+var (
+	sharedWebSocketHandler     *WebSocketHandler
+	sharedWebSocketHandlerOnce sync.Once
+)
+
 // NewWebSocketHandler creates a new WebSocket handler
 func NewWebSocketHandler() *WebSocketHandler {
 	return &WebSocketHandler{
 		agents:    make(map[uint64]*wsClient),
 		frontends: make(map[string]map[string]*frontendClient),
 	}
+}
+
+// SharedWebSocketHandler returns the process-wide WebSocket handler instance.
+// Runtime handlers/router must use this instance to share agent/frontend connections.
+func SharedWebSocketHandler() *WebSocketHandler {
+	sharedWebSocketHandlerOnce.Do(func() {
+		sharedWebSocketHandler = NewWebSocketHandler()
+	})
+	return sharedWebSocketHandler
 }
 
 // wsClient represents a connected agent WebSocket client
@@ -126,6 +141,9 @@ func (h *WebSocketHandler) HandleAgentConnection(c *gin.Context) {
 		"status":        models.AgentStatusOnline,
 		"last_heart_at": time.Now().Unix(),
 	})
+
+	// Push all currently pending tasks to the just-connected agent.
+	_ = h.dispatchPendingTasks(agentID)
 
 	h.handleAgentMessages(client, &agent)
 }
@@ -224,6 +242,12 @@ func (h *WebSocketHandler) handleAgentMessages(client *wsClient, agent *models.A
 		switch msg.Type {
 		case "heartbeat":
 			h.handleAgentHeartbeat(client, agent, msg.Payload)
+		case "task_update_v2":
+			h.handleTaskUpdateV2(client, agent, msg.Payload)
+		case "task_log_chunk_v2":
+			h.handleTaskLogChunkV2(client, agent, msg.Payload)
+		case "task_log_end_v2":
+			h.handleTaskLogEndV2(client, agent, msg.Payload)
 		case "task_status":
 			h.handleTaskStatus(client, agent, msg.Payload)
 		case "task_log":
@@ -317,152 +341,483 @@ func (h *WebSocketHandler) handleAgentHeartbeat(client *wsClient, agent *models.
 	client.mu.Lock()
 	client.conn.WriteMessage(websocket.TextMessage, responseData)
 	client.mu.Unlock()
+
+	if len(pendingTasks) > 0 {
+		_ = h.dispatchPendingTasks(client.agentID)
+	}
 }
 
 // handleTaskStatus processes a task status message from an agent
 func (h *WebSocketHandler) handleTaskStatus(client *wsClient, agent *models.Agent, payload map[string]interface{}) {
-	taskID := uint64(getFloat64(payload, "task_id"))
-	status := getString(payload, "status")
-	exitCode := int(getFloat64(payload, "exit_code"))
-	errorMsg := getString(payload, "error_msg")
+	legacy := map[string]interface{}{
+		"task_id": uint64(getFloat64(payload, "task_id")),
+		"attempt": 1,
+		"status":  getString(payload, "status"),
+	}
 
-	// Duration is nested in the result object from agent
-	duration := 0
+	if exitCode := int(getFloat64(payload, "exit_code")); exitCode != 0 {
+		legacy["exit_code"] = exitCode
+	}
+	if errorMsg := getString(payload, "error_msg"); errorMsg != "" {
+		legacy["error_msg"] = errorMsg
+	}
+
 	if result, ok := payload["result"].(map[string]interface{}); ok {
-		duration = int(getFloat64(result, "duration"))
+		legacy["result"] = result
+		if d := int64(getFloat64(result, "duration")); d > 0 {
+			legacy["duration_ms"] = d * 1000
+		}
 	}
-	// Fallback to top-level duration if result.duration is not available
-	if duration == 0 {
-		duration = int(getFloat64(payload, "duration"))
+	if _, ok := legacy["duration_ms"]; !ok {
+		if d := int64(getFloat64(payload, "duration")); d > 0 {
+			legacy["duration_ms"] = d * 1000
+		}
+	}
+	if key := getString(payload, "idempotency_key"); key != "" {
+		legacy["idempotency_key"] = key
+	}
+	legacy["timestamp"] = time.Now().Unix()
+
+	h.handleTaskUpdateV2(client, agent, legacy)
+}
+
+// handleTaskLog processes a task log message from an agent
+func (h *WebSocketHandler) handleTaskLog(client *wsClient, agent *models.Agent, payload map[string]interface{}) {
+	seq := int64(getFloat64(payload, "line_number"))
+	if seq <= 0 {
+		seq = time.Now().UnixNano()
 	}
 
-	if taskID == 0 {
+	logPayload := map[string]interface{}{
+		"task_id":   uint64(getFloat64(payload, "task_id")),
+		"attempt":   1,
+		"seq":       seq,
+		"level":     getString(payload, "level"),
+		"stream":    getString(payload, "source"),
+		"chunk":     getString(payload, "message"),
+		"timestamp": getInt64(payload, "timestamp"),
+	}
+
+	h.handleTaskLogChunkV2(client, agent, logPayload)
+}
+
+// handleTaskLogStream handles streaming task log chunks from an agent
+func (h *WebSocketHandler) handleTaskLogStream(client *wsClient, agent *models.Agent, payload map[string]interface{}) {
+	seq := int64(getFloat64(payload, "line_number"))
+	if seq <= 0 {
+		seq = time.Now().UnixNano()
+	}
+	logPayload := map[string]interface{}{
+		"task_id":   uint64(getFloat64(payload, "task_id")),
+		"attempt":   1,
+		"seq":       seq,
+		"stream":    getString(payload, "source"),
+		"chunk":     getString(payload, "chunk"),
+		"timestamp": getInt64(payload, "timestamp"),
+	}
+
+	h.handleTaskLogChunkV2(client, agent, logPayload)
+}
+
+type taskUpdatePayloadV2 struct {
+	TaskID         uint64
+	Attempt        int
+	Status         string
+	ExitCode       int
+	ErrorMsg       string
+	DurationMs     int64
+	IdempotencyKey string
+	Result         map[string]interface{}
+	Timestamp      int64
+}
+
+type taskLogChunkPayloadV2 struct {
+	TaskID    uint64
+	Attempt   int
+	Seq       int64
+	Level     string
+	Stream    string
+	Chunk     string
+	Timestamp int64
+}
+
+func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Agent, payload map[string]interface{}) {
+	update := parseTaskUpdatePayloadV2(payload)
+	if update.TaskID == 0 || update.Status == "" {
+		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, false, "invalid task update payload", nil)
 		return
 	}
 
 	var task models.AgentTask
-	if err := models.DB.First(&task, taskID).Error; err != nil {
+	if err := models.DB.First(&task, update.TaskID).Error; err != nil {
+		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, false, "task not found", nil)
+		return
+	}
+	if task.AgentID != client.agentID {
+		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, false, "task does not belong to agent", nil)
+		return
+	}
+
+	if update.Attempt <= 0 {
+		update.Attempt = task.RetryCount + 1
+	}
+	if update.IdempotencyKey == "" {
+		update.IdempotencyKey = buildTaskUpdateIdempotencyKey(update.TaskID, update.Attempt, update.Status, update.ExitCode)
+	}
+
+	var existingEvent models.AgentTaskEvent
+	if err := models.DB.Where("task_id = ? AND attempt = ? AND idempotency_key = ?", update.TaskID, update.Attempt, update.IdempotencyKey).
+		First(&existingEvent).Error; err == nil {
+		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, true, "", map[string]interface{}{"duplicate": true})
+		return
+	}
+
+	if !isValidTaskStatusTransition(task.Status, update.Status) {
+		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, false, "invalid status transition", nil)
+		return
+	}
+
+	event := &models.AgentTaskEvent{
+		TaskID:         update.TaskID,
+		PipelineRunID:  task.PipelineRunID,
+		AgentID:        client.agentID,
+		Attempt:        update.Attempt,
+		Status:         update.Status,
+		IdempotencyKey: update.IdempotencyKey,
+		ExitCode:       update.ExitCode,
+		DurationMs:     update.DurationMs,
+		ErrorMsg:       update.ErrorMsg,
+	}
+
+	result := models.DB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "task_id"}, {Name: "attempt"}, {Name: "idempotency_key"}},
+		DoNothing: true,
+	}).Create(event)
+	if result.Error != nil {
+		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, false, "failed to persist task event", nil)
+		return
+	}
+	if result.RowsAffected == 0 {
+		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, true, "", map[string]interface{}{"duplicate": true})
 		return
 	}
 
 	now := time.Now().Unix()
-	task.Status = status
-	task.EndTime = now
-	// 使用 agent 传递的 duration，如果为0则使用服务器计算的值
-	if duration > 0 {
-		task.Duration = duration
-	} else if task.StartTime > 0 {
-		task.Duration = int(now - task.StartTime)
+	updates := map[string]interface{}{
+		"status":    update.Status,
+		"exit_code": update.ExitCode,
+		"error_msg": update.ErrorMsg,
 	}
-	task.ExitCode = exitCode
-	task.ErrorMsg = errorMsg
-	models.DB.Save(&task)
 
-	// Update agent status
+	if update.Result != nil {
+		if data, err := json.Marshal(update.Result); err == nil {
+			updates["result_data"] = string(data)
+		}
+	}
+
+	if update.Status == models.TaskStatusRunning {
+		if task.StartTime == 0 {
+			updates["start_time"] = now
+		}
+	}
+
+	isTerminal := isTerminalTaskStatus(update.Status)
+	if isTerminal {
+		updates["end_time"] = now
+		durationSec := int(update.DurationMs / 1000)
+		if durationSec <= 0 && task.StartTime > 0 {
+			durationSec = int(now - task.StartTime)
+		}
+		updates["duration"] = durationSec
+	}
+
+	if err := models.DB.Model(&task).Updates(updates).Error; err != nil {
+		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, false, "failed to update task", nil)
+		return
+	}
+
+	executionStartTime := task.StartTime
+	if v, ok := updates["start_time"].(int64); ok {
+		executionStartTime = v
+	}
+	durationForFrontend := 0
+	if v, ok := updates["duration"].(int); ok {
+		durationForFrontend = v
+	}
+
+	h.broadcastToFrontend(task.PipelineRunID, "task_status", map[string]interface{}{
+		"task_id":    update.TaskID,
+		"run_id":     task.PipelineRunID,
+		"status":     update.Status,
+		"exit_code":  update.ExitCode,
+		"error_msg":  update.ErrorMsg,
+		"duration":   durationForFrontend,
+		"agent_id":   client.agentID,
+		"agent_name": agent.Name,
+		"timestamp":  now,
+	})
+
+	if isTerminal {
+		execution := &models.TaskExecution{
+			TaskID:    task.ID,
+			Attempt:   update.Attempt,
+			Status:    update.Status,
+			StartTime: executionStartTime,
+			EndTime:   now,
+			Duration:  durationForFrontend,
+			ExitCode:  update.ExitCode,
+			ErrorMsg:  update.ErrorMsg,
+		}
+		models.DB.Create(execution)
+	}
+
+	// Automatic retry/failover: only when task failed and retries remain.
+	// Final failure after retries will be handled by ignore_failure semantics at pipeline level.
+	if update.Status == models.TaskStatusFailed && task.RetryCount < task.MaxRetries {
+		nextRetry := task.RetryCount + 1
+		retryUpdates := map[string]interface{}{
+			"status":      models.TaskStatusPending,
+			"retry_count": nextRetry,
+			"start_time":  int64(0),
+			"end_time":    int64(0),
+			"duration":    0,
+			"exit_code":   0,
+			"error_msg":   "",
+			"result_data": "",
+		}
+		if err := models.DB.Model(&task).Updates(retryUpdates).Error; err != nil {
+			h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, false, "failed to enqueue retry", nil)
+			return
+		}
+
+		task.Status = models.TaskStatusPending
+		task.RetryCount = nextRetry
+		task.StartTime = 0
+		task.EndTime = 0
+		task.Duration = 0
+		task.ExitCode = 0
+		task.ErrorMsg = ""
+
+		h.broadcastToFrontend(task.PipelineRunID, "task_status", map[string]interface{}{
+			"task_id":     task.ID,
+			"run_id":      task.PipelineRunID,
+			"status":      models.TaskStatusPending,
+			"exit_code":   0,
+			"error_msg":   "",
+			"duration":    0,
+			"agent_id":    client.agentID,
+			"agent_name":  agent.Name,
+			"retry_count": task.RetryCount,
+			"max_retries": task.MaxRetries,
+			"retrying":    true,
+			"timestamp":   time.Now().Unix(),
+		})
+
+		_ = h.sendTaskAssign(task)
+		h.checkAgentStatus(client.agentID)
+		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, true, "", map[string]interface{}{
+			"retrying":    true,
+			"retry_count": task.RetryCount,
+			"max_retries": task.MaxRetries,
+		})
+		return
+	}
+
 	h.checkAgentStatus(client.agentID)
 
-	// Create execution record
-	execution := &models.TaskExecution{
-		TaskID:    taskID,
-		Attempt:   task.RetryCount + 1,
-		Status:    status,
-		StartTime: task.StartTime,
-		EndTime:   now,
-		Duration:  task.Duration,
-		ExitCode:  exitCode,
-		ErrorMsg:  errorMsg,
-	}
-	models.DB.Create(execution)
-
-	// Check and update pipeline status if task is completed
-	if status == models.TaskStatusSuccess || status == models.TaskStatusFailed {
+	if isTerminal {
 		var completedTasks []models.AgentTask
 		models.DB.Where("pipeline_run_id = ?", task.PipelineRunID).Find(&completedTasks)
 		h.triggerDownstreamTasks(task.PipelineRunID, completedTasks)
 		h.checkAndUpdatePipelineStatus(task.PipelineRunID)
 	}
 
-	// Broadcast to frontend clients subscribed to this run
-	h.broadcastToFrontend(task.PipelineRunID, "task_status", map[string]interface{}{
-		"task_id":    taskID,
-		"run_id":     task.PipelineRunID,
-		"status":     status,
-		"exit_code":  exitCode,
-		"error_msg":  errorMsg,
-		"duration":   task.Duration,
-		"agent_id":   client.agentID,
-		"agent_name": agent.Name,
-		"timestamp":  now,
-	})
+	h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, true, "", nil)
 }
 
-// handleTaskLog processes a task log message from an agent
-func (h *WebSocketHandler) handleTaskLog(client *wsClient, agent *models.Agent, payload map[string]interface{}) {
-	taskID := uint64(getFloat64(payload, "task_id"))
-	level := getString(payload, "level")
-	message := getString(payload, "message")
-	source := getString(payload, "source")
-	lineNumber := int(getFloat64(payload, "line_number"))
-	timestamp := getInt64(payload, "timestamp")
-	if timestamp == 0 {
-		timestamp = time.Now().Unix()
-	}
-
-	if taskID == 0 {
+func (h *WebSocketHandler) handleTaskLogChunkV2(client *wsClient, agent *models.Agent, payload map[string]interface{}) {
+	logChunk := parseTaskLogChunkPayloadV2(payload)
+	if logChunk.TaskID == 0 || logChunk.Chunk == "" {
+		h.sendAgentAck(client, "task_log_chunk_v2", logChunk.TaskID, logChunk.Attempt, false, "invalid task log payload", nil)
 		return
 	}
 
 	var task models.AgentTask
-	if err := models.DB.First(&task, taskID).Error; err != nil {
+	if err := models.DB.First(&task, logChunk.TaskID).Error; err != nil {
+		h.sendAgentAck(client, "task_log_chunk_v2", logChunk.TaskID, logChunk.Attempt, false, "task not found", nil)
+		return
+	}
+	if task.AgentID != client.agentID {
+		h.sendAgentAck(client, "task_log_chunk_v2", logChunk.TaskID, logChunk.Attempt, false, "task does not belong to agent", nil)
 		return
 	}
 
-	log := &models.AgentLog{
-		TaskID:    taskID,
-		Level:     level,
-		Message:   message,
-		Timestamp: timestamp,
-		Source:    source,
+	if logChunk.Attempt <= 0 {
+		logChunk.Attempt = task.RetryCount + 1
 	}
-	models.DB.Create(log)
-
-	// Broadcast to frontend clients subscribed to this run
-	h.broadcastToFrontend(task.PipelineRunID, "task_log", map[string]interface{}{
-		"log_id":      log.ID,
-		"task_id":     taskID,
-		"run_id":      task.PipelineRunID,
-		"level":       level,
-		"message":     message,
-		"source":      source,
-		"line_number": lineNumber,
-		"timestamp":   timestamp,
-	})
-}
-
-// handleTaskLogStream handles streaming task log chunks from an agent
-func (h *WebSocketHandler) handleTaskLogStream(client *wsClient, agent *models.Agent, payload map[string]interface{}) {
-	taskID := uint64(getFloat64(payload, "task_id"))
-	chunk := getString(payload, "chunk")
-	timestamp := getInt64(payload, "timestamp")
-	if timestamp == 0 {
-		timestamp = time.Now().Unix()
+	if logChunk.Seq <= 0 {
+		logChunk.Seq = time.Now().UnixNano()
 	}
+	if logChunk.Stream == "" {
+		logChunk.Stream = "stdout"
+	}
+	if logChunk.Level == "" {
+		if logChunk.Stream == "stderr" {
+			logChunk.Level = "error"
+		} else {
+			logChunk.Level = "info"
+		}
+	}
+	if logChunk.Timestamp == 0 {
+		logChunk.Timestamp = time.Now().Unix()
+	}
+	normalizedTimestamp := normalizeUnixTimestamp(logChunk.Timestamp)
 
-	if taskID == 0 {
+	uniqueKey := buildTaskLogChunkUniqueKey(logChunk.TaskID, logChunk.Attempt, logChunk.Seq)
+	if _, loaded := fileLogChunkSeen.LoadOrStore(uniqueKey, struct{}{}); loaded {
+		h.sendAgentAck(client, "task_log_chunk_v2", logChunk.TaskID, logChunk.Attempt, true, "", map[string]interface{}{
+			"seq":       logChunk.Seq,
+			"duplicate": true,
+		})
 		return
 	}
 
-	var task models.AgentTask
-	if err := models.DB.First(&task, taskID).Error; err != nil {
+	if err := agentFileLogs.Append(fileLogEntry{
+		TaskID:        logChunk.TaskID,
+		PipelineRunID: task.PipelineRunID,
+		Level:         logChunk.Level,
+		Message:       logChunk.Chunk,
+		Source:        logChunk.Stream,
+		Timestamp:     normalizedTimestamp,
+		LineNumber:    int(logChunk.Seq),
+		Attempt:       logChunk.Attempt,
+		Seq:           logChunk.Seq,
+	}); err != nil {
+		h.sendAgentAck(client, "task_log_chunk_v2", logChunk.TaskID, logChunk.Attempt, false, "failed to persist task log chunk", nil)
 		return
 	}
 
 	h.broadcastToFrontend(task.PipelineRunID, "task_log_stream", map[string]interface{}{
-		"task_id":   taskID,
+		"task_id":   logChunk.TaskID,
 		"run_id":    task.PipelineRunID,
-		"chunk":     chunk,
-		"timestamp": timestamp,
+		"attempt":   logChunk.Attempt,
+		"seq":       logChunk.Seq,
+		"stream":    logChunk.Stream,
+		"chunk":     logChunk.Chunk,
+		"timestamp": normalizedTimestamp,
 	})
+	h.broadcastToFrontend(task.PipelineRunID, "task_log", map[string]interface{}{
+		"task_id":     logChunk.TaskID,
+		"run_id":      task.PipelineRunID,
+		"level":       logChunk.Level,
+		"message":     logChunk.Chunk,
+		"source":      logChunk.Stream,
+		"line_number": logChunk.Seq,
+		"timestamp":   normalizedTimestamp,
+	})
+
+	h.sendAgentAck(client, "task_log_chunk_v2", logChunk.TaskID, logChunk.Attempt, true, "", map[string]interface{}{
+		"seq":       logChunk.Seq,
+		"duplicate": false,
+	})
+}
+
+func (h *WebSocketHandler) handleTaskLogEndV2(client *wsClient, _ *models.Agent, payload map[string]interface{}) {
+	taskID := uint64(getFloat64(payload, "task_id"))
+	attempt := int(getFloat64(payload, "attempt"))
+	if taskID == 0 {
+		h.sendAgentAck(client, "task_log_end_v2", 0, attempt, false, "invalid task id", nil)
+		return
+	}
+
+	var task models.AgentTask
+	if err := models.DB.First(&task, taskID).Error; err != nil {
+		h.sendAgentAck(client, "task_log_end_v2", taskID, attempt, false, "task not found", nil)
+		return
+	}
+	if task.AgentID != client.agentID {
+		h.sendAgentAck(client, "task_log_end_v2", taskID, attempt, false, "task does not belong to agent", nil)
+		return
+	}
+	if attempt <= 0 {
+		attempt = task.RetryCount + 1
+	}
+
+	h.sendAgentAck(client, "task_log_end_v2", taskID, attempt, true, "", map[string]interface{}{
+		"final_seq": int64(getFloat64(payload, "final_seq")),
+	})
+}
+
+func (h *WebSocketHandler) sendMessageToAgent(agentID uint64, msgType string, payload map[string]interface{}) bool {
+	h.agentsMu.RLock()
+	client, exists := h.agents[agentID]
+	h.agentsMu.RUnlock()
+	if !exists || client == nil || client.conn == nil {
+		return false
+	}
+
+	msg := WebSocketMessage{
+		Type:    msgType,
+		Payload: payload,
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return false
+	}
+
+	client.mu.Lock()
+	err = client.conn.WriteMessage(websocket.TextMessage, data)
+	client.mu.Unlock()
+	return err == nil
+}
+
+func (h *WebSocketHandler) sendTaskAssign(task models.AgentTask) bool {
+	if task.AgentID == 0 || task.ID == 0 {
+		return false
+	}
+
+	payload := map[string]interface{}{
+		"task": map[string]interface{}{
+			"id":              task.ID,
+			"agent_id":        task.AgentID,
+			"pipeline_run_id": task.PipelineRunID,
+			"node_id":         task.NodeID,
+			"task_type":       task.TaskType,
+			"name":            task.Name,
+			"params":          task.Params,
+			"script":          task.Script,
+			"work_dir":        task.WorkDir,
+			"env_vars":        task.EnvVars,
+			"status":          task.Status,
+			"priority":        task.Priority,
+			"timeout":         task.Timeout,
+			"retry_count":     task.RetryCount,
+			"max_retries":     task.MaxRetries,
+		},
+		"timestamp": time.Now().Unix(),
+	}
+
+	return h.sendMessageToAgent(task.AgentID, "task_assign", payload)
+}
+
+func (h *WebSocketHandler) dispatchPendingTasks(agentID uint64) int {
+	if agentID == 0 {
+		return 0
+	}
+
+	var pendingTasks []models.AgentTask
+	models.DB.Where("agent_id = ? AND status = ?", agentID, models.TaskStatusPending).
+		Order("priority DESC, created_at ASC").
+		Find(&pendingTasks)
+
+	dispatched := 0
+	for i := range pendingTasks {
+		if h.sendTaskAssign(pendingTasks[i]) {
+			dispatched++
+		}
+	}
+
+	return dispatched
 }
 
 // broadcastToFrontend broadcasts a message to all frontend clients subscribed to a run
@@ -544,233 +899,89 @@ func (h *WebSocketHandler) checkAgentStatus(agentID uint64) {
 // checkAndUpdatePipelineStatus checks all tasks status and updates pipeline run status accordingly
 // This should be called when a task completes (success/failed) to determine the overall pipeline status
 func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
-	fmt.Printf("[DEBUG] checkAndUpdatePipelineStatus called for runID=%d\n", runID)
-
 	var run models.PipelineRun
 	if err := models.DB.First(&run, runID).Error; err != nil {
-		fmt.Printf("[DEBUG] PipelineRun %d not found\n", runID)
 		return
 	}
-
-	// Only check if run is still running
 	if run.Status != "running" {
-		fmt.Printf("[DEBUG] checkAndUpdatePipelineStatus: run %d status is %s, not running, skipping\n", runID, run.Status)
 		return
 	}
 
-	// Get all tasks for this run
 	var tasks []models.AgentTask
 	models.DB.Where("pipeline_run_id = ?", runID).Find(&tasks)
-
-	fmt.Printf("[DEBUG] checkAndUpdatePipelineStatus: found %d tasks\n", len(tasks))
-
 	if len(tasks) == 0 {
 		return
 	}
 
-	// Parse pipeline config to check IgnoreFailure settings
-	var config PipelineConfig
-	configParsed := false
-	if err := json.Unmarshal([]byte(run.Config), &config); err == nil {
-		configParsed = true
+	nodeIgnoreFailure := map[string]bool{}
+	if run.Config != "" {
+		var config PipelineConfig
+		if err := json.Unmarshal([]byte(run.Config), &config); err == nil {
+			for i := range config.Nodes {
+				nodeIgnoreFailure[config.Nodes[i].ID] = config.Nodes[i].IgnoreFailure
+			}
+		}
 	}
 
-	// Collect all failed tasks (not just the first one)
-	var failedTasks []models.AgentTask
+	allTerminal := true
+	hasBlockingFailure := false
+	firstErrorMsg := ""
+
 	for i := range tasks {
-		if tasks[i].Status == models.TaskStatusFailed {
-			failedTasks = append(failedTasks, tasks[i])
+		task := tasks[i]
+		switch task.Status {
+		case models.TaskStatusSuccess, models.TaskStatusCancelled:
+			// Terminal.
+		case models.TaskStatusFailed:
+			ignoreFailure := nodeIgnoreFailure[task.NodeID]
+			if !ignoreFailure {
+				hasBlockingFailure = true
+				if firstErrorMsg == "" {
+					firstErrorMsg = task.ErrorMsg
+				}
+			}
+		default:
+			allTerminal = false
 		}
 	}
 
-	hasFailed := len(failedTasks) > 0
-
-	// Build node map for quick lookup
-	nodeMap := make(map[string]*PipelineNode)
-	for i := range config.Nodes {
-		nodeMap[config.Nodes[i].ID] = &config.Nodes[i]
-	}
-
-	// If any task failed, check if the failure should block the pipeline
-	if hasFailed && configParsed {
-		// Check all failed tasks to determine if any blocks execution
-		hasBlockingFailure := false
-
-		// Map downstream nodes affected by failed tasks
-		// If upstream (failed) node has ignore_failure=false, downstream will be blocked
-		blockedDownstream := make(map[string]bool)
-		for _, failedTask := range failedTasks {
-			fmt.Printf("[DEBUG] Checking failed task: %s\n", failedTask.NodeID)
-			// Get the failed task node's IgnoreFailure setting
-			failedNode := nodeMap[failedTask.NodeID]
-			failedNodeIgnoreFailure := false
-			if failedNode != nil {
-				failedNodeIgnoreFailure = failedNode.IgnoreFailure
-			}
-
-			// If failed node does NOT ignore its own failure, then downstream is blocked
-			if !failedNodeIgnoreFailure {
-				for _, edge := range config.Edges {
-					if edge.From == failedTask.NodeID {
-						downstreamNodeID := edge.To
-						blockedDownstream[downstreamNodeID] = true
-						fmt.Printf("[DEBUG] Upstream task %s failed with ignore_failure=false, downstream %s will be blocked\n",
-							failedTask.NodeID, downstreamNodeID)
-					}
-				}
-			}
-		}
-
-		// Check if any downstream node was blocked due to upstream failure
-		for nodeID, isBlocked := range blockedDownstream {
-			if isBlocked {
-				found := false
-				for _, task := range tasks {
-					if task.NodeID == nodeID {
-						found = true
-						if task.Status == models.TaskStatusPending || task.Status == models.TaskStatusRunning {
-							hasBlockingFailure = true
-							fmt.Printf("[DEBUG] checkAndUpdatePipelineStatus: downstream task %s was not triggered due to upstream failure (ignore_failure=false)\n", nodeID)
-						}
-						break
-					}
-				}
-				if !found {
-					hasBlockingFailure = true
-					fmt.Printf("[DEBUG] checkAndUpdatePipelineStatus: downstream task %s was never created due to upstream failure (ignore_failure=false)\n", nodeID)
-				}
-			}
-		}
-
-		// Check for pending/running tasks that depend on failed tasks
-		// If upstream (failed) node has ignore_failure=false, running downstream should be cancelled
-		for _, failedTask := range failedTasks {
-			failedNode := nodeMap[failedTask.NodeID]
-			failedNodeIgnoreFailure := false
-			if failedNode != nil {
-				failedNodeIgnoreFailure = failedNode.IgnoreFailure
-			}
-
-			if !failedNodeIgnoreFailure {
-				for _, edge := range config.Edges {
-					if edge.From == failedTask.NodeID {
-						downstreamNodeID := edge.To
-						for _, task := range tasks {
-							if task.NodeID == downstreamNodeID && (task.Status == models.TaskStatusPending || task.Status == models.TaskStatusRunning) {
-								hasBlockingFailure = true
-								fmt.Printf("[DEBUG] checkAndUpdatePipelineStatus: upstream %s failed (ignore_failure=false), cancelling downstream %s\n",
-									failedTask.NodeID, task.NodeID)
-
-								if task.Status == models.TaskStatusRunning {
-									task.Status = models.TaskStatusCancelled
-									task.ErrorMsg = fmt.Sprintf("Cancelled due to upstream task %s failure (upstream does not ignore failure)", failedTask.NodeID)
-									models.DB.Save(&task)
-									fmt.Printf("[DEBUG] Cancelled running task %s due to upstream failure\n", task.NodeID)
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		if !hasBlockingFailure {
-			// No blocking failures, check if all tasks are completed
-			allCompleted := true
-			for _, task := range tasks {
-				if task.Status != models.TaskStatusSuccess && task.Status != models.TaskStatusFailed && task.Status != models.TaskStatusCancelled {
-					allCompleted = false
-					break
-				}
-			}
-
-			if allCompleted {
-				// All tasks completed, mark as success (failed tasks had IgnoreFailure=true)
-				now := time.Now().Unix()
-				updates := map[string]interface{}{
-					"status":   "success",
-					"end_time": now,
-				}
-				if run.StartTime > 0 {
-					updates["duration"] = int(now - run.StartTime)
-				}
-				models.DB.Model(&run).Updates(updates)
-				h.BroadcastRunStatus(runID, "success", "", int(now-run.StartTime))
-				fmt.Printf("[DEBUG] checkAndUpdatePipelineStatus: run %d marked as success (all tasks completed, failures ignored)\n", runID)
-				return
-			}
-			// If not all completed, keep as running (some tasks may be waiting on IgnoreFailure edges)
-			fmt.Printf("[DEBUG] checkAndUpdatePipelineStatus: run %d has failures but no blocking failures, keeping as running\n", runID)
-			return
-		}
-		// hasBlockingFailure is true, fall through to mark as failed
-	}
-
-	// If any task failed (and it wasn't ignored), mark the entire run as failed
-	if hasFailed {
+	if hasBlockingFailure {
 		now := time.Now().Unix()
-		updates := map[string]interface{}{
-			"status":   "failed",
-			"end_time": now,
-		}
-
-		// Calculate duration
-		var duration int
+		duration := 0
 		if run.StartTime > 0 {
 			duration = int(now - run.StartTime)
 		}
-		updates["duration"] = duration
 
-		// Store error message from the first failed task
-		if len(failedTasks) > 0 && failedTasks[0].ErrorMsg != "" {
-			errorMsg := failedTasks[0].ErrorMsg
-			if len(errorMsg) > 255 {
-				errorMsg = errorMsg[:255]
+		updates := map[string]interface{}{
+			"status":   "failed",
+			"end_time": now,
+			"duration": duration,
+		}
+		if firstErrorMsg != "" {
+			if len(firstErrorMsg) > 255 {
+				firstErrorMsg = firstErrorMsg[:255]
 			}
-			updates["error_msg"] = errorMsg
+			updates["error_msg"] = firstErrorMsg
 		}
 
 		models.DB.Model(&run).Updates(updates)
+		h.BroadcastRunStatus(runID, "failed", firstErrorMsg, duration)
+		return
+	}
 
-		// Broadcast run status to frontend with duration
-		h.BroadcastRunStatus(runID, "failed", "", duration)
-		fmt.Printf("[DEBUG] checkAndUpdatePipelineStatus: run %d marked as failed\n", runID)
-	} else {
-		// Check if all tasks are completed (success or failed)
-		allCompleted := true
-		completedCount := 0
-		for _, task := range tasks {
-			fmt.Printf("[DEBUG] Task %d: node=%s, status=%s\n", task.ID, task.NodeID, task.Status)
-			if task.Status != models.TaskStatusSuccess && task.Status != models.TaskStatusFailed {
-				allCompleted = false
-			} else {
-				completedCount++
-			}
+	if allTerminal {
+		now := time.Now().Unix()
+		duration := 0
+		if run.StartTime > 0 {
+			duration = int(now - run.StartTime)
 		}
 
-		fmt.Printf("[DEBUG] checkAndUpdatePipelineStatus: allCompleted=%v, completedCount=%d, total=%d\n", allCompleted, completedCount, len(tasks))
-
-		// If all tasks completed and none failed, mark run as success
-		if allCompleted {
-			now := time.Now().Unix()
-			updates := map[string]interface{}{
-				"status":   "success",
-				"end_time": now,
-			}
-
-			// Calculate duration
-			var duration int
-			if run.StartTime > 0 {
-				duration = int(now - run.StartTime)
-			}
-			updates["duration"] = duration
-
-			models.DB.Model(&run).Updates(updates)
-
-			// Broadcast run status to frontend with duration
-			h.BroadcastRunStatus(runID, "success", "", duration)
-			fmt.Printf("[DEBUG] checkAndUpdatePipelineStatus: run %d marked as success\n", runID)
-		}
+		models.DB.Model(&run).Updates(map[string]interface{}{
+			"status":   "success",
+			"end_time": now,
+			"duration": duration,
+		})
+		h.BroadcastRunStatus(runID, "success", "", duration)
 	}
 }
 
@@ -942,6 +1153,9 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 			nodeConfig := node.getNodeConfig()
 			script := ""
 			taskType := node.Type
+			if taskType == "agent" || taskType == "custom" {
+				taskType = "shell"
+			}
 			if taskType == "shell" || taskType == "agent" || taskType == "custom" {
 				if s, ok := nodeConfig["script"].(string); ok {
 					script = s
@@ -965,6 +1179,11 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 				}
 			}
 
+			maxRetries := 0
+			if retryVal, ok := nodeConfig["retry_count"].(float64); ok && retryVal > 0 {
+				maxRetries = int(retryVal)
+			}
+
 			newTask := &models.AgentTask{
 				AgentID:       run.AgentID,
 				PipelineRunID: runID,
@@ -977,11 +1196,13 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 				EnvVars:       envVars,
 				Status:        models.TaskStatusPending,
 				Timeout:       timeout,
+				MaxRetries:    maxRetries,
 			}
 
 			if err := models.DB.Create(newTask).Error; err == nil {
 				fmt.Printf("[SUCCESS] Triggered downstream task %d for node %s\n", newTask.ID, downstreamID)
 				h.BroadcastTaskStatus(runID, newTask.ID, newTask.Status, 0, "", "")
+				_ = h.sendTaskAssign(*newTask)
 			} else {
 				fmt.Printf("[ERROR] Failed to create task for node %s: %v\n", downstreamID, err)
 			}
@@ -992,6 +1213,123 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 type DownstreamEdge struct {
 	To            string
 	IgnoreFailure bool
+}
+
+func (h *WebSocketHandler) sendAgentAck(client *wsClient, event string, taskID uint64, attempt int, ok bool, errMsg string, extra map[string]interface{}) {
+	if client == nil || client.conn == nil {
+		return
+	}
+
+	payload := map[string]interface{}{
+		"event":     event,
+		"task_id":   taskID,
+		"attempt":   attempt,
+		"ok":        ok,
+		"error_msg": errMsg,
+		"timestamp": time.Now().Unix(),
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+
+	msg := WebSocketMessage{
+		Type:    "ack_v2",
+		Payload: payload,
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+
+	client.mu.Lock()
+	_ = client.conn.WriteMessage(websocket.TextMessage, data)
+	client.mu.Unlock()
+}
+
+func parseTaskUpdatePayloadV2(payload map[string]interface{}) taskUpdatePayloadV2 {
+	update := taskUpdatePayloadV2{
+		TaskID:         uint64(getFloat64(payload, "task_id")),
+		Attempt:        int(getFloat64(payload, "attempt")),
+		Status:         getString(payload, "status"),
+		ExitCode:       int(getFloat64(payload, "exit_code")),
+		ErrorMsg:       getString(payload, "error_msg"),
+		DurationMs:     int64(getFloat64(payload, "duration_ms")),
+		IdempotencyKey: getString(payload, "idempotency_key"),
+		Timestamp:      getInt64(payload, "timestamp"),
+	}
+
+	if update.DurationMs <= 0 {
+		if sec := int64(getFloat64(payload, "duration")); sec > 0 {
+			update.DurationMs = sec * 1000
+		}
+	}
+	if result, ok := payload["result"].(map[string]interface{}); ok {
+		update.Result = result
+	}
+	if update.Timestamp == 0 {
+		update.Timestamp = time.Now().Unix()
+	}
+
+	return update
+}
+
+func parseTaskLogChunkPayloadV2(payload map[string]interface{}) taskLogChunkPayloadV2 {
+	chunk := taskLogChunkPayloadV2{
+		TaskID:    uint64(getFloat64(payload, "task_id")),
+		Attempt:   int(getFloat64(payload, "attempt")),
+		Seq:       int64(getFloat64(payload, "seq")),
+		Level:     getString(payload, "level"),
+		Stream:    getString(payload, "stream"),
+		Chunk:     getString(payload, "chunk"),
+		Timestamp: getInt64(payload, "timestamp"),
+	}
+	if chunk.Timestamp == 0 {
+		chunk.Timestamp = time.Now().Unix()
+	}
+	return chunk
+}
+
+func isTerminalTaskStatus(status string) bool {
+	return status == models.TaskStatusSuccess || status == models.TaskStatusFailed || status == models.TaskStatusCancelled
+}
+
+func isValidTaskStatusTransition(from, to string) bool {
+	allowed := map[string]map[string]bool{
+		models.TaskStatusPending: {
+			models.TaskStatusRunning:   true,
+			models.TaskStatusCancelled: true,
+		},
+		models.TaskStatusRunning: {
+			models.TaskStatusSuccess:   true,
+			models.TaskStatusFailed:    true,
+			models.TaskStatusCancelled: true,
+		},
+		models.TaskStatusSuccess:   {},
+		models.TaskStatusFailed:    {},
+		models.TaskStatusCancelled: {},
+	}
+
+	transitions, ok := allowed[from]
+	if !ok {
+		return false
+	}
+	return transitions[to]
+}
+
+func buildTaskUpdateIdempotencyKey(taskID uint64, attempt int, status string, exitCode int) string {
+	return fmt.Sprintf("%d:%d:%s:%d", taskID, attempt, status, exitCode)
+}
+
+func buildTaskLogChunkUniqueKey(taskID uint64, attempt int, seq int64) string {
+	return fmt.Sprintf("%d:%d:%d", taskID, attempt, seq)
+}
+
+func normalizeUnixTimestamp(ts int64) int64 {
+	// Convert milliseconds to seconds when needed.
+	if ts > 1e12 {
+		return ts / 1000
+	}
+	return ts
 }
 
 // IsAgentOnline checks if an agent is connected via WebSocket
@@ -1005,6 +1343,7 @@ func (h *WebSocketHandler) IsAgentOnline(agentID uint64) bool {
 // heartbeatHistory stores heartbeat records in memory (last 50 per agent)
 var heartbeatHistory map[uint64][]models.AgentHeartbeat
 var heartbeatMu sync.RWMutex
+var fileLogChunkSeen sync.Map
 
 func init() {
 	heartbeatHistory = make(map[uint64][]models.AgentHeartbeat)

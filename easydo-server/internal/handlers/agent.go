@@ -2,10 +2,10 @@ package handlers
 
 import (
 	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"easydo-server/internal/middleware"
 	"easydo-server/internal/models"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -152,12 +152,12 @@ func (h *AgentHandler) RegisterAgent(c *gin.Context) {
 			})
 
 			c.JSON(http.StatusOK, gin.H{
-				"code": 200,
+				"code":    200,
 				"message": "Agent信息已更新",
 				"data": gin.H{
-					"agent_id":           existingAgent.ID,
-					"name":               existingAgent.Name,
-					"status":             existingAgent.Status,
+					"agent_id":            existingAgent.ID,
+					"name":                existingAgent.Name,
+					"status":              existingAgent.Status,
 					"registration_status": existingAgent.RegistrationStatus,
 				},
 			})
@@ -170,23 +170,23 @@ func (h *AgentHandler) RegisterAgent(c *gin.Context) {
 	registerKey, _ := generateToken()
 
 	agent := &models.Agent{
-		Name:              name,
-		Host:              host,
-		Port:              port,
-		Token:             "",
-		RegisterKey:       registerKey,
-		Status:            models.AgentStatusOffline,
+		Name:               name,
+		Host:               host,
+		Port:               port,
+		Token:              "",
+		RegisterKey:        registerKey,
+		Status:             models.AgentStatusOffline,
 		RegistrationStatus: models.AgentRegistrationStatusPending,
-		Labels:            labels,
-		Tags:              tags,
-		OS:                os,
-		Arch:              arch,
-		Hostname:          hostname,
-		IPAddress:         ipAddress,
-		CPUCores:          cpuCores,
-		MemoryTotal:       memoryTotal,
-		DiskTotal:         diskTotal,
-		LastHeartAt:       time.Now().Unix(),
+		Labels:             labels,
+		Tags:               tags,
+		OS:                 os,
+		Arch:               arch,
+		Hostname:           hostname,
+		IPAddress:          ipAddress,
+		CPUCores:           cpuCores,
+		MemoryTotal:        memoryTotal,
+		DiskTotal:          diskTotal,
+		LastHeartAt:        time.Now().Unix(),
 	}
 
 	if err := h.DB.Create(agent).Error; err != nil {
@@ -198,14 +198,14 @@ func (h *AgentHandler) RegisterAgent(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
+		"code":    200,
 		"message": "注册申请已提交，等待管理员审批",
 		"data": gin.H{
-			"agent_id":           agent.ID,
-			"name":               agent.Name,
-			"status":             agent.Status,
+			"agent_id":            agent.ID,
+			"name":                agent.Name,
+			"status":              agent.Status,
 			"registration_status": agent.RegistrationStatus,
-			"register_key":       registerKey,
+			"register_key":        registerKey,
 		},
 	})
 }
@@ -262,33 +262,33 @@ func (h *AgentHandler) GetAgentDetail(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": gin.H{
-			"id":                   agent.ID,
-			"name":                 agent.Name,
-			"host":                 agent.Host,
-			"port":                 agent.Port,
-			"token":                agent.Token,
-			"register_key":         agent.RegisterKey,
-			"status":               agent.Status,
-			"registration_status":  agent.RegistrationStatus,
-			"approved_at":          agent.ApprovedAt,
-			"approved_by":          agent.ApprovedBy,
-			"approved_remark":      agent.ApprovedRemark,
-			"labels":               agent.Labels,
-			"tags":                 agent.Tags,
-			"version":              agent.Version,
-			"os":                   agent.OS,
-			"arch":                 agent.Arch,
-			"cpu_cores":            agent.CPUCores,
-			"memory_total":         agent.MemoryTotal,
-			"disk_total":           agent.DiskTotal,
-			"hostname":             agent.Hostname,
-			"ip_address":           agent.IPAddress,
-			"last_heart_at":        agent.LastHeartAt,
-			"heartbeat_interval":   agent.HeartbeatInterval,
-			"owner_id":             agent.OwnerID,
-			"owner":                agent.Owner,
-			"created_at":           agent.CreatedAt,
-			"updated_at":           agent.UpdatedAt,
+			"id":                  agent.ID,
+			"name":                agent.Name,
+			"host":                agent.Host,
+			"port":                agent.Port,
+			"token":               agent.Token,
+			"register_key":        agent.RegisterKey,
+			"status":              agent.Status,
+			"registration_status": agent.RegistrationStatus,
+			"approved_at":         agent.ApprovedAt,
+			"approved_by":         agent.ApprovedBy,
+			"approved_remark":     agent.ApprovedRemark,
+			"labels":              agent.Labels,
+			"tags":                agent.Tags,
+			"version":             agent.Version,
+			"os":                  agent.OS,
+			"arch":                agent.Arch,
+			"cpu_cores":           agent.CPUCores,
+			"memory_total":        agent.MemoryTotal,
+			"disk_total":          agent.DiskTotal,
+			"hostname":            agent.Hostname,
+			"ip_address":          agent.IPAddress,
+			"last_heart_at":       agent.LastHeartAt,
+			"heartbeat_interval":  agent.HeartbeatInterval,
+			"owner_id":            agent.OwnerID,
+			"owner":               agent.Owner,
+			"created_at":          agent.CreatedAt,
+			"updated_at":          agent.UpdatedAt,
 		},
 	})
 }
@@ -446,7 +446,7 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 		return
 	}
 
-	fmt.Printf("[DEBUG] Heartbeat: agent found, id=%d, db_token_len=%d, db_status=%s, db_reg_status=%s\n", 
+	fmt.Printf("[DEBUG] Heartbeat: agent found, id=%d, db_token_len=%d, db_status=%s, db_reg_status=%s\n",
 		agent.ID, len(agent.Token), agent.Status, agent.RegistrationStatus)
 
 	agentTimestamp := getInt64(req, "timestamp")
@@ -456,7 +456,7 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 
 	// If token is provided, verify it (full authentication)
 	if token != "" {
-		fmt.Printf("[DEBUG] Heartbeat: comparing tokens, request=%s, db=%s, match=%v\n", 
+		fmt.Printf("[DEBUG] Heartbeat: comparing tokens, request=%s, db=%s, match=%v\n",
 			token, agent.Token, agent.Token == token)
 		if agent.Token != token {
 			c.JSON(http.StatusUnauthorized, gin.H{
@@ -467,7 +467,7 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 		}
 
 		// Check if agent is approved for full heartbeat
-		fmt.Printf("[DEBUG] Heartbeat: checking registration status, current=%s, expected=%s\n", 
+		fmt.Printf("[DEBUG] Heartbeat: checking registration status, current=%s, expected=%s\n",
 			agent.RegistrationStatus, models.AgentRegistrationStatusApproved)
 		if agent.RegistrationStatus != models.AgentRegistrationStatusApproved {
 			c.JSON(http.StatusForbidden, gin.H{
@@ -495,8 +495,8 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 	}
 
 	updates := map[string]interface{}{
-		"last_heart_at":       agentTimestamp,
-		"consecutive_success": newSuccessCount,
+		"last_heart_at":        agentTimestamp,
+		"consecutive_success":  newSuccessCount,
 		"consecutive_failures": 0,
 	}
 
@@ -520,7 +520,7 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 		TasksRunning: getInt(req, "tasks_running"),
 	}
 
-	wsHandler := NewWebSocketHandler()
+	wsHandler := SharedWebSocketHandler()
 	wsHandler.storeHeartbeat(agentID, newHeartbeat)
 
 	// Get pending tasks for this agent (only if approved)
@@ -532,9 +532,9 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": gin.H{
-			"status":            "ok",
-			"server_time":       time.Now().Unix(),
-			"pending_tasks":     len(pendingTasks),
+			"status":             "ok",
+			"server_time":        time.Now().Unix(),
+			"pending_tasks":      len(pendingTasks),
 			"heartbeat_interval": agent.HeartbeatInterval,
 		},
 	})
@@ -556,7 +556,7 @@ func (h *AgentHandler) GetAgentHeartbeats(c *gin.Context) {
 	}
 
 	// Get heartbeats from WebSocket handler's shared memory
-	wsHandler := NewWebSocketHandler()
+	wsHandler := SharedWebSocketHandler()
 	heartbeats, total := wsHandler.GetHeartbeats(agentID, page, pageSize)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -573,8 +573,8 @@ func (h *AgentHandler) GetAgentHeartbeats(c *gin.Context) {
 // SelectAgent returns available agents matching criteria
 func (h *AgentHandler) SelectAgent(c *gin.Context) {
 	var req struct {
-		Labels  string `json:"labels"`  // Required labels
-		Tags    string `json:"tags"`    // Optional tags
+		Labels  string   `json:"labels"`  // Required labels
+		Tags    string   `json:"tags"`    // Optional tags
 		Exclude []uint64 `json:"exclude"` // Agent IDs to exclude
 	}
 
@@ -600,8 +600,8 @@ func (h *AgentHandler) SelectAgent(c *gin.Context) {
 
 	if len(agents) == 0 {
 		c.JSON(http.StatusOK, gin.H{
-			"code": 200,
-			"data": nil,
+			"code":    200,
+			"data":    nil,
 			"message": "没有可用的Agent",
 		})
 		return
@@ -831,7 +831,7 @@ func (h *AgentHandler) ApproveAgent(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
+		"code":    200,
 		"message": "接纳成功，Token已自动下发",
 		"data": gin.H{
 			"token": token,
@@ -919,7 +919,7 @@ func (h *AgentHandler) RefreshAgentToken(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
+		"code":    200,
 		"message": "Token已刷新",
 		"data": gin.H{
 			"token": token,

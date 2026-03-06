@@ -30,7 +30,7 @@ func InitRouter() *gin.Engine {
 		})
 
 		// WebSocket endpoint for agent connections
-		wsHandler := handlers.NewWebSocketHandler()
+		wsHandler := handlers.SharedWebSocketHandler()
 		router.GET("/ws/agent/heartbeat", wsHandler.HandleAgentConnection)
 
 		// WebSocket endpoint for frontend real-time updates

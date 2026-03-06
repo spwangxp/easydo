@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"easydo-agent/internal/client"
@@ -13,7 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// TaskHandler handles task polling and execution
+// TaskHandler handles websocket task assignment and execution
 type TaskHandler struct {
 	httpClient *client.HTTPClient
 	wsClient   *client.WebSocketClient
@@ -26,6 +27,8 @@ type TaskHandler struct {
 	mu         sync.RWMutex
 	running    bool
 	stopChan   chan struct{}
+	runCtx     context.Context
+	inFlight   sync.Map
 }
 
 // NewTaskHandler creates a new task handler
@@ -56,6 +59,8 @@ type Task struct {
 	Status        string `json:"status"`
 	Priority      int    `json:"priority"`
 	Timeout       int    `json:"timeout"`
+	RetryCount    int    `json:"retry_count"`
+	MaxRetries    int    `json:"max_retries"`
 }
 
 // SetToken sets the agent token
@@ -77,6 +82,58 @@ func (th *TaskHandler) SetWebSocketClient(wsClient *client.WebSocketClient) {
 	th.mu.Lock()
 	th.wsClient = wsClient
 	th.mu.Unlock()
+}
+
+// HandleTaskAssign handles concrete task assignment from server via WebSocket.
+func (th *TaskHandler) HandleTaskAssign(msg *client.TaskAssignMessage) error {
+	if msg == nil {
+		return fmt.Errorf("task assignment is nil")
+	}
+
+	t := Task{
+		ID:            msg.Task.ID,
+		AgentID:       msg.Task.AgentID,
+		PipelineRunID: msg.Task.PipelineRunID,
+		NodeID:        msg.Task.NodeID,
+		TaskType:      msg.Task.TaskType,
+		Name:          msg.Task.Name,
+		Params:        msg.Task.Params,
+		Script:        msg.Task.Script,
+		WorkDir:       msg.Task.WorkDir,
+		EnvVars:       msg.Task.EnvVars,
+		Status:        msg.Task.Status,
+		Priority:      msg.Task.Priority,
+		Timeout:       msg.Task.Timeout,
+		RetryCount:    msg.Task.RetryCount,
+		MaxRetries:    msg.Task.MaxRetries,
+	}
+
+	if t.ID == 0 {
+		return fmt.Errorf("invalid task id")
+	}
+	if t.Status != "" && t.Status != "pending" {
+		th.log.Infof("Skip task assignment %d with status %s", t.ID, t.Status)
+		return nil
+	}
+
+	if _, loaded := th.inFlight.LoadOrStore(t.ID, struct{}{}); loaded {
+		th.log.Debugf("Task %d already in-flight, skip duplicate assignment", t.ID)
+		return nil
+	}
+
+	th.mu.RLock()
+	ctx := th.runCtx
+	th.mu.RUnlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	go func(task Task) {
+		defer th.inFlight.Delete(task.ID)
+		th.executeTask(ctx, &task)
+	}(t)
+
+	return nil
 }
 
 // HandlePipelineAssign handles pipeline assignment from server via WebSocket
@@ -348,7 +405,7 @@ func (th *TaskHandler) reportPipelineLog(runID uint64, taskID uint64, level, mes
 	}
 }
 
-// Start starts the task polling loop
+// Start prepares the task handler for websocket-driven assignments.
 func (th *TaskHandler) Start(ctx context.Context) {
 	th.mu.Lock()
 	if th.running {
@@ -356,13 +413,13 @@ func (th *TaskHandler) Start(ctx context.Context) {
 		return
 	}
 	th.running = true
+	th.runCtx = ctx
 	th.mu.Unlock()
 
-	th.log.Info("Starting task handler")
-	go th.run(ctx)
+	th.log.Info("Task handler started in websocket assignment mode")
 }
 
-// Stop stops the task polling loop
+// Stop stops the task handler.
 func (th *TaskHandler) Stop() {
 	th.mu.Lock()
 	if !th.running {
@@ -370,128 +427,17 @@ func (th *TaskHandler) Stop() {
 		return
 	}
 	th.running = false
+	th.runCtx = nil
 	th.mu.Unlock()
 
 	close(th.stopChan)
-}
-
-// run is the main task polling loop
-func (th *TaskHandler) run(ctx context.Context) {
-	pollInterval := time.Duration(th.cfg.GetPollInterval()) * time.Second
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-th.stopChan:
-			return
-		case <-ticker.C:
-			th.pollAndExecuteTasks(ctx)
-		}
-	}
-}
-
-// pollAndExecuteTasks polls for tasks and executes them
-func (th *TaskHandler) pollAndExecuteTasks(ctx context.Context) {
-	th.mu.RLock()
-	agentID := th.agentID
-	token := th.token
-	th.mu.RUnlock()
-
-	if agentID == 0 || token == "" {
-		return
-	}
-
-	// Get pending tasks
-	tasks, err := th.getPendingTasks(ctx, agentID)
-	if err != nil {
-		th.log.Warnf("Failed to get pending tasks: %v", err)
-		return
-	}
-
-	if len(tasks) == 0 {
-		return
-	}
-
-	th.log.Infof("Found %d pending tasks", len(tasks))
-
-	// Execute each task
-	for _, t := range tasks {
-		select {
-		case <-ctx.Done():
-			return
-		case <-th.stopChan:
-			return
-		default:
-			th.executeTask(ctx, &t)
-		}
-	}
-}
-
-// getPendingTasks retrieves pending tasks from the server
-func (th *TaskHandler) getPendingTasks(ctx context.Context, agentID uint64) ([]Task, error) {
-	path := fmt.Sprintf("/api/tasks/agent/%d/pending", agentID)
-
-	resp, err := th.httpClient.Get(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("failed to get tasks: status %d", resp.StatusCode)
-	}
-
-	data, ok := resp.Body["data"].(map[string]interface{})
-	if !ok {
-		return nil, nil
-	}
-
-	listData, ok := data["list"].([]interface{})
-	if !ok || len(listData) == 0 {
-		return nil, nil
-	}
-
-	tasks := make([]Task, 0, len(listData))
-	for _, item := range listData {
-		taskData, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		task := Task{
-			ID:            uint64(taskData["id"].(float64)),
-			AgentID:       uint64(taskData["agent_id"].(float64)),
-			PipelineRunID: uint64(taskData["pipeline_run_id"].(float64)),
-			NodeID:        taskData["node_id"].(string),
-			TaskType:      taskData["task_type"].(string),
-			Name:          taskData["name"].(string),
-			Params:        taskData["params"].(string),
-			Script:        taskData["script"].(string),
-			WorkDir:       taskData["work_dir"].(string),
-			EnvVars:       taskData["env_vars"].(string),
-			Priority:      int(taskData["priority"].(float64)),
-			Timeout:       int(taskData["timeout"].(float64)),
-		}
-
-		if status, ok := taskData["status"].(string); ok {
-			task.Status = status
-		}
-
-		tasks = append(tasks, task)
-	}
-
-	return tasks, nil
 }
 
 // executeTask executes a single task
 func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 	th.log.Infof("Executing task: id=%d, name=%s, type=%s", task.ID, task.Name, task.TaskType)
 
-	th.mu.RLock()
-	token := th.token
-	th.mu.RUnlock()
+	attempt := task.RetryCount + 1
 
 	// Parse task parameters
 	params, err := task.ParseParams()
@@ -500,15 +446,18 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 		return
 	}
 
-	// Report task as running with duration 0
-	if err := th.reportTaskStatus(ctx, task.ID, token, "running", 0, "", "", "", 0); err != nil {
-		th.log.Warnf("Failed to report task start: %v", err)
+	// Report task as running first. If this fails, keep task pending server-side and wait for redispatch.
+	if err := th.reportTaskUpdateV2(task, attempt, "running", 0, "", 0, nil); err != nil {
+		th.log.Warnf("Failed to report v2 task start: %v", err)
+		return
 	}
 
 	// Set up log callback for real-time log reporting
-	th.executor.SetLogCallback(func(level, message, source string, lineNumber int) {
-		if err := th.ReportLog(ctx, task.ID, level, message, source, lineNumber); err != nil {
-			th.log.Warnf("Failed to report log: %v", err)
+	var logSeq int64
+	th.executor.SetLogCallback(func(level, message, source string, _ int) {
+		seq := atomic.AddInt64(&logSeq, 1)
+		if err := th.reportTaskLogChunkV2(task, attempt, seq, source, message); err != nil {
+			th.log.Warnf("Failed to report v2 log: %v", err)
 		}
 	})
 
@@ -521,8 +470,15 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 		status = "failed"
 	}
 
-	if err := th.reportTaskStatus(ctx, task.ID, token, status, result.ExitCode, result.Stdout, result.Stderr, result.Error, result.Duration.Seconds()); err != nil {
-		th.log.Warnf("Failed to report task completion: %v", err)
+	finalResult := map[string]interface{}{
+		"stdout_size": len(result.Stdout),
+		"stderr_size": len(result.Stderr),
+	}
+	if err := th.reportTaskUpdateV2(task, attempt, status, result.ExitCode, result.Error, result.Duration.Milliseconds(), finalResult); err != nil {
+		th.log.Warnf("Failed to report v2 task completion: %v", err)
+	}
+	if err := th.reportTaskLogEndV2(task, attempt, atomic.LoadInt64(&logSeq)); err != nil {
+		th.log.Debugf("Failed to report v2 log end: %v", err)
 	}
 
 	th.log.Infof("Task %d completed: status=%s, exit_code=%d, duration=%v",
@@ -553,30 +509,89 @@ func (t *Task) ParseParams() (*task.TaskParams, error) {
 	return params, nil
 }
 
-// reportTaskStatus reports task status to the server via WebSocket
-func (th *TaskHandler) reportTaskStatus(ctx context.Context, taskID uint64, token, status string, exitCode int, stdout, stderr, errorMsg string, duration float64) error {
+func (th *TaskHandler) reportTaskUpdateV2(t *Task, attempt int, status string, exitCode int, errorMsg string, durationMs int64, result map[string]interface{}) error {
 	th.mu.RLock()
 	wsClient := th.wsClient
 	th.mu.RUnlock()
 
-	// Try WebSocket first
-	if wsClient != nil && wsClient.IsConnected() {
-		payload := map[string]interface{}{
-			"task_id":   taskID,
-			"status":    status,
-			"exit_code": exitCode,
-			"stdout":    stdout,
-			"stderr":    stderr,
-			"error_msg": errorMsg,
-			"duration":  duration,
-		}
-		return wsClient.SendMessage("task_status", payload)
+	if wsClient == nil || !wsClient.IsConnected() {
+		return fmt.Errorf("websocket unavailable")
 	}
 
-	// Fallback to HTTP if WebSocket not available
-	req := map[string]interface{}{
-		"agent_id":  th.agentID,
-		"token":     token,
+	payload := map[string]interface{}{
+		"task_id":         t.ID,
+		"attempt":         attempt,
+		"status":          status,
+		"exit_code":       exitCode,
+		"error_msg":       errorMsg,
+		"duration_ms":     durationMs,
+		"idempotency_key": fmt.Sprintf("%d:%d:%s:%d", t.ID, attempt, status, exitCode),
+		"timestamp":       time.Now().Unix(),
+	}
+	if result != nil {
+		payload["result"] = result
+	}
+
+	return wsClient.SendMessage("task_update_v2", payload)
+}
+
+func (th *TaskHandler) reportTaskLogChunkV2(t *Task, attempt int, seq int64, stream, chunk string) error {
+	th.mu.RLock()
+	wsClient := th.wsClient
+	th.mu.RUnlock()
+
+	if wsClient == nil || !wsClient.IsConnected() {
+		return fmt.Errorf("websocket unavailable")
+	}
+
+	if stream == "" {
+		stream = "stdout"
+	}
+
+	payload := map[string]interface{}{
+		"task_id":   t.ID,
+		"attempt":   attempt,
+		"seq":       seq,
+		"stream":    stream,
+		"chunk":     chunk,
+		"timestamp": time.Now().Unix(),
+	}
+
+	return wsClient.SendMessage("task_log_chunk_v2", payload)
+}
+
+func (th *TaskHandler) reportTaskLogEndV2(t *Task, attempt int, finalSeq int64) error {
+	th.mu.RLock()
+	wsClient := th.wsClient
+	th.mu.RUnlock()
+
+	if wsClient == nil || !wsClient.IsConnected() {
+		return fmt.Errorf("websocket unavailable")
+	}
+
+	payload := map[string]interface{}{
+		"task_id":   t.ID,
+		"attempt":   attempt,
+		"final_seq": finalSeq,
+		"timestamp": time.Now().Unix(),
+	}
+
+	return wsClient.SendMessage("task_log_end_v2", payload)
+}
+
+// reportTaskStatus reports task status to the server via WebSocket
+func (th *TaskHandler) reportTaskStatus(ctx context.Context, taskID uint64, token, status string, exitCode int, stdout, stderr, errorMsg string, duration float64) error {
+	_ = ctx
+	_ = token
+	th.mu.RLock()
+	wsClient := th.wsClient
+	th.mu.RUnlock()
+
+	if wsClient == nil || !wsClient.IsConnected() {
+		return fmt.Errorf("websocket unavailable")
+	}
+
+	payload := map[string]interface{}{
 		"task_id":   taskID,
 		"status":    status,
 		"exit_code": exitCode,
@@ -586,16 +601,7 @@ func (th *TaskHandler) reportTaskStatus(ctx context.Context, taskID uint64, toke
 		"duration":  duration,
 	}
 
-	resp, err := th.httpClient.Post(ctx, "/api/tasks/report/status", req)
-	if err != nil {
-		return err
-	}
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("report status failed: %d", resp.StatusCode)
-	}
-
-	return nil
+	return wsClient.SendMessage("task_status", payload)
 }
 
 // convertNodes converts client.PipelineNode slice to task.PipelineNode slice
@@ -656,27 +662,16 @@ func convertConnections(conns []client.PipelineConnection) []task.PipelineConnec
 
 // ReportLog reports a log entry to the server via WebSocket
 func (th *TaskHandler) ReportLog(ctx context.Context, taskID uint64, level, message, source string, lineNumber int) error {
+	_ = ctx
 	th.mu.RLock()
 	wsClient := th.wsClient
 	th.mu.RUnlock()
 
-	// Try WebSocket first
-	if wsClient != nil && wsClient.IsConnected() {
-		payload := map[string]interface{}{
-			"task_id":     taskID,
-			"level":       level,
-			"message":     message,
-			"source":      source,
-			"line_number": lineNumber,
-			"timestamp":   time.Now().Unix(),
-		}
-		return wsClient.SendMessage("task_log", payload)
+	if wsClient == nil || !wsClient.IsConnected() {
+		return fmt.Errorf("websocket unavailable")
 	}
 
-	// Fallback to HTTP if WebSocket not available
-	req := map[string]interface{}{
-		"agent_id":    th.agentID,
-		"token":       th.token,
+	payload := map[string]interface{}{
 		"task_id":     taskID,
 		"level":       level,
 		"message":     message,
@@ -685,14 +680,5 @@ func (th *TaskHandler) ReportLog(ctx context.Context, taskID uint64, level, mess
 		"timestamp":   time.Now().Unix(),
 	}
 
-	resp, err := th.httpClient.Post(ctx, "/api/tasks/report/log", req)
-	if err != nil {
-		return err
-	}
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("report log failed: %d", resp.StatusCode)
-	}
-
-	return nil
+	return wsClient.SendMessage("task_log", payload)
 }

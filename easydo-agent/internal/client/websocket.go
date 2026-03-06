@@ -15,6 +15,7 @@ import (
 
 // TaskHandler interface for handling incoming tasks
 type TaskHandler interface {
+	HandleTaskAssign(msg *TaskAssignMessage) error
 	HandlePipelineAssign(msg *PipelineAssignMessage) error
 	HandleTaskCancel(taskID uint64) error
 }
@@ -24,6 +25,31 @@ type PipelineAssignMessage struct {
 	RunID       uint64         `json:"run_id"`
 	Config      PipelineConfig `json:"config"`
 	AgentConfig AgentConfig    `json:"agent_config"`
+}
+
+// TaskAssignMessage represents a concrete task assignment from server.
+type TaskAssignMessage struct {
+	Task      TaskAssignPayload `json:"task"`
+	Timestamp int64             `json:"timestamp"`
+}
+
+// TaskAssignPayload mirrors the task fields required by task executor.
+type TaskAssignPayload struct {
+	ID            uint64 `json:"id"`
+	AgentID       uint64 `json:"agent_id"`
+	PipelineRunID uint64 `json:"pipeline_run_id"`
+	NodeID        string `json:"node_id"`
+	TaskType      string `json:"task_type"`
+	Name          string `json:"name"`
+	Params        string `json:"params"`
+	Script        string `json:"script"`
+	WorkDir       string `json:"work_dir"`
+	EnvVars       string `json:"env_vars"`
+	Status        string `json:"status"`
+	Priority      int    `json:"priority"`
+	Timeout       int    `json:"timeout"`
+	RetryCount    int    `json:"retry_count"`
+	MaxRetries    int    `json:"max_retries"`
 }
 
 // PipelineConfig represents the pipeline configuration
@@ -131,10 +157,11 @@ func (c *WebSocketClient) SetConfig(cfg *websocketConfig) {
 // Connect establishes a WebSocket connection to the server
 func (c *WebSocketClient) Connect(ctx context.Context) error {
 	c.mu.Lock()
-	if c.running {
+	if c.conn != nil {
 		c.mu.Unlock()
 		return nil
 	}
+	wasRunning := c.running
 	c.running = true
 	c.mu.Unlock()
 
@@ -162,9 +189,11 @@ func (c *WebSocketClient) Connect(ctx context.Context) error {
 		"Content-Type": {"application/json"},
 	})
 	if err != nil {
-		c.mu.Lock()
-		c.running = false
-		c.mu.Unlock()
+		if !wasRunning {
+			c.mu.Lock()
+			c.running = false
+			c.mu.Unlock()
+		}
 		return fmt.Errorf("failed to connect to WebSocket: %w", err)
 	}
 
@@ -241,6 +270,8 @@ func (c *WebSocketClient) handleMessage(message []byte) {
 	}
 
 	switch msg.Type {
+	case "task_assign":
+		c.handleTaskAssign(msg.Payload)
 	case "pipeline_assign":
 		c.handlePipelineAssign(msg.Payload)
 	case "task_cancel":
@@ -250,6 +281,55 @@ func (c *WebSocketClient) handleMessage(message []byte) {
 	default:
 		klog.V(4).Infof("Received message of type: %s", msg.Type)
 	}
+}
+
+func (c *WebSocketClient) handleTaskAssign(payload map[string]interface{}) {
+	c.mu.RLock()
+	handler := c.taskHandler
+	c.mu.RUnlock()
+
+	if handler == nil {
+		klog.Warning("No task handler configured, cannot process task assignment")
+		return
+	}
+
+	assignMsg := &TaskAssignMessage{}
+	if taskRaw, ok := payload["task"]; ok {
+		data, err := json.Marshal(map[string]interface{}{
+			"task":      taskRaw,
+			"timestamp": payload["timestamp"],
+		})
+		if err != nil {
+			klog.Warningf("Failed to marshal task assign payload: %v", err)
+			return
+		}
+		if err := json.Unmarshal(data, assignMsg); err != nil {
+			klog.Warningf("Failed to parse task assign payload: %v", err)
+			return
+		}
+	} else {
+		// Backward compatibility: payload itself may be the task object.
+		data, err := json.Marshal(payload)
+		if err != nil {
+			klog.Warningf("Failed to marshal task payload: %v", err)
+			return
+		}
+		if err := json.Unmarshal(data, &assignMsg.Task); err != nil {
+			klog.Warningf("Failed to parse task payload: %v", err)
+			return
+		}
+	}
+
+	if assignMsg.Task.ID == 0 {
+		klog.Warning("Invalid task assignment, missing task id")
+		return
+	}
+
+	go func() {
+		if err := handler.HandleTaskAssign(assignMsg); err != nil {
+			klog.Warningf("Failed to handle task assignment: %v", err)
+		}
+	}()
 }
 
 // handlePipelineAssign handles pipeline assignment message from server
@@ -340,6 +420,10 @@ func (c *WebSocketClient) handleDisconnect(ctx context.Context) {
 		case <-time.After(c.cfg.reconnectDelay):
 			if err := c.Connect(ctx); err != nil {
 				klog.Warningf("Reconnection attempt %d failed: %v", attempt+1, err)
+				continue
+			}
+			if !c.IsConnected() {
+				klog.Warningf("Reconnection attempt %d did not establish connection", attempt+1)
 				continue
 			}
 			klog.Infof("WebSocket reconnected successfully")

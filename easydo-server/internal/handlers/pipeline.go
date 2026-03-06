@@ -751,9 +751,9 @@ func (h *PipelineHandler) createAllNodeTasks(pipeline models.Pipeline, run *mode
 	}
 }
 
-// executePipelineTasks starts the pipeline execution asynchronously
-// Tasks are created for initial nodes (inDegree=0) and Agent polls for execution
-// When a task completes, triggerDownstreamTasks creates tasks for downstream nodes
+// executePipelineTasks starts pipeline execution asynchronously.
+// Initial tasks are created for nodes with inDegree=0 and pushed to agent via WebSocket.
+// Downstream tasks are created and pushed when upstream tasks complete.
 func (h *PipelineHandler) executePipelineTasks(pipeline models.Pipeline, run *models.PipelineRun, config PipelineConfig) {
 	// 检查配置有效性
 	if config.Nodes == nil || len(config.Nodes) == 0 {
@@ -807,8 +807,7 @@ func (h *PipelineHandler) executePipelineTasks(pipeline models.Pipeline, run *mo
 		}
 	}
 
-	// 异步执行，任务由 Agent 轮询完成
-	// 下游任务由 triggerDownstreamTasks 在任务完成时触发
+	// 任务执行由 agent 通过 WebSocket 驱动，下游任务由 triggerDownstreamTasks 在任务完成时触发
 }
 
 func (h *PipelineHandler) selectAgentForPipeline(db *gorm.DB) uint64 {
@@ -893,6 +892,11 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 		envVars = string(envJSON)
 	}
 
+	maxRetries := 0
+	if retryVal, ok := nodeConfig["retry_count"].(float64); ok && retryVal > 0 {
+		maxRetries = int(retryVal)
+	}
+
 	repoURL := ""
 	repoBranch := ""
 	repoCommit := ""
@@ -933,6 +937,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 			EnvVars:       envVars,
 			Status:        models.TaskStatusPending,
 			Timeout:       timeout,
+			MaxRetries:    maxRetries,
 			RepoURL:       repoURL,
 			RepoBranch:    repoBranch,
 			RepoCommit:    repoCommit,
@@ -951,6 +956,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 		task.EnvVars = envVars
 		task.Timeout = timeout
 		task.Status = models.TaskStatusPending
+		task.MaxRetries = maxRetries
 		if err := db.Save(&task).Error; err != nil {
 			fmt.Printf("Failed to update task %d: %v\n", task.ID, err)
 			return false, nil
@@ -958,8 +964,10 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 		fmt.Printf("Updated existing task %d for node %s\n", task.ID, node.ID)
 	}
 
-	// 返回成功，让 Agent 轮询任务
-	// 任务完成后，AgentReportTaskStatus 会触发后续节点
+	// Immediately dispatch task via WebSocket if agent is connected.
+	// If not connected, task remains pending and will be pushed on next heartbeat/connect.
+	_ = SharedWebSocketHandler().sendTaskAssign(task)
+
 	return true, nil
 }
 
@@ -1393,7 +1401,7 @@ func (h *PipelineHandler) updateRunStatus(runID uint64, status, errorMsg string)
 	h.DB.Model(&run).Updates(updates)
 
 	// Broadcast run status to frontend clients
-	wsHandler := NewWebSocketHandler()
+	wsHandler := SharedWebSocketHandler()
 	wsHandler.BroadcastRunStatus(runID, status, errorMsg)
 }
 
@@ -1782,18 +1790,23 @@ func (h *PipelineHandler) GetRunLogs(c *gin.Context) {
 		return
 	}
 
-	// 获取所有日志
-	var logs []models.AgentLog
-	query := h.DB.Where("pipeline_run_id = ?", runID)
-
-	if level != "" {
-		query = query.Where("level = ?", level)
-	}
-	if source != "" {
-		query = query.Where("source = ?", source)
+	runIDNum, err := strconv.ParseUint(runID, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "无效的运行ID",
+		})
+		return
 	}
 
-	query.Order("timestamp ASC").Find(&logs)
+	logs, err := agentFileLogs.QueryRunLogs(runIDNum, level, source)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "读取日志失败: " + err.Error(),
+		})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,

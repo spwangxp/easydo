@@ -22,21 +22,21 @@ func InitDB() {
 	DB, err = gorm.Open(mysql.Open(config.GetDSN()), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Info),
 	})
-	
+
 	if err != nil {
 		panic("Failed to connect to database: " + err.Error())
 	}
-	
+
 	// 配置连接池
 	sqlDB, err := DB.DB()
 	if err != nil {
 		panic("Failed to get underlying sql.DB: " + err.Error())
 	}
-	
+
 	sqlDB.SetMaxOpenConns(config.Config.GetInt("database.max_open_conns"))
 	sqlDB.SetMaxIdleConns(config.Config.GetInt("database.max_idle_conns"))
 	sqlDB.SetConnMaxLifetime(config.Config.GetDuration("database.max_life_time"))
-	
+
 	// 自动迁移
 	autoMigrate()
 }
@@ -53,6 +53,8 @@ func autoMigrate() {
 		&TaskExecution{},
 		&AgentHeartbeat{},
 		&AgentLog{},
+		&AgentTaskEvent{},
+		&AgentLogChunk{},
 		&Secret{},
 		&SecretUsage{},
 		&SecretAuditLog{},
@@ -80,25 +82,25 @@ func initTestUsers() {
 
 	testUsers := []User{
 		{
-			Username:  "demo",
-			Nickname:  "Demo用户",
-			Email:     "demo@example.com",
-			Role:      "admin",
-			Status:    "active",
+			Username: "demo",
+			Nickname: "Demo用户",
+			Email:    "demo@example.com",
+			Role:     "admin",
+			Status:   "active",
 		},
 		{
-			Username:  "admin",
-			Nickname:  "管理员",
-			Email:     "admin@example.com",
-			Role:      "admin",
-			Status:    "active",
+			Username: "admin",
+			Nickname: "管理员",
+			Email:    "admin@example.com",
+			Role:     "admin",
+			Status:   "active",
 		},
 		{
-			Username:  "test",
-			Nickname:  "测试用户",
-			Email:     "test@example.com",
-			Role:      "user",
-			Status:    "active",
+			Username: "test",
+			Nickname: "测试用户",
+			Email:    "test@example.com",
+			Role:     "user",
+			Status:   "active",
 		},
 	}
 
