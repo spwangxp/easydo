@@ -119,19 +119,26 @@
         <div 
           class="connections-layer-wrapper"
           :style="{
+            width: `${canvasWidth}px`,
+            height: `${canvasHeight}px`,
             transform: `translate(${canvasOffset.x}px, ${canvasOffset.y}px) scale(${canvasScale})`,
             transformOrigin: '0 0'
           }"
         >
-          <svg class="connections-layer" :viewBox="`0 0 ${canvasWidth} ${canvasHeight}`">
+          <svg
+            class="connections-layer"
+            :width="canvasWidth"
+            :height="canvasHeight"
+            :viewBox="`0 0 ${canvasWidth} ${canvasHeight}`"
+          >
             <defs>
               <!-- 箭头标记 - 红色连接线 -->
               <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-                <polygon points="0 0, 10 3.5, 0 7" fill="#FF0000" />
+                <polygon points="0 0, 10 3.5, 0 7" fill="var(--danger-color)" />
               </marker>
               <!-- 虚线连接标记 -->
               <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-                <polygon points="0 0, 10 3.5, 0 7" fill="#909399" />
+                <polygon points="0 0, 10 3.5, 0 7" fill="var(--text-muted)" />
               </marker>
             </defs>
             <!-- 已完成的连接线 -->
@@ -141,7 +148,7 @@
               :d="getConnectionPath(conn)"
               class="connection-line"
               :class="{ selected: selectedConnection?.id === conn.id }"
-              stroke="#FF0000"
+              stroke="var(--danger-color)"
               stroke-width="3"
               fill="none"
               marker-end="url(#arrowhead)"
@@ -153,7 +160,7 @@
               v-if="connectingLine"
               :d="connectingLine.path"
               class="connecting-line-temp"
-              stroke="#909399"
+              stroke="var(--text-muted)"
               stroke-width="2"
               stroke-dasharray="5,5"
               fill="none"
@@ -993,6 +1000,7 @@ const deleteNode = async (node) => {
       selectedNode.value = null
     }
 
+    syncConnectionsWithPredecessors()
     saveHistory()
     ElMessage.success('删除成功')
   } catch {
@@ -1045,7 +1053,8 @@ const deleteConnection = async (conn) => {
         }
       }
     }
-    
+
+    syncConnectionsWithPredecessors()
     saveHistory()
     ElMessage.success('删除成功')
   } catch {
@@ -1106,6 +1115,7 @@ const finishConnection = (node, port, type) => {
       node.predecessors.push(connectionStart.value.node.id)
     }
     
+    syncConnectionsWithPredecessors()
     saveHistory()
   }
   
@@ -1250,6 +1260,7 @@ const undo = () => {
     const state = history.value[historyIndex.value]
     nodes.value = JSON.parse(JSON.stringify(state.nodes))
     connections.value = JSON.parse(JSON.stringify(state.connections))
+    syncConnectionsWithPredecessors()
   }
 }
 
@@ -1259,6 +1270,7 @@ const redo = () => {
     const state = history.value[historyIndex.value]
     nodes.value = JSON.parse(JSON.stringify(state.nodes))
     connections.value = JSON.parse(JSON.stringify(state.connections))
+    syncConnectionsWithPredecessors()
   }
 }
 
@@ -1305,7 +1317,84 @@ const getPredecessorName = (predId) => {
   return node ? node.name : predId
 }
 
-// 添加前置任务并创建连线
+// 连接键（用于去重和复用连接ID）
+const getConnectionKey = (from, to) => `${from}__${to}`
+
+// 从连接线反推 predecessors（兼容旧格式数据）
+const rebuildPredecessorsFromConnections = () => {
+  const predecessorMap = new Map()
+  const nodeIdSet = new Set(nodes.value.map(node => node.id))
+
+  nodes.value.forEach(node => {
+    predecessorMap.set(node.id, [])
+  })
+
+  connections.value.forEach(conn => {
+    if (!nodeIdSet.has(conn.from) || !nodeIdSet.has(conn.to) || conn.from === conn.to) return
+    const targetPreds = predecessorMap.get(conn.to) || []
+    if (!targetPreds.includes(conn.from)) {
+      targetPreds.push(conn.from)
+    }
+    predecessorMap.set(conn.to, targetPreds)
+  })
+
+  nodes.value.forEach(node => {
+    node.predecessors = predecessorMap.get(node.id) || []
+  })
+}
+
+// 以 predecessors 为唯一来源，同步 DAG 连接线
+const syncConnectionsWithPredecessors = () => {
+  const nodeIdSet = new Set(nodes.value.map(node => node.id))
+  const existingConnectionMap = new Map()
+
+  connections.value.forEach(conn => {
+    existingConnectionMap.set(getConnectionKey(conn.from, conn.to), conn)
+  })
+
+  const nextConnections = []
+  const seenKeys = new Set()
+
+  nodes.value.forEach(node => {
+    const currentPredecessors = Array.isArray(node.predecessors) ? node.predecessors : []
+    const editablePredecessors = []
+    const normalizedPredecessors = []
+
+    currentPredecessors.forEach(predId => {
+      // 保留空占位，避免“添加前置任务”后下拉项被同步逻辑立即清掉
+      if (!predId) {
+        editablePredecessors.push('')
+        return
+      }
+      if (predId === node.id || !nodeIdSet.has(predId)) return
+      if (normalizedPredecessors.includes(predId)) return
+      normalizedPredecessors.push(predId)
+      editablePredecessors.push(predId)
+
+      const key = getConnectionKey(predId, node.id)
+      if (seenKeys.has(key)) return
+      seenKeys.add(key)
+
+      const existing = existingConnectionMap.get(key)
+      nextConnections.push({
+        id: existing?.id || `conn_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
+        from: predId,
+        to: node.id,
+        ignore_failure: existing?.ignore_failure || false
+      })
+    })
+
+    // 清洗无效/重复 predecessor，避免配置和连线不一致
+    if (JSON.stringify(currentPredecessors) !== JSON.stringify(editablePredecessors)) {
+      node.predecessors = editablePredecessors
+    }
+  })
+
+  connections.value = nextConnections
+  updateAllPortsConnectionStatus()
+}
+
+// 添加前置任务
 const addPredecessor = () => {
   if (!selectedNode.value) return
   if (!selectedNode.value.predecessors) {
@@ -1314,161 +1403,35 @@ const addPredecessor = () => {
   selectedNode.value.predecessors.push('')
 }
 
-// 移除前置任务并删除连线
+// 移除前置任务
 const removePredecessor = (idx) => {
   if (!selectedNode.value?.predecessors) return
-  
-  const removedId = selectedNode.value.predecessors[idx]
-  
-  // 移除对应的连接
-  if (removedId) {
-    const connIndex = connections.value.findIndex(
-      c => c.from === removedId && c.to === selectedNode.value.id
-    )
-    if (connIndex > -1) {
-      connections.value.splice(connIndex, 1)
-    }
-    
-    // 更新源节点输出端口的连接状态
-    const fromNode = nodes.value.find(n => n.id === removedId)
-    if (fromNode) {
-      fromNode.outputs.forEach(o => {
-        o.connected = connections.value.some(c => c.from === fromNode.id)
-      })
-    }
-    
-    // 更新目标节点输入端口的连接状态
-    selectedNode.value.inputs.forEach(i => {
-      i.connected = connections.value.some(c => c.to === selectedNode.value.id)
-    })
-  }
-  
+
   selectedNode.value.predecessors.splice(idx, 1)
+  syncConnectionsWithPredecessors()
   saveHistory()
 }
 
-// 创建从前置任务到当前节点的连线
-const createConnectionFromPredecessor = (predId) => {
-  console.log('createConnectionFromPredecessor called with predId:', predId)
-  if (!predId || !selectedNode.value) {
-    console.log('Early return: predId or selectedNode.value is null')
-    return
-  }
-  
-  // 检查是否已存在连接
-  const exists = connections.value.find(
-    c => c.from === predId && c.to === selectedNode.value.id
-  )
-  console.log('Connection exists:', exists)
-  
-  if (!exists) {
-    const newConn = {
-      id: `conn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      from: predId,
-      to: selectedNode.value.id
-    }
-    console.log('Creating new connection:', newConn)
-    connections.value.push(newConn)
-    console.log('connections.value after push:', connections.value)
-    
-    // 更新源节点输出端口的连接状态
-    const fromNode = nodes.value.find(n => n.id === predId)
-    if (fromNode) {
-      console.log('Found fromNode:', fromNode.name)
-      fromNode.outputs.forEach(o => {
-        o.connected = connections.value.some(c => c.from === fromNode.id)
-      })
-    }
-    
-    // 更新目标节点输入端口的连接状态
-    selectedNode.value.inputs.forEach(i => {
-      i.connected = connections.value.some(c => c.to === selectedNode.value.id)
-    })
-  }
+// 处理前置任务选择变化 - 当用户通过下拉框选择前置任务时调用
+const handlePredecessorSelectChange = (newValue, idx) => {
+  if (!selectedNode.value || !selectedNode.value.predecessors) return
+
+  selectedNode.value.predecessors.splice(idx, 1, newValue || '')
+  syncConnectionsWithPredecessors()
+  saveHistory()
 }
 
-// 监听前置任务变化，自动创建/删除连接
-// 监听predecessors数组的深度变化
+// 监听节点依赖配置变化，实时同步为有向边
 watch(
-  () => selectedNode.value?.predecessors,
-  (newPredecessors, oldPredecessors) => {
-    if (!selectedNode.value || !newPredecessors) return
-    
-    // 过滤掉空字符串，只处理有效的节点ID
-    const validNewPreds = newPredecessors.filter(id => id && id !== '')
-    const validOldPreds = (oldPredecessors || []).filter(id => id && id !== '')
-    
-    // 获取旧的前置任务集合（只包含有效ID）
-    const oldSet = new Set(validOldPreds)
-    const newSet = new Set(validNewPreds)
-    
-    // 找出新增的前置任务，为每个新添加的前置任务创建连接
-    validNewPreds.forEach(predId => {
-      if (!oldSet.has(predId)) {
-        console.log('Creating connection for new predecessor:', predId)
-        createConnectionFromPredecessor(predId)
-      }
-    })
-    
-    // 找出移除的前置任务，删除对应的连接
-    validOldPreds.forEach(predId => {
-      if (!newSet.has(predId)) {
-        console.log('Removing connection for predecessor:', predId)
-        removeConnectionForPredecessor(predId)
-      }
-    })
+  () => nodes.value.map(node => ({
+    id: node.id,
+    predecessors: Array.isArray(node.predecessors) ? [...node.predecessors] : []
+  })),
+  () => {
+    syncConnectionsWithPredecessors()
   },
   { deep: true }
 )
-
-// 移除指定前置任务的连接
-const removeConnectionForPredecessor = (predId) => {
-  console.log('removeConnectionForPredecessor called with predId:', predId)
-  if (!predId || !selectedNode.value) {
-    console.log('Early return: predId or selectedNode is null')
-    return
-  }
-  
-  // 移除对应的连接
-  const connIndex = connections.value.findIndex(
-    c => c.from === predId && c.to === selectedNode.value.id
-  )
-  console.log('Connection index to remove:', connIndex)
-  if (connIndex > -1) {
-    connections.value.splice(connIndex, 1)
-    console.log('Connection removed, remaining:', connections.value.length)
-  }
-  
-  // 更新源节点输出端口的连接状态
-  const fromNode = nodes.value.find(n => n.id === predId)
-  if (fromNode) {
-    fromNode.outputs.forEach(o => {
-      o.connected = connections.value.some(c => c.from === fromNode.id)
-    })
-  }
-  
-  // 更新目标节点输入端口的连接状态
-  selectedNode.value.inputs.forEach(i => {
-    i.connected = connections.value.some(c => c.to === selectedNode.value.id)
-  })
-}
-
-// 处理前置任务选择变化 - 当用户通过下拉框选择前置任务时调用
-// Vue 3中直接通过索引修改数组(arr[idx] = value)不会触发响应式更新
-// 必须使用splice方法来确保watch能捕获变化
-const handlePredecessorSelectChange = (newValue, idx) => {
-  if (!selectedNode.value || !selectedNode.value.predecessors) return
-  
-  if (newValue) {
-    console.log('Predecessor selected:', newValue, 'at index:', idx, 'node:', selectedNode.value.name)
-    
-    // 使用splice替换数组元素以触发Vue响应式更新
-    selectedNode.value.predecessors.splice(idx, 1, newValue)
-    
-    // 手动创建连接（因为splice可能不会触发深度watch的立即响应）
-    createConnectionFromPredecessor(newValue)
-  }
-}
 
 // 清空画布
 const clearCanvas = async () => {
@@ -1486,6 +1449,7 @@ const clearCanvas = async () => {
 
 // 验证 DAG 有效性
 const validateDAG = () => {
+  syncConnectionsWithPredecessors()
   const errors = []
   
   // 检查是否有节点
@@ -1872,8 +1836,8 @@ const loadPipeline = async () => {
             }
           })
           
-          // 更新端口连接状态
-          updateAllPortsConnectionStatus()
+          // 以 predecessors 为准，重建连接并刷新端口状态
+          syncConnectionsWithPredecessors()
           console.log('新格式流水线配置加载成功', { nodes: nodes.value.length, connections: connections.value.length })
         } else {
           // 旧格式兼容
@@ -1882,10 +1846,11 @@ const loadPipeline = async () => {
           }
           if (config.connections && config.connections.length > 0) {
             connections.value = config.connections
+            rebuildPredecessorsFromConnections()
           } else {
             rebuildConnectionsFromPredecessors()
           }
-          updateAllPortsConnectionStatus()
+          syncConnectionsWithPredecessors()
           console.log('旧格式流水线配置加载成功', { nodes: nodes.value.length, connections: connections.value.length })
         }
       } catch (parseError) {
@@ -1923,30 +1888,7 @@ const getDefaultOutputs = (type) => {
 
 // 根据predecessors重建connections数组
 const rebuildConnectionsFromPredecessors = () => {
-  console.log('rebuildConnectionsFromPredecessors called')
-  const newConnections = []
-  
-  nodes.value.forEach(node => {
-    if (node.predecessors && Array.isArray(node.predecessors)) {
-      node.predecessors.forEach(predId => {
-        if (predId) {
-          // 检查是否已存在该连接
-          const exists = newConnections.some(c => c.from === predId && c.to === node.id)
-          if (!exists) {
-            newConnections.push({
-              id: `conn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-              from: predId,
-              to: node.id
-            })
-            console.log(`创建连接: ${predId} -> ${node.id}`)
-          }
-        }
-      })
-    }
-  })
-  
-  connections.value = newConnections
-  console.log('重建连接线完成:', connections.value.length, '条连接')
+  syncConnectionsWithPredecessors()
 }
 
 // 更新所有节点的端口连接状态
@@ -2234,8 +2176,6 @@ const getStatusText = (status) => {
     position: absolute;
     top: 0;
     left: 0;
-    width: 0;
-    height: 0;
     z-index: 10;
     pointer-events: none;
 
@@ -2243,6 +2183,8 @@ const getStatusText = (status) => {
       position: absolute;
       top: 0;
       left: 0;
+      width: 100%;
+      height: 100%;
       overflow: visible;
 
       .connection-line {

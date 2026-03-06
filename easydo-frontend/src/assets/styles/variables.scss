@@ -1,46 +1,46 @@
 // ============================================
-// EasyDo Modern Design System
-// 简约大气现代化设计系统 - 低对比度/触觉效果
+// EasyDo Visual Tokens
+// 简约大气 + 立体通透 + 灵动交互
 // ============================================
 
-// Primary Colors - Soft blue with low saturation
-$primary-color: #8BA4C7;
-$primary-hover: #A3B8D4;
-$primary-active: #6B8AAF;
-$primary-light: #E8EEF5;
-$primary-lighter: #F0F4F8;
+// Primary palette - cool blue spectrum
+$primary-color: #2f6dff;
+$primary-hover: #4d83ff;
+$primary-active: #1f59e8;
+$primary-light: rgba(47, 109, 255, 0.15);
+$primary-lighter: rgba(47, 109, 255, 0.08);
 
-// Semantic Colors - Soft pastels with low saturation
-$success-color: #8FB98F;
-$success-light: #E8F0E8;
-$warning-color: #D4B896;
-$warning-light: #F5EDE0;
-$danger-color: #C98B8B;
-$danger-light: #F5E5E5;
-$info-color: #9BB0C7;
-$info-light: #EDF1F5;
+// Semantic colors
+$success-color: #1fbc84;
+$success-light: rgba(31, 188, 132, 0.16);
+$warning-color: #f29f38;
+$warning-light: rgba(242, 159, 56, 0.2);
+$danger-color: #e75a5a;
+$danger-light: rgba(231, 90, 90, 0.16);
+$info-color: #2da7d7;
+$info-light: rgba(45, 167, 215, 0.16);
 
-// Text Colors - Warm grays with low contrast
-$text-primary: #4A4A48;
-$text-secondary: #7A7A78;
-$text-tertiary: #9A9A98;
-$text-muted: #BABAB8;
-$text-placeholder: #C8C8C6;
+// Text colors
+$text-primary: #132236;
+$text-secondary: #485d78;
+$text-tertiary: #6f829c;
+$text-muted: #97a9c0;
+$text-placeholder: #aebdd0;
 
-// Background Colors - Warm tones
-$bg-primary: #FAFAF8;
-$bg-secondary: #F5F4F2;
-$bg-tertiary: #EFEEEC;
-$bg-sidebar: #F7F6F4;
-$bg-card: #FDFCFA;
-$bg-elevated: #FFFFFF;
+// Surface colors
+$bg-primary: #edf3fc;
+$bg-secondary: #f4f8fe;
+$bg-tertiary: #f8fbff;
+$bg-sidebar: rgba(255, 255, 255, 0.74);
+$bg-card: rgba(255, 255, 255, 0.82);
+$bg-elevated: rgba(255, 255, 255, 0.92);
 
-// Border Colors - Very subtle
-$border-color: rgba(0, 0, 0, 0.06);
-$border-color-light: rgba(0, 0, 0, 0.04);
-$border-color-medium: rgba(0, 0, 0, 0.08);
-$border-color-strong: rgba(0, 0, 0, 0.12);
-$border-color-hover: rgba(0, 0, 0, 0.15);
+// Borders
+$border-color: rgba(17, 55, 96, 0.12);
+$border-color-light: rgba(17, 55, 96, 0.08);
+$border-color-medium: rgba(17, 55, 96, 0.16);
+$border-color-strong: rgba(17, 55, 96, 0.22);
+$border-color-hover: rgba(47, 109, 255, 0.32);
 
 // Legacy compatibility aliases
 $border-color-lighter: $border-color-light;
@@ -49,82 +49,75 @@ $background-color-white: $bg-elevated;
 $text-regular: $text-secondary;
 
 // ============================================
-// Neumorphism / Soft UI Shadow System
-// 触觉效果阴影系统
+// Depth and shadow system
 // ============================================
 
-// Soft diffused shadows for elevated elements
-$shadow-sm: 
-  2px 2px 8px rgba(0, 0, 0, 0.04),
-  -2px -2px 8px rgba(255, 255, 255, 0.9);
+$shadow-sm:
+  0 4px 12px rgba(16, 46, 88, 0.08),
+  0 1px 0 rgba(255, 255, 255, 0.85) inset;
 
-$shadow-md: 
-  4px 4px 16px rgba(0, 0, 0, 0.05),
-  -4px -4px 16px rgba(255, 255, 255, 0.9),
-  inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+$shadow-md:
+  0 14px 30px rgba(13, 43, 82, 0.12),
+  0 2px 0 rgba(255, 255, 255, 0.95) inset;
 
-$shadow-lg: 
-  8px 8px 24px rgba(0, 0, 0, 0.06),
-  -8px -8px 24px rgba(255, 255, 255, 0.95),
-  inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+$shadow-lg:
+  0 22px 48px rgba(12, 37, 73, 0.15),
+  0 2px 0 rgba(255, 255, 255, 0.95) inset;
 
-$shadow-xl: 
-  12px 12px 32px rgba(0, 0, 0, 0.08),
-  -12px -12px 32px rgba(255, 255, 255, 0.95),
-  inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+$shadow-xl:
+  0 30px 72px rgba(10, 31, 62, 0.2),
+  0 2px 0 rgba(255, 255, 255, 0.96) inset;
 
-// Inset shadows for pressed/tactile effect
-$shadow-inset: 
-  inset 2px 2px 6px rgba(0, 0, 0, 0.06),
-  inset -2px -2px 6px rgba(255, 255, 255, 0.8);
+$shadow-inset:
+  inset 0 1px 0 rgba(255, 255, 255, 0.9),
+  inset 0 -1px 0 rgba(23, 58, 103, 0.08);
 
-$shadow-inset-strong: 
-  inset 3px 3px 8px rgba(0, 0, 0, 0.08),
-  inset -3px -3px 8px rgba(255, 255, 255, 0.9);
+$shadow-inset-strong:
+  inset 0 2px 6px rgba(20, 52, 94, 0.18),
+  inset 0 1px 0 rgba(255, 255, 255, 0.65);
 
 // Legacy compatibility
 $box-shadow-base: $shadow-md;
 $box-shadow-light: $shadow-sm;
 
 // ============================================
-// Border Radius System
-// 圆角系统 - 大圆角营造柔和感
+// Radius
 // ============================================
 
-$radius-sm: 8px;
-$radius-md: 12px;
-$radius-lg: 16px;
-$radius-xl: 20px;
-$radius-2xl: 24px;
+$radius-sm: 10px;
+$radius-md: 14px;
+$radius-lg: 18px;
+$radius-xl: 24px;
+$radius-2xl: 30px;
 $radius-full: 9999px;
 
 // ============================================
 // Layout
 // ============================================
 
-$header-height: 64px;
-$sidebar-width: 240px;
-$sidebar-collapsed-width: 72px;
+$header-height: 72px;
+$sidebar-width: 268px;
+$sidebar-collapsed-width: 84px;
 
 // ============================================
 // Transitions
 // ============================================
 
-$transition-fast: 0.15s ease;
-$transition-base: 0.25s ease;
-$transition-slow: 0.4s ease;
-$transition-duration: 0.25s;
+$transition-fast: 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+$transition-base: 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+$transition-slow: 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+$transition-duration: 0.28s;
 
 // ============================================
 // Typography
 // ============================================
 
-$font-family-display: 'Plus Jakarta Sans', 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-$font-family-body: 'Manrope', 'Work Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+$font-family-display: 'Outfit', 'Plus Jakarta Sans', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+$font-family-body: 'Noto Sans SC', 'Manrope', 'PingFang SC', 'Microsoft YaHei', sans-serif;
 $font-family-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
 
 // ============================================
-// Spacing Scale
+// Spacing
 // ============================================
 
 $space-1: 4px;
@@ -138,7 +131,7 @@ $space-10: 40px;
 $space-12: 48px;
 
 // ============================================
-// Responsive Breakpoints
+// Responsive breakpoints
 // ============================================
 
 $breakpoints: (
@@ -149,80 +142,74 @@ $breakpoints: (
 );
 
 // ============================================
-// Blur Effects
+// Blur
 // ============================================
 
 $blur-sm: blur(8px);
 $blur-md: blur(16px);
-$blur-lg: blur(24px);
-$blur-xl: blur(32px);
+$blur-lg: blur(28px);
+$blur-xl: blur(38px);
 
-// Glass effect background
-$glass-bg: rgba(255, 255, 255, 0.75);
-$glass-border: rgba(255, 255, 255, 0.5);
+$glass-bg: rgba(255, 255, 255, 0.66);
+$glass-border: rgba(255, 255, 255, 0.6);
 
 // ============================================
-// Dark Theme Colors
+// Dark theme
 // ============================================
 
-// Dark Primary Colors
-$dark-primary-color: #6B8AAF;
-$dark-primary-hover: #8BA4C7;
-$dark-primary-active: #5A7A9F;
-$dark-primary-light: rgba(107, 138, 175, 0.2);
-$dark-primary-lighter: rgba(107, 138, 175, 0.1);
+$dark-primary-color: #78a2ff;
+$dark-primary-hover: #91b4ff;
+$dark-primary-active: #5e90ff;
+$dark-primary-light: rgba(120, 162, 255, 0.2);
+$dark-primary-lighter: rgba(120, 162, 255, 0.12);
 
-// Dark Semantic Colors
-$dark-success-color: #7AA97A;
-$dark-success-light: rgba(122, 169, 122, 0.2);
-$dark-warning-color: #C4A47A;
-$dark-warning-light: rgba(196, 164, 122, 0.2);
-$dark-danger-color: #B97A7A;
-$dark-danger-light: rgba(185, 122, 122, 0.2);
-$dark-info-color: #8BA4C7;
-$dark-info-light: rgba(139, 164, 199, 0.2);
+$dark-success-color: #4dc699;
+$dark-success-light: rgba(77, 198, 153, 0.22);
+$dark-warning-color: #ffb85d;
+$dark-warning-light: rgba(255, 184, 93, 0.2);
+$dark-danger-color: #ef7b7b;
+$dark-danger-light: rgba(239, 123, 123, 0.2);
+$dark-info-color: #66bde3;
+$dark-info-light: rgba(102, 189, 227, 0.2);
 
-// Dark Text Colors
-$dark-text-primary: #E8E8E6;
-$dark-text-secondary: #B8B8B6;
-$dark-text-tertiary: #888886;
-$dark-text-muted: #686866;
-$dark-text-placeholder: #585856;
+$dark-text-primary: #eef5ff;
+$dark-text-secondary: #c2d2e8;
+$dark-text-tertiary: #93a5bf;
+$dark-text-muted: #7387a3;
+$dark-text-placeholder: #6d8099;
 
-// Dark Background Colors
-$dark-bg-primary: #1A1A1A;
-$dark-bg-secondary: #242424;
-$dark-bg-tertiary: #2E2E2E;
-$dark-bg-sidebar: #1E1E1E;
-$dark-bg-card: #2A2A2A;
-$dark-bg-elevated: #323232;
+$dark-bg-primary: #0e1624;
+$dark-bg-secondary: #162235;
+$dark-bg-tertiary: #1d2b40;
+$dark-bg-sidebar: rgba(13, 22, 36, 0.8);
+$dark-bg-card: rgba(25, 38, 57, 0.82);
+$dark-bg-elevated: rgba(31, 47, 70, 0.9);
 
-// Dark Border Colors
-$dark-border-color: rgba(255, 255, 255, 0.08);
-$dark-border-color-light: rgba(255, 255, 255, 0.05);
-$dark-border-color-medium: rgba(255, 255, 255, 0.1);
-$dark-border-color-strong: rgba(255, 255, 255, 0.15);
-$dark-border-color-hover: rgba(255, 255, 255, 0.2);
+$dark-border-color: rgba(160, 187, 224, 0.18);
+$dark-border-color-light: rgba(160, 187, 224, 0.12);
+$dark-border-color-medium: rgba(160, 187, 224, 0.24);
+$dark-border-color-strong: rgba(160, 187, 224, 0.34);
+$dark-border-color-hover: rgba(120, 162, 255, 0.52);
 
-// Dark Shadows
 $dark-shadow-sm:
-  2px 2px 8px rgba(0, 0, 0, 0.3),
-  -2px -2px 8px rgba(255, 255, 255, 0.05);
+  0 5px 16px rgba(0, 0, 0, 0.32),
+  0 1px 0 rgba(197, 219, 255, 0.07) inset;
 
 $dark-shadow-md:
-  4px 4px 16px rgba(0, 0, 0, 0.4),
-  -4px -4px 16px rgba(255, 255, 255, 0.05),
-  inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  0 16px 34px rgba(0, 0, 0, 0.36),
+  0 1px 0 rgba(197, 219, 255, 0.08) inset;
 
 $dark-shadow-lg:
-  8px 8px 24px rgba(0, 0, 0, 0.5),
-  -8px -8px 24px rgba(255, 255, 255, 0.05),
-  inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  0 24px 54px rgba(0, 0, 0, 0.42),
+  0 1px 0 rgba(197, 219, 255, 0.1) inset;
+
+$dark-shadow-xl:
+  0 30px 72px rgba(0, 0, 0, 0.5),
+  0 1px 0 rgba(197, 219, 255, 0.12) inset;
 
 $dark-shadow-inset:
-  inset 2px 2px 6px rgba(0, 0, 0, 0.4),
-  inset -2px -2px 6px rgba(255, 255, 255, 0.05);
+  inset 0 1px 0 rgba(197, 219, 255, 0.12),
+  inset 0 -1px 0 rgba(0, 0, 0, 0.26);
 
-// Dark Glass Effect
-$dark-glass-bg: rgba(40, 40, 40, 0.85);
-$dark-glass-border: rgba(255, 255, 255, 0.1);
+$dark-glass-bg: rgba(15, 26, 42, 0.58);
+$dark-glass-border: rgba(174, 203, 246, 0.2);

@@ -263,7 +263,7 @@ const saveNotifications = () => {
       font-family: $font-family-display;
       font-size: 28px;
       font-weight: 700;
-      color: $text-primary;
+      color: var(--text-primary);
       letter-spacing: -0.02em;
     }
   }
@@ -277,7 +277,7 @@ const saveNotifications = () => {
     // ============================================
     .settings-sidebar {
       width: 220px;
-      background: $bg-card;
+      background: var(--bg-card);
       border-radius: $radius-xl;
       padding: 16px;
       flex-shrink: 0;
@@ -288,7 +288,7 @@ const saveNotifications = () => {
         align-items: center;
         gap: 12px;
         padding: 14px 18px;
-        color: $text-secondary;
+        color: var(--text-secondary);
         cursor: pointer;
         border-radius: $radius-md;
         transition: all $transition-base;
@@ -296,14 +296,14 @@ const saveNotifications = () => {
         margin-bottom: 4px;
         
         &:hover {
-          background: rgba($primary-color, 0.06);
-          color: $primary-color;
+          background: var(--primary-lighter);
+          color: var(--primary-color);
         }
         
         &.active {
-          color: $primary-color;
-          background: linear-gradient(135deg, rgba($primary-color, 0.12) 0%, rgba($primary-color, 0.06) 100%);
-          box-shadow: inset 0 0 0 1px rgba($primary-color, 0.15), $shadow-sm;
+          color: var(--primary-color);
+          background: linear-gradient(135deg, var(--primary-light) 0%, var(--primary-lighter) 100%);
+          box-shadow: inset 0 0 0 1px var(--border-color-hover), $shadow-sm;
         }
         
         .el-icon {
@@ -317,7 +317,7 @@ const saveNotifications = () => {
     // ============================================
     .settings-content {
       flex: 1;
-      background: $bg-card;
+      background: var(--bg-card);
       border-radius: $radius-xl;
       padding: 32px;
       box-shadow: $shadow-md;
@@ -327,10 +327,10 @@ const saveNotifications = () => {
           font-family: $font-family-display;
           font-size: 20px;
           font-weight: 600;
-          color: $text-primary;
+          color: var(--text-primary);
           margin-bottom: 28px;
           padding-bottom: 20px;
-          border-bottom: 1px solid $border-color;
+          border-bottom: 1px solid var(--border-color);
         }
       }
       
@@ -340,19 +340,19 @@ const saveNotifications = () => {
         label {
           display: block;
           font-size: 14px;
-          color: $text-secondary;
+          color: var(--text-secondary);
           margin-bottom: 10px;
           font-weight: 500;
         }
         
         :deep(.el-input__wrapper) {
-          background: $bg-secondary;
+          background: var(--bg-secondary);
           border-radius: $radius-md;
           box-shadow: $shadow-inset;
-          border: 1px solid $border-color-light;
+          border: 1px solid var(--border-color-light);
           
           &:hover, &.is-focus {
-            border-color: rgba($primary-color, 0.4);
+            border-color: var(--border-color-hover);
           }
         }
         
@@ -366,15 +366,15 @@ const saveNotifications = () => {
             }
             
             .el-radio-button__inner {
-              background: $bg-secondary;
-              border-color: $border-color;
-              color: $text-secondary;
+              background: var(--bg-secondary);
+              border-color: var(--border-color);
+              color: var(--text-secondary);
               font-weight: 500;
             }
             
             &.is-active .el-radio-button__inner {
-              background: linear-gradient(135deg, $primary-color 0%, $primary-hover 100%);
-              border-color: $primary-color;
+              background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
+              border-color: var(--primary-color);
               color: white;
               box-shadow: none;
             }
@@ -389,31 +389,31 @@ const saveNotifications = () => {
         justify-content: center;
         width: 120px;
         height: 120px;
-        border: 2px dashed $border-color;
+        border: 2px dashed var(--border-color);
         border-radius: $radius-lg;
         cursor: pointer;
-        color: $text-muted;
+        color: var(--text-muted);
         transition: all $transition-base;
-        background: $bg-secondary;
+        background: var(--bg-secondary);
         
         &:hover {
-          border-color: $primary-color;
-          color: $primary-color;
-          background: rgba($primary-color, 0.04);
+          border-color: var(--primary-color);
+          color: var(--primary-color);
+          background: var(--primary-lighter);
         }
       }
       
       .form-actions {
         margin-top: 32px;
         padding-top: 24px;
-        border-top: 1px solid $border-color;
+        border-top: 1px solid var(--border-color);
         
         :deep(.el-button--primary) {
           height: 44px;
           padding: 0 32px;
           border-radius: $radius-md;
           font-weight: 600;
-          background: linear-gradient(135deg, $primary-color 0%, $primary-hover 100%);
+          background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
           border: none;
           box-shadow: $shadow-md;
           
@@ -432,19 +432,19 @@ const saveNotifications = () => {
         align-items: center;
         justify-content: space-between;
         padding: 24px 0;
-        border-bottom: 1px solid $border-color-light;
+        border-bottom: 1px solid var(--border-color-light);
         
         .security-info {
           h4 {
             font-size: 15px;
             font-weight: 600;
-            color: $text-primary;
+            color: var(--text-primary);
             margin-bottom: 6px;
           }
           
           p {
             font-size: 13px;
-            color: $text-muted;
+            color: var(--text-muted);
           }
         }
         
@@ -458,7 +458,7 @@ const saveNotifications = () => {
             border-radius: 10px;
           }
           &.is-checked .el-switch__core {
-            background: linear-gradient(135deg, $primary-color 0%, $primary-hover 100%);
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
           }
         }
       }
@@ -472,7 +472,7 @@ const saveNotifications = () => {
         h4 {
           font-size: 15px;
           font-weight: 600;
-          color: $text-primary;
+          color: var(--text-primary);
           margin-bottom: 20px;
         }
         
@@ -481,20 +481,20 @@ const saveNotifications = () => {
           align-items: center;
           justify-content: space-between;
           padding: 18px 0;
-          border-bottom: 1px solid $border-color-light;
+          border-bottom: 1px solid var(--border-color-light);
           
           .notification-info {
             .notification-label {
               display: block;
               font-size: 14px;
-              color: $text-primary;
+              color: var(--text-primary);
               margin-bottom: 4px;
               font-weight: 500;
             }
             
             .notification-desc {
               font-size: 13px;
-              color: $text-muted;
+              color: var(--text-muted);
             }
           }
           
@@ -503,7 +503,7 @@ const saveNotifications = () => {
               border-radius: 10px;
             }
             &.is-checked .el-switch__core {
-              background: linear-gradient(135deg, $primary-color 0%, $primary-hover 100%);
+              background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
             }
           }
         }
@@ -518,10 +518,10 @@ const saveNotifications = () => {
         margin-bottom: 20px;
         
         :deep(.el-input__wrapper) {
-          background: $bg-secondary;
+          background: var(--bg-secondary);
           border-radius: $radius-md;
           box-shadow: $shadow-inset;
-          border: 1px solid $border-color-light;
+          border: 1px solid var(--border-color-light);
         }
         
         :deep(.el-button--primary) {
@@ -534,20 +534,20 @@ const saveNotifications = () => {
         background: transparent;
         
         th.el-table__cell {
-          background: $bg-secondary;
-          color: $text-secondary;
+          background: var(--bg-secondary);
+          color: var(--text-secondary);
           font-weight: 600;
           font-size: 13px;
-          border-bottom: 1px solid $border-color;
+          border-bottom: 1px solid var(--border-color);
         }
         
         td.el-table__cell {
-          color: $text-primary;
-          border-bottom: 1px solid $border-color-light;
+          color: var(--text-primary);
+          border-bottom: 1px solid var(--border-color-light);
         }
         
         .el-table__row:hover > td.el-table__cell {
-          background: rgba($primary-color, 0.04);
+          background: var(--primary-lighter);
         }
         
         .el-tag {
@@ -566,14 +566,14 @@ const saveNotifications = () => {
           display: flex;
           align-items: center;
           padding: 24px;
-          border: 1px solid $border-color;
+          border: 1px solid var(--border-color);
           border-radius: $radius-lg;
           margin-bottom: 16px;
           transition: all $transition-base;
-          background: $bg-secondary;
+          background: var(--bg-secondary);
           
           &:hover {
-            border-color: rgba($primary-color, 0.3);
+            border-color: var(--border-color-hover);
             box-shadow: $shadow-sm;
           }
           
@@ -588,18 +588,18 @@ const saveNotifications = () => {
             box-shadow: $shadow-sm;
             
             &.dingtalk {
-              background: linear-gradient(135deg, #ecf5ff 0%, rgba($primary-color, 0.15) 100%);
-              color: $primary-color;
+              background: linear-gradient(135deg, var(--primary-lighter) 0%, var(--primary-light) 100%);
+              color: var(--primary-color);
             }
             
             &.wechat {
-              background: linear-gradient(135deg, #f0f9eb 0%, rgba($success-color, 0.15) 100%);
-              color: darken($success-color, 15%);
+              background: linear-gradient(135deg, var(--success-light) 0%, rgba(31, 188, 132, 0.08) 100%);
+              color: var(--success-color);
             }
             
             &.ldap {
-              background: linear-gradient(135deg, #fdf6ec 0%, rgba($warning-color, 0.15) 100%);
-              color: darken($warning-color, 15%);
+              background: linear-gradient(135deg, var(--warning-light) 0%, rgba(242, 159, 56, 0.1) 100%);
+              color: var(--warning-color);
             }
           }
           
@@ -609,20 +609,20 @@ const saveNotifications = () => {
             h4 {
               font-size: 15px;
               font-weight: 600;
-              color: $text-primary;
+              color: var(--text-primary);
               margin-bottom: 6px;
             }
             
             p {
               font-size: 13px;
-              color: $text-muted;
+              color: var(--text-muted);
             }
           }
           
           :deep(.el-button--primary) {
             border-radius: $radius-md;
             font-weight: 500;
-            background: linear-gradient(135deg, $primary-color 0%, $primary-hover 100%);
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
             border: none;
             box-shadow: $shadow-sm;
           }

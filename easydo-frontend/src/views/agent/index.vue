@@ -349,7 +349,7 @@
       :close-on-click-modal="false"
     >
       <div class="delete-warning">
-        <el-icon color="#E6A23C" size="24"><Warning /></el-icon>
+        <el-icon color="var(--warning-color)" size="24"><Warning /></el-icon>
         <p>确定要删除执行器 <strong>{{ deleteForm.name }}</strong> 吗？</p>
         <p class="delete-tip">此操作不可恢复，请输入执行器名称以确认。</p>
       </div>
@@ -415,7 +415,7 @@
       :close-on-click-modal="false"
     >
       <div class="reject-warning">
-        <el-icon color="#F56C6C" size="24"><Warning /></el-icon>
+        <el-icon color="var(--danger-color)" size="24"><Warning /></el-icon>
         <p>确定要拒绝执行器 <strong>{{ currentAgent?.name }}</strong> 的注册申请吗？</p>
       </div>
       <el-form :model="rejectForm" label-width="80px" style="margin-top: 20px">
@@ -449,7 +449,7 @@
       :close-on-click-modal="false"
     >
       <div class="remove-warning">
-        <el-icon color="#E6A23C" size="24"><Warning /></el-icon>
+        <el-icon color="var(--warning-color)" size="24"><Warning /></el-icon>
         <p>确定要移除执行器 <strong>{{ currentAgent?.name }}</strong> 吗？</p>
         <p class="remove-tip">移除后该执行器将被注销，需要重新注册并审批才能使用。</p>
       </div>
@@ -1073,7 +1073,7 @@ onUnmounted(() => {
       font-family: $font-family-display;
       font-size: 28px;
       font-weight: 700;
-      color: $text-primary;
+      color: var(--text-primary);
       letter-spacing: -0.02em;
     }
   }
@@ -1084,7 +1084,7 @@ onUnmounted(() => {
     gap: 20px;
     margin-bottom: 24px;
     padding: 14px 20px;
-    background: $bg-card;
+    background: var(--bg-card);
     border-radius: $radius-xl;
     box-shadow: $shadow-sm;
 
@@ -1098,7 +1098,7 @@ onUnmounted(() => {
         align-items: center;
         gap: 6px;
         padding: 8px 16px;
-        color: $text-secondary;
+        color: var(--text-secondary);
         cursor: pointer;
         border-radius: $radius-full;
         transition: all $transition-base;
@@ -1106,20 +1106,20 @@ onUnmounted(() => {
         font-size: 14px;
 
         &:hover {
-          background: rgba($primary-color, 0.06);
-          color: $primary-color;
+          background: var(--primary-lighter);
+          color: var(--primary-color);
         }
 
         &.active {
-          color: $primary-color;
-          background: rgba($primary-color, 0.1);
-          box-shadow: inset 0 0 0 1px rgba($primary-color, 0.15);
+          color: var(--primary-color);
+          background: var(--primary-light);
+          box-shadow: inset 0 0 0 1px var(--border-color-hover);
         }
 
         .tab-count {
           font-size: 12px;
-          color: $text-muted;
-          background: $bg-secondary;
+          color: var(--text-muted);
+          background: var(--bg-secondary);
           padding: 2px 8px;
           border-radius: $radius-full;
         }
@@ -1130,20 +1130,20 @@ onUnmounted(() => {
       flex: 1;
       
       :deep(.el-input__wrapper) {
-        background: $bg-secondary;
+        background: var(--bg-secondary);
         border-radius: $radius-md;
         box-shadow: $shadow-inset;
-        border: 1px solid $border-color-light;
+        border: 1px solid var(--border-color-light);
         
         &:hover, &.is-focus {
-          border-color: rgba($primary-color, 0.4);
+          border-color: var(--border-color-hover);
         }
       }
     }
   }
 
   .agent-table {
-    background: $bg-card;
+    background: var(--bg-card);
     border-radius: $radius-xl;
     padding: 20px;
     box-shadow: $shadow-md;
@@ -1152,22 +1152,22 @@ onUnmounted(() => {
       background: transparent;
 
       th.el-table__cell {
-        background: $bg-secondary;
-        color: $text-secondary;
+        background: var(--bg-secondary);
+        color: var(--text-secondary);
         font-weight: 600;
         font-size: 13px;
         height: 50px;
-        border-bottom: 1px solid $border-color;
+        border-bottom: 1px solid var(--border-color);
       }
 
       td.el-table__cell {
         height: 56px;
-        color: $text-primary;
-        border-bottom: 1px solid $border-color-light;
+        color: var(--text-primary);
+        border-bottom: 1px solid var(--border-color-light);
       }
       
       .el-table__row:hover > td.el-table__cell {
-        background: rgba($primary-color, 0.04);
+        background: var(--primary-lighter);
       }
       
       .el-tag {
@@ -1177,23 +1177,23 @@ onUnmounted(() => {
         border: none;
         
         &.el-tag--success {
-          background: $success-light;
-          color: #5a8a5a;
+          background: var(--success-light);
+          color: var(--success-color);
         }
         
         &.el-tag--info {
-          background: $info-light;
-          color: #6b7b8f;
+          background: var(--info-light);
+          color: var(--info-color);
         }
         
         &.el-tag--warning {
-          background: $warning-light;
-          color: #8f7550;
+          background: var(--warning-light);
+          color: var(--warning-color);
         }
         
         &.el-tag--danger {
-          background: $danger-light;
-          color: #8f5a5a;
+          background: var(--danger-light);
+          color: var(--danger-color);
         }
       }
     }
@@ -1222,13 +1222,13 @@ onUnmounted(() => {
 
         .agent-name-text {
           font-size: 14px;
-          color: $text-primary;
+          color: var(--text-primary);
           font-weight: 600;
         }
 
         .agent-host {
           font-size: 12px;
-          color: $text-muted;
+          color: var(--text-muted);
           font-family: $font-family-mono;
         }
       }
@@ -1249,12 +1249,12 @@ onUnmounted(() => {
       align-items: center;
       gap: 4px;
       margin-right: 12px;
-      color: $text-secondary;
+      color: var(--text-secondary);
       font-size: 13px;
 
       .el-icon {
         font-size: 14px;
-        color: $primary-color;
+        color: var(--primary-color);
       }
     }
 
@@ -1271,14 +1271,14 @@ onUnmounted(() => {
         align-items: center;
         justify-content: center;
         font-size: 16px;
-        color: $text-secondary;
+        color: var(--text-secondary);
         cursor: pointer;
         border-radius: $radius-md;
         transition: all $transition-fast;
 
         &:hover {
-          color: $primary-color;
-          background: rgba($primary-color, 0.08);
+          color: var(--primary-color);
+          background: var(--primary-lighter);
         }
 
         &.more-icon {
@@ -1305,10 +1305,10 @@ onUnmounted(() => {
       font-family: $font-family-display;
       font-size: 16px;
       font-weight: 600;
-      color: $text-primary;
+      color: var(--text-primary);
       margin-bottom: 16px;
       padding-left: 12px;
-      border-left: 3px solid $primary-color;
+      border-left: 3px solid var(--primary-color);
     }
   }
 }
@@ -1321,13 +1321,13 @@ onUnmounted(() => {
   
   p {
     margin: 16px 0 8px;
-    color: $text-primary;
+    color: var(--text-primary);
     font-size: 15px;
     font-weight: 500;
   }
   
   .delete-tip {
-    color: $text-muted;
+    color: var(--text-muted);
     font-size: 13px;
   }
 }
@@ -1336,7 +1336,7 @@ onUnmounted(() => {
   padding: 8px 0;
 
   .token-tip {
-    color: $warning-color;
+    color: var(--warning-color);
     font-size: 13px;
     margin: 0 0 16px;
     line-height: 1.5;
@@ -1355,7 +1355,7 @@ onUnmounted(() => {
 
   p {
     margin: 16px 0 8px;
-    color: $text-primary;
+    color: var(--text-primary);
     font-size: 15px;
     font-weight: 500;
   }
@@ -1369,29 +1369,29 @@ onUnmounted(() => {
 
   p {
     margin: 16px 0 8px;
-    color: $text-primary;
+    color: var(--text-primary);
     font-size: 15px;
     font-weight: 500;
   }
 
   .remove-tip {
-    color: $text-muted;
+    color: var(--text-muted);
     font-size: 13px;
   }
 }
 
 .form-tip {
   font-size: 12px;
-  color: $text-muted;
+  color: var(--text-muted);
   margin-top: 4px;
 }
 
 .text-muted {
-  color: $text-muted;
+  color: var(--text-muted);
 }
 
 .text-danger {
-  color: $danger-color;
+  color: var(--danger-color);
 }
 
 :deep(.el-dialog__body) {

@@ -1,11 +1,7 @@
 @import './variables.scss';
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
 
-// ============================================
-// CSS Variables for Theme System
-// ============================================
 :root {
-  // Light Theme (Default)
   --primary-color: #{$primary-color};
   --primary-hover: #{$primary-hover};
   --primary-active: #{$primary-active};
@@ -48,6 +44,18 @@
 
   --glass-bg: #{$glass-bg};
   --glass-border: #{$glass-border};
+
+  --bg-ambient-a: radial-gradient(circle at 18% 22%, rgba(74, 133, 255, 0.26), transparent 52%);
+  --bg-ambient-b: radial-gradient(circle at 82% 10%, rgba(80, 203, 255, 0.22), transparent 42%);
+  --bg-ambient-c: radial-gradient(circle at 62% 84%, rgba(47, 109, 255, 0.13), transparent 47%);
+
+  --el-bg-color: #{$bg-elevated};
+  --el-bg-color-page: #{$bg-primary};
+  --el-fill-color-blank: transparent;
+  --el-fill-color-light: rgba(255, 255, 255, 0.52);
+  --el-text-color-primary: #{$text-primary};
+  --el-text-color-regular: #{$text-secondary};
+  --el-border-color-light: #{$border-color-light};
 }
 
 :root.dark {
@@ -88,31 +96,56 @@
   --shadow-sm: #{$dark-shadow-sm};
   --shadow-md: #{$dark-shadow-md};
   --shadow-lg: #{$dark-shadow-lg};
+  --shadow-xl: #{$dark-shadow-xl};
   --shadow-inset: #{$dark-shadow-inset};
 
   --glass-bg: #{$dark-glass-bg};
   --glass-border: #{$dark-glass-border};
+
+  --bg-ambient-a: radial-gradient(circle at 16% 16%, rgba(87, 132, 224, 0.28), transparent 46%);
+  --bg-ambient-b: radial-gradient(circle at 86% 8%, rgba(67, 157, 195, 0.24), transparent 36%);
+  --bg-ambient-c: radial-gradient(circle at 56% 88%, rgba(57, 104, 189, 0.22), transparent 45%);
+
+  --el-bg-color: #{$dark-bg-elevated};
+  --el-bg-color-page: #{$dark-bg-primary};
+  --el-fill-color-blank: rgba(24, 38, 59, 0.72);
+  --el-fill-color-light: rgba(34, 52, 79, 0.62);
+  --el-text-color-primary: #{$dark-text-primary};
+  --el-text-color-regular: #{$dark-text-secondary};
+  --el-border-color-light: #{$dark-border-color-light};
 }
 
-// ============================================
-// Reset & Base Styles
-// ============================================
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
-html, body {
+html,
+body {
   width: 100%;
   height: 100%;
   font-family: $font-family-body;
   font-size: 14px;
+  line-height: 1.6;
   color: var(--text-primary);
   background-color: var(--bg-primary);
+  background-image: var(--bg-ambient-a), var(--bg-ambient-b), var(--bg-ambient-c), linear-gradient(165deg, var(--bg-primary) 0%, var(--bg-secondary) 56%, var(--bg-tertiary) 100%);
+  background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   transition: background-color $transition-base, color $transition-base;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(120deg, rgba(255, 255, 255, 0.16) 0, rgba(255, 255, 255, 0.16) 1px, transparent 1px, transparent 14px);
+  opacity: 0.28;
+  mix-blend-mode: soft-light;
+  z-index: -1;
 }
 
 #app {
@@ -120,12 +153,14 @@ html, body {
   height: 100%;
 }
 
-// ============================================
-// Modern Scrollbar
-// ============================================
+a {
+  color: var(--primary-color);
+  text-decoration: none;
+}
+
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -133,227 +168,237 @@ html, body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--text-muted);
+  background: linear-gradient(180deg, rgba(67, 117, 204, 0.45) 0%, rgba(67, 117, 204, 0.7) 100%);
   border-radius: $radius-full;
-
-  &:hover {
-    background: var(--text-tertiary);
-  }
 }
 
-// ============================================
-// Utility Classes
-// ============================================
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(67, 117, 204, 0.66) 0%, rgba(67, 117, 204, 0.88) 100%);
+}
+
 .flex { display: flex; }
-.flex-center { display: flex; justify-content: center; align-items: center; }
-.flex-between { display: flex; justify-content: space-between; align-items: center; }
+.flex-center { display: flex; align-items: center; justify-content: center; }
+.flex-between { display: flex; align-items: center; justify-content: space-between; }
 .flex-1 { flex: 1; }
 .text-center { text-align: center; }
 .text-right { text-align: right; }
-
-// Spacing utilities
 .mt-20 { margin-top: 20px; }
 .mb-20 { margin-bottom: 20px; }
 .ml-20 { margin-left: 20px; }
 .mr-20 { margin-right: 20px; }
 .p-20 { padding: 20px; }
 
-// ============================================
-// Modern Page Container
-// ============================================
 .page-container {
   padding: $space-6;
-  background-color: var(--bg-primary);
   min-height: calc(100vh - $header-height);
 }
 
-// ============================================
-// Neumorphic Card Style
-// ============================================
 .card {
-  background-color: var(--bg-card);
-  border-radius: $radius-lg;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color-light);
+  border-radius: $radius-xl;
   box-shadow: var(--shadow-md);
   padding: $space-6;
-  transition: box-shadow $transition-base, background-color $transition-base;
-
-  &:hover {
-    box-shadow: var(--shadow-lg);
-  }
+  backdrop-filter: $blur-md;
+  -webkit-backdrop-filter: $blur-md;
 }
 
-// ============================================
-// Modern Title Styles
-// ============================================
 .page-title {
   font-family: $font-family-display;
-  font-size: 24px;
-  font-weight: 600;
+  font-size: 30px;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: -0.03em;
   color: var(--text-primary);
-  margin-bottom: $space-6;
-  letter-spacing: -0.02em;
 }
 
 .section-title {
   font-family: $font-family-display;
-  font-size: 18px;
-  font-weight: 600;
+  font-size: 20px;
+  line-height: 1.2;
+  font-weight: 650;
+  letter-spacing: -0.02em;
   color: var(--text-primary);
-  margin-bottom: $space-5;
 }
 
-// ============================================
-// Neumorphic Button Style
-// ============================================
-.btn-primary {
-  background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
-  border: none;
-  color: white;
-  border-radius: $radius-md;
-  padding: 10px 24px;
-  font-weight: 500;
-  box-shadow: var(--shadow-md);
-  transition: all $transition-base;
-
-  &:hover {
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-lg);
-  }
-
-  &:active {
-    transform: translateY(0);
-    box-shadow: var(--shadow-inset);
-  }
-}
-
-// ============================================
-// Glass Effect
-// ============================================
 .glass {
   background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
   backdrop-filter: $blur-md;
   -webkit-backdrop-filter: $blur-md;
-  border: 1px solid var(--glass-border);
 }
 
-// ============================================
-// Modern Table Styles Override
-// ============================================
-.modern-table {
-  background: var(--bg-card);
-  border-radius: $radius-lg;
+@keyframes float-up {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-ambient {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-4px, -10px, 0) scale(1.06);
+  }
+}
+
+.el-button {
+  border-radius: $radius-md;
+  font-weight: 600;
+  transition: transform $transition-fast, box-shadow $transition-fast, background $transition-fast, color $transition-fast;
+}
+
+.el-button--default {
+  border-color: var(--border-color);
+  background: var(--bg-elevated);
   box-shadow: var(--shadow-sm);
+}
+
+.el-button--default:hover {
+  color: var(--primary-color);
+  border-color: var(--border-color-hover);
+  transform: translateY(-1px);
+}
+
+.el-button--primary {
+  border: none;
+  background: linear-gradient(132deg, var(--primary-color) 0%, var(--primary-hover) 100%);
+  box-shadow: 0 12px 24px rgba(47, 109, 255, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.el-button--primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 30px rgba(47, 109, 255, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.el-button--primary:active {
+  transform: translateY(0);
+}
+
+.el-input__wrapper,
+.el-select .el-input__wrapper,
+.el-textarea__inner {
+  border-radius: $radius-md;
+  border: 1px solid var(--border-color-light);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-inset);
+  transition: border-color $transition-fast, box-shadow $transition-fast, background $transition-fast;
+}
+
+.el-input__wrapper:hover,
+.el-input__wrapper.is-focus,
+.el-select .el-input__wrapper:hover,
+.el-select .el-input__wrapper.is-focus,
+.el-textarea__inner:hover,
+.el-textarea__inner:focus {
+  border-color: var(--border-color-hover);
+  box-shadow: var(--shadow-inset), 0 0 0 4px var(--primary-lighter);
+}
+
+.el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: var(--bg-secondary);
+  --el-table-row-hover-bg-color: var(--primary-lighter);
+  --el-table-border-color: var(--border-color-light);
+  --el-fill-color-blank: transparent;
+  border-radius: $radius-lg;
   overflow: hidden;
-
-  .el-table {
-    background: transparent;
-
-    th.el-table__cell {
-      background: var(--bg-secondary);
-      color: var(--text-secondary);
-      font-weight: 600;
-      font-size: 13px;
-      border-bottom: 1px solid var(--border-color);
-    }
-
-    td.el-table__cell {
-      color: var(--text-primary);
-      border-bottom: 1px solid var(--border-color-light);
-    }
-
-    .el-table__row:hover > td.el-table__cell {
-      background: var(--primary-light);
-    }
-  }
+  background: transparent;
 }
 
-// ============================================
-// Status Badge Styles
-// ============================================
-.status-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
+.el-table th.el-table__cell {
+  background: rgba(255, 255, 255, 0.54);
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color-light);
+  font-weight: 600;
+}
+
+.el-table td.el-table__cell {
+  background: transparent;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-color-light);
+}
+
+.el-table .el-table__row:hover > td.el-table__cell {
+  background: var(--primary-lighter);
+}
+
+.el-table .el-table__inner-wrapper::before {
+  background: var(--border-color-light);
+}
+
+.el-table .el-table__fixed,
+.el-table .el-table__fixed-right,
+.el-table .el-table__fixed-left {
+  background: transparent;
+}
+
+.el-tag {
   border-radius: $radius-full;
-  font-size: 12px;
+  border: none;
+  font-weight: 600;
+}
+
+.el-card,
+.el-dialog,
+.el-drawer {
+  border-radius: $radius-xl;
+  border: 1px solid var(--border-color-light);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: $blur-md;
+  -webkit-backdrop-filter: $blur-md;
+}
+
+.el-dialog__header {
+  border-bottom: 1px solid var(--border-color-light);
+  margin-right: 0;
+}
+
+.el-dialog__footer {
+  border-top: 1px solid var(--border-color-light);
+}
+
+.el-dropdown-menu,
+.el-select-dropdown,
+.el-popper.is-light {
+  border: 1px solid var(--border-color-light);
+  border-radius: $radius-md;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: $blur-md;
+  -webkit-backdrop-filter: $blur-md;
+}
+
+.el-dropdown-menu__item {
+  border-radius: 10px;
+  margin: 4px;
+}
+
+.el-dropdown-menu__item:not(.is-disabled):focus,
+.el-dropdown-menu__item:not(.is-disabled):hover {
+  background: var(--primary-lighter);
+  color: var(--primary-color);
+}
+
+.el-breadcrumb__item .el-breadcrumb__inner {
+  color: var(--text-tertiary);
   font-weight: 500;
-
-  &--success {
-    background: var(--success-light);
-    color: #5a8a5a;
-  }
-
-  &--warning {
-    background: var(--warning-light);
-    color: #8f7550;
-  }
-
-  &--danger {
-    background: var(--danger-light);
-    color: #8f5a5a;
-  }
-
-  &--info {
-    background: var(--info-light);
-    color: #6b7b8f;
-  }
-
-  &::before {
-    content: '';
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: currentColor;
-  }
 }
 
-// ============================================
-// Form Input Styles
-// ============================================
-.modern-input {
-  .el-input__wrapper {
-    background: var(--bg-secondary);
-    border-radius: $radius-md;
-    box-shadow: var(--shadow-inset);
-    border: 1px solid var(--border-color-light);
-    padding: 8px 16px;
-    transition: all $transition-base;
-
-    &:hover, &.is-focus {
-      border-color: var(--primary-color);
-      box-shadow: var(--shadow-inset), 0 0 0 3px var(--primary-light);
-    }
-  }
-
-  input {
-    color: var(--text-primary);
-    font-family: $font-family-body;
-
-    &::placeholder {
-      color: var(--text-placeholder);
-    }
-  }
+.el-breadcrumb__item:last-child .el-breadcrumb__inner {
+  color: var(--text-primary);
+  font-weight: 650;
 }
 
-// ============================================
-// Soft Gradient Backgrounds
-// ============================================
-.gradient-bg {
-  background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
-}
-
-.gradient-bg-soft {
-  background: linear-gradient(135deg, var(--primary-lighter) 0%, var(--success-light) 100%);
-}
-
-// ============================================
-// Blur Background Shapes
-// ============================================
-.blur-shape {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(60px);
-  opacity: 0.5;
-  pointer-events: none;
+.el-empty {
+  color: var(--text-secondary);
 }

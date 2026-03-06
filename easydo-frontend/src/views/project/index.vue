@@ -458,150 +458,117 @@ onMounted(() => {
 @import '@/assets/styles/variables.scss';
 
 .project-container {
+  animation: float-up 0.45s ease both;
+
   .project-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 28px;
+    margin-bottom: 20px;
 
     .page-title {
       font-family: $font-family-display;
-      font-size: 28px;
-      font-weight: 700;
-      color: $text-primary;
-      letter-spacing: -0.02em;
+      font-size: 32px;
+      font-weight: 760;
+      letter-spacing: -0.03em;
+      color: var(--text-primary);
     }
-    
+
     :deep(.el-button--primary) {
-      height: 44px;
-      padding: 0 24px;
-      border-radius: $radius-md;
-      font-weight: 600;
-      background: linear-gradient(135deg, $primary-color 0%, $primary-hover 100%);
-      border: none;
-      box-shadow: $shadow-md;
-      
-      &:hover {
-        transform: translateY(-2px);
-        box-shadow: $shadow-lg;
-      }
+      height: 42px;
+      padding: 0 20px;
     }
   }
 
   .project-filters {
     display: flex;
     align-items: center;
-    gap: 20px;
-    margin-bottom: 24px;
-    padding: 14px 20px;
-    background: $bg-card;
+    gap: 16px;
+    padding: 14px 16px;
+    margin-bottom: 18px;
     border-radius: $radius-xl;
-    box-shadow: $shadow-sm;
+    border: 1px solid var(--border-color-light);
+    background: var(--bg-card);
+    box-shadow: var(--shadow-sm);
+    backdrop-filter: $blur-sm;
+    -webkit-backdrop-filter: $blur-sm;
 
     .filter-tabs {
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 5px;
 
       .tab-item {
-        display: flex;
+        display: inline-flex;
         align-items: center;
         gap: 6px;
-        padding: 8px 16px;
-        color: $text-secondary;
-        cursor: pointer;
+        padding: 8px 14px;
         border-radius: $radius-full;
-        transition: all $transition-base;
-        font-weight: 500;
-        font-size: 14px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+        transition: all $transition-fast;
 
         &:hover {
-          background: rgba($primary-color, 0.06);
-          color: $primary-color;
+          color: var(--primary-color);
+          background: var(--primary-lighter);
         }
 
         &.active {
-          color: $primary-color;
-          background: rgba($primary-color, 0.1);
-          box-shadow: inset 0 0 0 1px rgba($primary-color, 0.15);
+          color: var(--primary-color);
+          background: rgba($primary-color, 0.17);
+          box-shadow: inset 0 0 0 1px rgba($primary-color, 0.32);
         }
 
         .tab-count {
-          font-size: 12px;
-          color: $text-muted;
-          background: $bg-secondary;
-          padding: 2px 8px;
+          min-width: 20px;
+          height: 20px;
+          padding: 0 7px;
           border-radius: $radius-full;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          background: var(--bg-elevated);
+          color: var(--text-tertiary);
+          font-size: 11px;
         }
       }
 
       .tab-divider {
         width: 1px;
-        height: 20px;
-        background: $border-color;
-        margin: 0 8px;
+        height: 16px;
+        background: var(--border-color-light);
+        margin: 0 4px;
       }
     }
 
     .filter-search {
       flex: 1;
-      
-      :deep(.el-input__wrapper) {
-        background: $bg-secondary;
-        border-radius: $radius-md;
-        box-shadow: $shadow-inset;
-        border: 1px solid $border-color-light;
-        
-        &:hover, &.is-focus {
-          border-color: rgba($primary-color, 0.4);
-        }
-      }
+      min-width: 180px;
     }
   }
 
   .project-table {
-    background: $bg-card;
     border-radius: $radius-xl;
-    padding: 20px;
-    box-shadow: $shadow-md;
+    border: 1px solid var(--border-color-light);
+    background: var(--bg-card);
+    box-shadow: var(--shadow-md);
+    backdrop-filter: $blur-md;
+    -webkit-backdrop-filter: $blur-md;
+    padding: 16px;
 
     :deep(.el-table) {
       background: transparent;
 
       th.el-table__cell {
-        background: $bg-secondary;
-        color: $text-secondary;
-        font-weight: 600;
-        font-size: 13px;
-        height: 50px;
-        border-bottom: 1px solid $border-color;
+        background: rgba(255, 255, 255, 0.45);
+        border-bottom: 1px solid var(--border-color-light);
+        height: 44px;
       }
 
       td.el-table__cell {
-        height: 56px;
-        color: $text-primary;
-        border-bottom: 1px solid $border-color-light;
-      }
-
-      .el-table__row:hover > td.el-table__cell {
-        background: rgba($primary-color, 0.04);
-      }
-      
-      .el-tag {
-        border-radius: $radius-full;
-        padding: 4px 12px;
-        font-weight: 500;
-        border: none;
-        
-        &.el-tag--success {
-          background: $success-light;
-          color: darken($success-color, 20%);
-        }
-        
-        &.el-tag--info {
-          background: $info-light;
-          color: darken($info-color, 20%);
-        }
+        height: 54px;
       }
     }
 
@@ -611,23 +578,21 @@ onMounted(() => {
       gap: 12px;
 
       .project-icon {
-        width: 32px;
-        height: 32px;
-        display: flex;
+        width: 34px;
+        height: 34px;
+        border-radius: 12px;
+        display: inline-flex;
         align-items: center;
         justify-content: center;
         color: white;
         font-size: 13px;
-        font-weight: 600;
-        border-radius: $radius-md;
-        flex-shrink: 0;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        font-weight: 700;
+        box-shadow: 0 10px 20px rgba(11, 38, 73, 0.2);
       }
 
       .project-name-text {
-        font-size: 14px;
-        color: $text-primary;
-        font-weight: 500;
+        color: var(--text-primary);
+        font-weight: 620;
       }
     }
 
@@ -640,33 +605,35 @@ onMounted(() => {
       .action-icon {
         width: 32px;
         height: 32px;
-        display: flex;
+        border-radius: 10px;
+        border: 1px solid transparent;
+        color: var(--text-secondary);
+        display: inline-flex;
         align-items: center;
         justify-content: center;
-        font-size: 16px;
-        color: $text-secondary;
         cursor: pointer;
-        border-radius: $radius-md;
         transition: all $transition-fast;
 
         &:hover {
-          color: $primary-color;
-          background: rgba($primary-color, 0.08);
+          color: var(--primary-color);
+          background: var(--primary-lighter);
+          border-color: rgba($primary-color, 0.28);
         }
 
         &.active {
           color: $warning-color;
           background: $warning-light;
+          border-color: rgba($warning-color, 0.34);
         }
 
         &.more-icon {
-          font-size: 18px;
+          font-size: 17px;
         }
       }
     }
-    
+
     .el-empty {
-      padding: 60px 0;
+      padding: 54px 0;
     }
   }
 }
@@ -675,18 +642,46 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 20px 0;
-  
+  padding: 18px 0;
+
   p {
-    margin: 16px 0 8px;
-    color: $text-primary;
-    font-size: 15px;
-    font-weight: 500;
+    margin: 14px 0 6px;
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 600;
   }
-  
+
   .delete-tip {
-    color: $text-muted;
-    font-size: 13px;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .project-container {
+    .project-filters {
+      flex-direction: column;
+      align-items: stretch;
+
+      .filter-tabs {
+        overflow: auto;
+        padding-bottom: 4px;
+      }
+    }
+  }
+}
+
+@media (max-width: 768px) {
+  .project-container {
+    .project-header {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 10px;
+
+      .page-title {
+        font-size: 27px;
+      }
+    }
   }
 }
 </style>

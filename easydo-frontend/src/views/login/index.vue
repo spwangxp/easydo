@@ -193,337 +193,311 @@ const handleLogin = async () => {
 @import '@/assets/styles/variables.scss';
 
 .login-container {
-  width: 100%;
-  height: 100vh;
-  display: flex;
   position: relative;
+  width: 100%;
+  min-height: 100vh;
+  display: flex;
   overflow: hidden;
-  background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 50%, var(--primary-light) 100%);
-  
-  // Blur background shapes for depth
-  .blur-shape-1 {
-    position: absolute;
-    width: 600px;
-    height: 600px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, rgba($primary-color, 0.2) 0%, rgba($success-color, 0.15) 100%);
-    filter: blur(80px);
-    top: -200px;
-    left: -200px;
-    animation: float 20s ease-in-out infinite;
-  }
-  
-  .blur-shape-2 {
-    position: absolute;
-    width: 500px;
-    height: 500px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, rgba($warning-color, 0.15) 0%, rgba($primary-color, 0.1) 100%);
-    filter: blur(60px);
-    bottom: -150px;
-    right: -100px;
-    animation: float 25s ease-in-out infinite reverse;
-  }
-  
+  background:
+    radial-gradient(circle at 12% 22%, rgba($primary-color, 0.28), transparent 42%),
+    radial-gradient(circle at 88% 12%, rgba($info-color, 0.22), transparent 36%),
+    radial-gradient(circle at 72% 86%, rgba($primary-color, 0.14), transparent 46%),
+    linear-gradient(150deg, #eaf2ff 0%, #f4f8ff 46%, #edf5ff 100%);
+
+  .blur-shape-1,
+  .blur-shape-2,
   .blur-shape-3 {
     position: absolute;
+    border-radius: 50%;
+    pointer-events: none;
+    filter: blur(72px);
+    animation: floating 20s ease-in-out infinite;
+  }
+
+  .blur-shape-1 {
+    width: 420px;
+    height: 420px;
+    left: -120px;
+    top: -120px;
+    background: rgba($primary-color, 0.26);
+  }
+
+  .blur-shape-2 {
+    width: 320px;
+    height: 320px;
+    right: -80px;
+    top: 8%;
+    background: rgba($info-color, 0.24);
+    animation-delay: -6s;
+  }
+
+  .blur-shape-3 {
     width: 300px;
     height: 300px;
-    border-radius: 50%;
-    background: rgba($info-color, 0.12);
-    filter: blur(50px);
-    top: 50%;
-    left: 30%;
-    animation: float 18s ease-in-out infinite;
+    right: 16%;
+    bottom: -90px;
+    background: rgba($warning-color, 0.2);
+    animation-delay: -11s;
   }
 }
 
-@keyframes float {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  33% { transform: translate(30px, -30px) scale(1.05); }
-  66% { transform: translate(-20px, 20px) scale(0.95); }
+@keyframes floating {
+  0%,
+  100% { transform: translate3d(0, 0, 0); }
+  50% { transform: translate3d(-14px, 16px, 0); }
 }
 
-// Left side - decorative
 .login-left {
   flex: 1;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  align-items: center;
-  padding: 60px;
+  padding: 56px 72px;
   position: relative;
   z-index: 1;
-  
+
   .brand-section {
-    text-align: center;
-    
+    max-width: 560px;
+
     .brand-logo {
-      width: 80px;
-      height: 80px;
-      margin-bottom: 24px;
-      filter: drop-shadow(0 8px 24px rgba($primary-color, 0.3));
+      width: 82px;
+      height: 82px;
+      margin-bottom: 18px;
+      filter: drop-shadow(0 10px 24px rgba($primary-color, 0.26));
     }
-    
+
     .brand-name {
       font-family: $font-family-display;
-      font-size: 48px;
-      font-weight: 700;
+      font-size: 56px;
+      line-height: 1;
+      letter-spacing: -0.04em;
       color: var(--text-primary);
-      margin-bottom: 16px;
-      letter-spacing: -0.03em;
+      font-weight: 800;
+      margin-bottom: 14px;
     }
-    
+
     .brand-tagline {
-      font-size: 18px;
+      font-size: 19px;
       color: var(--text-secondary);
-      font-weight: 400;
+      font-weight: 500;
+      letter-spacing: 0.01em;
     }
   }
-  
+
   .features {
-    display: flex;
-    gap: 40px;
-    margin-top: 60px;
-    
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+    margin-top: 56px;
+    max-width: 620px;
+
     .feature-item {
+      border-radius: $radius-xl;
+      border: 1px solid rgba(255, 255, 255, 0.55);
+      background: rgba(255, 255, 255, 0.58);
+      backdrop-filter: $blur-sm;
+      -webkit-backdrop-filter: $blur-sm;
+      box-shadow: var(--shadow-sm);
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 12px;
-      
+      gap: 10px;
+      padding: 18px 14px;
+      transition: transform $transition-base, box-shadow $transition-base;
+
+      &:hover {
+        transform: translateY(-3px);
+        box-shadow: var(--shadow-md);
+      }
+
       .feature-icon {
-        width: 56px;
-        height: 56px;
-        border-radius: $radius-lg;
-        background: var(--bg-card);
-        box-shadow: $shadow-md;
+        width: 50px;
+        height: 50px;
+        border-radius: 14px;
         display: flex;
         align-items: center;
         justify-content: center;
         color: var(--primary-color);
-        font-size: 24px;
+        background: linear-gradient(140deg, rgba($primary-color, 0.22), rgba($primary-color, 0.08));
       }
-      
+
       .feature-text {
-        font-size: 14px;
+        font-size: 13px;
         color: var(--text-secondary);
-        font-weight: 500;
+        font-weight: 600;
       }
     }
   }
 }
 
-// Right side - login form
 .login-right {
-  width: 480px;
+  width: 520px;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 40px;
+  padding: 42px;
   position: relative;
   z-index: 1;
 }
 
 .login-box {
   width: 100%;
-  max-width: 400px;
-  background: $glass-bg;
+  max-width: 420px;
+  padding: 40px 34px 30px;
+  border-radius: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.64);
+  background: rgba(255, 255, 255, 0.7);
   backdrop-filter: $blur-lg;
   -webkit-backdrop-filter: $blur-lg;
-  border-radius: $radius-2xl;
-  padding: 48px;
-  box-shadow: 
-    0 8px 32px rgba(0, 0, 0, 0.06),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.6);
-  border: 1px solid rgba(255, 255, 255, 0.4);
+  box-shadow: var(--shadow-xl);
+  animation: float-up 0.52s ease both;
 }
 
 .login-header {
   text-align: center;
-  margin-bottom: 32px;
-  
+  margin-bottom: 26px;
+
   .logo {
-    width: 56px;
-    height: 56px;
-    margin-bottom: 16px;
-    filter: drop-shadow(0 4px 12px rgba($primary-color, 0.25));
+    width: 58px;
+    height: 58px;
+    margin-bottom: 12px;
+    filter: drop-shadow(0 6px 16px rgba($primary-color, 0.24));
   }
-  
+
   .title {
     font-family: $font-family-display;
-    font-size: 28px;
-    font-weight: 700;
+    font-size: 30px;
+    letter-spacing: -0.03em;
+    font-weight: 760;
     color: var(--text-primary);
-    letter-spacing: -0.02em;
   }
 }
 
 .login-form {
   .form-title {
-    font-size: 16px;
-    color: var(--text-secondary);
-    text-align: center;
-    margin-bottom: 28px;
-    font-weight: 400;
-  }
-  
-  :deep(.el-form-item) {
     margin-bottom: 20px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 15px;
+    font-weight: 500;
   }
-  
+
+  :deep(.el-form-item) {
+    margin-bottom: 16px;
+  }
+
   :deep(.el-input__wrapper) {
-    background: var(--bg-secondary);
-    border-radius: $radius-md;
-    box-shadow: $shadow-inset;
-    border: 1px solid var(--border-color-light);
-    padding: 12px 16px;
-    transition: all $transition-base;
-    
-    &:hover, &.is-focus {
-      border-color: rgba($primary-color, 0.4);
-      box-shadow: $shadow-inset, 0 0 0 3px rgba($primary-color, 0.08);
-    }
-    
+    min-height: 46px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.8);
+
     .el-input__inner {
-      color: var(--text-primary);
-      font-family: $font-family-body;
-      font-size: 15px;
-      
-      &::placeholder {
-        color: var(--text-placeholder);
-      }
+      font-size: 14px;
     }
-    
+
     .el-input__icon {
       color: var(--text-tertiary);
     }
   }
-  
+
   .password-toggle {
     cursor: pointer;
     color: var(--text-tertiary);
-    transition: color $transition-fast;
-    
+
     &:hover {
       color: var(--primary-color);
     }
   }
-  
+
   .form-options {
     width: 100%;
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    margin-bottom: 8px;
-    
+    justify-content: space-between;
+    margin: 2px 0 4px;
+
     :deep(.el-checkbox__label) {
       color: var(--text-secondary);
       font-size: 13px;
     }
-    
-    :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
-      background-color: var(--primary-color);
-      border-color: var(--primary-color);
-    }
-    
+
     .forgot-password {
       color: var(--primary-color);
       font-size: 13px;
+      font-weight: 600;
       cursor: pointer;
-      transition: color $transition-fast;
-      
+
       &:hover {
-        color: $primary-active;
         text-decoration: underline;
       }
     }
   }
-  
+
   .login-button {
     width: 100%;
-    height: 48px;
-    font-size: 16px;
-    font-weight: 600;
-    border-radius: $radius-md;
-    background: linear-gradient(135deg, $primary-color 0%, $primary-hover 100%);
-    border: none;
-    box-shadow: $shadow-md;
-    transition: all $transition-base;
-    margin-top: 8px;
-    
-    &:hover {
-      transform: translateY(-2px);
-      box-shadow: $shadow-lg;
-      background: linear-gradient(135deg, $primary-hover 0%, $primary-color 100%);
-    }
-    
-    &:active {
-      transform: translateY(0);
-      box-shadow: $shadow-inset;
-    }
+    height: 46px;
+    margin-top: 4px;
+    border-radius: 14px;
+    font-size: 15px;
+    letter-spacing: 0.06em;
+    font-weight: 700;
   }
 }
 
 .other-login {
-  margin-top: 32px;
+  margin-top: 24px;
   text-align: center;
-  
+
   .divider {
     display: flex;
     align-items: center;
-    gap: 16px;
-    margin-bottom: 24px;
-    
+    gap: 12px;
+    margin-bottom: 16px;
+
     &::before,
     &::after {
       content: '';
       flex: 1;
       height: 1px;
-      background: linear-gradient(90deg, transparent, $border-color-medium, transparent);
+      background: linear-gradient(90deg, transparent, var(--border-color-medium), transparent);
     }
-    
+
     span {
       color: var(--text-muted);
-      font-size: 13px;
+      font-size: 12px;
+      font-weight: 500;
     }
   }
-  
+
   .social-login {
     display: flex;
     justify-content: center;
-    gap: 16px;
-    
+    gap: 12px;
+
     .social-icon {
-      width: 48px;
-      height: 48px;
-      border-radius: $radius-lg;
-      cursor: pointer;
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+      border: 1px solid var(--border-color-light);
+      background: rgba(255, 255, 255, 0.76);
       display: flex;
       align-items: center;
       justify-content: center;
-      background: var(--bg-secondary);
-      box-shadow: $shadow-sm;
-      transition: all $transition-base;
-      
+      cursor: pointer;
+      transition: all $transition-fast;
+
       &:hover {
         transform: translateY(-2px);
-        box-shadow: $shadow-md;
-        background: var(--bg-card);
+        border-color: var(--border-color-hover);
+        box-shadow: var(--shadow-md);
       }
-      
-      &:active {
-        transform: translateY(0);
-        box-shadow: $shadow-inset;
-      }
-      
+
       img {
         width: 22px;
         height: 22px;
-        opacity: 0.7;
-        transition: opacity $transition-fast;
+        opacity: 0.72;
       }
-      
+
       &:hover img {
         opacity: 1;
       }
@@ -532,20 +506,46 @@ const handleLogin = async () => {
 }
 
 .login-footer {
-  margin-top: 32px;
+  margin-top: 24px;
   text-align: center;
   color: var(--text-muted);
   font-size: 12px;
 }
 
-// Responsive
+@media (max-width: 1200px) {
+  .login-left {
+    padding: 44px;
+
+    .brand-section {
+      .brand-name {
+        font-size: 46px;
+      }
+
+      .brand-tagline {
+        font-size: 16px;
+      }
+    }
+  }
+
+  .login-right {
+    width: 460px;
+    padding: 24px;
+  }
+}
+
 @media (max-width: 992px) {
   .login-left {
     display: none;
   }
-  
+
   .login-right {
     width: 100%;
+    padding: 20px;
+  }
+
+  .login-box {
+    max-width: 420px;
+    padding: 34px 24px 26px;
   }
 }
 </style>

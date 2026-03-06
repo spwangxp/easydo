@@ -110,7 +110,7 @@
       :close-on-click-modal="false"
     >
       <div class="reject-warning">
-        <el-icon color="#F56C6C" size="24"><Warning /></el-icon>
+        <el-icon color="var(--danger-color)" size="24"><Warning /></el-icon>
         <p>确定要拒绝执行器 <strong>{{ currentAgent?.name }}</strong> 的注册申请吗？</p>
       </div>
       <el-form :model="rejectForm" label-width="80px" style="margin-top: 20px">
@@ -266,96 +266,110 @@ onMounted(() => {
 </script>
 
 <style lang="scss" scoped>
+@import '@/assets/styles/variables.scss';
+
 .pending-container {
+  animation: float-up 0.45s ease both;
+
   .pending-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 20px;
+    margin-bottom: 18px;
 
     .page-title {
-      font-size: 24px;
-      font-weight: 600;
-      color: #303133;
+      font-family: $font-family-display;
+      font-size: 32px;
+      font-weight: 760;
+      letter-spacing: -0.03em;
+      color: var(--text-primary);
     }
   }
 
   .pending-table {
-    background: white;
-    border-radius: 8px;
+    border: 1px solid var(--border-color-light);
+    background: var(--bg-card);
+    border-radius: $radius-xl;
     padding: 16px;
+    box-shadow: var(--shadow-md);
+    backdrop-filter: $blur-md;
+    -webkit-backdrop-filter: $blur-md;
 
     :deep(.el-table) {
-      --el-table-border-color: #ebeef5;
-      --el-table-header-bg-color: #fafafa;
+      background: transparent;
 
       th.el-table__cell {
-        background-color: #fafafa;
-        color: #606266;
-        font-weight: 500;
-        height: 44px;
+        background: var(--bg-secondary);
+        color: var(--text-secondary);
+        font-weight: 600;
+        height: 46px;
       }
 
       td.el-table__cell {
-        height: 48px;
+        height: 52px;
+        color: var(--text-primary);
+      }
+
+      .el-table__row:hover > td.el-table__cell {
+        background: var(--primary-lighter);
       }
     }
+  }
+}
 
-    .agent-name-cell {
-      display: flex;
-      align-items: center;
-      gap: 12px;
+.agent-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
 
-      .agent-icon {
-        width: 40px;
-        height: 40px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: #409EFF;
-        color: white;
-        font-size: 20px;
-        border-radius: 8px;
-        flex-shrink: 0;
-      }
+.agent-icon {
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  color: #fff;
+  font-size: 18px;
+  background: linear-gradient(135deg, var(--primary-color), var(--primary-hover));
+  box-shadow: var(--shadow-sm);
+}
 
-      .agent-info {
-        display: flex;
-        flex-direction: column;
+.agent-info {
+  display: flex;
+  flex-direction: column;
+}
 
-        .agent-name-text {
-          font-size: 14px;
-          color: #303133;
-        }
+.agent-name-text {
+  font-size: 14px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
 
-        .agent-host {
-          font-size: 12px;
-          color: #909399;
-        }
-      }
-    }
+.agent-host {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: $font-family-mono;
+}
 
-    .agent-tags {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
+.agent-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 
-      .agent-tag {
-        margin: 0;
-      }
-    }
+  .agent-tag {
+    margin: 0;
+  }
+}
 
-    .resource-info {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      margin-right: 12px;
-      color: #606266;
+.resource-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 10px;
+  color: var(--text-secondary);
 
-      .el-icon {
-        font-size: 14px;
-      }
-    }
+  .el-icon {
+    font-size: 14px;
+    color: var(--primary-color);
   }
 }
 
@@ -371,12 +385,12 @@ onMounted(() => {
 
   p {
     margin: 12px 0 4px;
-    color: #303133;
+    color: var(--text-primary);
     font-size: 14px;
   }
 }
 
 .text-muted {
-  color: #909399;
+  color: var(--text-muted);
 }
 </style>
