@@ -80,7 +80,7 @@
       </template>
 
       <!-- 密码类型 -->
-      <div v-if="credentialType === '密码'" class="credential-section">
+      <div v-if="isCredentialType(['PASSWORD', '密码'])" class="credential-section">
         <el-form-item label="用户名" prop="secret_data.username">
           <el-input v-model="form.secret_data.username" placeholder="请输入用户名">
             <template #prefix>
@@ -109,7 +109,7 @@
       </div>
       
       <!-- SSH 密钥类型 -->
-      <div v-if="credentialType === 'SSH 密钥'" class="credential-section">
+      <div v-if="isCredentialType(['SSH_KEY', 'SSH 密钥'])" class="credential-section">
         <el-form-item label="私钥" prop="secret_data.private_key">
           <el-input
             v-model="form.secret_data.private_key"
@@ -151,7 +151,7 @@
       </div>
       
       <!-- Token 类型 -->
-      <div v-if="credentialType === 'API 令牌'" class="credential-section">
+      <div v-if="isCredentialType(['TOKEN', 'API 令牌'])" class="credential-section">
         <el-form-item label="令牌值" prop="secret_data.token">
           <el-input
             v-model="form.secret_data.token"
@@ -193,7 +193,7 @@
       </div>
       
       <!-- OAuth2 类型 -->
-      <div v-if="credentialType === 'OAuth2'" class="credential-section">
+      <div v-if="isCredentialType(['OAUTH2', 'OAuth2'])" class="credential-section">
         <el-form-item label="Client ID" prop="secret_data.client_id">
           <el-input v-model="form.secret_data.client_id" placeholder="OAuth2 Client ID" />
         </el-form-item>
@@ -214,7 +214,7 @@
       </div>
       
       <!-- 证书类型 -->
-      <template v-if="credentialType === '证书'">
+      <template v-if="isCredentialType(['CERTIFICATE', '证书'])">
         <el-form-item label="证书 PEM" prop="secret_data.cert_pem">
           <el-input
             v-model="form.secret_data.cert_pem"
@@ -257,7 +257,7 @@
       </template>
       
       <!-- Passkey 类型 -->
-      <template v-if="credentialType === 'Passkey'">
+      <template v-if="isCredentialType(['PASSKEY', 'Passkey'])">
         <el-alert type="info" :closable="false" show-icon>
           <template #title>
             Passkey 凭据通常通过浏览器注册生成，不支持手动创建。
@@ -266,7 +266,7 @@
       </template>
       
       <!-- MFA 类型 -->
-      <template v-if="credentialType === '多因素认证'">
+      <template v-if="isCredentialType(['MFA', '多因素认证'])">
         <el-form-item label="MFA 类型" prop="secret_data.mfa_type">
           <el-select v-model="form.secret_data.mfa_type" placeholder="选择 MFA 类型" style="width: 100%">
             <el-option label="TOTP（时间同步）" value="totp" />
@@ -290,7 +290,7 @@
       </template>
       
       <!-- IAM 角色类型 -->
-      <template v-if="credentialType === 'IAM 角色'">
+      <template v-if="isCredentialType(['IAM_ROLE', 'IAM 角色'])">
         <el-form-item label="云平台" prop="secret_data.provider">
           <el-select v-model="form.secret_data.provider" placeholder="选择云平台" style="width: 100%">
             <el-option label="AWS" value="aws" />
@@ -421,7 +421,6 @@ const form = reactive({
 })
 
 function handleTypeChange(val) {
-  console.log('handleTypeChange called with value:', val)
   // Reset secret_data using Object.assign to maintain reactivity
   Object.assign(form.secret_data, {
     username: '',
@@ -452,7 +451,10 @@ function handleTypeChange(val) {
     region: ''
   })
   form.category = ''
-  console.log('Type after change:', form.type)
+}
+
+function isCredentialType(candidates) {
+  return candidates.includes(form.type)
 }
 
 const rules = {
@@ -517,7 +519,7 @@ watch(() => props.initialData, (val) => {
     form.scope = val.scope
     form.auto_rotate = val.auto_rotate
     
-    // Reset secret_data with initial values while maintaining reactivity
+    // Reset and merge returned secret_data for edit backfill
     Object.assign(form.secret_data, {
       username: '',
       password: '',
@@ -546,6 +548,9 @@ watch(() => props.initialData, (val) => {
       role_arn: '',
       region: ''
     })
+    if (val.secret_data && typeof val.secret_data === 'object') {
+      Object.assign(form.secret_data, val.secret_data)
+    }
     
     if (val.expires_at) {
       expiresAt.value = new Date(val.expires_at * 1000)

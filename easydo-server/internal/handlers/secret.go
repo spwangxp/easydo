@@ -19,7 +19,10 @@ type SecretHandler struct {
 }
 
 func NewSecretHandler() *SecretHandler {
-	svc, _ := services.NewEncryptionService()
+	svc, err := services.NewEncryptionService()
+	if err != nil {
+		panic("failed to initialize secret encryption service: " + err.Error())
+	}
 	return &SecretHandler{
 		DB:                models.DB,
 		EncryptionService: svc,
@@ -66,6 +69,8 @@ type SecretResponse struct {
 }
 
 func (h *SecretHandler) List(c *gin.Context) {
+	userID, role := getRequestUser(c)
+
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 	secretType := c.Query("type")
@@ -81,7 +86,7 @@ func (h *SecretHandler) List(c *gin.Context) {
 		pageSize = 20
 	}
 
-	query := h.DB.Model(&models.Secret{})
+	query := applySecretReadScope(h.DB.Model(&models.Secret{}), userID, role)
 
 	if secretType != "" {
 		query = query.Where("type = ?", secretType)
@@ -143,6 +148,8 @@ func (h *SecretHandler) List(c *gin.Context) {
 }
 
 func (h *SecretHandler) Get(c *gin.Context) {
+	userID, role := getRequestUser(c)
+
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -157,6 +164,14 @@ func (h *SecretHandler) Get(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "密钥不存在",
+		})
+		return
+	}
+
+	if !canReadSecret(h.DB, &secret, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "无权限访问该密钥",
 		})
 		return
 	}
@@ -191,6 +206,8 @@ func (h *SecretHandler) Get(c *gin.Context) {
 }
 
 func (h *SecretHandler) Create(c *gin.Context) {
+	userID, role := getRequestUser(c)
+
 	var req CreateSecretRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -200,7 +217,25 @@ func (h *SecretHandler) Create(c *gin.Context) {
 		return
 	}
 
-	userID := c.GetUint64("user_id")
+	if req.Scope == "" {
+		req.Scope = string(models.SecretScopeAll)
+	}
+	if req.Scope == string(models.SecretScopeProject) {
+		if req.ProjectID == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    400,
+				"message": "project 范围必须指定 project_id",
+			})
+			return
+		}
+		if !isAdminRole(role) && !userOwnsProject(h.DB, req.ProjectID, userID) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"code":    403,
+				"message": "无权限在该项目下创建密钥",
+			})
+			return
+		}
+	}
 
 	var existingCount int64
 	h.DB.Model(&models.Secret{}).Where("name = ? AND scope = ? AND project_id = ?", req.Name, req.Scope, req.ProjectID).Count(&existingCount)
@@ -257,6 +292,8 @@ func (h *SecretHandler) Create(c *gin.Context) {
 }
 
 func (h *SecretHandler) Update(c *gin.Context) {
+	userID, role := getRequestUser(c)
+
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -283,8 +320,13 @@ func (h *SecretHandler) Update(c *gin.Context) {
 		})
 		return
 	}
-
-	userID := c.GetUint64("user_id")
+	if !canWriteSecret(h.DB, &secret, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "无权限修改该密钥",
+		})
+		return
+	}
 
 	updates := make(map[string]interface{})
 
@@ -295,6 +337,22 @@ func (h *SecretHandler) Update(c *gin.Context) {
 		updates["description"] = req.Description
 	}
 	if req.Scope != "" {
+		if req.Scope == string(models.SecretScopeProject) {
+			if req.ProjectID == 0 {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"code":    400,
+					"message": "project 范围必须指定 project_id",
+				})
+				return
+			}
+			if !isAdminRole(role) && !userOwnsProject(h.DB, req.ProjectID, userID) {
+				c.JSON(http.StatusForbidden, gin.H{
+					"code":    403,
+					"message": "无权限修改为该项目范围",
+				})
+				return
+			}
+		}
 		updates["scope"] = req.Scope
 		updates["project_id"] = req.ProjectID
 	}
@@ -336,6 +394,8 @@ func (h *SecretHandler) Update(c *gin.Context) {
 }
 
 func (h *SecretHandler) Delete(c *gin.Context) {
+	userID, role := getRequestUser(c)
+
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -353,8 +413,13 @@ func (h *SecretHandler) Delete(c *gin.Context) {
 		})
 		return
 	}
-
-	userID := c.GetUint64("user_id")
+	if !canWriteSecret(h.DB, &secret, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "无权限删除该密钥",
+		})
+		return
+	}
 
 	if err := h.DB.Delete(&secret).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -373,6 +438,8 @@ func (h *SecretHandler) Delete(c *gin.Context) {
 }
 
 func (h *SecretHandler) GetValue(c *gin.Context) {
+	userID, role := getRequestUser(c)
+
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -387,6 +454,14 @@ func (h *SecretHandler) GetValue(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "密钥不存在",
+		})
+		return
+	}
+
+	if !canReadSecret(h.DB, &secret, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "无权限访问该密钥",
 		})
 		return
 	}
@@ -417,7 +492,6 @@ func (h *SecretHandler) GetValue(c *gin.Context) {
 		return
 	}
 
-	userID := c.GetUint64("user_id")
 	now := time.Now().Unix()
 	h.DB.Model(&secret).Updates(map[string]interface{}{
 		"last_used_at": now,
@@ -509,6 +583,8 @@ func (h *SecretHandler) logAudit(secret *models.Secret, action string, actorID u
 }
 
 func (h *SecretHandler) BatchDelete(c *gin.Context) {
+	userID, role := getRequestUser(c)
+
 	var ids []uint64
 	if err := c.ShouldBindJSON(&ids); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -526,7 +602,35 @@ func (h *SecretHandler) BatchDelete(c *gin.Context) {
 		return
 	}
 
-	result := h.DB.Where("id IN ?", ids).Delete(&models.Secret{})
+	if !isAdminRole(role) {
+		var secrets []models.Secret
+		if err := h.DB.Where("id IN ?", ids).Find(&secrets).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    500,
+				"message": "查询密钥失败: " + err.Error(),
+			})
+			return
+		}
+		if len(secrets) != len(ids) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"code":    404,
+				"message": "部分密钥不存在",
+			})
+			return
+		}
+		for i := range secrets {
+			if !canWriteSecret(h.DB, &secrets[i], userID, role) {
+				c.JSON(http.StatusForbidden, gin.H{
+					"code":    403,
+					"message": "存在无权限删除的密钥",
+				})
+				return
+			}
+		}
+	}
+
+	query := h.DB.Model(&models.Secret{}).Where("id IN ?", ids)
+	result := query.Delete(&models.Secret{})
 	if result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,

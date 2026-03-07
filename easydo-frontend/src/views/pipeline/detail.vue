@@ -1,5 +1,5 @@
 <template>
-  <div class="pipeline-detail-container">
+  <div ref="detailContainerRef" class="pipeline-detail-container">
     <!-- 头部信息 -->
     <div class="detail-header">
       <div class="header-left">
@@ -528,7 +528,7 @@
     <el-dialog
       v-model="runDialogVisible"
       title="运行流水线"
-      width="500px"
+      :width="runDialogWidth"
     >
       <el-form :model="runForm" label-width="100px">
         <el-form-item label="分支">
@@ -654,6 +654,9 @@ const showLogPanel = ref(false)
 const selectedTask = ref(null)
 const logContentRef = ref(null)
 let executionPollingTimer = null
+const detailContainerRef = ref(null)
+const detailContainerWidth = ref(0)
+let detailResizeObserver = null
 
 // 计算执行进度
 const executionProgress = computed(() => {
@@ -669,6 +672,14 @@ const executionProgressStatus = computed(() => {
   if (currentRun.value.status === 'failed') return 'exception'
   if (currentRun.value.status === 'running') return ''
   return ''
+})
+
+const runDialogWidth = computed(() => {
+  const containerWidth = detailContainerWidth.value
+  if (!containerWidth) return '680px'
+  const calculated = Math.floor(containerWidth * 0.7)
+  const clamped = Math.max(520, Math.min(860, calculated))
+  return `${clamped}px`
 })
 
 // 获取流水线详情
@@ -1159,7 +1170,22 @@ const stopRealtimeUpdates = () => {
   realtime.disconnect()
 }
 
+const updateDetailContainerWidth = () => {
+  if (!detailContainerRef.value) return
+  detailContainerWidth.value = Math.floor(detailContainerRef.value.clientWidth)
+}
+
 onMounted(() => {
+  nextTick(() => {
+    updateDetailContainerWidth()
+    if (typeof ResizeObserver !== 'undefined' && detailContainerRef.value) {
+      detailResizeObserver = new ResizeObserver(() => {
+        updateDetailContainerWidth()
+      })
+      detailResizeObserver.observe(detailContainerRef.value)
+    }
+  })
+  window.addEventListener('resize', updateDetailContainerWidth)
   fetchPipelineDetail()
   fetchProjects()
   fetchRunHistory()
@@ -1168,6 +1194,11 @@ onMounted(() => {
 
 // 组件卸载时停止轮询和 WebSocket
 onUnmounted(() => {
+  window.removeEventListener('resize', updateDetailContainerWidth)
+  if (detailResizeObserver) {
+    detailResizeObserver.disconnect()
+    detailResizeObserver = null
+  }
   stopExecutionPolling()
   stopRealtimeUpdates()
 })
@@ -1185,6 +1216,8 @@ onUnmounted(() => {
 }
 
 .pipeline-detail-container {
+  width: 100%;
+  min-width: 0;
   min-height: 100%;
   background: var(--bg-secondary);
   
@@ -1271,7 +1304,9 @@ onUnmounted(() => {
     .tab-item {
       display: flex;
       align-items: center;
+      justify-content: center;
       gap: 6px;
+      min-width: 108px;
       padding: 16px 20px;
       color: var(--text-secondary);
       cursor: pointer;

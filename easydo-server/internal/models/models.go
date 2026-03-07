@@ -39,6 +39,11 @@ func InitDB() {
 
 	// 自动迁移
 	autoMigrate()
+
+	// 加载或创建主密钥（持久化在数据库）
+	if _, err := LoadOrCreateMasterKey(DB); err != nil {
+		panic("Failed to initialize master key: " + err.Error())
+	}
 }
 
 func autoMigrate() {
@@ -65,6 +70,7 @@ func autoMigrate() {
 		&Credential{},
 		&CredentialUsage{},
 		&CredentialAuditLog{},
+		&MasterKey{},
 	)
 
 	// 初始化测试用户

@@ -128,9 +128,12 @@
     <el-dialog
       v-model="dialogVisible"
       :title="isEdit ? '编辑项目' : '创建项目'"
-      width="480px"
+      width="640px"
       :close-on-click-modal="false"
+      :append-to-body="true"
+      top="100px"
     >
+
       <el-form
         ref="formRef"
         :model="formData"
@@ -168,6 +171,7 @@
       title="确认删除"
       width="400px"
       :close-on-click-modal="false"
+      :append-to-body="true"
     >
       <div class="delete-warning">
         <el-icon color="#E6A23C" size="24"><Warning /></el-icon>

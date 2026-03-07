@@ -10,8 +10,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+
+	"easydo-server/internal/models"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -28,38 +28,16 @@ type EncryptionService interface {
 
 type AESGCMEncryption struct {
 	masterKey []byte
-	keyPath   string
 }
 
 func NewEncryptionService() (*AESGCMEncryption, error) {
-	keyPath := "data/encryption.key"
-
-	var masterKey []byte
-	if _, err := os.Stat(keyPath); err == nil {
-		data, err := os.ReadFile(keyPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read master key: %w", err)
-		}
-		masterKey = data
-	} else {
-		masterKey = make([]byte, 32)
-		if _, err := rand.Read(masterKey); err != nil {
-			return nil, fmt.Errorf("failed to generate master key: %w", err)
-		}
-
-		dir := filepath.Dir(keyPath)
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return nil, fmt.Errorf("failed to create key directory: %w", err)
-		}
-
-		if err := os.WriteFile(keyPath, masterKey, 0600); err != nil {
-			return nil, fmt.Errorf("failed to save master key: %w", err)
-		}
+	masterKey, err := models.GetMasterKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load master key: %w", err)
 	}
 
 	return &AESGCMEncryption{
 		masterKey: masterKey,
-		keyPath:   keyPath,
 	}, nil
 }
 

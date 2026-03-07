@@ -129,7 +129,7 @@ function refreshCredentials() {
 }
 
 function goToCredentials() {
-  router.push('/credentials')
+  router.push('/secrets')
 }
 
 function getTypeIcon(type) {

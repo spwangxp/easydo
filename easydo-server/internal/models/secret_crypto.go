@@ -10,36 +10,9 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"golang.org/x/crypto/ssh"
 )
-
-var masterKey []byte
-var keyPath = "data/encryption.key"
-
-func init() {
-	if _, err := os.Stat(keyPath); err == nil {
-		data, err := os.ReadFile(keyPath)
-		if err != nil {
-			panic(fmt.Sprintf("Failed to read master key: %v", err))
-		}
-		masterKey = data
-	} else {
-		masterKey = make([]byte, 32)
-		if _, err := rand.Read(masterKey); err != nil {
-			panic(fmt.Sprintf("Failed to generate master key: %v", err))
-		}
-		dir := filepath.Dir(keyPath)
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			panic(fmt.Sprintf("Failed to create key directory: %v", err))
-		}
-		if err := os.WriteFile(keyPath, masterKey, 0600); err != nil {
-			panic(fmt.Sprintf("Failed to save master key: %v", err))
-		}
-	}
-}
 
 func EncryptSecret(plaintext string) (string, error) {
 	if len(plaintext) == 0 {
@@ -49,6 +22,11 @@ func EncryptSecret(plaintext string) (string, error) {
 	iv := make([]byte, 12)
 	if _, err := rand.Read(iv); err != nil {
 		return "", fmt.Errorf("failed to generate IV: %w", err)
+	}
+
+	masterKey, err := GetMasterKey()
+	if err != nil {
+		return "", fmt.Errorf("failed to load master key: %w", err)
 	}
 
 	block, err := aes.NewCipher(masterKey)
@@ -81,6 +59,11 @@ func DecryptSecret(encryptedValue string) ([]byte, error) {
 
 	iv := ciphertext[:12]
 	encryptedData := ciphertext[12:]
+
+	masterKey, err := GetMasterKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load master key: %w", err)
+	}
 
 	block, err := aes.NewCipher(masterKey)
 	if err != nil {

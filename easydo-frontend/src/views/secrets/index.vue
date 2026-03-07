@@ -332,7 +332,9 @@
       :title="isEdit ? '编辑密钥' : '新建密钥'"
       width="640px"
       destroy-on-close
+      :append-to-body="false"
     >
+
       <SecretForm
         v-if="dialogVisible"
         :initial-data="currentSecret"
@@ -502,7 +504,7 @@ import {
   MoreFilled, Edit, CircleCheck, Refresh, DataLine,
   CopyDocument, Delete, Clock, Warning, View, UploadFilled
 } from '@element-plus/icons-vue'
-import { getCredentialList, deleteCredential, verifyCredential, getCredentialTypes, getCredentialCategories, getCredentialUsage, rotateCredential, createCredential, batchVerifyCredentials, batchDeleteCredentials, exportCredentials } from '@/api/credential'
+import { getCredentialList, deleteCredential, verifyCredential, getCredentialTypes, getCredentialCategories, getCredentialUsage, rotateCredential, createCredential, batchVerifyCredentials, batchDeleteCredentials, exportCredentials, getCredentialSecretData } from '@/api/credential'
 import SecretForm from './components/SecretForm.vue'
 
 // 状态
@@ -578,16 +580,18 @@ async function loadTypesAndCategories() {
     ])
     if (typesRes.code === 200) {
       credentialTypes.value = typesRes.data.map(t => ({
-        value: t.name,           // 使用 name 作为 value (如 "PASSWORD")
-        label: t.display_name || t.name,  // 使用 display_name 或 name 作为显示标签 (如 "密码")
+        value: t.value || t.name,
+        label: t.label || t.name,
+        name: t.name,
         icon: t.icon,
         description: t.description
       }))
     }
     if (catsRes.code === 200) {
       credentialCategories.value = catsRes.data.map(c => ({
-        value: c.name || c.value,
+        value: c.value || c.name,
         label: c.label || c.name || c.value,
+        name: c.name,
         icon: c.icon
       }))
     }
@@ -642,9 +646,21 @@ function handleCardCommand(command, secret) {
 }
 
 // 编辑
-function handleEdit(secret) {
+async function handleEdit(secret) {
   isEdit.value = true
-  currentSecret.value = secret
+  try {
+    const secretRes = await getCredentialSecretData(secret.id)
+    currentSecret.value = {
+      ...secret,
+      secret_data: secretRes?.data?.secret_data || {}
+    }
+  } catch (error) {
+    currentSecret.value = {
+      ...secret,
+      secret_data: {}
+    }
+    ElMessage.warning('未获取到敏感字段回填数据，可手动补充后保存')
+  }
   formKey.value++
   dialogVisible.value = true
 }
@@ -678,7 +694,32 @@ async function handleRotate(secret) {
       }
     )
 
+    const { value: secretDataText } = await ElMessageBox.prompt(
+      '请输入新的 secret_data（JSON 格式）',
+      '填写轮换内容',
+      {
+        inputType: 'textarea',
+        inputValue: '{}',
+        inputPlaceholder: '{"token":"new-token"}',
+        confirmButtonText: '提交轮换',
+        cancelButtonText: '取消'
+      }
+    )
+
+    let secretData = {}
+    try {
+      secretData = JSON.parse(secretDataText || '{}')
+    } catch (e) {
+      ElMessage.error('secret_data 必须是合法 JSON')
+      return
+    }
+    if (!secretData || typeof secretData !== 'object' || Object.keys(secretData).length === 0) {
+      ElMessage.error('secret_data 不能为空')
+      return
+    }
+
     const res = await rotateCredential(secret.id, {
+      secret_data: secretData,
       reason: '用户手动触发轮换'
     })
 

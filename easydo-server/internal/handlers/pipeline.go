@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"easydo-server/internal/models"
+	"easydo-server/internal/services"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -403,6 +406,13 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 		}
 	}
 
+	triggerUserID := c.GetUint64("user_id")
+	triggerRole := c.GetString("role")
+	triggerUsername := c.GetString("username")
+	if triggerUsername == "" {
+		triggerUsername = "system"
+	}
+
 	// 获取最新的构建号
 	var lastRun models.PipelineRun
 	h.DB.Where("pipeline_id = ?", id).Order("build_number DESC").First(&lastRun)
@@ -418,7 +428,7 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 		BuildNumber: buildNumber,
 		Status:      "running",
 		TriggerType: "manual",
-		TriggerUser: "demo",
+		TriggerUser: triggerUsername,
 		StartTime:   time.Now().Unix(),
 		Config:      pipeline.Config, // 保存配置快照
 	}
@@ -449,7 +459,7 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 	}
 
 	// 异步执行流水线任务
-	go h.executePipelineTasks(pipeline, run, config)
+	go h.executePipelineTasks(pipeline, run, config, triggerUserID, triggerRole)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -754,7 +764,7 @@ func (h *PipelineHandler) createAllNodeTasks(pipeline models.Pipeline, run *mode
 // executePipelineTasks starts pipeline execution asynchronously.
 // Initial tasks are created for nodes with inDegree=0 and pushed to agent via WebSocket.
 // Downstream tasks are created and pushed when upstream tasks complete.
-func (h *PipelineHandler) executePipelineTasks(pipeline models.Pipeline, run *models.PipelineRun, config PipelineConfig) {
+func (h *PipelineHandler) executePipelineTasks(pipeline models.Pipeline, run *models.PipelineRun, config PipelineConfig, triggerUserID uint64, triggerRole string) {
 	// 检查配置有效性
 	if config.Nodes == nil || len(config.Nodes) == 0 {
 		h.updateRunStatus(run.ID, "failed", "流水线配置无效：节点列表为空")
@@ -802,7 +812,11 @@ func (h *PipelineHandler) executePipelineTasks(pipeline models.Pipeline, run *mo
 			// 创建初始节点任务
 			node := nodeMap[nodeID]
 			if node != nil {
-				h.executeNodeWithAgent(h.DB, pipeline, run, node, nodeMap, resolver, agentID)
+				success, _ := h.executeNodeWithAgent(h.DB, pipeline, run, node, nodeMap, resolver, agentID, triggerUserID, triggerRole)
+				if !success {
+					h.updateRunStatus(run.ID, "failed", "初始化任务失败（凭据权限或解析错误）")
+					return
+				}
 			}
 		}
 	}
@@ -835,7 +849,7 @@ func (h *PipelineHandler) selectAgentForPipeline(db *gorm.DB) uint64 {
 	return selectedAgent
 }
 
-func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipeline, run *models.PipelineRun, node *PipelineNode, nodeMap map[string]*PipelineNode, resolver *VariableResolver, agentID uint64) (bool, map[string]interface{}) {
+func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipeline, run *models.PipelineRun, node *PipelineNode, nodeMap map[string]*PipelineNode, resolver *VariableResolver, agentID uint64, triggerUserID uint64, triggerRole string) (bool, map[string]interface{}) {
 	taskType := node.Type
 
 	if taskType == "email" {
@@ -866,6 +880,10 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 		if err == nil {
 			nodeConfig = resolvedConfig
 		}
+	}
+	if err := h.injectCredentialEnv(db, nodeConfig, run, triggerUserID, triggerRole); err != nil {
+		fmt.Printf("Failed to inject credential for node %s: %v\n", node.ID, err)
+		return false, nil
 	}
 
 	script := h.buildTaskScript(node, nodeConfig)
@@ -1041,6 +1059,7 @@ func (h *PipelineHandler) executeNode(db *gorm.DB, pipeline models.Pipeline, run
 			config = resolvedConfig
 		}
 	}
+	_ = h.injectCredentialEnv(db, config, run, 0, "")
 
 	// 获取脚本内容
 	script := h.buildTaskScript(node, config)
@@ -1169,6 +1188,126 @@ func (h *PipelineHandler) executeNode(db *gorm.DB, pipeline models.Pipeline, run
 			}
 		}
 	}
+}
+
+func parseCredentialID(v interface{}) (uint64, bool) {
+	switch val := v.(type) {
+	case float64:
+		if val <= 0 {
+			return 0, false
+		}
+		return uint64(val), true
+	case int:
+		if val <= 0 {
+			return 0, false
+		}
+		return uint64(val), true
+	case int64:
+		if val <= 0 {
+			return 0, false
+		}
+		return uint64(val), true
+	case uint64:
+		if val == 0 {
+			return 0, false
+		}
+		return val, true
+	case string:
+		if strings.TrimSpace(val) == "" {
+			return 0, false
+		}
+		id, err := strconv.ParseUint(val, 10, 64)
+		if err != nil || id == 0 {
+			return 0, false
+		}
+		return id, true
+	default:
+		return 0, false
+	}
+}
+
+func sanitizeEnvKey(key string) string {
+	normalized := strings.ToUpper(strings.TrimSpace(key))
+	re := regexp.MustCompile(`[^A-Z0-9]+`)
+	normalized = re.ReplaceAllString(normalized, "_")
+	normalized = strings.Trim(normalized, "_")
+	return normalized
+}
+
+func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, nodeConfig map[string]interface{}, run *models.PipelineRun, userID uint64, role string) error {
+	if nodeConfig == nil {
+		return nil
+	}
+
+	authMode, _ := nodeConfig["auth_mode"].(string)
+	if authMode != "credential" {
+		return nil
+	}
+
+	credentialID, ok := parseCredentialID(nodeConfig["credential_id"])
+	if !ok {
+		return errors.New("credential_id is required when auth_mode=credential")
+	}
+
+	var credential models.Credential
+	if err := db.First(&credential, credentialID).Error; err != nil {
+		return fmt.Errorf("credential not found: %w", err)
+	}
+	if !canReadCredential(db, &credential, userID, role) {
+		return errors.New("access denied for credential")
+	}
+	if credential.Status != models.CredentialStatusActive {
+		return errors.New("credential is not active")
+	}
+
+	decrypted, err := services.NewCredentialEncryptionService().
+		DecryptCredentialData(credential.EncryptedData, credential.EncryptionIV)
+	if err != nil {
+		return fmt.Errorf("failed to decrypt credential: %w", err)
+	}
+
+	credentialJSON, _ := json.Marshal(decrypted)
+	credentialEnv := map[string]interface{}{
+		"EASYDO_CREDENTIAL_ID":       strconv.FormatUint(credential.ID, 10),
+		"EASYDO_CREDENTIAL_TYPE":     string(credential.Type),
+		"EASYDO_CREDENTIAL_CATEGORY": string(credential.Category),
+		"EASYDO_CREDENTIAL_JSON":     string(credentialJSON),
+	}
+
+	for k, v := range decrypted {
+		envKey := sanitizeEnvKey(k)
+		if envKey == "" {
+			continue
+		}
+		credentialEnv["EASYDO_CREDENTIAL_"+envKey] = convertToString(v)
+	}
+
+	envMap := make(map[string]interface{})
+	if existing, ok := nodeConfig["env"].(map[string]interface{}); ok {
+		for k, v := range existing {
+			envMap[k] = v
+		}
+	}
+	for k, v := range credentialEnv {
+		envMap[k] = v
+	}
+	nodeConfig["env"] = envMap
+
+	now := time.Now().Unix()
+	db.Model(&credential).Updates(map[string]interface{}{
+		"last_used_at": now,
+		"used_count":   credential.UsedCount + 1,
+	})
+	db.Create(&models.CredentialUsage{
+		CredentialID: credential.ID,
+		UsedByType:   "pipeline_run",
+		UsedByID:     run.ID,
+		UsedByName:   fmt.Sprintf("pipeline_run_%d", run.ID),
+		UsedAt:       now,
+		Result:       "success",
+	})
+
+	return nil
 }
 
 // executeEmailTask executes email notification task (Server side)

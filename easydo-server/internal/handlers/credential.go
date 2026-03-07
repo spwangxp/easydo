@@ -25,30 +25,30 @@ func NewCredentialHandler() *CredentialHandler {
 
 // CreateCredentialRequest - 创建凭据的请求结构
 type CreateCredentialRequest struct {
-	Name         string                  `json:"name" binding:"required,min=1,max=128"`
-	Description  string                  `json:"description" binding:"max=512"`
-	Type         models.CredentialType   `json:"type" binding:"required"`
+	Name         string                    `json:"name" binding:"required,min=1,max=128"`
+	Description  string                    `json:"description" binding:"max=512"`
+	Type         models.CredentialType     `json:"type" binding:"required"`
 	Category     models.CredentialCategory `json:"category"`
-	SecretData   map[string]interface{}  `json:"secret_data" binding:"required"`
-	Scope        models.CredentialScope  `json:"scope"`
-	ProjectID    uint64                  `json:"project_id"`
-	ExpiresAt    *int64                  `json:"expires_at"`
-	AutoRotate   bool                    `json:"auto_rotate"`
-	RotatePeriod int                     `json:"rotate_period"`
-	Metadata     string                  `json:"metadata"`
+	SecretData   map[string]interface{}    `json:"secret_data" binding:"required"`
+	Scope        models.CredentialScope    `json:"scope"`
+	ProjectID    uint64                    `json:"project_id"`
+	ExpiresAt    *int64                    `json:"expires_at"`
+	AutoRotate   bool                      `json:"auto_rotate"`
+	RotatePeriod int                       `json:"rotate_period"`
+	Metadata     string                    `json:"metadata"`
 }
 
 // UpdateCredentialRequest - 更新凭据的请求结构
 type UpdateCredentialRequest struct {
-	Name         string                  `json:"name" binding:"min=1,max=128"`
-	Description  string                  `json:"description" binding:"max=512"`
+	Name         string                    `json:"name" binding:"min=1,max=128"`
+	Description  string                    `json:"description" binding:"max=512"`
 	Category     models.CredentialCategory `json:"category"`
-	SecretData   map[string]interface{}  `json:"secret_data"`
-	Status       models.CredentialStatus `json:"status"`
-	ExpiresAt    *int64                  `json:"expires_at"`
-	AutoRotate   bool                    `json:"auto_rotate"`
-	RotatePeriod int                     `json:"rotate_period"`
-	Metadata     string                  `json:"metadata"`
+	SecretData   map[string]interface{}    `json:"secret_data"`
+	Status       models.CredentialStatus   `json:"status"`
+	ExpiresAt    *int64                    `json:"expires_at"`
+	AutoRotate   bool                      `json:"auto_rotate"`
+	RotatePeriod int                       `json:"rotate_period"`
+	Metadata     string                    `json:"metadata"`
 }
 
 // RotateCredentialRequest - 轮换凭据请求结构
@@ -101,8 +101,7 @@ func (h *CredentialHandler) CreateCredential(c *gin.Context) {
 		}
 	}
 
-	userID, _ := c.Get("user_id")
-	ownerID := userID.(uint64)
+	ownerID, role := getRequestUser(c)
 
 	// 加密凭据数据
 	encryptedData, iv, err := h.encryptionService.EncryptCredentialData(req.SecretData)
@@ -135,6 +134,29 @@ func (h *CredentialHandler) CreateCredential(c *gin.Context) {
 	if credential.Scope == "" {
 		credential.Scope = models.ScopeUser
 	}
+	if credential.Scope == models.ScopeProject {
+		if credential.ProjectID == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    400,
+				"message": "Project scope requires project_id",
+			})
+			return
+		}
+		if !isAdminRole(role) && !userOwnsProject(models.DB, credential.ProjectID, ownerID) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"code":    403,
+				"message": "Access denied for project scope",
+			})
+			return
+		}
+	}
+	if credential.Scope == models.ScopeGlobal && !isAdminRole(role) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "Only admin can create global credentials",
+		})
+		return
+	}
 
 	if err := models.DB.Create(&credential).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -165,8 +187,7 @@ func (h *CredentialHandler) CreateCredential(c *gin.Context) {
 // @Success 200 {object} Response{data=ListResponse}
 // @Router /api/v1/credentials [get]
 func (h *CredentialHandler) ListCredentials(c *gin.Context) {
-	userID, _ := c.Get("user_id")
-	ownerID := userID.(uint64)
+	ownerID, role := getRequestUser(c)
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	size, _ := strconv.Atoi(c.DefaultQuery("size", "10"))
@@ -183,8 +204,7 @@ func (h *CredentialHandler) ListCredentials(c *gin.Context) {
 		size = 10
 	}
 
-	query := models.DB.Model(&models.Credential{}).
-		Where("owner_id = ? OR scope = ? OR is_shared = ?", ownerID, models.ScopeGlobal, true)
+	query := applyCredentialReadScope(models.DB.Model(&models.Credential{}), ownerID, role)
 
 	if credentialType != "" {
 		if !models.IsValidType(models.CredentialType(credentialType)) {
@@ -245,6 +265,8 @@ func (h *CredentialHandler) ListCredentials(c *gin.Context) {
 // @Failure 404 {object} Response
 // @Router /api/v1/credentials/{id} [get]
 func (h *CredentialHandler) GetCredential(c *gin.Context) {
+	ownerID, role := getRequestUser(c)
+
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -263,10 +285,7 @@ func (h *CredentialHandler) GetCredential(c *gin.Context) {
 		return
 	}
 
-	userID, _ := c.Get("user_id")
-	ownerID := userID.(uint64)
-
-	if credential.OwnerID != ownerID && credential.Scope != models.ScopeGlobal && !credential.IsShared {
+	if !canReadCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -277,6 +296,62 @@ func (h *CredentialHandler) GetCredential(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": credential.ToResponse(),
+	})
+}
+
+// GetCredentialSecretData - 获取凭据敏感数据（编辑回填）
+// @Summary 获取凭据敏感数据
+// @Description 仅用于有权限用户在编辑场景回填 secret_data
+// @Tags credentials
+// @Produce json
+// @Param id path int true "凭据ID"
+// @Success 200 {object} Response
+// @Failure 404 {object} Response
+// @Router /api/v1/credentials/{id}/secret-data [get]
+func (h *CredentialHandler) GetCredentialSecretData(c *gin.Context) {
+	ownerID, role := getRequestUser(c)
+
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid credential ID",
+		})
+		return
+	}
+
+	var credential models.Credential
+	if err := models.DB.First(&credential, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Credential not found",
+		})
+		return
+	}
+
+	if !canWriteCredential(models.DB, &credential, ownerID, role) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "Access denied",
+		})
+		return
+	}
+
+	secretData, err := h.encryptionService.DecryptCredentialData(credential.EncryptedData, credential.EncryptionIV)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to decrypt credential data",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": gin.H{
+			"id":          credential.ID,
+			"secret_data": secretData,
+		},
 	})
 }
 
@@ -293,6 +368,8 @@ func (h *CredentialHandler) GetCredential(c *gin.Context) {
 // @Failure 404 {object} Response
 // @Router /api/v1/credentials/{id} [put]
 func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
+	ownerID, role := getRequestUser(c)
+
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -311,10 +388,7 @@ func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
 		return
 	}
 
-	userID, _ := c.Get("user_id")
-	ownerID := userID.(uint64)
-
-	if credential.OwnerID != ownerID {
+	if !canWriteCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -406,6 +480,8 @@ func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
 // @Failure 404 {object} Response
 // @Router /api/v1/credentials/{id} [delete]
 func (h *CredentialHandler) DeleteCredential(c *gin.Context) {
+	ownerID, role := getRequestUser(c)
+
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -424,10 +500,7 @@ func (h *CredentialHandler) DeleteCredential(c *gin.Context) {
 		return
 	}
 
-	userID, _ := c.Get("user_id")
-	ownerID := userID.(uint64)
-
-	if credential.OwnerID != ownerID {
+	if !canWriteCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -459,6 +532,8 @@ func (h *CredentialHandler) DeleteCredential(c *gin.Context) {
 // @Failure 404 {object} Response
 // @Router /api/v1/credentials/{id}/verify [post]
 func (h *CredentialHandler) VerifyCredential(c *gin.Context) {
+	ownerID, role := getRequestUser(c)
+
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -473,6 +548,13 @@ func (h *CredentialHandler) VerifyCredential(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "Credential not found",
+		})
+		return
+	}
+	if !canReadCredential(models.DB, &credential, ownerID, role) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "Access denied",
 		})
 		return
 	}
@@ -513,15 +595,21 @@ type VerifyResponse struct {
 // @Success 200 {object} Response{data=[]models.TypeInfo}
 // @Router /api/v1/credentials/types [get]
 func (h *CredentialHandler) GetCredentialTypes(c *gin.Context) {
-	types := []models.TypeInfo{
-		models.TypePassword.GetTypeInfo(),
-		models.TypeSSHKey.GetTypeInfo(),
-		models.TypeToken.GetTypeInfo(),
-		models.TypeOAuth2.GetTypeInfo(),
-		models.TypeCert.GetTypeInfo(),
-		models.TypePasskey.GetTypeInfo(),
-		models.TypeMFA.GetTypeInfo(),
-		models.TypeIAM.GetTypeInfo(),
+	type typeDef struct {
+		Value models.CredentialType `json:"value"`
+		Label string                `json:"label"`
+		models.TypeInfo
+	}
+
+	types := []typeDef{
+		{Value: models.TypePassword, Label: models.TypePassword.GetTypeLabel(), TypeInfo: models.TypePassword.GetTypeInfo()},
+		{Value: models.TypeSSHKey, Label: models.TypeSSHKey.GetTypeLabel(), TypeInfo: models.TypeSSHKey.GetTypeInfo()},
+		{Value: models.TypeToken, Label: models.TypeToken.GetTypeLabel(), TypeInfo: models.TypeToken.GetTypeInfo()},
+		{Value: models.TypeOAuth2, Label: models.TypeOAuth2.GetTypeLabel(), TypeInfo: models.TypeOAuth2.GetTypeInfo()},
+		{Value: models.TypeCert, Label: models.TypeCert.GetTypeLabel(), TypeInfo: models.TypeCert.GetTypeInfo()},
+		{Value: models.TypePasskey, Label: models.TypePasskey.GetTypeLabel(), TypeInfo: models.TypePasskey.GetTypeInfo()},
+		{Value: models.TypeMFA, Label: models.TypeMFA.GetTypeLabel(), TypeInfo: models.TypeMFA.GetTypeInfo()},
+		{Value: models.TypeIAM, Label: models.TypeIAM.GetTypeLabel(), TypeInfo: models.TypeIAM.GetTypeInfo()},
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -538,19 +626,25 @@ func (h *CredentialHandler) GetCredentialTypes(c *gin.Context) {
 // @Success 200 {object} Response{data=[]models.CategoryInfo}
 // @Router /api/v1/credentials/categories [get]
 func (h *CredentialHandler) GetCredentialCategories(c *gin.Context) {
-	categories := []models.CategoryInfo{
-		models.CategoryGitHub.GetCategoryInfo(),
-		models.CategoryGitLab.GetCategoryInfo(),
-		models.CategoryGitee.GetCategoryInfo(),
-		models.CategoryDocker.GetCategoryInfo(),
-		models.CategoryKubernetes.GetCategoryInfo(),
-		models.CategoryDingTalk.GetCategoryInfo(),
-		models.CategoryWeChat.GetCategoryInfo(),
-		models.CategoryEmail.GetCategoryInfo(),
-		models.CategoryAWS.GetCategoryInfo(),
-		models.CategoryGCP.GetCategoryInfo(),
-		models.CategoryAzure.GetCategoryInfo(),
-		models.CategoryCustom.GetCategoryInfo(),
+	type categoryDef struct {
+		Value models.CredentialCategory `json:"value"`
+		Label string                    `json:"label"`
+		models.CategoryInfo
+	}
+
+	categories := []categoryDef{
+		{Value: models.CategoryGitHub, Label: models.CategoryGitHub.GetCategoryLabel(), CategoryInfo: models.CategoryGitHub.GetCategoryInfo()},
+		{Value: models.CategoryGitLab, Label: models.CategoryGitLab.GetCategoryLabel(), CategoryInfo: models.CategoryGitLab.GetCategoryInfo()},
+		{Value: models.CategoryGitee, Label: models.CategoryGitee.GetCategoryLabel(), CategoryInfo: models.CategoryGitee.GetCategoryInfo()},
+		{Value: models.CategoryDocker, Label: models.CategoryDocker.GetCategoryLabel(), CategoryInfo: models.CategoryDocker.GetCategoryInfo()},
+		{Value: models.CategoryKubernetes, Label: models.CategoryKubernetes.GetCategoryLabel(), CategoryInfo: models.CategoryKubernetes.GetCategoryInfo()},
+		{Value: models.CategoryDingTalk, Label: models.CategoryDingTalk.GetCategoryLabel(), CategoryInfo: models.CategoryDingTalk.GetCategoryInfo()},
+		{Value: models.CategoryWeChat, Label: models.CategoryWeChat.GetCategoryLabel(), CategoryInfo: models.CategoryWeChat.GetCategoryInfo()},
+		{Value: models.CategoryEmail, Label: models.CategoryEmail.GetCategoryLabel(), CategoryInfo: models.CategoryEmail.GetCategoryInfo()},
+		{Value: models.CategoryAWS, Label: models.CategoryAWS.GetCategoryLabel(), CategoryInfo: models.CategoryAWS.GetCategoryInfo()},
+		{Value: models.CategoryGCP, Label: models.CategoryGCP.GetCategoryLabel(), CategoryInfo: models.CategoryGCP.GetCategoryInfo()},
+		{Value: models.CategoryAzure, Label: models.CategoryAzure.GetCategoryLabel(), CategoryInfo: models.CategoryAzure.GetCategoryInfo()},
+		{Value: models.CategoryCustom, Label: models.CategoryCustom.GetCategoryLabel(), CategoryInfo: models.CategoryCustom.GetCategoryInfo()},
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -571,6 +665,8 @@ func (h *CredentialHandler) GetCredentialCategories(c *gin.Context) {
 // @Failure 400 {object} Response
 // @Router /api/v1/credentials/{id}/rotate [post]
 func (h *CredentialHandler) RotateCredential(c *gin.Context) {
+	ownerID, role := getRequestUser(c)
+
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -589,10 +685,7 @@ func (h *CredentialHandler) RotateCredential(c *gin.Context) {
 		return
 	}
 
-	userID, _ := c.Get("user_id")
-	ownerID := userID.(uint64)
-
-	if credential.OwnerID != ownerID {
+	if !canWriteCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -661,6 +754,8 @@ func (h *CredentialHandler) RotateCredential(c *gin.Context) {
 // @Success 200 {object} Response{data=UsageStatsResponse}
 // @Router /api/v1/credentials/{id}/usage [get]
 func (h *CredentialHandler) GetCredentialUsage(c *gin.Context) {
+	ownerID, role := getRequestUser(c)
+
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -679,10 +774,7 @@ func (h *CredentialHandler) GetCredentialUsage(c *gin.Context) {
 		return
 	}
 
-	userID, _ := c.Get("user_id")
-	ownerID := userID.(uint64)
-
-	if credential.OwnerID != ownerID && credential.Scope != models.ScopeGlobal && !credential.IsShared {
+	if !canReadCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -749,6 +841,8 @@ type UsageStatsResponse struct {
 // @Success 200 {object} Response{data=BatchVerifyResponse}
 // @Router /api/v1/credentials/batch/verify [post]
 func (h *CredentialHandler) BatchVerifyCredentials(c *gin.Context) {
+	ownerID, role := getRequestUser(c)
+
 	var req BatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -777,6 +871,15 @@ func (h *CredentialHandler) BatchVerifyCredentials(c *gin.Context) {
 				"id":    id,
 				"valid": false,
 				"error": "Credential not found",
+			})
+			failed++
+			continue
+		}
+		if !canReadCredential(models.DB, &credential, ownerID, role) {
+			results = append(results, gin.H{
+				"id":    id,
+				"valid": false,
+				"error": "Access denied",
 			})
 			failed++
 			continue
@@ -820,8 +923,7 @@ func (h *CredentialHandler) BatchVerifyCredentials(c *gin.Context) {
 // @Success 200 {object} Response{data=BatchDeleteResponse}
 // @Router /api/v1/credentials/batch/delete [post]
 func (h *CredentialHandler) BatchDeleteCredentials(c *gin.Context) {
-	userID, _ := c.Get("user_id")
-	ownerID := userID.(uint64)
+	ownerID, role := getRequestUser(c)
 
 	var req BatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -840,18 +942,29 @@ func (h *CredentialHandler) BatchDeleteCredentials(c *gin.Context) {
 		return
 	}
 
-	// 检查所有权
-	var count int64
-	models.DB.Model(&models.Credential{}).
-		Where("id IN ? AND owner_id != ?", req.IDs, ownerID).
-		Count(&count)
-
-	if count > 0 {
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "Some credentials do not belong to you",
+	var credentials []models.Credential
+	if err := models.DB.Where("id IN ?", req.IDs).Find(&credentials).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to query credentials: " + err.Error(),
 		})
 		return
+	}
+	if len(credentials) != len(req.IDs) {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Some credentials not found",
+		})
+		return
+	}
+	for i := range credentials {
+		if !canWriteCredential(models.DB, &credentials[i], ownerID, role) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"code":    403,
+				"message": "Some credentials are not writable",
+			})
+			return
+		}
 	}
 
 	// 删除凭据
@@ -879,10 +992,10 @@ type BatchRequest struct {
 
 // BatchVerifyResponse - 批量验证响应
 type BatchVerifyResponse struct {
-	Success int       `json:"success"`
-	Failed  int       `json:"failed"`
-	Total   int       `json:"total"`
-	Results []gin.H   `json:"results"`
+	Success int     `json:"success"`
+	Failed  int     `json:"failed"`
+	Total   int     `json:"total"`
+	Results []gin.H `json:"results"`
 }
 
 // BatchDeleteResponse - 批量删除响应
@@ -901,14 +1014,12 @@ type BatchDeleteResponse struct {
 // @Success 200 {object} Response{data=[]models.CredentialResponse}
 // @Router /api/v1/credentials/export [get]
 func (h *CredentialHandler) ExportCredentials(c *gin.Context) {
-	userID, _ := c.Get("user_id")
-	ownerID := userID.(uint64)
+	ownerID, role := getRequestUser(c)
 
 	credentialType := c.Query("type")
 	category := c.Query("category")
 
-	query := models.DB.Model(&models.Credential{}).
-		Where("owner_id = ? OR scope = ? OR is_shared = ?", ownerID, models.ScopeGlobal, true)
+	query := applyCredentialReadScope(models.DB.Model(&models.Credential{}), ownerID, role)
 
 	if credentialType != "" {
 		if !models.IsValidType(models.CredentialType(credentialType)) {

@@ -176,6 +176,7 @@ func InitRouter() *gin.Engine {
 			credentials.GET("/categories", credentialHandler.GetCredentialCategories)
 			credentials.GET("/export", credentialHandler.ExportCredentials)
 			credentials.GET("/:id", credentialHandler.GetCredential)
+			credentials.GET("/:id/secret-data", credentialHandler.GetCredentialSecretData)
 			credentials.PUT("/:id", credentialHandler.UpdateCredential)
 			credentials.DELETE("/:id", credentialHandler.DeleteCredential)
 			credentials.POST("/:id/verify", credentialHandler.VerifyCredential)

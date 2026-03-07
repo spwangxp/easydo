@@ -75,8 +75,7 @@ const routes = [
       },
       {
         path: 'credentials',
-        name: 'Credentials',
-        component: () => import('@/views/credential/index.vue')
+        redirect: '/secrets'
       }
     ]
   },

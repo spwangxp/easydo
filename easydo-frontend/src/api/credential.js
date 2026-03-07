@@ -55,6 +55,17 @@ export function getCredential(id) {
 }
 
 /**
+ * 获取凭据敏感数据（用于编辑回填）
+ * @param {number} id - 凭据ID
+ */
+export function getCredentialSecretData(id) {
+  return request({
+    url: `/v1/credentials/${id}/secret-data`,
+    method: 'get'
+  })
+}
+
+/**
  * 更新凭据
  * @param {number} id - 凭据ID
  * @param {Object} data - 更新数据
