@@ -132,9 +132,13 @@
             :viewBox="`0 0 ${canvasWidth} ${canvasHeight}`"
           >
             <defs>
-              <!-- 箭头标记 - 红色连接线 -->
+              <!-- 常规连接箭头 -->
               <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-                <polygon points="0 0, 10 3.5, 0 7" fill="var(--danger-color)" />
+                <polygon points="0 0, 10 3.5, 0 7" fill="var(--pipeline-connection-color)" />
+              </marker>
+              <!-- 选中连接箭头 -->
+              <marker id="arrowhead-selected" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                <polygon points="0 0, 10 3.5, 0 7" fill="var(--pipeline-connection-selected)" />
               </marker>
               <!-- 虚线连接标记 -->
               <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
@@ -142,19 +146,26 @@
               </marker>
             </defs>
             <!-- 已完成的连接线 -->
-            <path
+            <g
               v-for="conn in connections"
               :key="conn.id"
-              :d="getConnectionPath(conn)"
-              class="connection-line"
+              class="connection-item"
               :class="{ selected: selectedConnection?.id === conn.id }"
-              stroke="var(--danger-color)"
-              stroke-width="3"
-              fill="none"
-              marker-end="url(#arrowhead)"
-              @click="selectConnection(conn)"
-              @dblclick="deleteConnection(conn)"
-            />
+            >
+              <path
+                :d="getConnectionPath(conn)"
+                class="connection-line-glow"
+                fill="none"
+              />
+              <path
+                :d="getConnectionPath(conn)"
+                class="connection-line"
+                fill="none"
+                :marker-end="selectedConnection?.id === conn.id ? 'url(#arrowhead-selected)' : 'url(#arrowhead)'"
+                @click="selectConnection(conn)"
+                @dblclick="deleteConnection(conn)"
+              />
+            </g>
             <!-- 正在拖拽的连接线 -->
             <path
               v-if="connectingLine"
@@ -554,10 +565,10 @@ const componentCategories = [
     name: 'notify',
     label: '通知',
     components: [
-      { type: 'dingtalk', name: '钉钉通知', description: '钉钉机器人通知', icon: 'Bell', color: '#909399', inputs: [{ label: '消息', key: 'message' }], outputs: [] },
-      { type: 'wechat', name: '企业微信', description: '企业微信通知', icon: 'Bell', color: '#909399', inputs: [{ label: '消息', key: 'message' }], outputs: [] },
-      { type: 'email', name: '邮件通知', description: '邮件通知', icon: 'Message', color: '#909399', inputs: [{ label: '消息', key: 'message' }], outputs: [] },
-      { type: 'webhook', name: 'Webhook', description: 'Webhook 回调', icon: 'Link', color: '#909399', inputs: [{ label: '数据', key: 'data' }], outputs: [] }
+      { type: 'dingtalk', name: '钉钉通知', description: '钉钉机器人通知', icon: 'Bell', color: 'var(--text-muted)', inputs: [{ label: '消息', key: 'message' }], outputs: [] },
+      { type: 'wechat', name: '企业微信', description: '企业微信通知', icon: 'Bell', color: 'var(--text-muted)', inputs: [{ label: '消息', key: 'message' }], outputs: [] },
+      { type: 'email', name: '邮件通知', description: '邮件通知', icon: 'Message', color: 'var(--text-muted)', inputs: [{ label: '消息', key: 'message' }], outputs: [] },
+      { type: 'webhook', name: 'Webhook', description: 'Webhook 回调', icon: 'Link', color: 'var(--text-muted)', inputs: [{ label: '数据', key: 'data' }], outputs: [] }
     ]
   },
   {
@@ -2153,7 +2164,7 @@ const getStatusText = (status) => {
   position: relative;
   overflow: hidden;
   cursor: grab;
-  background: var(--bg-primary);
+  background: var(--pipeline-canvas-bg);
 
   &:active {
     cursor: grabbing;
@@ -2165,9 +2176,9 @@ const getStatusText = (status) => {
     left: -5000px;
     width: 10000px;
     height: 10000px;
-    background-color: var(--bg-primary);
+    background-color: var(--surface-base);
     background-image:
-      radial-gradient(circle, var(--border-color-medium) 1px, transparent 1px);
+      radial-gradient(circle, var(--pipeline-grid-dot) 1px, transparent 1px);
     background-size: 20px 20px;
     pointer-events: none;
   }
@@ -2177,7 +2188,7 @@ const getStatusText = (status) => {
     top: 0;
     left: 0;
     z-index: 10;
-    pointer-events: none;
+    pointer-events: auto;
 
     .connections-layer {
       position: absolute;
@@ -2187,24 +2198,56 @@ const getStatusText = (status) => {
       height: 100%;
       overflow: visible;
 
-      .connection-line {
-        cursor: pointer;
-        transition: stroke-width 0.2s;
-        opacity: 0.9;
+      pointer-events: none;
+
+      .connection-item {
+        .connection-line-glow {
+          stroke: var(--pipeline-connection-glow);
+          stroke-width: 8;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+          opacity: 0.56;
+          transition: opacity $transition-fast, stroke $transition-fast;
+        }
+
+        .connection-line {
+          cursor: pointer;
+          pointer-events: stroke;
+          stroke: var(--pipeline-connection-color);
+          stroke-width: 3;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+          opacity: 0.94;
+          transition: stroke $transition-fast, stroke-width $transition-fast, opacity $transition-fast;
+        }
 
         &:hover {
-          stroke-width: 4;
+          .connection-line-glow {
+            opacity: 0.84;
+          }
+
+          .connection-line {
+            stroke-width: 3.8;
+          }
         }
 
         &.selected {
-          stroke: var(--danger-color);
-          stroke-width: 4;
+          .connection-line-glow {
+            stroke: var(--pipeline-node-selected-ring);
+            opacity: 0.96;
+          }
+
+          .connection-line {
+            stroke: var(--pipeline-connection-selected);
+            stroke-width: 4.2;
+          }
         }
       }
 
       .connecting-line-temp {
         pointer-events: none;
-        opacity: 0.7;
+        opacity: 0.78;
+        stroke: var(--pipeline-connection-color);
       }
     }
   }
@@ -2221,25 +2264,40 @@ const getStatusText = (status) => {
 .pipeline-node {
   position: absolute;
   min-width: 200px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
+  background: var(--pipeline-node-bg);
+  border: 1px solid var(--pipeline-node-border);
   border-radius: $radius-lg;
   cursor: move;
   transition: box-shadow $transition-base, border-color $transition-base, transform $transition-base;
   overflow: visible;
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--pipeline-node-shadow);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  isolation: isolate;
+
+  &::before {
+    content: '';
+    position: absolute;
+    left: 14px;
+    right: 14px;
+    top: 72px;
+    height: 1px;
+    background: linear-gradient(90deg, var(--pipeline-node-track-fade) 0%, var(--pipeline-node-track) 48%, var(--pipeline-node-track-fade) 100%);
+    pointer-events: none;
+    z-index: 0;
+  }
 
   &:hover {
-    border-color: var(--primary-color);
-    box-shadow: var(--shadow-lg);
+    border-color: var(--pipeline-connection-selected);
+    box-shadow: var(--pipeline-node-hover-shadow);
     transform: translateY(-2px);
   }
 
   &.selected {
-    border-color: var(--primary-color);
+    border-color: var(--pipeline-connection-selected);
     box-shadow:
-      0 0 0 2px var(--primary-light),
-      var(--shadow-lg);
+      0 0 0 2px var(--pipeline-node-selected-ring),
+      var(--pipeline-node-hover-shadow);
   }
 
   &.connecting {
@@ -2260,10 +2318,10 @@ const getStatusText = (status) => {
       width: 12px;
       height: 12px;
       border-radius: 50%;
-      background: var(--primary-color);
-      border: 2px solid var(--bg-primary);
+      background: var(--pipeline-port-input);
+      border: 2px solid var(--surface-base);
       transition: all 0.2s;
-      box-shadow: 0 0 0 2px var(--border-color);
+      box-shadow: 0 0 0 2px var(--pipeline-node-track);
     }
 
     .port-label {
@@ -2276,41 +2334,43 @@ const getStatusText = (status) => {
     &:hover {
       .port-dot {
         transform: scale(1.3);
-        box-shadow: 0 0 12px var(--primary-color);
+        box-shadow: 0 0 12px var(--pipeline-connection-selected);
       }
     }
 
     &.input-port {
       left: -12px;
-      top: 60px;
+      top: 66px;
       transform: translateX(-100%);
 
       .port-dot {
-        background: var(--primary-color);
+        background: var(--pipeline-port-input);
       }
     }
 
     &.output-port {
       right: -12px;
-      top: 60px;
+      top: 66px;
 
       .port-dot {
-        background: var(--success-color);
+        background: var(--pipeline-port-output);
       }
 
       &:hover .port-dot {
-        background: var(--success-color);
-        box-shadow: 0 0 12px var(--success-color);
+        background: var(--pipeline-port-output);
+        box-shadow: 0 0 12px var(--pipeline-port-output);
       }
     }
 
     &.connected .port-dot {
-      background: var(--success-color);
-      box-shadow: 0 0 8px var(--success-color);
+      background: var(--pipeline-port-output);
+      box-shadow: 0 0 8px var(--pipeline-port-output);
     }
   }
 
   .node-content {
+    position: relative;
+    z-index: 1;
     padding: 16px;
 
     .node-header {

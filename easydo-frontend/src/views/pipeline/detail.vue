@@ -222,7 +222,7 @@
                 }"
               >
                 <div class="task-status-icon">
-                  <el-icon v-if="task.status === 'pending' || task.display_status === 'not_executed'" color="#909399"><Clock /></el-icon>
+                  <el-icon v-if="task.status === 'pending' || task.display_status === 'not_executed'" :color="'var(--text-muted)'"><Clock /></el-icon>
                   <el-icon v-else-if="task.status === 'running'" color="#E6A23C" class="running-icon"><Loading /></el-icon>
                   <el-icon v-else-if="task.status === 'success'" color="#67C23A"><SuccessFilled /></el-icon>
                   <el-icon v-else-if="task.status === 'failed' || task.display_status === 'blocked'" color="#F56C6C"><CircleCloseFilled /></el-icon>
@@ -1186,14 +1186,14 @@ onUnmounted(() => {
 
 .pipeline-detail-container {
   min-height: 100%;
-  background: #f5f7fa;
+  background: var(--bg-secondary);
   
   .detail-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
     padding: 16px 24px;
-    background: white;
+    background: var(--bg-card);
     border-bottom: 1px solid #e4e7ed;
     
     .header-left {
@@ -1205,14 +1205,14 @@ onUnmounted(() => {
         display: flex;
         align-items: center;
         gap: 4px;
-        color: #606266;
+        color: var(--text-secondary);
         cursor: pointer;
         padding: 8px 12px;
         border-radius: 4px;
         transition: background 0.3s;
         
         &:hover {
-          background: #f5f7fa;
+          background: var(--bg-secondary);
         }
       }
       
@@ -1237,7 +1237,7 @@ onUnmounted(() => {
           .pipeline-name {
             font-size: 20px;
             font-weight: 600;
-            color: #303133;
+            color: var(--text-primary);
             margin: 0 0 8px;
           }
           
@@ -1247,7 +1247,7 @@ onUnmounted(() => {
             gap: 12px;
             
             .create-time {
-              color: #909399;
+              color: var(--text-muted);
               font-size: 12px;
             }
           }
@@ -1265,7 +1265,7 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     padding: 0 24px;
-    background: white;
+    background: var(--bg-card);
     border-bottom: 1px solid #e4e7ed;
     
     .tab-item {
@@ -1273,23 +1273,23 @@ onUnmounted(() => {
       align-items: center;
       gap: 6px;
       padding: 16px 20px;
-      color: #606266;
+      color: var(--text-secondary);
       cursor: pointer;
       border-bottom: 2px solid transparent;
       transition: all 0.3s;
       
       &:hover {
-        color: #409EFF;
+        color: var(--primary-color);
       }
       
       &.active {
-        color: #409EFF;
-        border-bottom-color: #409EFF;
+        color: var(--primary-color);
+        border-bottom-color: var(--primary-color);
       }
       
       .tab-count {
         font-size: 12px;
-        color: #909399;
+        color: var(--text-muted);
         margin-left: 4px;
       }
     }
@@ -1300,11 +1300,11 @@ onUnmounted(() => {
       align-items: center;
       gap: 4px;
       padding: 16px;
-      color: #606266;
+      color: var(--text-secondary);
       cursor: pointer;
       
       &:hover {
-        color: #409EFF;
+        color: var(--primary-color);
       }
     }
   }
@@ -1313,7 +1313,7 @@ onUnmounted(() => {
     padding: 24px;
     
     .tab-panel {
-      background: white;
+      background: var(--bg-card);
       border-radius: 8px;
       min-height: 500px;
       
@@ -1328,7 +1328,7 @@ onUnmounted(() => {
           margin: 0;
           font-size: 16px;
           font-weight: 600;
-          color: #303133;
+          color: var(--text-primary);
         }
       }
     }
@@ -1347,7 +1347,7 @@ onUnmounted(() => {
         padding: 20px;
         
         .build-number {
-          color: #409EFF;
+          color: var(--primary-color);
           font-weight: 500;
         }
       }
@@ -1374,18 +1374,18 @@ onUnmounted(() => {
                 display: block;
                 font-size: 28px;
                 font-weight: 600;
-                color: #303133;
+                color: var(--text-primary);
               }
               
               .summary-label {
                 font-size: 12px;
-                color: #909399;
+                color: var(--text-muted);
               }
               
               &.success .summary-value { color: #67C23A; }
               &.danger .summary-value { color: #F56C6C; }
               &.warning .summary-value { color: #E6A23C; }
-              &.info .summary-value { color: #409EFF; }
+              &.info .summary-value { color: var(--primary-color); }
             }
           }
         }
@@ -1429,7 +1429,7 @@ onUnmounted(() => {
         }
         
         .build-number {
-          color: #409EFF;
+          color: var(--primary-color);
           font-weight: 500;
         }
       }
@@ -1446,7 +1446,7 @@ onUnmounted(() => {
           .form-tip {
             margin-left: 12px;
             font-size: 12px;
-            color: #909399;
+            color: var(--text-muted);
           }
         }
       }
@@ -1483,14 +1483,14 @@ onUnmounted(() => {
             
             .summary-label {
               font-size: 12px;
-              color: #909399;
+              color: var(--text-muted);
               margin-bottom: 8px;
             }
             
             .summary-value {
               font-size: 16px;
               font-weight: 500;
-              color: #303133;
+              color: var(--text-primary);
             }
           }
         }
@@ -1517,19 +1517,19 @@ onUnmounted(() => {
               }
               
               &:hover {
-                background: #f5f7fa;
+                background: var(--bg-secondary);
               }
               
               &.task-running {
-                background: #fdf6ec;
+                background: var(--warning-light);
               }
               
               &.task-failed {
-                background: #fef0f0;
+                background: var(--danger-light);
               }
               
               &.task-not-executed {
-                background: #f5f7fa;
+                background: var(--bg-secondary);
                 opacity: 0.7;
               }
               
@@ -1548,13 +1548,13 @@ onUnmounted(() => {
                 .task-name {
                   font-size: 14px;
                   font-weight: 500;
-                  color: #303133;
+                  color: var(--text-primary);
                   margin-bottom: 4px;
                 }
                 
                 .task-meta {
                   font-size: 12px;
-                  color: #909399;
+                  color: var(--text-muted);
                   
                   .task-agent {
                     margin-right: 16px;
@@ -1564,7 +1564,7 @@ onUnmounted(() => {
                 .task-error {
                   margin-top: 8px;
                   padding: 8px 12px;
-                  background: #fef0f0;
+                  background: var(--danger-light);
                   border-radius: 4px;
                   font-size: 12px;
                   color: #F56C6C;

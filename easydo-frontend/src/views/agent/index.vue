@@ -614,11 +614,11 @@ const POLLING_INTERVAL = 5000
 const getStatusColor = (status) => {
   const colors = {
     online: '#67C23A',
-    offline: '#909399',
+    offline: 'var(--text-muted)',
     busy: '#E6A23C',
     error: '#F56C6C'
   }
-  return colors[status] || '#909399'
+  return colors[status] || 'var(--text-muted)'
 }
 
 const getStatusType = (status) => {

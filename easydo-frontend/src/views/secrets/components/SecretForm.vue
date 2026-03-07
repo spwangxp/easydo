@@ -658,13 +658,13 @@ async function handleSubmit() {
   margin: 24px 0 16px 0;
   padding-bottom: 8px;
   border-bottom: 1px solid #e4e7ed;
-  color: #606266;
+  color: var(--text-secondary);
   font-size: 14px;
   font-weight: 500;
 }
 
 .section-header .el-icon {
-  color: #909399;
+  color: var(--text-muted);
 }
 
 .section-divider {
@@ -675,7 +675,7 @@ async function handleSubmit() {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #606266;
+  color: var(--text-secondary);
   font-size: 14px;
   font-weight: 500;
   background-color: transparent;
@@ -684,7 +684,7 @@ async function handleSubmit() {
 .form-hint {
   margin-left: 12px;
   font-size: 12px;
-  color: #909399;
+  color: var(--text-muted);
 }
 
 .form-actions {
@@ -699,7 +699,7 @@ async function handleSubmit() {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #909399;
+  color: var(--text-muted);
   font-size: 14px;
 }
 

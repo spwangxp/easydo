@@ -40,7 +40,7 @@
       </el-button>
     </div>
 
-    <div v-if="selectedSecrets.length > 0" class="batch-actions" style="margin-bottom: 16px; padding: 12px; background-color: #f5f7fa; border-radius: 4px;">
+    <div v-if="selectedSecrets.length > 0" class="batch-actions" style="margin-bottom: 16px; padding: 12px; background-color: var(--bg-secondary); border-radius: 4px;">
       <span style="margin-right: 16px;">已选择 {{ selectedSecrets.length }} 项</span>
       <el-button type="danger" size="small" @click="handleBatchDelete">
         批量删除
@@ -414,7 +414,7 @@ onMounted(() => {
   .page-title {
     font-size: 24px;
     font-weight: 600;
-    color: #303133;
+    color: var(--text-primary);
     margin: 0;
   }
 }
@@ -431,7 +431,7 @@ onMounted(() => {
   gap: 8px;
 
   .secret-icon {
-    color: #409EFF;
+    color: var(--primary-color);
     font-size: 16px;
   }
 }

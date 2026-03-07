@@ -157,7 +157,7 @@ const typeColorMap = {
   PASSWORD: '#E6A23C',
   SSH_KEY: '#67C23A',
   TOKEN: '#409EFF',
-  OAUTH2: '#909399',
+  OAUTH2: 'var(--text-muted)',
   CERTIFICATE: '#F56C6C'
 }
 

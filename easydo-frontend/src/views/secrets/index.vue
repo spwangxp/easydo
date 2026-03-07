@@ -988,7 +988,7 @@ function getTypeColor(type) {
     PASSWORD: '#E6A23C',
     SSH_KEY: '#67C23A',
     TOKEN: '#409EFF',
-    OAUTH2: '#909399',
+    OAUTH2: 'var(--text-muted)',
     CERTIFICATE: '#F56C6C',
     PASSKEY: '#00D4AA',
     MFA: '#FF6B6B',
@@ -1041,7 +1041,7 @@ onMounted(() => {
 <style scoped>
 .secrets-management {
   padding: 24px;
-  background: #f5f7fa;
+  background: var(--bg-secondary);
   min-height: 100%;
 }
 
@@ -1059,16 +1059,16 @@ onMounted(() => {
   margin: 0 0 8px 0;
   font-size: 24px;
   font-weight: 600;
-  color: #303133;
+  color: var(--text-primary);
 }
 
 .header-icon {
-  color: #409EFF;
+  color: var(--primary-color);
 }
 
 .header-desc {
   margin: 0;
-  color: #909399;
+  color: var(--text-muted);
   font-size: 14px;
 }
 
@@ -1117,12 +1117,12 @@ onMounted(() => {
 .stat-value {
   font-size: 28px;
   font-weight: 700;
-  color: #303133;
+  color: var(--text-primary);
 }
 
 .stat-label {
   font-size: 14px;
-  color: #909399;
+  color: var(--text-muted);
   margin-top: 4px;
 }
 
@@ -1132,7 +1132,7 @@ onMounted(() => {
   align-items: center;
   margin-bottom: 16px;
   padding: 16px;
-  background: white;
+  background: var(--bg-card);
   border-radius: 8px;
 }
 
@@ -1154,13 +1154,13 @@ onMounted(() => {
   align-items: center;
   gap: 16px;
   padding: 12px 16px;
-  background: #ecf5ff;
+  background: var(--primary-lighter);
   border-radius: 8px;
   margin-bottom: 16px;
 }
 
 .batch-info {
-  color: #409EFF;
+  color: var(--primary-color);
   font-weight: 500;
 }
 
@@ -1205,7 +1205,7 @@ onMounted(() => {
 
 .card-name {
   font-weight: 600;
-  color: #303133;
+  color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1213,7 +1213,7 @@ onMounted(() => {
 
 .card-type {
   font-size: 12px;
-  color: #909399;
+  color: var(--text-muted);
 }
 
 .card-more {
@@ -1240,7 +1240,7 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: #909399;
+  color: var(--text-muted);
 }
 
 .card-status {
@@ -1253,17 +1253,17 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  background: #fafafa;
+  background: var(--bg-tertiary);
   border-top: 1px solid #f0f0f0;
 }
 
 .card-time {
   font-size: 12px;
-  color: #909399;
+  color: var(--text-muted);
 }
 
 .secret-table {
-  background: white;
+  background: var(--bg-card);
   border-radius: 8px;
 }
 
@@ -1298,7 +1298,7 @@ onMounted(() => {
   margin: 0 0 12px 0;
   font-size: 16px;
   font-weight: 600;
-  color: #303133;
+  color: var(--text-primary);
 }
 
 .usage-stats {
@@ -1308,27 +1308,27 @@ onMounted(() => {
 .usage-stat-item {
   text-align: center;
   padding: 20px;
-  background: #f5f7fa;
+  background: var(--bg-secondary);
   border-radius: 8px;
 }
 
 .usage-stat-item.success {
-  background: #f0f9eb;
+  background: var(--success-light);
 }
 
 .usage-stat-item.danger {
-  background: #fef0f0;
+  background: var(--danger-light);
 }
 
 .usage-value {
   font-size: 32px;
   font-weight: 700;
-  color: #303133;
+  color: var(--text-primary);
 }
 
 .usage-label {
   font-size: 14px;
-  color: #909399;
+  color: var(--text-muted);
   margin-top: 8px;
 }
 
@@ -1346,12 +1346,12 @@ onMounted(() => {
 .progress-value {
   font-size: 28px;
   font-weight: 700;
-  color: #303133;
+  color: var(--text-primary);
 }
 
 .progress-label {
   font-size: 14px;
-  color: #909399;
+  color: var(--text-muted);
 }
 
 .usage-last {
@@ -1359,7 +1359,7 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  color: #909399;
+  color: var(--text-muted);
   font-size: 14px;
 }
 
@@ -1387,6 +1387,6 @@ onMounted(() => {
   align-items: center;
   margin-bottom: 12px;
   font-weight: 500;
-  color: #303133;
+  color: var(--text-primary);
 }
 </style>

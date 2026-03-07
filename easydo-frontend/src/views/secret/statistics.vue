@@ -179,7 +179,7 @@ onMounted(() => {
 .stat-value {
   font-size: 36px;
   font-weight: bold;
-  color: #409EFF;
+  color: var(--primary-color);
   padding: 20px 0;
 }
 

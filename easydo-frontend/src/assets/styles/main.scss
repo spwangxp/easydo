@@ -45,17 +45,73 @@
   --glass-bg: #{$glass-bg};
   --glass-border: #{$glass-border};
 
+  --surface-base: #{$bg-primary};
+  --surface-subtle: #{$bg-secondary};
+  --surface-muted: #{$bg-tertiary};
+  --surface-raised: #{$bg-card};
+  --surface-overlay: #{$bg-elevated};
+  --surface-sidebar: #{$bg-sidebar};
+  --interactive-hover-bg: #{$primary-lighter};
+  --interactive-active-bg: #{$primary-light};
+  --interactive-focus-ring: #{$primary-lighter};
+  --status-success-soft: #{$success-light};
+  --status-warning-soft: #{$warning-light};
+  --status-danger-soft: #{$danger-light};
+  --status-info-soft: #{$info-light};
+  --table-header-bg: rgba(255, 255, 255, 0.54);
+  --ambient-grid-line: rgba(255, 255, 255, 0.16);
+  --scrollbar-thumb-from: rgba(67, 117, 204, 0.45);
+  --scrollbar-thumb-to: rgba(67, 117, 204, 0.7);
+  --scrollbar-thumb-hover-from: rgba(67, 117, 204, 0.66);
+  --scrollbar-thumb-hover-to: rgba(67, 117, 204, 0.88);
+
+  --pipeline-canvas-bg: linear-gradient(165deg, var(--surface-base) 0%, var(--surface-subtle) 62%, var(--surface-muted) 100%);
+  --pipeline-grid-dot: var(--border-color-medium);
+  --pipeline-connection-color: rgba(63, 122, 238, 0.78);
+  --pipeline-connection-selected: var(--primary-color);
+  --pipeline-connection-glow: rgba(47, 109, 255, 0.24);
+  --pipeline-node-bg: rgba(255, 255, 255, 0.88);
+  --pipeline-node-border: rgba(17, 55, 96, 0.18);
+  --pipeline-node-shadow: 0 18px 34px rgba(13, 42, 81, 0.15), 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+  --pipeline-node-hover-shadow: 0 24px 46px rgba(12, 37, 73, 0.2), 0 1px 0 rgba(255, 255, 255, 0.95) inset;
+  --pipeline-node-track: rgba(47, 109, 255, 0.26);
+  --pipeline-node-track-fade: rgba(47, 109, 255, 0.02);
+  --pipeline-node-selected-ring: rgba(47, 109, 255, 0.24);
+  --pipeline-port-input: var(--primary-color);
+  --pipeline-port-output: var(--success-color);
+
   --bg-ambient-a: radial-gradient(circle at 18% 22%, rgba(74, 133, 255, 0.26), transparent 52%);
   --bg-ambient-b: radial-gradient(circle at 82% 10%, rgba(80, 203, 255, 0.22), transparent 42%);
   --bg-ambient-c: radial-gradient(circle at 62% 84%, rgba(47, 109, 255, 0.13), transparent 47%);
 
-  --el-bg-color: #{$bg-elevated};
-  --el-bg-color-page: #{$bg-primary};
+  --el-color-primary: var(--primary-color);
+  --el-color-success: var(--success-color);
+  --el-color-warning: var(--warning-color);
+  --el-color-danger: var(--danger-color);
+  --el-color-info: var(--info-color);
+  --el-bg-color: var(--surface-overlay);
+  --el-bg-color-page: var(--surface-base);
+  --el-bg-color-overlay: var(--surface-overlay);
+  --el-fill-color: var(--surface-subtle);
   --el-fill-color-blank: transparent;
   --el-fill-color-light: rgba(255, 255, 255, 0.52);
+  --el-fill-color-lighter: rgba(255, 255, 255, 0.34);
+  --el-fill-color-dark: rgba(17, 55, 96, 0.08);
+  --el-fill-color-darker: rgba(17, 55, 96, 0.14);
   --el-text-color-primary: #{$text-primary};
   --el-text-color-regular: #{$text-secondary};
+  --el-text-color-secondary: #{$text-tertiary};
+  --el-text-color-placeholder: #{$text-placeholder};
+  --el-text-color-disabled: #{$text-muted};
+  --el-border-color: #{$border-color};
   --el-border-color-light: #{$border-color-light};
+  --el-border-color-lighter: #{$border-color-light};
+  --el-border-color-extra-light: #{$border-color-light};
+  --el-border-color-dark: #{$border-color-medium};
+  --el-mask-color: rgba(9, 22, 38, 0.52);
+  --el-mask-color-extra-light: rgba(9, 22, 38, 0.34);
+  --el-overlay-color: rgba(9, 22, 38, 0.62);
+  --el-overlay-color-lighter: rgba(9, 22, 38, 0.42);
 }
 
 :root.dark {
@@ -102,17 +158,73 @@
   --glass-bg: #{$dark-glass-bg};
   --glass-border: #{$dark-glass-border};
 
+  --surface-base: #{$dark-bg-primary};
+  --surface-subtle: #{$dark-bg-secondary};
+  --surface-muted: #{$dark-bg-tertiary};
+  --surface-raised: #{$dark-bg-card};
+  --surface-overlay: #{$dark-bg-elevated};
+  --surface-sidebar: #{$dark-bg-sidebar};
+  --interactive-hover-bg: #{$dark-primary-lighter};
+  --interactive-active-bg: #{$dark-primary-light};
+  --interactive-focus-ring: #{$dark-primary-lighter};
+  --status-success-soft: #{$dark-success-light};
+  --status-warning-soft: #{$dark-warning-light};
+  --status-danger-soft: #{$dark-danger-light};
+  --status-info-soft: #{$dark-info-light};
+  --table-header-bg: rgba(33, 50, 74, 0.7);
+  --ambient-grid-line: rgba(125, 161, 221, 0.12);
+  --scrollbar-thumb-from: rgba(127, 163, 223, 0.32);
+  --scrollbar-thumb-to: rgba(127, 163, 223, 0.52);
+  --scrollbar-thumb-hover-from: rgba(127, 163, 223, 0.48);
+  --scrollbar-thumb-hover-to: rgba(127, 163, 223, 0.68);
+
+  --pipeline-canvas-bg: linear-gradient(165deg, var(--surface-base) 0%, var(--surface-subtle) 62%, var(--surface-muted) 100%);
+  --pipeline-grid-dot: rgba(152, 185, 238, 0.26);
+  --pipeline-connection-color: rgba(138, 176, 255, 0.86);
+  --pipeline-connection-selected: #9abcff;
+  --pipeline-connection-glow: rgba(138, 176, 255, 0.34);
+  --pipeline-node-bg: rgba(27, 41, 63, 0.9);
+  --pipeline-node-border: rgba(158, 188, 236, 0.34);
+  --pipeline-node-shadow: 0 20px 38px rgba(0, 0, 0, 0.42), 0 1px 0 rgba(209, 224, 251, 0.09) inset;
+  --pipeline-node-hover-shadow: 0 28px 52px rgba(0, 0, 0, 0.5), 0 1px 0 rgba(209, 224, 251, 0.13) inset;
+  --pipeline-node-track: rgba(138, 176, 255, 0.42);
+  --pipeline-node-track-fade: rgba(138, 176, 255, 0.03);
+  --pipeline-node-selected-ring: rgba(138, 176, 255, 0.3);
+  --pipeline-port-input: #9abcff;
+  --pipeline-port-output: #71d9ad;
+
   --bg-ambient-a: radial-gradient(circle at 16% 16%, rgba(87, 132, 224, 0.28), transparent 46%);
   --bg-ambient-b: radial-gradient(circle at 86% 8%, rgba(67, 157, 195, 0.24), transparent 36%);
   --bg-ambient-c: radial-gradient(circle at 56% 88%, rgba(57, 104, 189, 0.22), transparent 45%);
 
-  --el-bg-color: #{$dark-bg-elevated};
-  --el-bg-color-page: #{$dark-bg-primary};
+  --el-color-primary: var(--primary-color);
+  --el-color-success: var(--success-color);
+  --el-color-warning: var(--warning-color);
+  --el-color-danger: var(--danger-color);
+  --el-color-info: var(--info-color);
+  --el-bg-color: var(--surface-overlay);
+  --el-bg-color-page: var(--surface-base);
+  --el-bg-color-overlay: var(--surface-overlay);
+  --el-fill-color: var(--surface-subtle);
   --el-fill-color-blank: rgba(24, 38, 59, 0.72);
   --el-fill-color-light: rgba(34, 52, 79, 0.62);
+  --el-fill-color-lighter: rgba(44, 64, 92, 0.46);
+  --el-fill-color-dark: rgba(10, 18, 30, 0.52);
+  --el-fill-color-darker: rgba(10, 18, 30, 0.68);
   --el-text-color-primary: #{$dark-text-primary};
   --el-text-color-regular: #{$dark-text-secondary};
+  --el-text-color-secondary: #{$dark-text-tertiary};
+  --el-text-color-placeholder: #{$dark-text-placeholder};
+  --el-text-color-disabled: #{$dark-text-muted};
+  --el-border-color: #{$dark-border-color};
   --el-border-color-light: #{$dark-border-color-light};
+  --el-border-color-lighter: #{$dark-border-color-light};
+  --el-border-color-extra-light: #{$dark-border-color-light};
+  --el-border-color-dark: #{$dark-border-color-medium};
+  --el-mask-color: rgba(6, 11, 19, 0.7);
+  --el-mask-color-extra-light: rgba(6, 11, 19, 0.52);
+  --el-overlay-color: rgba(6, 11, 19, 0.76);
+  --el-overlay-color-lighter: rgba(6, 11, 19, 0.62);
 }
 
 * {
@@ -142,7 +254,7 @@ body::before {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  background: repeating-linear-gradient(120deg, rgba(255, 255, 255, 0.16) 0, rgba(255, 255, 255, 0.16) 1px, transparent 1px, transparent 14px);
+  background: repeating-linear-gradient(120deg, var(--ambient-grid-line) 0, var(--ambient-grid-line) 1px, transparent 1px, transparent 14px);
   opacity: 0.28;
   mix-blend-mode: soft-light;
   z-index: -1;
@@ -168,12 +280,12 @@ a {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: linear-gradient(180deg, rgba(67, 117, 204, 0.45) 0%, rgba(67, 117, 204, 0.7) 100%);
+  background: linear-gradient(180deg, var(--scrollbar-thumb-from) 0%, var(--scrollbar-thumb-to) 100%);
   border-radius: $radius-full;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(180deg, rgba(67, 117, 204, 0.66) 0%, rgba(67, 117, 204, 0.88) 100%);
+  background: linear-gradient(180deg, var(--scrollbar-thumb-hover-from) 0%, var(--scrollbar-thumb-hover-to) 100%);
 }
 
 .flex { display: flex; }
@@ -315,7 +427,7 @@ a {
 }
 
 .el-table th.el-table__cell {
-  background: rgba(255, 255, 255, 0.54);
+  background: var(--table-header-bg);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-color-light);
   font-weight: 600;
@@ -401,4 +513,24 @@ a {
 
 .el-empty {
   color: var(--text-secondary);
+}
+
+.el-tabs__item {
+  color: var(--text-secondary);
+}
+
+.el-tabs__item:hover {
+  color: var(--primary-color);
+}
+
+.el-tabs__item.is-active {
+  color: var(--primary-color);
+}
+
+.el-tabs__active-bar {
+  background-color: var(--primary-color);
+}
+
+.el-tabs__nav-wrap::after {
+  background-color: var(--border-color-light);
 }

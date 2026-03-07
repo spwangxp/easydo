@@ -252,7 +252,7 @@ defineExpose({
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  background: #f5f7fa;
+  background: var(--bg-secondary);
   border-bottom: 1px solid #e4e7ed;
   margin: -20px -20px 0;
   

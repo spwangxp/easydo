@@ -20,7 +20,7 @@
           <div style="display: flex; align-items: center; gap: 8px;">
             <el-icon><component :is="type.icon" /></el-icon>
             <span>{{ type.label }}</span>
-            <span style="color: #909399; font-size: 12px;">({{ type.description }})</span>
+            <span style="color: var(--text-muted); font-size: 12px;">({{ type.description }})</span>
           </div>
         </el-option>
       </el-select>

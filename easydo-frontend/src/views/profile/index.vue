@@ -271,7 +271,7 @@ const logoutDevice = (deviceId) => {
     .page-title {
       font-size: 24px;
       font-weight: 600;
-      color: #303133;
+      color: var(--text-primary);
     }
   }
   
@@ -284,7 +284,7 @@ const logoutDevice = (deviceId) => {
       flex-shrink: 0;
       
       .user-card {
-        background: white;
+        background: var(--bg-card);
         border-radius: 8px;
         padding: 30px 20px;
         text-align: center;
@@ -299,18 +299,18 @@ const logoutDevice = (deviceId) => {
         .username {
           font-size: 18px;
           font-weight: 500;
-          color: #303133;
+          color: var(--text-primary);
           margin-bottom: 8px;
         }
         
         .email {
           font-size: 13px;
-          color: #909399;
+          color: var(--text-muted);
         }
       }
       
       .profile-menu {
-        background: white;
+        background: var(--bg-card);
         border-radius: 8px;
         padding: 12px;
         
@@ -319,18 +319,18 @@ const logoutDevice = (deviceId) => {
           align-items: center;
           gap: 12px;
           padding: 12px 16px;
-          color: #606266;
+          color: var(--text-secondary);
           cursor: pointer;
           border-radius: 6px;
           transition: all 0.3s;
           
           &:hover {
-            background: #f5f7fa;
+            background: var(--bg-secondary);
           }
           
           &.active {
-            color: #409EFF;
-            background: #ecf5ff;
+            color: var(--primary-color);
+            background: var(--primary-lighter);
           }
         }
       }
@@ -338,7 +338,7 @@ const logoutDevice = (deviceId) => {
     
     .profile-content {
       flex: 1;
-      background: white;
+      background: var(--bg-card);
       border-radius: 8px;
       padding: 24px;
       
@@ -346,7 +346,7 @@ const logoutDevice = (deviceId) => {
         .section-title {
           font-size: 18px;
           font-weight: 500;
-          color: #303133;
+          color: var(--text-primary);
           margin-bottom: 24px;
           padding-bottom: 16px;
           border-bottom: 1px solid #ebeef5;
@@ -372,8 +372,8 @@ const logoutDevice = (deviceId) => {
             display: flex;
             align-items: center;
             justify-content: center;
-            background: #ecf5ff;
-            color: #409EFF;
+            background: var(--primary-lighter);
+            color: var(--primary-color);
             border-radius: 8px;
             margin-right: 16px;
           }
@@ -384,13 +384,13 @@ const logoutDevice = (deviceId) => {
             h4 {
               font-size: 14px;
               font-weight: 500;
-              color: #303133;
+              color: var(--text-primary);
               margin-bottom: 4px;
             }
             
             p {
               font-size: 12px;
-              color: #909399;
+              color: var(--text-muted);
             }
           }
         }
@@ -408,13 +408,13 @@ const logoutDevice = (deviceId) => {
             h4 {
               font-size: 14px;
               font-weight: 500;
-              color: #303133;
+              color: var(--text-primary);
               margin-bottom: 4px;
             }
             
             p {
               font-size: 12px;
-              color: #909399;
+              color: var(--text-muted);
             }
           }
         }
@@ -434,8 +434,8 @@ const logoutDevice = (deviceId) => {
           margin-bottom: 12px;
           
           &.current {
-            background: #f0f9eb;
-            border-color: #67C23A;
+            background: var(--success-light);
+            border-color: var(--success-color);
           }
           
           .device-icon {
@@ -444,10 +444,10 @@ const logoutDevice = (deviceId) => {
             display: flex;
             align-items: center;
             justify-content: center;
-            background: #f5f7fa;
+            background: var(--bg-secondary);
             border-radius: 8px;
             margin-right: 16px;
-            color: #606266;
+            color: var(--text-secondary);
           }
           
           .device-content {
@@ -462,14 +462,14 @@ const logoutDevice = (deviceId) => {
               .device-name {
                 font-size: 14px;
                 font-weight: 500;
-                color: #303133;
+                color: var(--text-primary);
               }
             }
             
             .device-info,
             .device-time {
               font-size: 12px;
-              color: #909399;
+              color: var(--text-muted);
               margin-top: 4px;
             }
           }
