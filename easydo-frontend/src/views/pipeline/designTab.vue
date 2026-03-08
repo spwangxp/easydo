@@ -203,55 +203,48 @@
             @dblclick="editNode(node)"
           >
             <!-- 输入端口 -->
-            <div 
-              v-for="(input, idx) in node.inputs" 
-              :key="`input-${idx}`"
+            <div
+              v-if="(node.inputs?.length || 0) > 0"
               class="node-port input-port"
-              :class="{ connected: input.connected }"
-              @mousedown.stop="startConnection(node, input, 'input')"
-              @mouseup.stop="finishConnection(node, input, 'input')"
-            >
-              <div class="port-dot"></div>
-              <span class="port-label">{{ input.label }}</span>
-            </div>
+              :class="{ connected: node.inputs?.some(input => input.connected) }"
+              title="输入"
+              @mousedown.stop="startConnection(node, node.inputs[0], 'input')"
+              @mouseup.stop="finishConnection(node, node.inputs[0], 'input')"
+            />
 
             <!-- 节点内容 -->
             <div class="node-content">
               <div class="node-header">
-                <!-- 执行顺序标识 -->
-                <div v-if="executionOrder.get(node.id)" class="node-order-badge">
-                  {{ executionOrder.get(node.id) }}
+                <div class="node-main">
+                  <div v-if="executionOrder.get(node.id)" class="node-order-badge">
+                    #{{ executionOrder.get(node.id) }}
+                  </div>
+                  <div class="node-icon" :style="{ background: getNodeColor(node.type) }">
+                    <el-icon><component :is="getNodeIcon(node.type)" /></el-icon>
+                  </div>
+                  <div class="node-info">
+                    <span class="node-name">{{ node.name }}</span>
+                  </div>
                 </div>
-                <div class="node-icon" :style="{ background: getNodeColor(node.type) }">
-                  <el-icon><component :is="getNodeIcon(node.type)" /></el-icon>
-                </div>
-                <div class="node-info">
-                  <span class="node-name">{{ node.name }}</span>
-                  <span class="node-type">{{ getNodeTypeLabel(node.type) }}</span>
-                </div>
-                <div class="node-actions">
-                  <el-icon class="delete-btn" @click.stop="deleteNode(node)"><Close /></el-icon>
-                </div>
+                <el-icon class="delete-btn" @click.stop="deleteNode(node)"><Close /></el-icon>
               </div>
-              <div class="node-status" v-if="node.status">
-                <el-tag :type="getStatusType(node.status)" size="small">
-                  {{ getStatusText(node.status) }}
-                </el-tag>
+              <div class="node-meta">
+                <span class="meta-chip type-chip">{{ getNodeTypeLabel(node.type) }}</span>
+                <span class="meta-chip io-chip">
+                  IN {{ getNodeInCount(node.id) }} / OUT {{ getNodeOutCount(node.id) }}
+                </span>
               </div>
             </div>
 
             <!-- 输出端口 -->
-            <div 
-              v-for="(output, idx) in node.outputs" 
-              :key="`output-${idx}`"
+            <div
+              v-if="(node.outputs?.length || 0) > 0"
               class="node-port output-port"
-              :class="{ connected: output.connected }"
-              @mousedown.stop="startConnection(node, output, 'output')"
-              @mouseup.stop="finishConnection(node, output, 'output')"
-            >
-              <span class="port-label">{{ output.label }}</span>
-              <div class="port-dot"></div>
-            </div>
+              :class="{ connected: node.outputs?.some(output => output.connected) }"
+              title="输出"
+              @mousedown.stop="startConnection(node, node.outputs[0], 'output')"
+              @mouseup.stop="finishConnection(node, node.outputs[0], 'output')"
+            />
           </div>
         </div>
       </div>
@@ -361,6 +354,27 @@
               </el-form-item>
             </template>
           </el-form>
+        </div>
+
+        <div class="config-section" v-if="getNodeCredentialSlots(selectedNode.type).length > 0">
+          <div class="section-title">凭据绑定</div>
+          <el-form label-position="top" size="small">
+            <el-form-item
+              v-for="slot in getNodeCredentialSlots(selectedNode.type)"
+              :key="slot.slot"
+              :label="`${slot.label || slot.slot}${slot.required ? '（必填）' : ''}`"
+            >
+              <CredentialSelector
+                v-model="selectedNode.params[`credentials.${slot.slot}.credential_id`]"
+                :credential-types="slot.allowed_types || []"
+                :credential-categories="slot.allowed_categories || []"
+                @change="updateNode(selectedNode)"
+              />
+            </el-form-item>
+          </el-form>
+          <div class="config-tip">
+            修改凭据绑定可能影响当前流水线后续运行，以及所有引用该密钥的任务认证行为。
+          </div>
         </div>
 
         <!-- 前置条件 -->
@@ -482,10 +496,12 @@ import {
   Plus,
   Check
 } from '@element-plus/icons-vue'
-import { updatePipeline, getPipelineDetail } from '@/api/pipeline'
+import { updatePipeline, getPipelineDetail, getPipelineTaskTypes } from '@/api/pipeline'
 
 const route = useRoute()
 const pipelineId = computed(() => parseInt(route.params.id))
+const taskTypeDefinitions = ref({})
+const loadedCredentialBindingSnapshot = ref([])
 
 // 画布状态
 const canvasArea = ref(null)
@@ -525,9 +541,7 @@ const componentCategories = [
     name: 'source',
     label: '代码源',
     components: [
-      { type: 'git_clone', name: 'Git 检出', description: 'Git 代码仓库检出', icon: 'Connection', color: '#67C23A', inputs: [], outputs: [{ label: '代码', key: 'code' }] },
-      { type: 'github', name: 'GitHub', description: 'GitHub 代码仓库', icon: 'Connection', color: '#67C23A', inputs: [], outputs: [{ label: '代码', key: 'code' }] },
-      { type: 'gitee', name: 'Gitee', description: 'Gitee 代码仓库', icon: 'Connection', color: '#67C23A', inputs: [], outputs: [{ label: '代码', key: 'code' }] }
+      { type: 'git_clone', name: 'Git 检出', description: 'Git 代码仓库检出', icon: 'Connection', color: '#67C23A', inputs: [], outputs: [{ label: '代码', key: 'code' }] }
     ]
   },
   {
@@ -538,7 +552,7 @@ const componentCategories = [
       { type: 'maven', name: 'Maven 构建', description: 'Maven 项目构建', icon: 'Box', color: '#E6A23C', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '产物', key: 'artifact' }] },
       { type: 'gradle', name: 'Gradle 构建', description: 'Gradle 项目构建', icon: 'Box', color: '#E6A23C', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '产物', key: 'artifact' }] },
       { type: 'docker', name: 'Docker 构建', description: 'Docker 镜像构建', icon: 'Box', color: '#E6A23C', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '镜像', key: 'image' }] },
-      { type: 'custom', name: '自定义脚本', description: '自定义构建脚本', icon: 'Edit', color: '#E6A23C', inputs: [{ label: '输入', key: 'input' }], outputs: [{ label: '输出', key: 'output' }] }
+      { type: 'artifact_publish', name: '制品归档', description: '归档构建产物', icon: 'UploadFilled', color: '#E6A23C', inputs: [{ label: '产物', key: 'artifact' }], outputs: [{ label: '结果', key: 'result' }] }
     ]
   },
   {
@@ -548,7 +562,8 @@ const componentCategories = [
       { type: 'unit', name: '单元测试', description: '执行单元测试', icon: 'Document', color: '#409EFF', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '报告', key: 'report' }] },
       { type: 'integration', name: '集成测试', description: '执行集成测试', icon: 'Document', color: '#409EFF', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '报告', key: 'report' }] },
       { type: 'e2e', name: 'E2E 测试', description: '端到端测试', icon: 'Document', color: '#409EFF', inputs: [{ label: '应用', key: 'app' }], outputs: [{ label: '结果', key: 'result' }] },
-      { type: 'coverage', name: '代码覆盖率', description: '代码覆盖率分析', icon: 'DataAnalysis', color: '#409EFF', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '报告', key: 'report' }] }
+      { type: 'coverage', name: '代码覆盖率', description: '代码覆盖率分析', icon: 'DataAnalysis', color: '#409EFF', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '报告', key: 'report' }] },
+      { type: 'lint', name: '代码检查', description: '静态检查/格式检查', icon: 'Warning', color: '#409EFF', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '结果', key: 'result' }] }
     ]
   },
   {
@@ -557,18 +572,16 @@ const componentCategories = [
     components: [
       { type: 'ssh', name: 'SSH 部署', description: '通过 SSH 部署', icon: 'Promotion', color: '#F56C6C', inputs: [{ label: '产物', key: 'artifact' }], outputs: [{ label: '结果', key: 'result' }] },
       { type: 'kubernetes', name: 'K8s 部署', description: 'Kubernetes 部署', icon: 'Promotion', color: '#F56C6C', inputs: [{ label: '镜像', key: 'image' }], outputs: [{ label: '结果', key: 'result' }] },
-      { type: 'docker-run', name: 'Docker 运行', description: 'Docker 容器运行', icon: 'Promotion', color: '#F56C6C', inputs: [{ label: '镜像', key: 'image' }], outputs: [{ label: '结果', key: 'result' }] },
-      { type: 'script', name: '自定义脚本', description: '自定义部署脚本', icon: 'Edit', color: '#F56C6C', inputs: [{ label: '输入', key: 'input' }], outputs: [{ label: '输出', key: 'output' }] }
+      { type: 'docker-run', name: 'Docker 运行', description: 'Docker 容器运行', icon: 'Promotion', color: '#F56C6C', inputs: [{ label: '镜像', key: 'image' }], outputs: [{ label: '结果', key: 'result' }] }
     ]
   },
   {
     name: 'notify',
     label: '通知',
     components: [
-      { type: 'dingtalk', name: '钉钉通知', description: '钉钉机器人通知', icon: 'Bell', color: 'var(--text-muted)', inputs: [{ label: '消息', key: 'message' }], outputs: [] },
-      { type: 'wechat', name: '企业微信', description: '企业微信通知', icon: 'Bell', color: 'var(--text-muted)', inputs: [{ label: '消息', key: 'message' }], outputs: [] },
       { type: 'email', name: '邮件通知', description: '邮件通知', icon: 'Message', color: 'var(--text-muted)', inputs: [{ label: '消息', key: 'message' }], outputs: [] },
-      { type: 'webhook', name: 'Webhook', description: 'Webhook 回调', icon: 'Link', color: 'var(--text-muted)', inputs: [{ label: '数据', key: 'data' }], outputs: [] }
+      { type: 'webhook', name: 'Webhook', description: 'Webhook 回调', icon: 'Link', color: 'var(--text-muted)', inputs: [{ label: '数据', key: 'data' }], outputs: [] },
+      { type: 'in_app', name: '站内信', description: '发送站内通知消息', icon: 'Bell', color: 'var(--text-muted)', inputs: [{ label: '消息', key: 'message' }], outputs: [] }
     ]
   },
   {
@@ -576,9 +589,6 @@ const componentCategories = [
     label: '工具',
     components: [
       { type: 'shell', name: 'Shell 脚本', description: '执行 Shell 脚本', icon: 'Terminal', color: '#8c33fe', inputs: [{ label: '输入', key: 'input' }], outputs: [{ label: '输出', key: 'output' }] },
-      { type: 'agent', name: 'Agent 执行', description: 'Agent 远程执行任务', icon: 'Monitor', color: '#00d4aa', inputs: [{ label: '输入', key: 'input' }], outputs: [{ label: '输出', key: 'output' }] },
-      { type: 'condition', name: '条件判断', description: '条件分支处理', icon: 'Share', color: '#8c33fe', inputs: [{ label: '输入', key: 'input' }], outputs: [{ label: '是', key: 'yes' }, { label: '否', key: 'no' }] },
-      { type: 'parallel', name: '并行执行', description: '并行执行多个任务', icon: 'Share', color: '#8c33fe', inputs: [{ label: '输入', key: 'input' }], outputs: [{ label: '输出', key: 'output' }] },
       { type: 'sleep', name: '等待', description: '暂停等待', icon: 'Clock', color: '#8c33fe', inputs: [], outputs: [] }
     ]
   }
@@ -627,6 +637,31 @@ const getNodeColor = (type) => {
   return '#409EFF'
 }
 
+const taskTypeAliasMap = {
+  github: 'git_clone',
+  gitee: 'git_clone',
+  agent: 'shell',
+  custom: 'shell',
+  script: 'shell',
+  dingtalk: 'webhook',
+  wechat: 'webhook'
+}
+
+const normalizeTaskType = (type) => {
+  if (!type) return ''
+  const normalized = String(type).trim().toLowerCase()
+  return taskTypeAliasMap[normalized] || normalized
+}
+
+const getNodeCredentialSlots = (type) => {
+  const normalized = normalizeTaskType(type)
+  const def = taskTypeDefinitions.value[normalized]
+  if (!def || !Array.isArray(def.credential_slots)) {
+    return []
+  }
+  return def.credential_slots
+}
+
 // 获取节点参数定义
 const getNodeParams = (type) => {
   const paramDefs = {
@@ -635,105 +670,88 @@ const getNodeParams = (type) => {
       { key: 'repository.branch', label: '分支', type: 'text', placeholder: 'main', value: 'main' },
       { key: 'repository.target_dir', label: '目标目录', type: 'text', placeholder: './app', value: './app' },
       { key: 'repository.commit_id', label: '指定提交（可选）', type: 'text', placeholder: '留空则检出最新提交' },
-      { key: 'repository.shallow_clone', label: '浅克隆', type: 'boolean', value: true },
       { key: 'repository.depth', label: '克隆深度', type: 'number', min: 1, value: 10 },
-      { key: 'repository.submodule', label: '克隆子模块', type: 'boolean', value: false },
       { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 60, value: 300 }
-    ],
-    git: [
-      { key: 'url', label: '仓库地址', type: 'text', placeholder: 'https://github.com/xxx/xxx.git' },
-      { key: 'branch', label: '分支', type: 'text', placeholder: 'main' },
-      { key: 'auth_mode', label: '认证模式', type: 'select', options: [{ label: '无需认证', value: 'none' }, { label: '使用凭据', value: 'credential' }] },
-      { key: 'credential_id', label: '选择凭据', type: 'credential_selector', credential_type: 'TOKEN', show_if: { key: 'auth_mode', value: 'credential' } }
-    ],
-    github: [
-      { key: 'url', label: '仓库地址', type: 'text', placeholder: 'https://github.com/xxx/xxx.git' },
-      { key: 'branch', label: '分支', type: 'text', placeholder: 'main' },
-      { key: 'auth_mode', label: '认证模式', type: 'select', options: [{ label: '无需认证', value: 'none' }, { label: '使用凭据', value: 'credential' }] },
-      { key: 'credential_id', label: '选择 GitHub 凭据', type: 'credential_selector', credential_category: 'github', show_if: { key: 'auth_mode', value: 'credential' } }
-    ],
-    gitee: [
-      { key: 'url', label: '仓库地址', type: 'text', placeholder: 'https://gitee.com/xxx/xxx.git' },
-      { key: 'branch', label: '分支', type: 'text', placeholder: 'main' },
-      { key: 'auth_mode', label: '认证模式', type: 'select', options: [{ label: '无需认证', value: 'none' }, { label: '使用凭据', value: 'credential' }] },
-      { key: 'credential_id', label: '选择 Gitee 凭据', type: 'credential_selector', credential_category: 'gitee', show_if: { key: 'auth_mode', value: 'credential' } }
     ],
     npm: [
       { key: 'command', label: '构建命令', type: 'text', placeholder: 'npm run build' },
-      { key: 'workingDir', label: '工作目录', type: 'text', placeholder: './' },
-      { key: 'cache', label: '启用缓存', type: 'boolean' }
+      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
+    ],
+    maven: [
+      { key: 'command', label: '构建命令', type: 'text', placeholder: 'mvn -B clean package' },
+      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
+    ],
+    gradle: [
+      { key: 'command', label: '构建命令', type: 'text', placeholder: './gradlew build' },
+      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
     ],
     docker: [
       { key: 'image_name', label: '镜像名称', type: 'text', placeholder: 'myapp' },
       { key: 'image_tag', label: '镜像标签', type: 'text', placeholder: 'latest' },
       { key: 'dockerfile', label: 'Dockerfile 路径', type: 'text', placeholder: './Dockerfile', value: './Dockerfile' },
       { key: 'context', label: '构建上下文', type: 'text', placeholder: '.', value: '.' },
-      { key: 'build_args', label: '构建参数', type: 'textarea', placeholder: 'JSON格式，如 {"KEY": "value"}' },
-      { key: 'cache_from', label: '缓存镜像', type: 'text', placeholder: 'myapp:latest' },
-      { key: 'cache_to', label: '缓存输出', type: 'text', placeholder: 'myapp:cache' },
       { key: 'push', label: '构建后推送', type: 'boolean', value: true },
       { key: 'registry', label: '仓库地址', type: 'text', placeholder: 'registry.example.com' },
-      { key: 'auth_mode', label: '认证模式', type: 'select', options: [{ label: '无需认证', value: 'none' }, { label: '使用凭据', value: 'credential' }] },
-      { key: 'credential_id', label: '选择 Docker 凭据', type: 'credential_selector', credential_category: 'docker', show_if: { key: 'auth_mode', value: 'credential' } },
       { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 60, value: 600 }
+    ],
+    artifact_publish: [
+      { key: 'artifact_path', label: '产物路径', type: 'text', placeholder: './dist' },
+      { key: 'target_dir', label: '归档目标目录', type: 'text', placeholder: './artifacts' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 60, value: 300 }
     ],
     unit: [
       { key: 'command', label: '测试命令', type: 'text', placeholder: 'npm run test:unit' },
-      { key: 'coverage', label: '生成覆盖率报告', type: 'boolean' }
+      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
+    ],
+    integration: [
+      { key: 'command', label: '测试命令', type: 'text', placeholder: 'npm run test:integration' },
+      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
+    ],
+    e2e: [
+      { key: 'command', label: '测试命令', type: 'text', placeholder: 'npm run test:e2e' },
+      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
+    ],
+    coverage: [
+      { key: 'command', label: '测试命令', type: 'text', placeholder: 'npm run test:coverage' },
+      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
+    ],
+    lint: [
+      { key: 'command', label: '检查命令', type: 'text', placeholder: 'npm run lint' },
+      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
     ],
     ssh: [
       { key: 'host', label: '主机地址', type: 'text', placeholder: '192.168.1.1' },
       { key: 'port', label: '端口', type: 'number', placeholder: '22' },
-      { key: 'auth_mode', label: '认证模式', type: 'select', options: [{ label: '密码认证', value: 'password' }, { label: '使用 SSH 凭据', value: 'credential' }] },
-      { key: 'credential_id', label: '选择 SSH 凭据', type: 'credential_selector', credential_type: 'SSH_KEY', show_if: { key: 'auth_mode', value: 'credential' } },
-      { key: 'script', label: '部署脚本', type: 'textarea', placeholder: '部署命令' }
+      { key: 'user', label: '用户名', type: 'text', placeholder: 'root' },
+      { key: 'script', label: '远端脚本', type: 'textarea', placeholder: 'cd /app && ./deploy.sh' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 600 }
     ],
     kubernetes: [
-      { key: 'cluster', label: '集群名称', type: 'text', placeholder: 'default' },
-      { key: 'namespace', label: '命名空间', type: 'text', placeholder: 'default' },
-      { key: 'deployment', label: 'Deployment', type: 'text' },
-      { key: 'image', label: '镜像', type: 'text' },
-      { key: 'auth_mode', label: '认证模式', type: 'select', options: [{ label: '默认配置', value: 'default' }, { label: '使用凭据', value: 'credential' }] },
-      { key: 'credential_id', label: '选择 K8s 凭据', type: 'credential_selector', credential_category: 'kubernetes', show_if: { key: 'auth_mode', value: 'credential' } }
+      { key: 'command', label: '部署命令', type: 'textarea', placeholder: 'kubectl apply -f deploy.yaml' },
+      { key: 'manifest', label: 'Manifest 文件(可选)', type: 'text', placeholder: './deploy.yaml' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 600 }
     ],
-    dingtalk: [
-      { key: 'auth_mode', label: '认证模式', type: 'select', options: [{ label: '直接配置', value: 'direct' }, { label: '使用凭据', value: 'credential' }] },
-      { key: 'credential_id', label: '选择钉钉凭据', type: 'credential_selector', credential_category: 'dingtalk', show_if: { key: 'auth_mode', value: 'credential' } },
-      { key: 'webhook', label: 'Webhook 地址', type: 'text', placeholder: 'https://oapi.dingtalk.com/robot/send?access_token=xxx', show_if: { key: 'auth_mode', value: 'direct' } },
-      { key: 'atMobiles', label: '@手机号', type: 'text', placeholder: '138xxxx' },
-      { key: 'atAll', label: '@全体成员', type: 'boolean' }
-    ],
-    wechat: [
-      { key: 'auth_mode', label: '认证模式', type: 'select', options: [{ label: '直接配置', value: 'direct' }, { label: '使用凭据', value: 'credential' }] },
-      { key: 'credential_id', label: '选择企业微信凭据', type: 'credential_selector', credential_category: 'wechat', show_if: { key: 'auth_mode', value: 'credential' } }
+    'docker-run': [
+      { key: 'registry', label: '镜像仓库(可选)', type: 'text', placeholder: 'registry.example.com' },
+      { key: 'image_name', label: '镜像名称', type: 'text', placeholder: 'myapp' },
+      { key: 'image_tag', label: '镜像标签', type: 'text', placeholder: 'latest' },
+      { key: 'container_name', label: '容器名称(可选)', type: 'text', placeholder: 'myapp-web' },
+      { key: 'run_args', label: '运行参数', type: 'text', placeholder: '-p 8080:8080 -e ENV=prod' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 600 }
     ],
     shell: [
       { key: 'script', label: '脚本内容', type: 'textarea', placeholder: 'echo "hello"' },
       { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
       { key: 'env', label: '环境变量', type: 'textarea', placeholder: 'JSON格式，如 {"KEY": "value"}' },
       { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
-    ],
-    agent: [
-      { key: 'agentId', label: '选择 Agent', type: 'select', placeholder: '选择执行 agent' },
-      { key: 'taskType', label: '任务类型', type: 'select', options: [
-        { label: 'Shell 脚本', value: 'shell' },
-        { label: 'Python 脚本', value: 'python' },
-        { label: 'Node.js 脚本', value: 'node' },
-        { label: 'Docker 命令', value: 'docker' }
-      ]},
-      { key: 'script', label: '执行脚本', type: 'textarea', placeholder: '要执行的脚本内容' },
-      { key: 'workingDir', label: '工作目录', type: 'text', placeholder: './' },
-      { key: 'envVars', label: '环境变量', type: 'text', placeholder: 'JSON 格式，如 {"KEY": "value"}' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400 }
-    ],
-    custom: [
-      { key: 'script', label: '脚本内容', type: 'textarea', placeholder: 'echo "hello"' },
-      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
-      { key: 'env', label: '环境变量', type: 'textarea', placeholder: 'JSON格式，如 {"KEY": "value"}' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
-    ],
-    condition: [
-      { key: 'expression', label: '条件表达式', type: 'text', placeholder: '${VAR} == "value"' }
     ],
     sleep: [
       { key: 'seconds', label: '等待秒数', type: 'number', min: 1, max: 3600, placeholder: '60' }
@@ -743,10 +761,37 @@ const getNodeParams = (type) => {
       { key: 'cc', label: '抄送', type: 'textarea', placeholder: '用逗号分隔多个邮箱' },
       { key: 'subject', label: '邮件主题', type: 'text', placeholder: '构建完成通知' },
       { key: 'body', label: '邮件正文', type: 'textarea', placeholder: '支持 HTML 格式' },
+      { key: 'smtp_host', label: 'SMTP 主机', type: 'text', placeholder: 'smtp.example.com' },
+      { key: 'smtp_port', label: 'SMTP 端口', type: 'number', min: 1, max: 65535, value: 25 },
+      { key: 'smtp_username', label: 'SMTP 用户名', type: 'text', placeholder: 'noreply@example.com' },
+      { key: 'smtp_password', label: 'SMTP 密码', type: 'text', placeholder: '应用密码或授权码' },
+      { key: 'from', label: '发件人', type: 'text', placeholder: 'noreply@example.com' },
       { key: 'body_type', label: '正文类型', type: 'select', options: [
         { label: '纯文本', value: 'text' },
         { label: 'HTML', value: 'html' }
       ], value: 'text' }
+    ],
+    webhook: [
+      { key: 'url', label: 'Webhook 地址', type: 'text', placeholder: 'https://example.com/webhook' },
+      { key: 'method', label: '请求方法', type: 'select', options: [
+        { label: 'POST', value: 'POST' },
+        { label: 'PUT', value: 'PUT' },
+        { label: 'PATCH', value: 'PATCH' }
+      ], value: 'POST' },
+      { key: 'headers_json', label: '请求头(JSON)', type: 'textarea', placeholder: '{"Authorization":"Bearer xxx"}' },
+      { key: 'body', label: '请求体', type: 'textarea', placeholder: '{"status":"success"}' },
+      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 300, value: 10 }
+    ],
+    in_app: [
+      { key: 'title', label: '消息标题', type: 'text', placeholder: '流水线通知' },
+      { key: 'content', label: '消息内容', type: 'textarea', placeholder: '部署已完成' },
+      { key: 'message_type', label: '消息类型', type: 'select', options: [
+        { label: '系统', value: 'system' },
+        { label: '告警', value: 'alert' },
+        { label: '警告', value: 'warning' }
+      ], value: 'system' },
+      { key: 'priority', label: '优先级', type: 'number', min: 0, max: 2, value: 0 },
+      { key: 'metadata_json', label: '附加元数据(JSON)', type: 'textarea', placeholder: '{"scope":"pipeline"}' }
     ]
   }
   return paramDefs[type] || []
@@ -1288,6 +1333,39 @@ const redo = () => {
 const canUndo = computed(() => historyIndex.value > 0)
 const canRedo = computed(() => historyIndex.value < history.value.length - 1)
 
+const nodeDependencyStats = computed(() => {
+  const statsMap = new Map()
+
+  nodes.value.forEach(node => {
+    statsMap.set(node.id, { inSet: new Set(), outSet: new Set() })
+  })
+
+  connections.value.forEach(conn => {
+    if (!conn?.from || !conn?.to || conn.from === conn.to) return
+
+    const from = statsMap.get(conn.from)
+    const to = statsMap.get(conn.to)
+    if (!from || !to) return
+
+    from.outSet.add(conn.to)
+    to.inSet.add(conn.from)
+  })
+
+  statsMap.forEach((value, nodeID) => {
+    statsMap.set(nodeID, { in: value.inSet.size, out: value.outSet.size })
+  })
+
+  return statsMap
+})
+
+const getNodeInCount = (nodeId) => {
+  return nodeDependencyStats.value.get(nodeId)?.in || 0
+}
+
+const getNodeOutCount = (nodeId) => {
+  return nodeDependencyStats.value.get(nodeId)?.out || 0
+}
+
 // 计算执行顺序
 const executionOrder = computed(() => getExecutionOrder())
 
@@ -1680,6 +1758,68 @@ const getExecutionOrder = () => {
   return orderMap
 }
 
+const buildCredentialBindingSnapshot = (nodeList) => {
+  const list = Array.isArray(nodeList) ? nodeList : []
+  const result = []
+
+  list.forEach(node => {
+    const params = node?.params || {}
+    Object.entries(params).forEach(([key, value]) => {
+      const match = /^credentials\.([^.]+)\.credential_id$/.exec(key)
+      if (!match) return
+
+      const slot = match[1]
+      const credentialID = Number(value || 0)
+      if (!Number.isFinite(credentialID) || credentialID <= 0) return
+
+      result.push({
+        key: `${node.id}::${slot}`,
+        node_id: node.id,
+        node_name: node.name || node.id,
+        task_type: normalizeTaskType(node.type),
+        slot,
+        credential_id: credentialID
+      })
+    })
+  })
+
+  result.sort((a, b) => a.key.localeCompare(b.key))
+  return result
+}
+
+const diffCredentialBindingSnapshots = (beforeList, afterList) => {
+  const beforeMap = new Map((beforeList || []).map(item => [item.key, item]))
+  const afterMap = new Map((afterList || []).map(item => [item.key, item]))
+
+  const added = []
+  const removed = []
+  const changed = []
+
+  afterMap.forEach((afterItem, key) => {
+    const beforeItem = beforeMap.get(key)
+    if (!beforeItem) {
+      added.push(afterItem)
+      return
+    }
+    if (beforeItem.credential_id !== afterItem.credential_id) {
+      changed.push({ before: beforeItem, after: afterItem })
+    }
+  })
+
+  beforeMap.forEach((beforeItem, key) => {
+    if (!afterMap.has(key)) {
+      removed.push(beforeItem)
+    }
+  })
+
+  return {
+    added,
+    removed,
+    changed,
+    total: added.length + removed.length + changed.length
+  }
+}
+
 // 保存流水线
 const savePipeline = async () => {
   // 验证 DAG
@@ -1754,6 +1894,33 @@ const savePipeline = async () => {
       nodes: nodeList,
       edges: edges
     }
+
+    const nextSnapshot = buildCredentialBindingSnapshot(nodes.value)
+    const credentialDiff = diffCredentialBindingSnapshots(loadedCredentialBindingSnapshot.value, nextSnapshot)
+    if (credentialDiff.total > 0) {
+      const previewLines = []
+      credentialDiff.added.slice(0, 4).forEach(item => {
+        previewLines.push(`新增绑定：${item.node_name}/${item.slot} -> 凭据 #${item.credential_id}`)
+      })
+      credentialDiff.changed.slice(0, 4).forEach(item => {
+        previewLines.push(`变更绑定：${item.after.node_name}/${item.after.slot} #${item.before.credential_id} -> #${item.after.credential_id}`)
+      })
+      credentialDiff.removed.slice(0, 4).forEach(item => {
+        previewLines.push(`移除绑定：${item.node_name}/${item.slot} (原凭据 #${item.credential_id})`)
+      })
+
+      const warningText = [
+        `检测到 ${credentialDiff.total} 处凭据绑定变更。`,
+        '这可能影响该流水线后续运行认证，以及相关密钥的影响范围统计。',
+        ...previewLines
+      ].join('\n')
+
+      await ElMessageBox.confirm(warningText, '流水线变更影响提醒', {
+        type: 'warning',
+        confirmButtonText: '继续保存',
+        cancelButtonText: '取消'
+      })
+    }
     
     console.log('保存流水线配置:', JSON.stringify(pipelineData, null, 2))
     
@@ -1764,11 +1931,13 @@ const savePipeline = async () => {
     
     if (response.code === 200) {
       ElMessage.success('流水线保存成功')
+      loadedCredentialBindingSnapshot.value = nextSnapshot
       saveHistory()
     } else {
       ElMessage.error(response.message || '保存失败')
     }
   } catch (error) {
+    if (error === 'cancel' || error === 'close') return
     console.error('保存流水线失败:', error)
     ElMessage.error('保存失败，请稍后重试')
   }
@@ -1777,6 +1946,23 @@ const savePipeline = async () => {
 // 保存配置
 const saveNodeConfig = () => {
   ElMessage.success('配置已保存')
+}
+
+const loadTaskTypeDefinitions = async () => {
+  try {
+    const response = await getPipelineTaskTypes()
+    if (response.code !== 200 || !Array.isArray(response.data)) {
+      return
+    }
+    const map = {}
+    response.data.forEach(item => {
+      if (!item?.type) return
+      map[String(item.type).trim().toLowerCase()] = item
+    })
+    taskTypeDefinitions.value = map
+  } catch (error) {
+    console.error('加载任务类型定义失败:', error)
+  }
 }
 
 // 加载流水线配置
@@ -1864,6 +2050,7 @@ const loadPipeline = async () => {
           syncConnectionsWithPredecessors()
           console.log('旧格式流水线配置加载成功', { nodes: nodes.value.length, connections: connections.value.length })
         }
+        loadedCredentialBindingSnapshot.value = buildCredentialBindingSnapshot(nodes.value)
       } catch (parseError) {
         console.error('解析流水线配置失败:', parseError)
       }
@@ -1877,9 +2064,24 @@ const loadPipeline = async () => {
 const getDefaultInputs = (type) => {
   const inputsMap = {
     git_clone: [],
+    npm: [{ label: '代码', key: 'code' }],
+    maven: [{ label: '代码', key: 'code' }],
+    gradle: [{ label: '代码', key: 'code' }],
     shell: [{ label: '输入', key: 'input' }],
     docker: [{ label: '代码', key: 'code' }],
+    artifact_publish: [{ label: '产物', key: 'artifact' }],
+    unit: [{ label: '代码', key: 'code' }],
+    integration: [{ label: '代码', key: 'code' }],
+    e2e: [{ label: '应用', key: 'app' }],
+    coverage: [{ label: '代码', key: 'code' }],
+    lint: [{ label: '代码', key: 'code' }],
+    ssh: [{ label: '产物', key: 'artifact' }],
+    kubernetes: [{ label: '镜像', key: 'image' }],
+    'docker-run': [{ label: '镜像', key: 'image' }],
+    sleep: [],
     email: [{ label: '消息', key: 'message' }],
+    webhook: [{ label: '数据', key: 'data' }],
+    in_app: [{ label: '消息', key: 'message' }],
     default: [{ label: '输入', key: 'input' }]
   }
   return inputsMap[type] || inputsMap.default
@@ -1889,9 +2091,24 @@ const getDefaultInputs = (type) => {
 const getDefaultOutputs = (type) => {
   const outputsMap = {
     git_clone: [{ label: '代码', key: 'code' }],
+    npm: [{ label: '产物', key: 'artifact' }],
+    maven: [{ label: '产物', key: 'artifact' }],
+    gradle: [{ label: '产物', key: 'artifact' }],
     shell: [{ label: '输出', key: 'output' }],
     docker: [{ label: '镜像', key: 'image' }],
+    artifact_publish: [{ label: '结果', key: 'result' }],
+    unit: [{ label: '报告', key: 'report' }],
+    integration: [{ label: '报告', key: 'report' }],
+    e2e: [{ label: '结果', key: 'result' }],
+    coverage: [{ label: '报告', key: 'report' }],
+    lint: [{ label: '结果', key: 'result' }],
+    ssh: [{ label: '结果', key: 'result' }],
+    kubernetes: [{ label: '结果', key: 'result' }],
+    'docker-run': [{ label: '结果', key: 'result' }],
+    sleep: [],
     email: [],
+    webhook: [],
+    in_app: [],
     default: [{ label: '输出', key: 'output' }]
   }
   return outputsMap[type] || outputsMap.default
@@ -1921,6 +2138,8 @@ const updateAllPortsConnectionStatus = () => {
 
 // 初始化
 onMounted(async () => {
+  await loadTaskTypeDefinitions()
+
   // 加载流水线配置
   await loadPipeline()
   
@@ -1939,27 +2158,6 @@ onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown)
   window.removeEventListener('keyup', handleKeyUp)
 })
-
-// 状态相关
-const getStatusType = (status) => {
-  const types = {
-    success: 'success',
-    running: 'warning',
-    failed: 'danger',
-    pending: 'info'
-  }
-  return types[status] || 'info'
-}
-
-const getStatusText = (status) => {
-  const texts = {
-    success: '成功',
-    running: '运行中',
-    failed: '失败',
-    pending: '等待'
-  }
-  return texts[status] || status
-}
 </script>
 
 <style lang="scss" scoped>
@@ -2263,7 +2461,7 @@ const getStatusText = (status) => {
 
 .pipeline-node {
   position: absolute;
-  min-width: 200px;
+  min-width: 220px;
   background: var(--pipeline-node-bg);
   border: 1px solid var(--pipeline-node-border);
   border-radius: $radius-lg;
@@ -2271,26 +2469,14 @@ const getStatusText = (status) => {
   transition: box-shadow $transition-base, border-color $transition-base, transform $transition-base;
   overflow: visible;
   box-shadow: var(--pipeline-node-shadow);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   isolation: isolate;
-
-  &::before {
-    content: '';
-    position: absolute;
-    left: 14px;
-    right: 14px;
-    top: 72px;
-    height: 1px;
-    background: linear-gradient(90deg, var(--pipeline-node-track-fade) 0%, var(--pipeline-node-track) 48%, var(--pipeline-node-track-fade) 100%);
-    pointer-events: none;
-    z-index: 0;
-  }
 
   &:hover {
     border-color: var(--pipeline-connection-selected);
     box-shadow: var(--pipeline-node-hover-shadow);
-    transform: translateY(-2px);
+    transform: translateY(-1px);
   }
 
   &.selected {
@@ -2306,104 +2492,72 @@ const getStatusText = (status) => {
 
   .node-port {
     position: absolute;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    height: 24px;
-    padding: 0 8px;
-    cursor: pointer;
-    transition: all 0.2s;
-
-    .port-dot {
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      background: var(--pipeline-port-input);
-      border: 2px solid var(--surface-base);
-      transition: all 0.2s;
-      box-shadow: 0 0 0 2px var(--pipeline-node-track);
-    }
-
-    .port-label {
-      font-size: 11px;
-      color: var(--text-secondary);
-      white-space: nowrap;
-      font-weight: 500;
-    }
-
-    &:hover {
-      .port-dot {
-        transform: scale(1.3);
-        box-shadow: 0 0 12px var(--pipeline-connection-selected);
-      }
-    }
+    top: 0;
+    bottom: 0;
+    width: 14px;
+    cursor: crosshair;
+    background: transparent;
+    z-index: 2;
 
     &.input-port {
-      left: -12px;
-      top: 66px;
-      transform: translateX(-100%);
-
-      .port-dot {
-        background: var(--pipeline-port-input);
-      }
+      left: -7px;
+      transform: none;
     }
 
     &.output-port {
-      right: -12px;
-      top: 66px;
-
-      .port-dot {
-        background: var(--pipeline-port-output);
-      }
-
-      &:hover .port-dot {
-        background: var(--pipeline-port-output);
-        box-shadow: 0 0 12px var(--pipeline-port-output);
-      }
-    }
-
-    &.connected .port-dot {
-      background: var(--pipeline-port-output);
-      box-shadow: 0 0 8px var(--pipeline-port-output);
+      right: -7px;
+      transform: none;
     }
   }
 
   .node-content {
     position: relative;
     z-index: 1;
-    padding: 16px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
 
     .node-header {
       display: flex;
-      align-items: center;
-      gap: 12px;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+
+      .node-main {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 1;
+        min-width: 0;
+      }
 
       .node-order-badge {
-        width: 28px;
-        height: 28px;
+        min-width: 24px;
+        height: 24px;
+        padding: 0 6px;
         display: flex;
         align-items: center;
         justify-content: center;
-        background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
-        color: white;
-        font-size: 12px;
+        background: var(--pipeline-node-track);
+        color: var(--primary-color);
+        font-size: 11px;
         font-weight: 700;
-        border-radius: 50%;
+        border-radius: $radius-full;
         flex-shrink: 0;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
       }
 
       .node-icon {
-        width: 40px;
-        height: 40px;
+        width: 32px;
+        height: 32px;
         display: flex;
         align-items: center;
         justify-content: center;
         border-radius: $radius-md;
         color: white;
-        font-size: 20px;
+        font-size: 16px;
         flex-shrink: 0;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
       }
 
       .node-info {
@@ -2413,54 +2567,63 @@ const getStatusText = (status) => {
         .node-name {
           display: block;
           color: var(--text-primary);
-          font-size: 14px;
+          font-size: 13px;
           font-weight: 600;
+          line-height: 1.2;
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
         }
-
-        .node-type {
-          display: block;
-          color: var(--text-muted);
-          font-size: 12px;
-          margin-top: 2px;
-        }
       }
 
-      .node-actions {
+      .delete-btn {
         opacity: 0;
         transition: opacity 0.2s;
+        color: var(--text-muted);
+        cursor: pointer;
+        font-size: 16px;
+        padding: 4px;
+        border-radius: $radius-sm;
+        transition: all $transition-fast;
 
-        .delete-btn {
+        &:hover {
           color: var(--danger-color);
-          cursor: pointer;
-          font-size: 16px;
-          padding: 4px;
-          border-radius: $radius-sm;
-          transition: all $transition-fast;
-
-          &:hover {
-            color: var(--danger-color);
-            background: var(--danger-light);
-          }
+          background: var(--danger-light);
         }
       }
     }
 
-    .node-status {
-      margin-top: 12px;
+    .node-meta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
 
-      :deep(.el-tag) {
+      .meta-chip {
+        display: inline-flex;
+        align-items: center;
+        height: 22px;
+        padding: 0 8px;
         border-radius: $radius-full;
-        padding: 4px 12px;
+        font-size: 11px;
         font-weight: 500;
-        border: none;
+        line-height: 1;
+        color: var(--text-secondary);
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color-light);
+      }
+
+      .type-chip {
+        color: var(--text-secondary);
+      }
+
+      .io-chip {
+        color: var(--text-muted);
       }
     }
   }
 
-  &:hover .node-actions {
+  &:hover .delete-btn {
     opacity: 1;
   }
 }

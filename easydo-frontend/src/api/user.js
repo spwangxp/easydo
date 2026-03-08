@@ -15,6 +15,13 @@ export function logout() {
   })
 }
 
+export function refreshAuthToken() {
+  return request({
+    url: '/auth/refresh',
+    method: 'post'
+  })
+}
+
 export function getUserInfo() {
   return request({
     url: '/auth/userinfo',

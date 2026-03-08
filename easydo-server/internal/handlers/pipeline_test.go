@@ -2,16 +2,22 @@ package handlers
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"easydo-server/internal/models"
+	"github.com/gin-gonic/gin"
 )
 
 func TestPipelineConfig_GetEdges(t *testing.T) {
 	tests := []struct {
-		name           string
-		config         PipelineConfig
-		expectedEdges  int
-		expectedFrom   string
-		expectedTo     string
+		name          string
+		config        PipelineConfig
+		expectedEdges int
+		expectedFrom  string
+		expectedTo    string
 	}{
 		{
 			name: "new format with edges",
@@ -81,10 +87,10 @@ func TestPipelineConfig_GetEdges(t *testing.T) {
 
 func TestPipelineNode_GetNodeConfig(t *testing.T) {
 	tests := []struct {
-		name          string
-		node          PipelineNode
-		expectedType  string
-		expectEmpty   bool
+		name         string
+		node         PipelineNode
+		expectedType string
+		expectEmpty  bool
 	}{
 		{
 			name: "new format with config",
@@ -477,10 +483,10 @@ func TestValidateDAG(t *testing.T) {
 				},
 			},
 			expectValid: false,
-			expectErr:   "流水线配置无效：存在不可达节点: [3]",
+			expectErr:   "流水线配置无效：存在孤立节点（未连接到依赖图）: [3]",
 		},
 		{
-			name: "valid - disconnected components (multiple entry points)",
+			name: "invalid - disconnected components without edges",
 			config: PipelineConfig{
 				Version: "2.0",
 				Nodes: []PipelineNode{
@@ -489,7 +495,8 @@ func TestValidateDAG(t *testing.T) {
 				},
 				Edges: []PipelineEdge{},
 			},
-			expectValid: true,
+			expectValid: false,
+			expectErr:   "流水线配置无效：多节点流水线必须包含依赖边",
 		},
 		{
 			name: "invalid - self-referencing node",
@@ -614,5 +621,155 @@ func TestValidateDAG(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestValidatePipelineCredentialBindings_UnknownSlot(t *testing.T) {
+	handler := &PipelineHandler{}
+	config := PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{
+				ID:   "1",
+				Type: "git_clone",
+				Name: "Clone",
+				Config: map[string]interface{}{
+					"repository": map[string]interface{}{
+						"url": "https://example.com/repo.git",
+					},
+					"credentials": map[string]interface{}{
+						"unknown_slot": map[string]interface{}{
+							"credential_id": 1,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := handler.validatePipelineCredentialBindings(&config, 0, "", 0)
+	if err == nil {
+		t.Fatalf("expected unknown slot validation error")
+	}
+	if !strings.Contains(err.Error(), "不支持凭据槽位") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseAndValidatePipelineConfig_NormalizesTaskType(t *testing.T) {
+	handler := &PipelineHandler{}
+	raw := `{
+		"version":"2.0",
+		"nodes":[
+			{"id":"1","type":"github","name":"Clone","config":{"repository":{"url":"https://example.com/repo.git"}}}
+		],
+		"edges":[]
+	}`
+
+	config, refs, errMsg, err := handler.parseAndValidatePipelineConfig(raw, 0, "", 0)
+	if err != nil {
+		t.Fatalf("expected parse success, got err=%v, msg=%s", err, errMsg)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("expected no credential refs, got %d", len(refs))
+	}
+	if len(config.Nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(config.Nodes))
+	}
+	if config.Nodes[0].Type != "git_clone" {
+		t.Fatalf("expected normalized type git_clone, got %s", config.Nodes[0].Type)
+	}
+}
+
+func TestGetPipelineTaskTypes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := &PipelineHandler{}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	handler.GetPipelineTaskTypes(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if int(resp["code"].(float64)) != 200 {
+		t.Fatalf("expected code=200, got %+v", resp["code"])
+	}
+
+	data, ok := resp["data"].([]interface{})
+	if !ok || len(data) == 0 {
+		t.Fatalf("expected non-empty task type list")
+	}
+}
+
+func TestApplyServerCredentialConfig_WebhookMTLS(t *testing.T) {
+	nodeConfig := map[string]interface{}{}
+	slot := taskCredentialSlot{Slot: "webhook_mtls"}
+	credential := models.Credential{Type: models.TypeCert}
+	decrypted := map[string]interface{}{
+		"cert_pem":    "CERT",
+		"key_pem":     "KEY",
+		"ca_cert":     "CA",
+		"server_name": "api.example.com",
+	}
+
+	applyServerCredentialConfig("webhook", slot, credential, decrypted, nodeConfig)
+
+	if nodeConfig["tls_client_cert"] != "CERT" {
+		t.Fatalf("expected tls_client_cert to be populated")
+	}
+	if nodeConfig["tls_client_key"] != "KEY" {
+		t.Fatalf("expected tls_client_key to be populated")
+	}
+	if nodeConfig["tls_ca_cert"] != "CA" {
+		t.Fatalf("expected tls_ca_cert to be populated")
+	}
+	if nodeConfig["tls_server_name"] != "api.example.com" {
+		t.Fatalf("expected tls_server_name to be populated")
+	}
+}
+
+func TestBuildWebhookTLSConfig_Empty(t *testing.T) {
+	tlsConfig, err := buildWebhookTLSConfig(map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if tlsConfig != nil {
+		t.Fatalf("expected nil tls config for empty input")
+	}
+}
+
+func TestBuildWebhookTLSConfig_InsecureSkipVerify(t *testing.T) {
+	tlsConfig, err := buildWebhookTLSConfig(map[string]interface{}{
+		"tls_insecure_skip_verify": true,
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if tlsConfig == nil || !tlsConfig.InsecureSkipVerify {
+		t.Fatalf("expected tls config with insecure skip verify")
+	}
+}
+
+func TestBuildWebhookTLSConfig_InvalidCombination(t *testing.T) {
+	_, err := buildWebhookTLSConfig(map[string]interface{}{
+		"tls_client_cert": "only-cert",
+	})
+	if err == nil || !strings.Contains(err.Error(), "without tls_client_key") {
+		t.Fatalf("expected tls_client_cert without key error, got %v", err)
+	}
+}
+
+func TestBuildWebhookTLSConfig_InvalidCA(t *testing.T) {
+	_, err := buildWebhookTLSConfig(map[string]interface{}{
+		"tls_ca_cert": "not-a-pem",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid tls_ca_cert PEM") {
+		t.Fatalf("expected invalid tls_ca_cert PEM error, got %v", err)
 	}
 }

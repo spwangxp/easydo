@@ -3,31 +3,32 @@ package models
 // Agent represents an execution agent that runs on hosts
 type Agent struct {
 	BaseModel
-	Name                string  `gorm:"size:128;not null" json:"name"`
-	Host                string  `gorm:"size:255;not null" json:"host"`
-	Port                int     `gorm:"not null" json:"port"`
-	Token               string  `gorm:"size:256;not null" json:"token"`                       // Secret token for authentication
-	RegisterKey         string  `gorm:"size:256" json:"register_key"`                         // Registration key for fetching token after approval
-	Status              string  `gorm:"size:32;default:'offline'" json:"status"`              // online, offline, busy, error
-	RegistrationStatus  string  `gorm:"size:32;default:'pending'" json:"registration_status"` // pending, approved, rejected
-	ApprovedAt          int64   `json:"approved_at"`                                          // Approval timestamp
-	ApprovedBy          *uint64 `gorm:"index" json:"approved_by"`                             // Approver user ID
-	ApprovedRemark      string  `gorm:"type:text" json:"approved_remark"`                     // Approval remark
-	Labels              string  `gorm:"type:text" json:"labels"`                              // JSON array of labels ["linux", "docker", "cpu=8"]
-	Tags                string  `gorm:"type:text" json:"tags"`                                // JSON object of tags {"env": "prod", "region": "cn-east"}
-	Version             string  `gorm:"size:32" json:"version"`                               // Agent version
-	OS                  string  `gorm:"size:64" json:"os"`                                    // Operating system
-	Arch                string  `gorm:"size:32" json:"arch"`                                  // Architecture
-	CPUCores            int     `json:"cpu_cores"`                                            // Number of CPU cores
-	MemoryTotal         int64   `json:"memory_total"`                                         // Total memory in bytes
-	DiskTotal           int64   `json:"disk_total"`                                           // Total disk space in bytes
-	Hostname            string  `gorm:"size:128" json:"hostname"`
-	IPAddress           string  `gorm:"size:64" json:"ip_address"`
-	LastHeartAt         int64   `json:"last_heart_at"`                                                  // Last heartbeat timestamp
-	HeartbeatInterval   int     `gorm:"column:heartbeat_interval;default:10" json:"heartbeat_interval"` // Heartbeat interval in seconds
-	ConsecutiveSuccess  int     `gorm:"default:0" json:"consecutive_success"`                           // Consecutive successful heartbeats (max 3)
-	ConsecutiveFailures int     `gorm:"default:0" json:"consecutive_failures"`                          // Consecutive failed heartbeats (max 3)
-	OwnerID             *uint64 `gorm:"index" json:"owner_id"`                                          // Optional owner
+	Name                   string  `gorm:"size:128;not null" json:"name"`
+	Host                   string  `gorm:"size:255;not null" json:"host"`
+	Port                   int     `gorm:"not null" json:"port"`
+	Token                  string  `gorm:"size:256;not null" json:"token"`                                             // Secret token for authentication
+	RegisterKey            string  `gorm:"size:256" json:"register_key"`                                               // Registration key for fetching token after approval
+	Status                 string  `gorm:"size:32;default:'offline'" json:"status"`                                    // online, offline, busy, error
+	RegistrationStatus     string  `gorm:"size:32;default:'pending'" json:"registration_status"`                       // pending, approved, rejected
+	MaxConcurrentPipelines int     `gorm:"column:max_concurrent_pipelines;default:10" json:"max_concurrent_pipelines"` // 最大并发流水线数
+	ApprovedAt             int64   `json:"approved_at"`                                                                // Approval timestamp
+	ApprovedBy             *uint64 `gorm:"index" json:"approved_by"`                                                   // Approver user ID
+	ApprovedRemark         string  `gorm:"type:text" json:"approved_remark"`                                           // Approval remark
+	Labels                 string  `gorm:"type:text" json:"labels"`                                                    // JSON array of labels ["linux", "docker", "cpu=8"]
+	Tags                   string  `gorm:"type:text" json:"tags"`                                                      // JSON object of tags {"env": "prod", "region": "cn-east"}
+	Version                string  `gorm:"size:32" json:"version"`                                                     // Agent version
+	OS                     string  `gorm:"size:64" json:"os"`                                                          // Operating system
+	Arch                   string  `gorm:"size:32" json:"arch"`                                                        // Architecture
+	CPUCores               int     `json:"cpu_cores"`                                                                  // Number of CPU cores
+	MemoryTotal            int64   `json:"memory_total"`                                                               // Total memory in bytes
+	DiskTotal              int64   `json:"disk_total"`                                                                 // Total disk space in bytes
+	Hostname               string  `gorm:"size:128" json:"hostname"`
+	IPAddress              string  `gorm:"size:64" json:"ip_address"`
+	LastHeartAt            int64   `json:"last_heart_at"`                                                  // Last heartbeat timestamp
+	HeartbeatInterval      int     `gorm:"column:heartbeat_interval;default:10" json:"heartbeat_interval"` // Heartbeat interval in seconds
+	ConsecutiveSuccess     int     `gorm:"default:0" json:"consecutive_success"`                           // Consecutive successful heartbeats (max 3)
+	ConsecutiveFailures    int     `gorm:"default:0" json:"consecutive_failures"`                          // Consecutive failed heartbeats (max 3)
+	OwnerID                *uint64 `gorm:"index" json:"owner_id"`                                          // Optional owner
 
 	Owner *User `gorm:"foreignKey:OwnerID" json:"owner"`
 }
@@ -86,6 +87,7 @@ type AgentTask struct {
 
 // TaskStatus constants
 const (
+	TaskStatusQueued    = "queued"
 	TaskStatusPending   = "pending"
 	TaskStatusRunning   = "running"
 	TaskStatusSuccess   = "success"

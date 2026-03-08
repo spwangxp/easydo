@@ -504,7 +504,7 @@ import {
   MoreFilled, Edit, CircleCheck, Refresh, DataLine,
   CopyDocument, Delete, Clock, Warning, View, UploadFilled
 } from '@element-plus/icons-vue'
-import { getCredentialList, deleteCredential, verifyCredential, getCredentialTypes, getCredentialCategories, getCredentialUsage, rotateCredential, createCredential, batchVerifyCredentials, batchDeleteCredentials, exportCredentials, getCredentialSecretData } from '@/api/credential'
+import { getCredentialList, deleteCredential, verifyCredential, getCredentialTypes, getCredentialCategories, getCredentialUsage, rotateCredential, createCredential, batchVerifyCredentials, batchDeleteCredentials, exportCredentials, getCredentialSecretData, getCredentialImpact, batchCredentialImpact } from '@/api/credential'
 import SecretForm from './components/SecretForm.vue'
 
 // 状态
@@ -645,6 +645,14 @@ function handleCardCommand(command, secret) {
   }
 }
 
+function formatImpactHint(impact) {
+  if (!impact) return ''
+  const refs = Number(impact.reference_count || 0)
+  if (refs <= 0) return ''
+  const pipelines = Number(impact.pipeline_count || 0)
+  return `当前密钥被 ${pipelines} 条流水线、${refs} 个任务节点引用，变更可能影响相关流水线后续运行。`
+}
+
 // 编辑
 async function handleEdit(secret) {
   isEdit.value = true
@@ -684,8 +692,20 @@ async function handleVerify(secret) {
 // 轮换
 async function handleRotate(secret) {
   try {
+    let impactHint = ''
+    try {
+      const impactRes = await getCredentialImpact(secret.id)
+      impactHint = formatImpactHint(impactRes?.data)
+    } catch (error) {
+      console.warn('获取密钥影响范围失败', error)
+    }
+
+    const rotateMessage = impactHint
+      ? `确定要轮换密钥 "${secret.name}" 吗？\n${impactHint}\n轮换后旧凭据将失效。`
+      : `确定要轮换密钥 "${secret.name}" 吗？轮换后旧凭据将失效。`
+
     await ElMessageBox.confirm(
-      `确定要轮换密钥 "${secret.name}" 吗？轮换后旧凭据将失效。`,
+      rotateMessage,
       '确认轮换',
       {
         type: 'warning',
@@ -760,7 +780,19 @@ function handleDuplicate(secret) {
 // 删除
 async function handleDelete(secret) {
   try {
-    await ElMessageBox.confirm('确定要删除此密钥吗？此操作不可恢复。', '确认删除', {
+    let impactHint = ''
+    try {
+      const impactRes = await getCredentialImpact(secret.id)
+      impactHint = formatImpactHint(impactRes?.data)
+    } catch (error) {
+      console.warn('获取密钥影响范围失败', error)
+    }
+
+    const deleteMessage = impactHint
+      ? `确定要删除此密钥吗？\n${impactHint}\n此操作不可恢复。`
+      : '确定要删除此密钥吗？此操作不可恢复。'
+
+    await ElMessageBox.confirm(deleteMessage, '确认删除', {
       type: 'warning'
     })
     const res = await deleteCredential(secret.id)
@@ -792,7 +824,22 @@ async function batchVerify() {
 // 批量删除
 async function batchDelete() {
   try {
-    await ElMessageBox.confirm(`确定要删除选中的 ${selectedIds.value.length} 个密钥吗？`, '批量删除', {
+    let impactHint = ''
+    try {
+      const impactRes = await batchCredentialImpact(selectedIds.value)
+      const data = impactRes?.data
+      if (data && Number(data.total_references || 0) > 0) {
+        impactHint = `其中 ${data.impacted_credentials} 个密钥被 ${data.total_references} 个流水线任务引用，删除后可能导致相关流水线任务认证失败。`
+      }
+    } catch (error) {
+      console.warn('获取批量密钥影响范围失败', error)
+    }
+
+    const batchMessage = impactHint
+      ? `确定要删除选中的 ${selectedIds.value.length} 个密钥吗？\n${impactHint}`
+      : `确定要删除选中的 ${selectedIds.value.length} 个密钥吗？`
+
+    await ElMessageBox.confirm(batchMessage, '批量删除', {
       type: 'warning'
     })
     const res = await batchDeleteCredentials(selectedIds.value)

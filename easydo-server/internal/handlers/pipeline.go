@@ -1,24 +1,47 @@
 package handlers
 
 import (
-	"easydo-server/internal/models"
-	"easydo-server/internal/services"
+	"bytes"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net"
 	"net/http"
+	"net/smtp"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"easydo-server/internal/models"
+	"easydo-server/internal/services"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
 type PipelineHandler struct {
 	DB *gorm.DB
+}
+
+type pipelineTaskTypeResponse struct {
+	Type            string                       `json:"type"`
+	Category        string                       `json:"category"`
+	ExecMode        string                       `json:"exec_mode"`
+	CredentialSlots []pipelineTaskCredentialSlot `json:"credential_slots"`
+}
+
+type pipelineTaskCredentialSlot struct {
+	Slot              string                      `json:"slot"`
+	Label             string                      `json:"label"`
+	Required          bool                        `json:"required"`
+	AllowedTypes      []models.CredentialType     `json:"allowed_types"`
+	AllowedCategories []models.CredentialCategory `json:"allowed_categories"`
 }
 
 func NewPipelineHandler() *PipelineHandler {
@@ -37,6 +60,189 @@ func getEnvironmentText(env string) string {
 	default:
 		return env
 	}
+}
+
+func (h *PipelineHandler) GetPipelineTaskTypes(c *gin.Context) {
+	keys := make([]string, 0, len(pipelineTaskDefinitions))
+	for taskType := range pipelineTaskDefinitions {
+		keys = append(keys, taskType)
+	}
+	sort.Strings(keys)
+
+	result := make([]pipelineTaskTypeResponse, 0, len(keys))
+	for _, taskType := range keys {
+		def := pipelineTaskDefinitions[taskType]
+		slots := make([]pipelineTaskCredentialSlot, 0, len(def.CredentialSlots))
+		for _, slot := range def.CredentialSlots {
+			slots = append(slots, pipelineTaskCredentialSlot{
+				Slot:              slot.Slot,
+				Label:             slot.Label,
+				Required:          slot.Required,
+				AllowedTypes:      slot.AllowedTypes,
+				AllowedCategories: slot.AllowedCategories,
+			})
+		}
+		result = append(result, pipelineTaskTypeResponse{
+			Type:            def.CanonicalType,
+			Category:        def.Category,
+			ExecMode:        def.ExecMode,
+			CredentialSlots: slots,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": result,
+	})
+}
+
+type pipelineCredentialBinding struct {
+	NodeID       string
+	TaskType     string
+	Slot         taskCredentialSlot
+	CredentialID uint64
+}
+
+func (h *PipelineHandler) validatePipelineCredentialBindings(config *PipelineConfig, userID uint64, role string, pipelineID uint64) ([]models.PipelineCredentialRef, error) {
+	if config == nil || len(config.Nodes) == 0 {
+		return nil, nil
+	}
+
+	refs := make([]models.PipelineCredentialRef, 0)
+	bindings := make([]pipelineCredentialBinding, 0)
+
+	for i := range config.Nodes {
+		node := &config.Nodes[i]
+		canonical, def, ok := getPipelineTaskDefinition(node.Type)
+		if !ok {
+			continue
+		}
+
+		nodeCfg := normalizePipelineNodeConfig(node.Type, canonical, node.getNodeConfig())
+		node.Config = nodeCfg
+		node.Params = nil
+		node.Type = canonical
+
+		if len(def.CredentialSlots) == 0 {
+			continue
+		}
+
+		rawBindings, _ := nodeCfg["credentials"].(map[string]interface{})
+		if rawBindings != nil {
+			for key := range rawBindings {
+				if _, slotOK := def.findCredentialSlot(key); !slotOK {
+					return nil, fmt.Errorf("节点 '%s' 的任务类型 '%s' 不支持凭据槽位 '%s'", node.ID, canonical, key)
+				}
+			}
+		}
+
+		for _, slot := range def.CredentialSlots {
+			var bindingRaw interface{}
+			if rawBindings != nil {
+				bindingRaw = rawBindings[slot.Slot]
+			}
+
+			credentialID, hasBinding := extractCredentialIDFromBinding(bindingRaw)
+			if !hasBinding {
+				if slot.Required {
+					return nil, fmt.Errorf("节点 '%s' 缺少必填凭据槽位 '%s'", node.ID, slot.Slot)
+				}
+				continue
+			}
+
+			bindings = append(bindings, pipelineCredentialBinding{
+				NodeID:       node.ID,
+				TaskType:     canonical,
+				Slot:         slot,
+				CredentialID: credentialID,
+			})
+			refs = append(refs, models.PipelineCredentialRef{
+				PipelineID:     pipelineID,
+				NodeID:         node.ID,
+				TaskType:       canonical,
+				CredentialSlot: slot.Slot,
+				CredentialID:   credentialID,
+			})
+		}
+	}
+
+	if len(bindings) == 0 {
+		return refs, nil
+	}
+
+	credentialIDs := make([]uint64, 0, len(bindings))
+	seen := make(map[uint64]struct{})
+	for _, binding := range bindings {
+		if _, exists := seen[binding.CredentialID]; exists {
+			continue
+		}
+		seen[binding.CredentialID] = struct{}{}
+		credentialIDs = append(credentialIDs, binding.CredentialID)
+	}
+
+	var credentials []models.Credential
+	if err := applyCredentialReadScope(h.DB.Model(&models.Credential{}), userID, role).
+		Where("id IN ?", credentialIDs).
+		Find(&credentials).Error; err != nil {
+		return nil, err
+	}
+
+	credentialMap := make(map[uint64]models.Credential, len(credentials))
+	for _, credential := range credentials {
+		credentialMap[credential.ID] = credential
+	}
+
+	for _, binding := range bindings {
+		credential, exists := credentialMap[binding.CredentialID]
+		if !exists {
+			return nil, fmt.Errorf("节点 '%s' 绑定的凭据 #%d 不存在或无权限访问", binding.NodeID, binding.CredentialID)
+		}
+		if credential.Status != models.CredentialStatusActive {
+			return nil, fmt.Errorf("节点 '%s' 绑定的凭据 '%s' 不是活跃状态", binding.NodeID, credential.Name)
+		}
+		if !binding.Slot.allowsType(credential.Type) {
+			return nil, fmt.Errorf("节点 '%s' 的槽位 '%s' 不支持凭据类型 '%s'", binding.NodeID, binding.Slot.Slot, credential.Type)
+		}
+		if !binding.Slot.allowsCategory(credential.Category) {
+			return nil, fmt.Errorf("节点 '%s' 的槽位 '%s' 不支持凭据分类 '%s'", binding.NodeID, binding.Slot.Slot, credential.Category)
+		}
+	}
+
+	return refs, nil
+}
+
+func (h *PipelineHandler) parseAndValidatePipelineConfig(rawConfig string, userID uint64, role string, pipelineID uint64) (PipelineConfig, []models.PipelineCredentialRef, string, error) {
+	var config PipelineConfig
+	if err := json.Unmarshal([]byte(rawConfig), &config); err != nil {
+		return PipelineConfig{}, nil, "流水线配置JSON解析失败: " + err.Error(), err
+	}
+
+	if valid, errMsg := config.ValidateDAG(); !valid {
+		return PipelineConfig{}, nil, errMsg, errors.New(errMsg)
+	}
+	if valid, errMsg := config.ValidateTaskTypes(); !valid {
+		return PipelineConfig{}, nil, errMsg, errors.New(errMsg)
+	}
+
+	refs, err := h.validatePipelineCredentialBindings(&config, userID, role, pipelineID)
+	if err != nil {
+		return PipelineConfig{}, nil, "流水线凭据配置无效: " + err.Error(), err
+	}
+
+	return config, refs, "", nil
+}
+
+func (h *PipelineHandler) replacePipelineCredentialRefs(tx *gorm.DB, pipelineID uint64, refs []models.PipelineCredentialRef) error {
+	if err := tx.Where("pipeline_id = ?", pipelineID).Delete(&models.PipelineCredentialRef{}).Error; err != nil {
+		return err
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	for i := range refs {
+		refs[i].PipelineID = pipelineID
+	}
+	return tx.Create(&refs).Error
 }
 
 func (h *PipelineHandler) GetPipelineList(c *gin.Context) {
@@ -177,27 +383,23 @@ func (h *PipelineHandler) CreatePipeline(c *gin.Context) {
 		return
 	}
 
-	// Validate DAG if config is provided
-	if req.Config != "" {
-		var config PipelineConfig
-		if err := json.Unmarshal([]byte(req.Config), &config); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"code":    400,
-				"message": "流水线配置JSON解析失败: " + err.Error(),
-			})
-			return
-		}
+	userID := c.GetUint64("user_id")
+	role := c.GetString("role")
+	credentialRefs := make([]models.PipelineCredentialRef, 0)
 
-		if valid, errMsg := config.ValidateDAG(); !valid {
+	if req.Config != "" {
+		config, refs, errMsg, err := h.parseAndValidatePipelineConfig(req.Config, userID, role, 0)
+		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"code":    400,
 				"message": errMsg,
 			})
 			return
 		}
+		normalizedConfig, _ := json.Marshal(config)
+		req.Config = string(normalizedConfig)
+		credentialRefs = refs
 	}
-
-	userID := c.GetUint64("user_id")
 
 	pipeline := &models.Pipeline{
 		Name:        req.Name,
@@ -224,6 +426,21 @@ func (h *PipelineHandler) CreatePipeline(c *gin.Context) {
 		// 获取刚创建的流水线
 		var createdPipeline models.Pipeline
 		h.DB.Where("name = ? AND owner_id = ?", req.Name, userID).Order("id DESC").First(&createdPipeline)
+		if createdPipeline.ID == 0 {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    500,
+				"message": "创建流水线失败: 无法获取流水线ID",
+			})
+			return
+		}
+
+		if err := h.replacePipelineCredentialRefs(h.DB, createdPipeline.ID, credentialRefs); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    500,
+				"message": "创建流水线失败: 同步凭据引用失败: " + err.Error(),
+			})
+			return
+		}
 
 		c.JSON(http.StatusOK, gin.H{
 			"code": 200,
@@ -236,6 +453,13 @@ func (h *PipelineHandler) CreatePipeline(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "创建流水线失败",
+		})
+		return
+	}
+	if err := h.replacePipelineCredentialRefs(h.DB, pipeline.ID, credentialRefs); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "创建流水线失败: 同步凭据引用失败: " + err.Error(),
 		})
 		return
 	}
@@ -274,24 +498,22 @@ func (h *PipelineHandler) UpdatePipeline(c *gin.Context) {
 		return
 	}
 
-	// Validate DAG if config is being updated
-	if req.Config != "" {
-		var config PipelineConfig
-		if err := json.Unmarshal([]byte(req.Config), &config); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"code":    400,
-				"message": "流水线配置JSON解析失败: " + err.Error(),
-			})
-			return
-		}
+	userID := c.GetUint64("user_id")
+	role := c.GetString("role")
+	credentialRefs := make([]models.PipelineCredentialRef, 0)
 
-		if valid, errMsg := config.ValidateDAG(); !valid {
+	if req.Config != "" {
+		config, refs, errMsg, err := h.parseAndValidatePipelineConfig(req.Config, userID, role, pipeline.ID)
+		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"code":    400,
 				"message": errMsg,
 			})
 			return
 		}
+		normalizedConfig, _ := json.Marshal(config)
+		req.Config = string(normalizedConfig)
+		credentialRefs = refs
 	}
 
 	// 逐个更新字段
@@ -331,6 +553,15 @@ func (h *PipelineHandler) UpdatePipeline(c *gin.Context) {
 			})
 			return
 		}
+		if req.Config != "" {
+			if err := h.replacePipelineCredentialRefs(h.DB, pipeline.ID, credentialRefs); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"code":    500,
+					"message": "更新流水线失败: 同步凭据引用失败: " + err.Error(),
+				})
+				return
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -344,6 +575,7 @@ func (h *PipelineHandler) DeletePipeline(c *gin.Context) {
 
 	// 先删除关联的运行记录
 	h.DB.Where("pipeline_id = ?", id).Delete(&models.PipelineRun{})
+	h.DB.Where("pipeline_id = ?", id).Delete(&models.PipelineCredentialRef{})
 
 	if err := h.DB.Delete(&models.Pipeline{}, id).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -381,29 +613,12 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 		return
 	}
 
-	// 检查是否有需要 Agent 执行的节点（shell/docker/git_clone/agent）
-	hasAgentNode := false
-	for _, node := range config.Nodes {
-		if node.Type == "shell" || node.Type == "docker" || node.Type == "git_clone" || node.Type == "agent" {
-			hasAgentNode = true
-			break
-		}
-	}
-
-	// 如果有需要 Agent 执行的节点，检查是否有可用的 Agent
-	if hasAgentNode {
-		var availableAgents []models.Agent
-		h.DB.Where("status = ? AND registration_status = ?",
-			models.AgentStatusOnline,
-			models.AgentRegistrationStatusApproved).Find(&availableAgents)
-
-		if len(availableAgents) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"code":    400,
-				"message": "没有可用的执行器，请确认至少有一个执行器在线且已接纳后再运行流水线。您可以前往「执行器」页面查看和管理执行器状态。",
-			})
-			return
-		}
+	if valid, errMsg := config.ValidateTaskTypes(); !valid {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": errMsg,
+		})
+		return
 	}
 
 	triggerUserID := c.GetUint64("user_id")
@@ -411,6 +626,23 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 	triggerUsername := c.GetString("username")
 	if triggerUsername == "" {
 		triggerUsername = "system"
+	}
+
+	if _, err := h.validatePipelineCredentialBindings(&config, triggerUserID, triggerRole, pipeline.ID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "流水线凭据配置无效: " + err.Error(),
+		})
+		return
+	}
+
+	// 检查是否有需要 Agent 执行的节点
+	hasAgentNode := false
+	for _, node := range config.Nodes {
+		if isAgentPipelineTaskType(node.Type) {
+			hasAgentNode = true
+			break
+		}
 	}
 
 	// 获取最新的构建号
@@ -422,15 +654,24 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 		buildNumber = lastRun.BuildNumber + 1
 	}
 
+	runStatus := models.PipelineRunStatusRunning
+	startTime := time.Now().Unix()
+	if hasAgentNode {
+		runStatus = models.PipelineRunStatusQueued
+		startTime = 0
+	}
+
 	// 创建新的构建记录，保存配置快照
 	run := &models.PipelineRun{
-		PipelineID:  pipeline.ID,
-		BuildNumber: buildNumber,
-		Status:      "running",
-		TriggerType: "manual",
-		TriggerUser: triggerUsername,
-		StartTime:   time.Now().Unix(),
-		Config:      pipeline.Config, // 保存配置快照
+		PipelineID:      pipeline.ID,
+		BuildNumber:     buildNumber,
+		Status:          runStatus,
+		TriggerType:     "manual",
+		TriggerUser:     triggerUsername,
+		TriggerUserID:   triggerUserID,
+		TriggerUserRole: triggerRole,
+		StartTime:       startTime,
+		Config:          pipeline.Config, // 保存配置快照
 	}
 
 	// 创建记录
@@ -458,14 +699,19 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 		}
 	}
 
-	// 异步执行流水线任务
-	go h.executePipelineTasks(pipeline, run, config, triggerUserID, triggerRole)
+	if hasAgentNode {
+		go h.scheduleQueuedPipelineRuns(h.DB)
+	} else {
+		// 无需 agent 的流水线直接执行
+		go h.executePipelineTasks(pipeline, run, config, triggerUserID, triggerRole)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": gin.H{
 			"run_id":       run.ID,
 			"build_number": buildNumber,
+			"status":       run.Status,
 		},
 	})
 }
@@ -473,7 +719,7 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 // PipelineNode represents a node in the pipeline configuration
 type PipelineNode struct {
 	ID            string                 `json:"id"`
-	Type          string                 `json:"type"` // shell, docker, git_clone, email, agent
+	Type          string                 `json:"type"` // git_clone/npm/maven/gradle/docker/unit/integration/e2e/coverage/lint/ssh/kubernetes/docker-run/shell/sleep/email/webhook/in_app
 	Name          string                 `json:"name"`
 	Config        map[string]interface{} `json:"config,omitempty"` // 新格式：config
 	Params        map[string]interface{} `json:"params,omitempty"` // 旧格式兼容：params
@@ -625,7 +871,9 @@ func (c *PipelineConfig) ValidateDAG() (bool, string) {
 	}
 
 	if len(entryNodes) == 0 && len(nodesInEdges) > 0 {
-		return false, "流水线配置无效：没有起始任务（所有任务都有前置依赖）"
+		// A directed acyclic graph must contain at least one entry node.
+		// If every connected node has incoming edges, there is a cycle.
+		return false, "流水线配置无效：检测到循环依赖"
 	}
 
 	isolatedNodes := []string{}
@@ -767,7 +1015,7 @@ func (h *PipelineHandler) createAllNodeTasks(pipeline models.Pipeline, run *mode
 func (h *PipelineHandler) executePipelineTasks(pipeline models.Pipeline, run *models.PipelineRun, config PipelineConfig, triggerUserID uint64, triggerRole string) {
 	// 检查配置有效性
 	if config.Nodes == nil || len(config.Nodes) == 0 {
-		h.updateRunStatus(run.ID, "failed", "流水线配置无效：节点列表为空")
+		h.updateRunStatus(run.ID, models.PipelineRunStatusFailed, "流水线配置无效：节点列表为空")
 		return
 	}
 
@@ -793,14 +1041,28 @@ func (h *PipelineHandler) executePipelineTasks(pipeline models.Pipeline, run *mo
 		inDegree[edge.To]++
 	}
 
-	// 选择执行 Agent
-	agentID := h.selectAgentForPipeline(h.DB)
-	if agentID == 0 {
-		h.updateRunStatus(run.ID, "failed", "没有可用的Agent")
-		return
+	// 是否存在需要 Agent 执行的节点
+	hasAgentNode := false
+	for _, node := range config.Nodes {
+		if isAgentPipelineTaskType(node.Type) {
+			hasAgentNode = true
+			break
+		}
 	}
 
-	h.DB.Model(run).Update("agent_id", agentID)
+	// 选择执行 Agent（仅当存在 Agent 任务时）
+	agentID := run.AgentID
+	if hasAgentNode {
+		if agentID == 0 {
+			agentID = h.selectAgentForPipeline(h.DB)
+		}
+		if agentID == 0 {
+			h.updateRunStatus(run.ID, models.PipelineRunStatusFailed, "没有可用的Agent")
+			return
+		}
+		h.DB.Model(run).Update("agent_id", agentID)
+		run.AgentID = agentID
+	}
 
 	// 找出入度为0的初始节点
 	resolver := NewVariableResolver()
@@ -814,8 +1076,14 @@ func (h *PipelineHandler) executePipelineTasks(pipeline models.Pipeline, run *mo
 			if node != nil {
 				success, _ := h.executeNodeWithAgent(h.DB, pipeline, run, node, nodeMap, resolver, agentID, triggerUserID, triggerRole)
 				if !success {
-					h.updateRunStatus(run.ID, "failed", "初始化任务失败（凭据权限或解析错误）")
+					h.updateRunStatus(run.ID, models.PipelineRunStatusFailed, "初始化任务失败（凭据权限或解析错误）")
 					return
+				}
+				if isServerPipelineTaskType(node.Type) {
+					var completedTasks []models.AgentTask
+					h.DB.Where("pipeline_run_id = ?", run.ID).Find(&completedTasks)
+					SharedWebSocketHandler().triggerDownstreamTasks(run.ID, completedTasks)
+					SharedWebSocketHandler().checkAndUpdatePipelineStatus(run.ID)
 				}
 			}
 		}
@@ -825,102 +1093,119 @@ func (h *PipelineHandler) executePipelineTasks(pipeline models.Pipeline, run *mo
 }
 
 func (h *PipelineHandler) selectAgentForPipeline(db *gorm.DB) uint64 {
-	var agents []models.Agent
-	db.Where("status = ? AND registration_status = ?",
-		models.AgentStatusOnline,
-		models.AgentRegistrationStatusApproved).Find(&agents)
+	return selectAgentWithPipelineCapacity(db)
+}
 
-	if len(agents) == 0 {
+func resolveTaskMaxRetries(nodeConfig map[string]interface{}) int {
+	if nodeConfig == nil {
 		return 0
 	}
 
-	var selectedAgent uint64
-	minTasks := int64(999999)
-
-	for _, agent := range agents {
-		var runningTasks int64
-		db.Model(&models.AgentTask{}).Where("agent_id = ? AND status = ?", agent.ID, models.TaskStatusRunning).Count(&runningTasks)
-		if runningTasks < minTasks {
-			minTasks = runningTasks
-			selectedAgent = agent.ID
-		}
+	raw, exists := nodeConfig["retry_count"]
+	if !exists {
+		return 0
 	}
 
-	return selectedAgent
+	retries := toInt(raw)
+	if retries < 0 {
+		return 0
+	}
+	return retries
+}
+
+func createAgentTaskWithExplicitMaxRetries(db *gorm.DB, task *models.AgentTask) error {
+	expectedMaxRetries := task.MaxRetries
+
+	if err := db.Create(task).Error; err != nil {
+		return err
+	}
+
+	// Existing schemas may still have max_retries default=3; enforce explicit 0 when configured.
+	if expectedMaxRetries == 0 {
+		if err := db.Model(task).Update("max_retries", 0).Error; err != nil {
+			return err
+		}
+		task.MaxRetries = 0
+	}
+
+	return nil
 }
 
 func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipeline, run *models.PipelineRun, node *PipelineNode, nodeMap map[string]*PipelineNode, resolver *VariableResolver, agentID uint64, triggerUserID uint64, triggerRole string) (bool, map[string]interface{}) {
-	taskType := node.Type
-
-	if taskType == "email" {
-		success := h.executeEmailTask(db, run, node)
-		return success, nil
+	canonicalType, def, ok := getPipelineTaskDefinition(node.Type)
+	if !ok {
+		fmt.Printf("Unsupported task type: %s\n", node.Type)
+		return false, nil
 	}
 
-	if taskType != "shell" && taskType != "docker" && taskType != "git_clone" && taskType != "agent" && taskType != "custom" {
+	nodeConfig := normalizePipelineNodeConfig(node.Type, canonicalType, node.getNodeConfig())
+	if resolver != nil {
+		resolvedConfig, err := resolver.ResolveNodeConfig(nodeConfig)
+		if err == nil {
+			nodeConfig = normalizePipelineNodeConfig(node.Type, canonicalType, resolvedConfig)
+		}
+	}
+
+	if err := h.injectCredentialEnv(db, canonicalType, def, nodeConfig, run, triggerUserID, triggerRole); err != nil {
+		fmt.Printf("Failed to inject credential for node %s: %v\n", node.ID, err)
+		return false, nil
+	}
+
+	timeout := node.Timeout
+	if timeout <= 0 {
+		if v := toInt(nodeConfig["timeout"]); v > 0 {
+			timeout = v
+		} else {
+			timeout = 3600
+		}
+	}
+	maxRetries := resolveTaskMaxRetries(nodeConfig)
+
+	if def.ExecMode == taskExecModeServer {
+		success, errMsg := h.executeServerTask(db, run, node, canonicalType, nodeConfig, timeout)
+		if !success {
+			fmt.Printf("Server task failed: node=%s type=%s err=%s\n", node.ID, canonicalType, errMsg)
+			return false, nil
+		}
 		return true, nil
 	}
 
-	if taskType == "agent" || taskType == "custom" {
-		taskType = "shell"
+	if agentID == 0 {
+		return false, nil
 	}
 
 	var agent models.Agent
 	if err := db.First(&agent, agentID).Error; err != nil {
 		return false, nil
 	}
-
 	if agent.Status != models.AgentStatusOnline && agent.Status != models.AgentStatusBusy {
 		return false, nil
 	}
 
-	nodeConfig := node.getNodeConfig()
-	if resolver != nil {
-		resolvedConfig, err := resolver.ResolveNodeConfig(nodeConfig)
-		if err == nil {
-			nodeConfig = resolvedConfig
-		}
-	}
-	if err := h.injectCredentialEnv(db, nodeConfig, run, triggerUserID, triggerRole); err != nil {
-		fmt.Printf("Failed to inject credential for node %s: %v\n", node.ID, err)
+	_, script, err := renderPipelineAgentScript(canonicalType, nodeConfig)
+	if err != nil {
+		fmt.Printf("Failed to render task script for node %s: %v\n", node.ID, err)
 		return false, nil
 	}
-
-	script := h.buildTaskScript(node, nodeConfig)
-	if resolver != nil && script != "" {
-		resolvedScript, err := resolver.ResolveVariables(script)
-		if err == nil {
+	if resolver != nil && strings.TrimSpace(script) != "" {
+		resolvedScript, resolveErr := resolver.ResolveVariables(script)
+		if resolveErr == nil {
 			script = resolvedScript
 		}
-	}
-
-	timeout := node.Timeout
-	if timeout <= 0 {
-		timeout = 3600
 	}
 
 	workDir := ""
 	if wd, ok := nodeConfig["working_dir"].(string); ok {
 		workDir = wd
 	}
-
 	envVars := ""
 	if env, ok := nodeConfig["env"].(map[string]interface{}); ok {
 		envJSON, _ := json.Marshal(env)
 		envVars = string(envJSON)
 	}
 
-	maxRetries := 0
-	if retryVal, ok := nodeConfig["retry_count"].(float64); ok && retryVal > 0 {
-		maxRetries = int(retryVal)
-	}
-
-	repoURL := ""
-	repoBranch := ""
-	repoCommit := ""
-	repoPath := ""
-
-	if taskType == "git_clone" {
+	repoURL, repoBranch, repoCommit, repoPath := "", "", "", ""
+	if canonicalType == "git_clone" {
 		if repo, ok := nodeConfig["repository"].(map[string]interface{}); ok {
 			if url, ok := repo["url"].(string); ok {
 				repoURL = url
@@ -937,17 +1222,14 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 		}
 	}
 
-	// 检查任务是否已存在
 	var task models.AgentTask
 	result := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, node.ID).First(&task)
-
 	if result.Error != nil {
-		// 任务不存在，创建新任务
 		task = models.AgentTask{
 			AgentID:       agentID,
 			PipelineRunID: run.ID,
 			NodeID:        node.ID,
-			TaskType:      taskType,
+			TaskType:      "shell",
 			Name:          node.Name,
 			Params:        h.jsonEncode(nodeConfig),
 			Script:        script,
@@ -961,31 +1243,31 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 			RepoCommit:    repoCommit,
 			RepoPath:      repoPath,
 		}
-		if err := db.Create(&task).Error; err != nil {
+		if err := createAgentTaskWithExplicitMaxRetries(db, &task); err != nil {
 			fmt.Printf("Failed to create task for node %s: %v\n", node.ID, err)
 			return false, nil
 		}
-		fmt.Printf("Created task %d for node %s\n", task.ID, node.ID)
 	} else {
-		// 任务已存在，更新任务信息
 		task.AgentID = agentID
+		task.TaskType = "shell"
+		task.Params = h.jsonEncode(nodeConfig)
 		task.Script = script
 		task.WorkDir = workDir
 		task.EnvVars = envVars
 		task.Timeout = timeout
 		task.Status = models.TaskStatusPending
 		task.MaxRetries = maxRetries
+		task.RepoURL = repoURL
+		task.RepoBranch = repoBranch
+		task.RepoCommit = repoCommit
+		task.RepoPath = repoPath
 		if err := db.Save(&task).Error; err != nil {
 			fmt.Printf("Failed to update task %d: %v\n", task.ID, err)
 			return false, nil
 		}
-		fmt.Printf("Updated existing task %d for node %s\n", task.ID, node.ID)
 	}
 
-	// Immediately dispatch task via WebSocket if agent is connected.
-	// If not connected, task remains pending and will be pushed on next heartbeat/connect.
 	_ = SharedWebSocketHandler().sendTaskAssign(task)
-
 	return true, nil
 }
 
@@ -993,201 +1275,14 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 // Returns (success, taskOutputs) - success indicates if execution was successful,
 // taskOutputs contains the outputs generated by the task for downstream tasks
 func (h *PipelineHandler) executeNode(db *gorm.DB, pipeline models.Pipeline, run *models.PipelineRun, node *PipelineNode, nodeMap map[string]*PipelineNode, resolver *VariableResolver) (bool, map[string]interface{}) {
-	// 判断任务类型：Agent执行（shell/docker/git_clone） vs Server执行（email）
-	taskType := node.Type
-
-	// Server 直接执行的任务类型
-	if taskType == "email" {
-		success := h.executeEmailTask(db, run, node)
-		return success, nil
-	}
-
-	// 需要通过 Agent 执行的任务类型（shell/docker/git_clone/agent）
-	// 支持的任务类型包括：shell, docker, git_clone, agent, custom
-	if taskType != "shell" && taskType != "docker" && taskType != "git_clone" && taskType != "agent" && taskType != "custom" {
-		// 未知类型，视为不需要执行，直接返回成功
-		return true, nil
-	}
-
-	// 如果是 agent 或 custom 类型，按 shell 类型处理
-	if taskType == "agent" || taskType == "custom" {
-		taskType = "shell"
-	}
-
-	// 选择 Agent
-	var agent models.Agent
-	var agentID uint64
-
-	// 自动选择在线且已批准的 Agent
-	var agents []models.Agent
-	db.Where("status = ? AND registration_status = ?",
-		models.AgentStatusOnline,
-		models.AgentRegistrationStatusApproved).Find(&agents)
-
-	if len(agents) == 0 {
-		return false, nil
-	}
-
-	// 选择负载最小的 Agent
-	agentID = agents[0].ID
-	minTasks := int64(999999)
-
-	for _, a := range agents {
-		var runningTasks int64
-		db.Model(&models.AgentTask{}).Where("agent_id = ? AND status = ?", a.ID, models.TaskStatusRunning).Count(&runningTasks)
-		if runningTasks < minTasks {
-			minTasks = runningTasks
-			agentID = a.ID
-		}
-	}
-
-	if err := db.First(&agent, agentID).Error; err != nil {
-		return false, nil
-	}
-
-	if agent.Status != models.AgentStatusOnline && agent.Status != models.AgentStatusBusy {
-		return false, nil
-	}
-
-	// 从节点配置中提取任务参数
-	config := node.getNodeConfig()
-
-	// 使用变量解析器解析配置中的变量引用
-	if resolver != nil {
-		resolvedConfig, err := resolver.ResolveNodeConfig(config)
-		if err == nil {
-			config = resolvedConfig
-		}
-	}
-	_ = h.injectCredentialEnv(db, config, run, 0, "")
-
-	// 获取脚本内容
-	script := h.buildTaskScript(node, config)
-
-	// 解析脚本中的变量引用
-	if resolver != nil && script != "" {
-		resolvedScript, err := resolver.ResolveVariables(script)
-		if err == nil {
-			script = resolvedScript
-		}
-	}
-
-	// 获取超时时间
-	timeout := node.Timeout
-	if timeout <= 0 {
-		timeout = 3600 // 默认1小时
-	}
-
-	// 获取工作目录
-	workDir := ""
-	if wd, ok := config["working_dir"].(string); ok {
-		workDir = wd
-	}
-
-	// 获取环境变量
-	envVars := ""
-	if env, ok := config["env"].(map[string]interface{}); ok {
-		envJSON, _ := json.Marshal(env)
-		envVars = string(envJSON)
-	}
-
-	// 获取仓库信息（用于 git_clone 任务）
-	repoURL := ""
-	repoBranch := ""
-	repoCommit := ""
-	repoPath := ""
-
-	if taskType == "git_clone" {
-		if repo, ok := config["repository"].(map[string]interface{}); ok {
-			if url, ok := repo["url"].(string); ok {
-				repoURL = url
-			}
-			if branch, ok := repo["branch"].(string); ok {
-				repoBranch = branch
-			}
-			if commit, ok := repo["commit_id"].(string); ok {
-				repoCommit = commit
-			}
-			if targetDir, ok := repo["target_dir"].(string); ok {
-				repoPath = targetDir
-			}
-		}
-	}
-
-	var task models.AgentTask
-	result := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, node.ID).First(&task)
-
-	if result.Error != nil {
-		task = models.AgentTask{
-			AgentID:       agentID,
-			PipelineRunID: run.ID,
-			NodeID:        node.ID,
-			TaskType:      taskType,
-			Name:          node.Name,
-			Params:        h.jsonEncode(config),
-			Script:        script,
-			WorkDir:       workDir,
-			EnvVars:       envVars,
-			Status:        models.TaskStatusPending,
-			Timeout:       timeout,
-			RepoURL:       repoURL,
-			RepoBranch:    repoBranch,
-			RepoCommit:    repoCommit,
-			RepoPath:      repoPath,
-		}
-		if err := db.Create(&task).Error; err != nil {
-			return false, nil
-		}
-	} else {
-		task.AgentID = agentID
-		task.Status = models.TaskStatusPending
-		task.Script = script
-		task.WorkDir = workDir
-		task.EnvVars = envVars
-		task.Timeout = timeout
-		if err := db.Save(&task).Error; err != nil {
+	agentID := uint64(0)
+	if isAgentPipelineTaskType(node.Type) {
+		agentID = h.selectAgentForPipeline(db)
+		if agentID == 0 {
 			return false, nil
 		}
 	}
-
-	// 更新 Agent 状态
-	db.Model(&agent).Update("status", models.AgentStatusBusy)
-
-	// 更新 PipelineRun 绑定的 Agent
-	db.Model(run).Update("agent_id", agentID)
-
-	// 等待任务完成（带超时）
-	timeoutChan := time.After(time.Duration(timeout+30) * time.Second)
-	tickChan := time.Tick(5 * time.Second)
-
-	for {
-		select {
-		case <-timeoutChan:
-			db.Model(task).Updates(map[string]interface{}{
-				"status":    models.TaskStatusFailed,
-				"error_msg": "任务执行超时",
-				"end_time":  time.Now().Unix(),
-			})
-			db.Model(&agent).Update("status", models.AgentStatusOnline)
-			return false, nil
-
-		case <-tickChan:
-			var currentTask models.AgentTask
-			db.First(&currentTask, task.ID)
-
-			if currentTask.Status == models.TaskStatusSuccess {
-				db.Model(&agent).Update("status", models.AgentStatusOnline)
-				// 构建任务输出
-				taskOutputs := h.buildTaskOutputs(taskType, &currentTask)
-				return true, taskOutputs
-			}
-
-			if currentTask.Status == models.TaskStatusFailed {
-				db.Model(&agent).Update("status", models.AgentStatusOnline)
-				return false, nil
-			}
-		}
-	}
+	return h.executeNodeWithAgent(db, pipeline, run, node, nodeMap, resolver, agentID, 0, "")
 }
 
 func parseCredentialID(v interface{}) (uint64, bool) {
@@ -1234,205 +1329,650 @@ func sanitizeEnvKey(key string) string {
 	return normalized
 }
 
-func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, nodeConfig map[string]interface{}, run *models.PipelineRun, userID uint64, role string) error {
-	if nodeConfig == nil {
-		return nil
+func extractCredentialIDFromBinding(raw interface{}) (uint64, bool) {
+	if raw == nil {
+		return 0, false
 	}
 
-	authMode, _ := nodeConfig["auth_mode"].(string)
-	if authMode != "credential" {
-		return nil
+	if id, ok := parseCredentialID(raw); ok {
+		return id, true
 	}
 
-	credentialID, ok := parseCredentialID(nodeConfig["credential_id"])
+	binding, ok := raw.(map[string]interface{})
 	if !ok {
-		return errors.New("credential_id is required when auth_mode=credential")
+		return 0, false
 	}
+	return parseCredentialID(binding["credential_id"])
+}
 
-	var credential models.Credential
-	if err := db.First(&credential, credentialID).Error; err != nil {
-		return fmt.Errorf("credential not found: %w", err)
+func slotEnvPrefix(slot string) string {
+	slotKey := sanitizeEnvKey(slot)
+	if slotKey == "" {
+		slotKey = "CREDENTIAL"
 	}
-	if !canReadCredential(db, &credential, userID, role) {
-		return errors.New("access denied for credential")
-	}
-	if credential.Status != models.CredentialStatusActive {
-		return errors.New("credential is not active")
-	}
+	return "EASYDO_CRED_" + slotKey + "_"
+}
 
-	decrypted, err := services.NewCredentialEncryptionService().
-		DecryptCredentialData(credential.EncryptedData, credential.EncryptionIV)
-	if err != nil {
-		return fmt.Errorf("failed to decrypt credential: %w", err)
-	}
-
-	credentialJSON, _ := json.Marshal(decrypted)
-	credentialEnv := map[string]interface{}{
-		"EASYDO_CREDENTIAL_ID":       strconv.FormatUint(credential.ID, 10),
-		"EASYDO_CREDENTIAL_TYPE":     string(credential.Type),
-		"EASYDO_CREDENTIAL_CATEGORY": string(credential.Category),
-		"EASYDO_CREDENTIAL_JSON":     string(credentialJSON),
-	}
-
-	for k, v := range decrypted {
-		envKey := sanitizeEnvKey(k)
-		if envKey == "" {
-			continue
-		}
-		credentialEnv["EASYDO_CREDENTIAL_"+envKey] = convertToString(v)
-	}
-
+func mergeNodeEnv(nodeConfig map[string]interface{}) map[string]interface{} {
 	envMap := make(map[string]interface{})
 	if existing, ok := nodeConfig["env"].(map[string]interface{}); ok {
 		for k, v := range existing {
 			envMap[k] = v
 		}
 	}
-	for k, v := range credentialEnv {
-		envMap[k] = v
+	return envMap
+}
+
+func pickCredentialSecretValue(secrets map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if val := strings.TrimSpace(convertToString(secrets[key])); val != "" {
+			return val
+		}
 	}
-	nodeConfig["env"] = envMap
+	return ""
+}
 
-	now := time.Now().Unix()
-	db.Model(&credential).Updates(map[string]interface{}{
-		"last_used_at": now,
-		"used_count":   credential.UsedCount + 1,
-	})
-	db.Create(&models.CredentialUsage{
-		CredentialID: credential.ID,
-		UsedByType:   "pipeline_run",
-		UsedByID:     run.ID,
-		UsedByName:   fmt.Sprintf("pipeline_run_%d", run.ID),
-		UsedAt:       now,
-		Result:       "success",
-	})
+func pickCredentialBoolValue(secrets map[string]interface{}, keys ...string) (bool, bool) {
+	for _, key := range keys {
+		value, exists := secrets[key]
+		if !exists || value == nil {
+			continue
+		}
+		switch v := value.(type) {
+		case bool:
+			return v, true
+		case string:
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "1", "true", "yes", "y", "on":
+				return true, true
+			case "0", "false", "no", "n", "off":
+				return false, true
+			}
+		case float64:
+			return v != 0, true
+		case int:
+			return v != 0, true
+		case int64:
+			return v != 0, true
+		}
+	}
+	return false, false
+}
 
+func ensureHeadersMap(config map[string]interface{}) map[string]interface{} {
+	if headers, ok := config["headers"].(map[string]interface{}); ok {
+		return headers
+	}
+	headers := make(map[string]interface{})
+	config["headers"] = headers
+	return headers
+}
+
+func applyServerCredentialConfig(taskType string, slot taskCredentialSlot, credential models.Credential, decrypted map[string]interface{}, nodeConfig map[string]interface{}) {
+	switch taskType {
+	case "email":
+		if slot.Slot != "smtp_auth" {
+			return
+		}
+
+		if strings.TrimSpace(toString(nodeConfig["smtp_username"])) == "" {
+			nodeConfig["smtp_username"] = pickCredentialSecretValue(decrypted, "username", "client_id")
+		}
+		if strings.TrimSpace(toString(nodeConfig["smtp_password"])) == "" {
+			nodeConfig["smtp_password"] = pickCredentialSecretValue(decrypted, "password", "token", "client_secret", "secret_access_key")
+		}
+
+	case "webhook":
+		if slot.Slot == "webhook_mtls" {
+			if strings.TrimSpace(toString(nodeConfig["tls_client_cert"])) == "" {
+				nodeConfig["tls_client_cert"] = pickCredentialSecretValue(decrypted, "cert_pem", "client_cert", "certificate")
+			}
+			if strings.TrimSpace(toString(nodeConfig["tls_client_key"])) == "" {
+				nodeConfig["tls_client_key"] = pickCredentialSecretValue(decrypted, "key_pem", "private_key", "client_key")
+			}
+			if strings.TrimSpace(toString(nodeConfig["tls_ca_cert"])) == "" {
+				nodeConfig["tls_ca_cert"] = pickCredentialSecretValue(decrypted, "ca_cert", "ca_bundle", "ca")
+			}
+			if strings.TrimSpace(toString(nodeConfig["tls_server_name"])) == "" {
+				nodeConfig["tls_server_name"] = pickCredentialSecretValue(decrypted, "server_name", "tls_server_name")
+			}
+			if _, exists := nodeConfig["tls_insecure_skip_verify"]; !exists {
+				if value, ok := pickCredentialBoolValue(decrypted, "insecure_skip_verify", "skip_verify"); ok {
+					nodeConfig["tls_insecure_skip_verify"] = value
+				}
+			}
+			return
+		}
+
+		if slot.Slot != "webhook_auth" {
+			return
+		}
+
+		headers := ensureHeadersMap(nodeConfig)
+		if current := strings.TrimSpace(toString(headers["Authorization"])); current != "" {
+			return
+		}
+
+		switch credential.Type {
+		case models.TypeToken:
+			token := pickCredentialSecretValue(decrypted, "token", "access_token")
+			if token == "" {
+				return
+			}
+			tokenType := strings.ToLower(strings.TrimSpace(pickCredentialSecretValue(decrypted, "token_type")))
+			if tokenType == "basic" {
+				username := pickCredentialSecretValue(decrypted, "username", "client_id")
+				raw := username + ":" + token
+				headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(raw))
+				return
+			}
+			headers["Authorization"] = "Bearer " + token
+
+		case models.TypePassword:
+			username := pickCredentialSecretValue(decrypted, "username")
+			password := pickCredentialSecretValue(decrypted, "password")
+			if username == "" || password == "" {
+				return
+			}
+			raw := username + ":" + password
+			headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(raw))
+
+		case models.TypeOAuth2:
+			token := pickCredentialSecretValue(decrypted, "access_token")
+			if token != "" {
+				headers["Authorization"] = "Bearer " + token
+			}
+		}
+	}
+}
+
+func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, canonicalType string, def pipelineTaskDefinition, nodeConfig map[string]interface{}, run *models.PipelineRun, userID uint64, role string) error {
+	if nodeConfig == nil || len(def.CredentialSlots) == 0 {
+		return nil
+	}
+
+	rawBindings, _ := nodeConfig["credentials"].(map[string]interface{})
+	injectEnv := def.ExecMode == taskExecModeAgent
+	var envMap map[string]interface{}
+	if injectEnv {
+		envMap = mergeNodeEnv(nodeConfig)
+	}
+
+	for _, slot := range def.CredentialSlots {
+		var bindingRaw interface{}
+		if rawBindings != nil {
+			bindingRaw = rawBindings[slot.Slot]
+		}
+
+		credentialID, hasBinding := extractCredentialIDFromBinding(bindingRaw)
+		if !hasBinding {
+			if slot.Required {
+				return fmt.Errorf("credential slot '%s' is required", slot.Slot)
+			}
+			continue
+		}
+
+		var credential models.Credential
+		if err := db.First(&credential, credentialID).Error; err != nil {
+			return fmt.Errorf("credential not found for slot '%s': %w", slot.Slot, err)
+		}
+		if !canReadCredential(db, &credential, userID, role) {
+			return fmt.Errorf("access denied for credential slot '%s'", slot.Slot)
+		}
+		if credential.Status != models.CredentialStatusActive {
+			return fmt.Errorf("credential in slot '%s' is not active", slot.Slot)
+		}
+
+		if !slot.allowsType(credential.Type) {
+			return fmt.Errorf("credential type '%s' is not allowed for slot '%s'", credential.Type, slot.Slot)
+		}
+		if !slot.allowsCategory(credential.Category) {
+			return fmt.Errorf("credential category '%s' is not allowed for slot '%s'", credential.Category, slot.Slot)
+		}
+
+		decrypted, err := services.NewCredentialEncryptionService().
+			DecryptCredentialData(credential.EncryptedData, credential.EncryptionIV)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt credential in slot '%s': %w", slot.Slot, err)
+		}
+
+		if injectEnv {
+			prefix := slotEnvPrefix(slot.Slot)
+			credentialJSON, _ := json.Marshal(decrypted)
+			envMap[prefix+"ID"] = strconv.FormatUint(credential.ID, 10)
+			envMap[prefix+"TYPE"] = string(credential.Type)
+			envMap[prefix+"CATEGORY"] = string(credential.Category)
+			envMap[prefix+"JSON"] = string(credentialJSON)
+
+			for k, v := range decrypted {
+				envKey := sanitizeEnvKey(k)
+				if envKey == "" {
+					continue
+				}
+				envMap[prefix+envKey] = convertToString(v)
+			}
+		}
+
+		applyServerCredentialConfig(canonicalType, slot, credential, decrypted, nodeConfig)
+
+		now := time.Now().Unix()
+		db.Model(&credential).Updates(map[string]interface{}{
+			"last_used_at": now,
+			"used_count":   credential.UsedCount + 1,
+		})
+		db.Create(&models.CredentialUsage{
+			CredentialID: credential.ID,
+			UsedByType:   "pipeline_run",
+			UsedByID:     run.ID,
+			UsedByName:   fmt.Sprintf("pipeline_run_%d:%s", run.ID, slot.Slot),
+			UsedAt:       now,
+			Result:       "success",
+		})
+	}
+
+	if injectEnv && len(envMap) > 0 {
+		nodeConfig["env"] = envMap
+	}
 	return nil
 }
 
-// executeEmailTask executes email notification task (Server side)
-func (h *PipelineHandler) executeEmailTask(db *gorm.DB, run *models.PipelineRun, node *PipelineNode) bool {
-	config := node.Config
-	if config == nil {
-		return true // 没有配置，视为成功
+func (h *PipelineHandler) executeServerTask(db *gorm.DB, run *models.PipelineRun, node *PipelineNode, canonicalType string, nodeConfig map[string]interface{}, timeout int) (bool, string) {
+	start := time.Now().Unix()
+	serverTaskAgentID := h.resolveServerTaskAgentID(db, run)
+	if serverTaskAgentID == 0 {
+		return false, "无法分配服务端任务执行记录"
 	}
 
-	// TODO: 实现邮件发送逻辑
-	// 这里可以调用现有的邮件服务
-	// 目前直接返回成功
+	var task models.AgentTask
+	result := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, node.ID).First(&task)
+	if result.Error != nil {
+		task = models.AgentTask{
+			AgentID:       serverTaskAgentID,
+			PipelineRunID: run.ID,
+			NodeID:        node.ID,
+			TaskType:      canonicalType,
+			Name:          node.Name,
+			Params:        h.jsonEncode(nodeConfig),
+			Status:        models.TaskStatusRunning,
+			StartTime:     start,
+			Timeout:       timeout,
+			MaxRetries:    0,
+		}
+		if err := createAgentTaskWithExplicitMaxRetries(db, &task); err != nil {
+			return false, "创建服务端任务失败: " + err.Error()
+		}
+	} else {
+		task.AgentID = serverTaskAgentID
+		task.TaskType = canonicalType
+		task.Params = h.jsonEncode(nodeConfig)
+		task.Status = models.TaskStatusRunning
+		task.StartTime = start
+		task.EndTime = 0
+		task.ErrorMsg = ""
+		task.Timeout = timeout
+		if err := db.Save(&task).Error; err != nil {
+			return false, "更新服务端任务失败: " + err.Error()
+		}
+	}
 
-	return true
+	success := false
+	errMsg := ""
+	switch canonicalType {
+	case "email":
+		success, errMsg = h.executeEmailTask(nodeConfig)
+	case "webhook":
+		success, errMsg = h.executeWebhookTask(nodeConfig)
+	case "in_app":
+		success, errMsg = h.executeInAppTask(db, run, node, nodeConfig)
+	default:
+		errMsg = "不支持的服务端任务类型"
+	}
+
+	end := time.Now().Unix()
+	duration := int(end - start)
+	updates := map[string]interface{}{
+		"end_time":  end,
+		"duration":  duration,
+		"status":    models.TaskStatusSuccess,
+		"error_msg": "",
+	}
+	if !success {
+		updates["status"] = models.TaskStatusFailed
+		updates["error_msg"] = errMsg
+	}
+	db.Model(&task).Updates(updates)
+	SharedWebSocketHandler().BroadcastTaskStatus(run.ID, task.ID, task.NodeID, updates["status"].(string), 0, errMsg, "")
+
+	return success, errMsg
+}
+
+func (h *PipelineHandler) resolveServerTaskAgentID(db *gorm.DB, run *models.PipelineRun) uint64 {
+	if run != nil && run.AgentID > 0 {
+		return run.AgentID
+	}
+
+	var existing models.Agent
+	if err := db.Select("id").Order("id ASC").First(&existing).Error; err == nil && existing.ID > 0 {
+		return existing.ID
+	}
+
+	systemAgent := models.Agent{
+		Name:               "__server_task__",
+		Host:               "server.internal",
+		Port:               0,
+		Token:              "__server_task__",
+		Status:             models.AgentStatusOffline,
+		RegistrationStatus: models.AgentRegistrationStatusApproved,
+		ApprovedAt:         time.Now().Unix(),
+		LastHeartAt:        time.Now().Unix(),
+		HeartbeatInterval:  10,
+	}
+	if err := db.Where("name = ? AND host = ?", systemAgent.Name, systemAgent.Host).FirstOrCreate(&systemAgent).Error; err != nil {
+		return 0
+	}
+	return systemAgent.ID
+}
+
+// executeEmailTask executes email notification task (Server side)
+func (h *PipelineHandler) executeEmailTask(config map[string]interface{}) (bool, string) {
+	toList := parseCommaSeparatedList(toString(config["to"]))
+	ccList := parseCommaSeparatedList(toString(config["cc"]))
+	recipients := append([]string{}, toList...)
+	recipients = append(recipients, ccList...)
+	if len(recipients) == 0 {
+		return false, "email.to 不能为空"
+	}
+
+	subject := toString(config["subject"])
+	if strings.TrimSpace(subject) == "" {
+		subject = "EasyDo 流水线通知"
+	}
+	body := toString(config["body"])
+	bodyType := strings.ToLower(strings.TrimSpace(toString(config["body_type"])))
+	if bodyType != "html" {
+		bodyType = "text"
+	}
+
+	smtpHost := strings.TrimSpace(toString(config["smtp_host"]))
+	if smtpHost == "" {
+		return false, "smtp_host 不能为空"
+	}
+	smtpPort := toInt(config["smtp_port"])
+	if smtpPort <= 0 {
+		smtpPort = 25
+	}
+	username := strings.TrimSpace(toString(config["smtp_username"]))
+	password := toString(config["smtp_password"])
+	from := strings.TrimSpace(toString(config["from"]))
+	if from == "" {
+		from = username
+	}
+	if from == "" {
+		return false, "from 不能为空"
+	}
+
+	contentType := "text/plain; charset=UTF-8"
+	if bodyType == "html" {
+		contentType = "text/html; charset=UTF-8"
+	}
+
+	msg := bytes.NewBuffer(nil)
+	msg.WriteString("From: " + from + "\r\n")
+	msg.WriteString("To: " + strings.Join(toList, ",") + "\r\n")
+	if len(ccList) > 0 {
+		msg.WriteString("Cc: " + strings.Join(ccList, ",") + "\r\n")
+	}
+	msg.WriteString("Subject: " + subject + "\r\n")
+	msg.WriteString("MIME-Version: 1.0\r\n")
+	msg.WriteString("Content-Type: " + contentType + "\r\n")
+	msg.WriteString("\r\n")
+	msg.WriteString(body)
+
+	addr := net.JoinHostPort(smtpHost, strconv.Itoa(smtpPort))
+	var auth smtp.Auth
+	if username != "" {
+		auth = smtp.PlainAuth("", username, password, smtpHost)
+	}
+	if err := smtp.SendMail(addr, auth, from, recipients, msg.Bytes()); err != nil {
+		return false, "邮件发送失败: " + err.Error()
+	}
+	return true, ""
+}
+
+func (h *PipelineHandler) executeWebhookTask(config map[string]interface{}) (bool, string) {
+	url := strings.TrimSpace(toString(config["url"]))
+	if url == "" {
+		return false, "webhook.url 不能为空"
+	}
+
+	method := strings.ToUpper(strings.TrimSpace(toString(config["method"])))
+	if method == "" {
+		method = http.MethodPost
+	}
+
+	timeout := toInt(config["timeout"])
+	if timeout <= 0 {
+		timeout = 10
+	}
+
+	var payload []byte
+	bodyVal := config["body"]
+	switch v := bodyVal.(type) {
+	case string:
+		body := strings.TrimSpace(v)
+		if body == "" {
+			payload = []byte(`{}`)
+		} else if json.Valid([]byte(body)) {
+			payload = []byte(body)
+		} else {
+			payload, _ = json.Marshal(map[string]interface{}{"message": body})
+		}
+	case map[string]interface{}, []interface{}:
+		payload, _ = json.Marshal(v)
+	default:
+		payload = []byte(`{}`)
+	}
+
+	req, err := http.NewRequest(method, url, bytes.NewReader(payload))
+	if err != nil {
+		return false, "构造 webhook 请求失败: " + err.Error()
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	if headersMap, ok := config["headers"].(map[string]interface{}); ok {
+		for k, v := range headersMap {
+			key := strings.TrimSpace(k)
+			if key == "" {
+				continue
+			}
+			req.Header.Set(key, toString(v))
+		}
+	} else if headersJSON := strings.TrimSpace(toString(config["headers_json"])); headersJSON != "" {
+		var headers map[string]string
+		if err := json.Unmarshal([]byte(headersJSON), &headers); err == nil {
+			for k, v := range headers {
+				key := strings.TrimSpace(k)
+				if key == "" {
+					continue
+				}
+				req.Header.Set(key, v)
+			}
+		}
+	}
+
+	tlsConfig, err := buildWebhookTLSConfig(config)
+	if err != nil {
+		return false, "webhook TLS 配置无效: " + err.Error()
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if tlsConfig != nil {
+		transport.TLSClientConfig = tlsConfig
+	}
+
+	client := &http.Client{
+		Timeout:   time.Duration(timeout) * time.Second,
+		Transport: transport,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, "webhook 调用失败: " + err.Error()
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Sprintf("webhook 响应失败: status=%d body=%s", resp.StatusCode, string(respBody))
+	}
+	return true, ""
+}
+
+func buildWebhookTLSConfig(config map[string]interface{}) (*tls.Config, error) {
+	clientCertPEM := strings.TrimSpace(toString(config["tls_client_cert"]))
+	clientKeyPEM := strings.TrimSpace(toString(config["tls_client_key"]))
+	caCertPEM := strings.TrimSpace(toString(config["tls_ca_cert"]))
+	serverName := strings.TrimSpace(toString(config["tls_server_name"]))
+	insecureSkip := false
+	switch v := config["tls_insecure_skip_verify"].(type) {
+	case bool:
+		insecureSkip = v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "y", "on":
+			insecureSkip = true
+		}
+	case float64:
+		insecureSkip = v != 0
+	case int:
+		insecureSkip = v != 0
+	case int64:
+		insecureSkip = v != 0
+	}
+
+	if clientCertPEM == "" && clientKeyPEM != "" {
+		return nil, fmt.Errorf("tls_client_key provided without tls_client_cert")
+	}
+	if clientCertPEM != "" && clientKeyPEM == "" {
+		return nil, fmt.Errorf("tls_client_cert provided without tls_client_key")
+	}
+
+	if clientCertPEM == "" && caCertPEM == "" && serverName == "" && !insecureSkip {
+		return nil, nil
+	}
+
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+	if insecureSkip {
+		tlsConfig.InsecureSkipVerify = true
+	}
+	if serverName != "" {
+		tlsConfig.ServerName = serverName
+	}
+
+	if caCertPEM != "" {
+		rootCAs, err := x509.SystemCertPool()
+		if err != nil || rootCAs == nil {
+			rootCAs = x509.NewCertPool()
+		}
+		if ok := rootCAs.AppendCertsFromPEM([]byte(caCertPEM)); !ok {
+			return nil, fmt.Errorf("invalid tls_ca_cert PEM")
+		}
+		tlsConfig.RootCAs = rootCAs
+	}
+
+	if clientCertPEM != "" && clientKeyPEM != "" {
+		certificate, err := tls.X509KeyPair([]byte(clientCertPEM), []byte(clientKeyPEM))
+		if err != nil {
+			return nil, fmt.Errorf("invalid client certificate pair: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{certificate}
+	}
+
+	return tlsConfig, nil
+}
+
+func (h *PipelineHandler) executeInAppTask(db *gorm.DB, run *models.PipelineRun, node *PipelineNode, config map[string]interface{}) (bool, string) {
+	title := strings.TrimSpace(toString(config["title"]))
+	if title == "" {
+		title = "流水线站内信通知"
+	}
+	content := strings.TrimSpace(toString(config["content"]))
+	if content == "" {
+		content = fmt.Sprintf("流水线运行 #%d 的节点 %s 已触发站内信通知", run.ID, node.Name)
+	}
+	msgType := strings.TrimSpace(toString(config["message_type"]))
+	if msgType == "" {
+		msgType = models.MessageTypeSystem
+	}
+	priority := toInt(config["priority"])
+
+	metadata := map[string]interface{}{
+		"pipeline_run_id": run.ID,
+		"node_id":         node.ID,
+		"node_name":       node.Name,
+	}
+	if customMetadata := strings.TrimSpace(toString(config["metadata_json"])); customMetadata != "" {
+		var merged map[string]interface{}
+		if err := json.Unmarshal([]byte(customMetadata), &merged); err == nil {
+			for k, v := range merged {
+				metadata[k] = v
+			}
+		}
+	}
+	metadataJSON, _ := json.Marshal(metadata)
+
+	message := &models.Message{
+		Type:       msgType,
+		Title:      title,
+		Content:    content,
+		SenderType: "system",
+		Priority:   priority,
+		Metadata:   string(metadataJSON),
+	}
+	if err := db.Create(message).Error; err != nil {
+		return false, "站内信创建失败: " + err.Error()
+	}
+	return true, ""
+}
+
+func parseCommaSeparatedList(raw string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r'
+	})
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		item := strings.TrimSpace(p)
+		if item == "" {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func toString(v interface{}) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case json.Number:
+		return val.String()
+	case fmt.Stringer:
+		return val.String()
+	case nil:
+		return ""
+	default:
+		return fmt.Sprintf("%v", val)
+	}
 }
 
 // buildTaskScript builds the execution script based on node type and config
 func (h *PipelineHandler) buildTaskScript(node *PipelineNode, config map[string]interface{}) string {
-	taskType := node.Type
-
-	switch taskType {
-	case "shell", "custom", "agent":
-		// Shell/custom/agent 任务：直接使用脚本内容
-		if script, ok := config["script"].(string); ok {
-			return script
-		}
-		return ""
-
-	case "docker":
-		// Docker 任务：构建 Docker 命令
-		var script strings.Builder
-
-		imageName := ""
-		if v, ok := config["image_name"].(string); ok {
-			imageName = v
-		}
-
-		imageTag := "latest"
-		if v, ok := config["image_tag"].(string); ok {
-			imageTag = v
-		}
-
-		dockerfile := "./Dockerfile"
-		if v, ok := config["dockerfile"].(string); ok {
-			dockerfile = v
-		}
-
-		context := "."
-		if v, ok := config["context"].(string); ok {
-			context = v
-		}
-
-		script.WriteString(fmt.Sprintf("docker build -t %s:%s -f %s %s\n", imageName, imageTag, dockerfile, context))
-
-		// 如果需要推送
-		if push, ok := config["push"].(bool); ok && push {
-			registry := ""
-			if v, ok := config["registry"].(string); ok {
-				registry = v
-			}
-			if registry != "" {
-				script.WriteString(fmt.Sprintf("docker tag %s:%s %s/%s:%s\n", imageName, imageTag, registry, imageName, imageTag))
-				script.WriteString(fmt.Sprintf("docker push %s/%s:%s\n", registry, imageName, imageTag))
-			}
-		}
-
-		return script.String()
-
-	case "git_clone":
-		// Git 任务：构建 Git 命令
-		var script strings.Builder
-
-		repoURL := ""
-		branch := "main"
-		targetDir := ""
-		depth := 0
-
-		if repo, ok := config["repository"].(map[string]interface{}); ok {
-			if url, ok := repo["url"].(string); ok {
-				repoURL = url
-			}
-			if b, ok := repo["branch"].(string); ok {
-				branch = b
-			}
-			if dir, ok := repo["target_dir"].(string); ok {
-				targetDir = dir
-			}
-			if d, ok := repo["depth"].(float64); ok {
-				depth = int(d)
-			}
-		}
-
-		if repoURL == "" {
-			return ""
-		}
-
-		// 构建 git clone 命令
-		script.WriteString("set -e\n")
-
-		// 删除已存在的目标目录（如果存在）
-		if targetDir != "" {
-			script.WriteString(fmt.Sprintf("rm -rf %s\n", targetDir))
-			script.WriteString(fmt.Sprintf("mkdir -p %s\n", targetDir))
-			script.WriteString(fmt.Sprintf("cd %s\n", targetDir))
-		}
-
-		// 执行 clone
-		if depth > 0 {
-			script.WriteString(fmt.Sprintf("git clone --depth %d -b %s %s .\n", depth, branch, repoURL))
-		} else {
-			script.WriteString(fmt.Sprintf("git clone -b %s %s .\n", branch, repoURL))
-		}
-
-		// 如果指定了 commit
-		if commit, ok := config["repository"].(map[string]interface{}); ok {
-			if commitID, ok := commit["commit_id"].(string); ok && commitID != "" {
-				script.WriteString(fmt.Sprintf("git checkout %s\n", commitID))
-			}
-		}
-
-		return script.String()
-
-	default:
+	_, script, err := renderPipelineAgentScript(node.Type, config)
+	if err != nil {
 		return ""
 	}
+	return script
 }
 
 // buildTaskOutputs builds the output map for a completed task based on task type
@@ -1530,11 +2070,7 @@ func (h *PipelineHandler) updateRunStatus(runID uint64, status, errorMsg string)
 	}
 
 	if errorMsg != "" {
-		// Store error message in stage field
-		if len(errorMsg) > 64 {
-			errorMsg = errorMsg[:64]
-		}
-		updates["stage"] = errorMsg
+		updates["error_msg"] = errorMsg
 	}
 
 	h.DB.Model(&run).Updates(updates)
@@ -1542,6 +2078,13 @@ func (h *PipelineHandler) updateRunStatus(runID uint64, status, errorMsg string)
 	// Broadcast run status to frontend clients
 	wsHandler := SharedWebSocketHandler()
 	wsHandler.BroadcastRunStatus(runID, status, errorMsg)
+
+	if status == models.PipelineRunStatusSuccess || status == models.PipelineRunStatusFailed || status == models.PipelineRunStatusCancelled {
+		if run.AgentID > 0 {
+			updateAgentStatusByPipelineConcurrency(h.DB, run.AgentID)
+		}
+		go h.scheduleQueuedPipelineRuns(h.DB)
+	}
 }
 
 func (h *PipelineHandler) GetPipelineRuns(c *gin.Context) {
@@ -1596,8 +2139,8 @@ func (h *PipelineHandler) GetPipelineStatistics(c *gin.Context) {
 	var avgDuration float64
 
 	h.DB.Model(&models.PipelineRun{}).Where("pipeline_id = ?", id).Count(&totalRuns)
-	h.DB.Model(&models.PipelineRun{}).Where("pipeline_id = ? AND status = ?", id, "success").Count(&successfulRuns)
-	h.DB.Model(&models.PipelineRun{}).Where("pipeline_id = ? AND status = ?", id, "failed").Count(&failedRuns)
+	h.DB.Model(&models.PipelineRun{}).Where("pipeline_id = ? AND status = ?", id, models.PipelineRunStatusSuccess).Count(&successfulRuns)
+	h.DB.Model(&models.PipelineRun{}).Where("pipeline_id = ? AND status = ?", id, models.PipelineRunStatusFailed).Count(&failedRuns)
 
 	// 计算平均耗时
 	var totalDuration int64
@@ -1802,7 +2345,7 @@ func (h *PipelineHandler) GetRunTasks(c *gin.Context) {
 			}
 			// 起始节点未执行，可能是因为流水线刚开始或被跳过
 			// 检查流水线运行状态
-			if run.Status == "pending" || run.Status == "running" {
+			if run.Status == models.PipelineRunStatusQueued || run.Status == models.PipelineRunStatusPending || run.Status == models.PipelineRunStatusRunning {
 				// 流水线还在运行中，起始节点暂未执行是正常的
 				shouldSkipMap[nodeID] = true
 				canNeverExecuteMap[nodeID] = false

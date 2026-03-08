@@ -68,6 +68,7 @@
         <el-icon><VideoPlay /></el-icon>
         <span>执行过程</span>
         <el-tag v-if="currentRun.status === 'running'" type="warning" size="small" class="running-tag">运行中</el-tag>
+        <el-tag v-else-if="currentRun.status === 'queued'" type="info" size="small" class="running-tag">排队中</el-tag>
       </div>
       <div 
         class="tab-item" 
@@ -212,8 +213,8 @@
             
             <div class="task-list">
               <div 
-                v-for="task in runTasks" 
-                :key="task.id"
+                v-for="task in sortedRunTasks"
+                :key="task.id ? `task-${task.id}` : `node-${task.node_id || task.NodeID || task.name || 'unknown'}`"
                 class="task-item"
                 :class="{ 
                   'task-running': task.status === 'running', 
@@ -222,7 +223,7 @@
                 }"
               >
                 <div class="task-status-icon">
-                  <el-icon v-if="task.status === 'pending' || task.display_status === 'not_executed'" :color="'var(--text-muted)'"><Clock /></el-icon>
+                  <el-icon v-if="task.status === 'queued' || task.status === 'pending' || task.display_status === 'not_executed'" :color="'var(--text-muted)'"><Clock /></el-icon>
                   <el-icon v-else-if="task.status === 'running'" color="#E6A23C" class="running-icon"><Loading /></el-icon>
                   <el-icon v-else-if="task.status === 'success'" color="#67C23A"><SuccessFilled /></el-icon>
                   <el-icon v-else-if="task.status === 'failed' || task.display_status === 'blocked'" color="#F56C6C"><CircleCloseFilled /></el-icon>
@@ -233,6 +234,7 @@
                     <el-tag v-if="task.display_status === 'not_executed'" type="info" size="small">暂未执行</el-tag>
                     <el-tag v-else-if="task.display_status === 'blocked'" type="danger" size="small">已阻塞</el-tag>
                     <span class="task-agent" v-if="task.Agent">{{ task.Agent.name }}</span>
+                    <span class="task-start-time">开始: {{ formatDateTime(task.start_time) }}</span>
                     <span class="task-duration" v-if="task.duration > 0">耗时: {{ formatDuration(task.duration) }}</span>
                   </div>
                   <div class="task-error" v-if="task.error_msg">
@@ -246,7 +248,7 @@
                     link 
                     size="small" 
                     @click="viewTaskLogs(task)"
-                    :disabled="task.status === 'pending' || task.display_status === 'not_executed' || task.display_status === 'blocked'"
+                    :disabled="task.status === 'queued' || task.status === 'pending' || task.display_status === 'not_executed' || task.display_status === 'blocked'"
                   >
                     查看日志
                   </el-button>
@@ -658,6 +660,66 @@ const detailContainerRef = ref(null)
 const detailContainerWidth = ref(0)
 let detailResizeObserver = null
 
+const parseTaskOrderTime = (value) => {
+  if (value === null || value === undefined || value === '' || value === 0) {
+    return Number.POSITIVE_INFINITY
+  }
+
+  if (typeof value === 'number') {
+    if (value <= 0) return Number.POSITIVE_INFINITY
+    return value > 1e12 ? value : value * 1000
+  }
+
+  if (typeof value === 'string') {
+    const ms = Date.parse(value)
+    if (Number.isNaN(ms) || ms <= 0) {
+      return Number.POSITIVE_INFINITY
+    }
+    return ms
+  }
+
+  return Number.POSITIVE_INFINITY
+}
+
+const sortedRunTasks = computed(() => {
+  if (!Array.isArray(runTasks.value)) return []
+
+  return [...runTasks.value]
+    .map((task, index) => ({
+      task,
+      index,
+      hasScheduledRecord: (task.id || 0) > 0,
+      scheduledAt: parseTaskOrderTime(task.created_at),
+      startedAt: parseTaskOrderTime(task.start_time)
+    }))
+    .sort((a, b) => {
+      if (a.hasScheduledRecord !== b.hasScheduledRecord) {
+        return a.hasScheduledRecord ? -1 : 1
+      }
+
+      if (a.scheduledAt !== b.scheduledAt) {
+        return a.scheduledAt - b.scheduledAt
+      }
+
+      if (a.startedAt !== b.startedAt) {
+        return a.startedAt - b.startedAt
+      }
+
+      const aID = a.task.id || 0
+      const bID = b.task.id || 0
+      if (aID !== bID) {
+        return aID - bID
+      }
+
+      return a.index - b.index
+    })
+    .map(item => item.task)
+})
+
+const getTaskNodeID = (task) => {
+  return task?.node_id || task?.NodeID || ''
+}
+
 // 计算执行进度
 const executionProgress = computed(() => {
   if (!runTasks.value || runTasks.value.length === 0) return 0
@@ -796,7 +858,8 @@ const confirmRun = async () => {
   try {
     const response = await runPipeline(pipelineId.value)
     if (response.code === 200) {
-      ElMessage.success('流水线已开始运行')
+      const runStatus = response?.data?.status
+      ElMessage.success(runStatus === 'queued' ? '流水线已进入排队' : '流水线已开始运行')
       runDialogVisible.value = false
 
       // 获取最新的运行记录并切换到执行Tab
@@ -941,9 +1004,9 @@ const startExecutionPolling = () => {
   if (executionPollingTimer) return
   
   executionPollingTimer = setInterval(() => {
-    if (activeTab.value === 'execution' && currentRun.value?.status === 'running') {
+    if (activeTab.value === 'execution' && (currentRun.value?.status === 'running' || currentRun.value?.status === 'queued')) {
       fetchExecutionDetail()
-    } else if (currentRun.value?.status !== 'running') {
+    } else if (currentRun.value?.status !== 'running' && currentRun.value?.status !== 'queued') {
       // 执行完成，停止轮询
       stopExecutionPolling()
     }
@@ -1038,6 +1101,7 @@ const getStatusType = (status) => {
     running: 'warning',
     failed: 'danger',
     pending: 'info',
+    queued: 'warning',
     not_executed: 'info',
     blocked: 'danger'
   }
@@ -1050,6 +1114,7 @@ const getStatusText = (status) => {
     running: '运行中',
     failed: '失败',
     pending: '等待',
+    queued: '排队中',
     not_executed: '暂未执行',
     blocked: '已阻塞'
   }
@@ -1092,15 +1157,63 @@ const setupRealtimeUpdates = () => {
     if (!currentRun.value || payload.run_id !== currentRun.value.id) return
     
     // 更新任务状态
-    const taskIndex = runTasks.value.findIndex(t => t.id === payload.task_id)
+    let taskIndex = -1
+    if (payload.task_id) {
+      taskIndex = runTasks.value.findIndex(t => Number(t.id || 0) === Number(payload.task_id))
+    }
+    if (taskIndex === -1 && payload.node_id) {
+      taskIndex = runTasks.value.findIndex(t => getTaskNodeID(t) === payload.node_id)
+    }
+
     if (taskIndex !== -1) {
-      runTasks.value[taskIndex].status = payload.status
-      runTasks.value[taskIndex].exit_code = payload.exit_code
-      runTasks.value[taskIndex].error_msg = payload.error_msg
-      runTasks.value[taskIndex].duration = payload.duration
-      if (payload.agent_name) {
-        runTasks.value[taskIndex].Agent = { name: payload.agent_name }
+      const task = runTasks.value[taskIndex]
+
+      if (payload.task_id && (!task.id || task.id === 0)) {
+        task.id = payload.task_id
       }
+      if (payload.node_id) {
+        task.node_id = payload.node_id
+      }
+      if (!task.created_at && payload.timestamp) {
+        task.created_at = payload.timestamp
+      }
+
+      task.status = payload.status
+      if (payload.status) {
+        task.display_status = payload.status
+      }
+      task.exit_code = payload.exit_code
+      task.error_msg = payload.error_msg
+      task.duration = payload.duration
+      if (payload.start_time !== undefined && payload.start_time !== null) {
+        task.start_time = payload.start_time
+      } else if (payload.status === 'running' && !task.start_time && payload.timestamp) {
+        task.start_time = payload.timestamp
+      } else if (payload.status === 'pending' && payload.retrying) {
+        task.start_time = 0
+      }
+      if (payload.agent_name) {
+        task.Agent = { name: payload.agent_name }
+      }
+
+      if (selectedTask.value && payload.task_id && Number(selectedTask.value.id || 0) === Number(payload.task_id)) {
+        selectedTask.value = task
+      } else if (selectedTask.value && payload.node_id && getTaskNodeID(selectedTask.value) === payload.node_id) {
+        selectedTask.value = task
+      }
+    } else if (payload.node_id) {
+      runTasks.value.push({
+        id: payload.task_id || 0,
+        node_id: payload.node_id,
+        name: payload.task_name || payload.node_id,
+        status: payload.status || 'pending',
+        display_status: payload.status || 'pending',
+        start_time: payload.start_time || 0,
+        duration: payload.duration || 0,
+        error_msg: payload.error_msg || '',
+        created_at: payload.timestamp || 0,
+        Agent: payload.agent_name ? { name: payload.agent_name } : null
+      })
     }
     
     // 如果有选中的任务，显示错误信息
@@ -1590,9 +1703,17 @@ onUnmounted(() => {
                 .task-meta {
                   font-size: 12px;
                   color: var(--text-muted);
+                  display: flex;
+                  align-items: center;
+                  gap: 12px;
+                  flex-wrap: wrap;
                   
                   .task-agent {
-                    margin-right: 16px;
+                    margin-right: 4px;
+                  }
+
+                  .task-start-time {
+                    color: var(--text-secondary);
                   }
                 }
                 

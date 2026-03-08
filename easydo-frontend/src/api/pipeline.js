@@ -15,6 +15,13 @@ export function getPipelineDetail(id) {
   })
 }
 
+export function getPipelineTaskTypes() {
+  return request({
+    url: '/pipelines/task-types',
+    method: 'get'
+  })
+}
+
 export function createPipeline(data) {
   return request({
     url: '/pipelines',

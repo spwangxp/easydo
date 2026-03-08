@@ -320,6 +320,17 @@ func (h *WebSocketHandler) handleAgentHeartbeat(client *wsClient, agent *models.
 	}
 
 	models.DB.Model(agent).Updates(updates)
+	h.checkAgentStatus(client.agentID)
+
+	recordAgentHeartbeat(models.DB, h, models.AgentHeartbeat{
+		AgentID:      client.agentID,
+		Timestamp:    agentTimestamp,
+		CPUUsage:     getFloat64(payload, "cpu_usage"),
+		MemoryUsage:  getFloat64(payload, "memory_usage"),
+		DiskUsage:    getFloat64(payload, "disk_usage"),
+		LoadAvg:      getString(payload, "load_avg"),
+		TasksRunning: int(getFloat64(payload, "tasks_running")),
+	})
 
 	// Get pending tasks
 	var pendingTasks []models.AgentTask
@@ -345,6 +356,7 @@ func (h *WebSocketHandler) handleAgentHeartbeat(client *wsClient, agent *models.
 	if len(pendingTasks) > 0 {
 		_ = h.dispatchPendingTasks(client.agentID)
 	}
+	go NewPipelineHandler().scheduleQueuedPipelineRuns(models.DB)
 }
 
 // handleTaskStatus processes a task status message from an agent
@@ -544,11 +556,17 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 	if v, ok := updates["duration"].(int); ok {
 		durationForFrontend = v
 	}
+	startTimeForFrontend := task.StartTime
+	if v, ok := updates["start_time"].(int64); ok {
+		startTimeForFrontend = v
+	}
 
 	h.broadcastToFrontend(task.PipelineRunID, "task_status", map[string]interface{}{
 		"task_id":    update.TaskID,
+		"node_id":    task.NodeID,
 		"run_id":     task.PipelineRunID,
 		"status":     update.Status,
+		"start_time": startTimeForFrontend,
 		"exit_code":  update.ExitCode,
 		"error_msg":  update.ErrorMsg,
 		"duration":   durationForFrontend,
@@ -600,8 +618,10 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 
 		h.broadcastToFrontend(task.PipelineRunID, "task_status", map[string]interface{}{
 			"task_id":     task.ID,
+			"node_id":     task.NodeID,
 			"run_id":      task.PipelineRunID,
 			"status":      models.TaskStatusPending,
+			"start_time":  int64(0),
 			"exit_code":   0,
 			"error_msg":   "",
 			"duration":    0,
@@ -854,14 +874,16 @@ func (h *WebSocketHandler) broadcastToFrontend(runID uint64, msgType string, pay
 }
 
 // BroadcastTaskStatus broadcasts task status to all frontend clients
-func (h *WebSocketHandler) BroadcastTaskStatus(runID, taskID uint64, status string, exitCode int, errorMsg, agentName string) {
+func (h *WebSocketHandler) BroadcastTaskStatus(runID, taskID uint64, nodeID, status string, exitCode int, errorMsg, agentName string) {
 	payload := map[string]interface{}{
 		"task_id":    taskID,
+		"node_id":    nodeID,
 		"run_id":     runID,
 		"status":     status,
 		"exit_code":  exitCode,
 		"error_msg":  errorMsg,
 		"agent_name": agentName,
+		"timestamp":  time.Now().Unix(),
 	}
 	h.broadcastToFrontend(runID, "task_status", payload)
 }
@@ -882,18 +904,7 @@ func (h *WebSocketHandler) BroadcastRunStatus(runID uint64, status, errorMsg str
 
 // checkAgentStatus updates agent status based on running tasks
 func (h *WebSocketHandler) checkAgentStatus(agentID uint64) {
-	var runningTasks int64
-	models.DB.Model(&models.AgentTask{}).Where("agent_id = ? AND status = ?", agentID, models.TaskStatusRunning).Count(&runningTasks)
-
-	var pendingTasks int64
-	models.DB.Model(&models.AgentTask{}).Where("agent_id = ? AND status = ?", agentID, models.TaskStatusPending).Count(&pendingTasks)
-
-	status := models.AgentStatusOnline
-	if runningTasks > 0 || pendingTasks > 0 {
-		status = models.AgentStatusBusy
-	}
-
-	models.DB.Model(&models.Agent{}).Where("id = ?", agentID).Update("status", status)
+	updateAgentStatusByPipelineConcurrency(models.DB, agentID)
 }
 
 // checkAndUpdatePipelineStatus checks all tasks status and updates pipeline run status accordingly
@@ -903,7 +914,7 @@ func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
 	if err := models.DB.First(&run, runID).Error; err != nil {
 		return
 	}
-	if run.Status != "running" {
+	if run.Status != models.PipelineRunStatusRunning {
 		return
 	}
 
@@ -953,7 +964,7 @@ func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
 		}
 
 		updates := map[string]interface{}{
-			"status":   "failed",
+			"status":   models.PipelineRunStatusFailed,
 			"end_time": now,
 			"duration": duration,
 		}
@@ -965,7 +976,9 @@ func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
 		}
 
 		models.DB.Model(&run).Updates(updates)
-		h.BroadcastRunStatus(runID, "failed", firstErrorMsg, duration)
+		h.BroadcastRunStatus(runID, models.PipelineRunStatusFailed, firstErrorMsg, duration)
+		updateAgentStatusByPipelineConcurrency(models.DB, run.AgentID)
+		go NewPipelineHandler().scheduleQueuedPipelineRuns(models.DB)
 		return
 	}
 
@@ -977,11 +990,13 @@ func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
 		}
 
 		models.DB.Model(&run).Updates(map[string]interface{}{
-			"status":   "success",
+			"status":   models.PipelineRunStatusSuccess,
 			"end_time": now,
 			"duration": duration,
 		})
-		h.BroadcastRunStatus(runID, "success", "", duration)
+		h.BroadcastRunStatus(runID, models.PipelineRunStatusSuccess, "", duration)
+		updateAgentStatusByPipelineConcurrency(models.DB, run.AgentID)
+		go NewPipelineHandler().scheduleQueuedPipelineRuns(models.DB)
 	}
 }
 
@@ -997,7 +1012,7 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 		return
 	}
 
-	if run.Status != "running" {
+	if run.Status != models.PipelineRunStatusRunning {
 		fmt.Printf("[DEBUG] PipelineRun %d status is %s, not running, skipping\n", runID, run.Status)
 		return
 	}
@@ -1013,12 +1028,13 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 		return
 	}
 
-	if len(config.Nodes) == 0 || len(config.Edges) == 0 {
+	edges := config.getEdges()
+	if len(config.Nodes) == 0 || len(edges) == 0 {
 		fmt.Printf("[DEBUG] No nodes or edges in config for run %d\n", runID)
 		return
 	}
 
-	fmt.Printf("[DEBUG] Config has %d nodes, %d edges\n", len(config.Nodes), len(config.Edges))
+	fmt.Printf("[DEBUG] Config has %d nodes, %d edges\n", len(config.Nodes), len(edges))
 
 	// Build node map
 	nodeMap := make(map[string]*PipelineNode)
@@ -1031,7 +1047,7 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 	for _, node := range config.Nodes {
 		graph[node.ID] = []DownstreamEdge{}
 	}
-	for _, edge := range config.Edges {
+	for _, edge := range edges {
 		graph[edge.From] = append(graph[edge.From], DownstreamEdge{
 			To:            edge.To,
 			IgnoreFailure: edge.IgnoreFailure,
@@ -1043,7 +1059,7 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 	edgeMap := make(map[string]map[string]bool)
 	// Build upstream edges map for efficient dependency checking
 	upstreamEdges := make(map[string][]PipelineEdge)
-	for _, edge := range config.Edges {
+	for _, edge := range edges {
 		if edgeMap[edge.From] == nil {
 			edgeMap[edge.From] = make(map[string]bool)
 		}
@@ -1073,6 +1089,7 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 	fmt.Printf("[DEBUG] Failed completed nodes: %v\n", completedFailed)
 
 	// For each completed task, check if downstream nodes should be triggered
+	serverTasksExecuted := false
 	for _, task := range completedTasks {
 		if task.Status != models.TaskStatusSuccess && task.Status != models.TaskStatusFailed {
 			continue
@@ -1150,21 +1167,53 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 			}
 
 			// Create task for downstream node
-			nodeConfig := node.getNodeConfig()
-			script := ""
-			taskType := node.Type
-			if taskType == "agent" || taskType == "custom" {
-				taskType = "shell"
+			canonicalType, def, ok := getPipelineTaskDefinition(node.Type)
+			if !ok {
+				fmt.Printf("[ERROR] Unsupported task type for downstream node %s: %s\n", downstreamID, node.Type)
+				continue
 			}
-			if taskType == "shell" || taskType == "agent" || taskType == "custom" {
-				if s, ok := nodeConfig["script"].(string); ok {
-					script = s
-				}
-			}
+			nodeConfig := normalizePipelineNodeConfig(node.Type, canonicalType, node.getNodeConfig())
 
 			timeout := node.Timeout
 			if timeout <= 0 {
+				if configured := toInt(nodeConfig["timeout"]); configured > 0 {
+					timeout = configured
+				}
+			}
+			if timeout <= 0 {
 				timeout = 3600
+			}
+
+			if def.ExecMode == taskExecModeServer {
+				pipelineHandler := NewPipelineHandler()
+				success, errMsg := pipelineHandler.executeServerTask(models.DB, &run, node, canonicalType, nodeConfig, timeout)
+				if success {
+					fmt.Printf("[SUCCESS] Executed server downstream task: node=%s type=%s\n", downstreamID, canonicalType)
+				} else {
+					fmt.Printf("[ERROR] Failed server downstream task: node=%s type=%s err=%s\n", downstreamID, canonicalType, errMsg)
+				}
+				serverTasksExecuted = true
+				continue
+			}
+
+			_, script, err := renderPipelineAgentScript(canonicalType, nodeConfig)
+			if err != nil {
+				fmt.Printf("[ERROR] Failed to render script for downstream node %s: %v\n", downstreamID, err)
+				failedTask := &models.AgentTask{
+					AgentID:       run.AgentID,
+					PipelineRunID: runID,
+					NodeID:        downstreamID,
+					TaskType:      canonicalType,
+					Name:          node.Name,
+					Status:        models.TaskStatusFailed,
+					ErrorMsg:      "脚本渲染失败: " + err.Error(),
+					StartTime:     time.Now().Unix(),
+					EndTime:       time.Now().Unix(),
+					Timeout:       timeout,
+				}
+				_ = models.DB.Create(failedTask).Error
+				h.BroadcastTaskStatus(runID, failedTask.ID, failedTask.NodeID, failedTask.Status, 0, failedTask.ErrorMsg, "")
+				continue
 			}
 
 			workDir := ""
@@ -1179,34 +1228,61 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 				}
 			}
 
-			maxRetries := 0
-			if retryVal, ok := nodeConfig["retry_count"].(float64); ok && retryVal > 0 {
-				maxRetries = int(retryVal)
+			maxRetries := resolveTaskMaxRetries(nodeConfig)
+
+			paramsJSON, _ := json.Marshal(nodeConfig)
+			repoURL, repoBranch, repoCommit, repoPath := "", "", "", ""
+			if canonicalType == "git_clone" {
+				if repo, ok := nodeConfig["repository"].(map[string]interface{}); ok {
+					if v, ok := repo["url"].(string); ok {
+						repoURL = v
+					}
+					if v, ok := repo["branch"].(string); ok {
+						repoBranch = v
+					}
+					if v, ok := repo["commit_id"].(string); ok {
+						repoCommit = v
+					}
+					if v, ok := repo["target_dir"].(string); ok {
+						repoPath = v
+					}
+				}
 			}
 
 			newTask := &models.AgentTask{
 				AgentID:       run.AgentID,
 				PipelineRunID: runID,
 				NodeID:        downstreamID,
-				TaskType:      taskType,
+				TaskType:      "shell",
 				Name:          node.Name,
-				Params:        "",
+				Params:        string(paramsJSON),
 				Script:        script,
 				WorkDir:       workDir,
 				EnvVars:       envVars,
 				Status:        models.TaskStatusPending,
 				Timeout:       timeout,
 				MaxRetries:    maxRetries,
+				RepoURL:       repoURL,
+				RepoBranch:    repoBranch,
+				RepoCommit:    repoCommit,
+				RepoPath:      repoPath,
 			}
 
-			if err := models.DB.Create(newTask).Error; err == nil {
+			if err := createAgentTaskWithExplicitMaxRetries(models.DB, newTask); err == nil {
 				fmt.Printf("[SUCCESS] Triggered downstream task %d for node %s\n", newTask.ID, downstreamID)
-				h.BroadcastTaskStatus(runID, newTask.ID, newTask.Status, 0, "", "")
+				h.BroadcastTaskStatus(runID, newTask.ID, newTask.NodeID, newTask.Status, 0, "", "")
 				_ = h.sendTaskAssign(*newTask)
 			} else {
 				fmt.Printf("[ERROR] Failed to create task for node %s: %v\n", downstreamID, err)
 			}
 		}
+	}
+
+	if serverTasksExecuted {
+		var latestCompleted []models.AgentTask
+		models.DB.Where("pipeline_run_id = ?", runID).Find(&latestCompleted)
+		h.triggerDownstreamTasks(runID, latestCompleted)
+		h.checkAndUpdatePipelineStatus(runID)
 	}
 }
 
@@ -1295,6 +1371,11 @@ func isTerminalTaskStatus(status string) bool {
 
 func isValidTaskStatusTransition(from, to string) bool {
 	allowed := map[string]map[string]bool{
+		models.TaskStatusQueued: {
+			models.TaskStatusPending:   true,
+			models.TaskStatusRunning:   true,
+			models.TaskStatusCancelled: true,
+		},
 		models.TaskStatusPending: {
 			models.TaskStatusRunning:   true,
 			models.TaskStatusCancelled: true,

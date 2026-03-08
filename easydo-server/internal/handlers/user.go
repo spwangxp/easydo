@@ -46,7 +46,7 @@ func (h *UserHandler) Login(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	var user models.User
 	result := h.DB.Where("username = ?", req.Username).First(&user)
 	if result.Error != nil {
@@ -56,7 +56,7 @@ func (h *UserHandler) Login(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	if !user.CheckPassword(req.Password) {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"code":    401,
@@ -64,7 +64,7 @@ func (h *UserHandler) Login(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	if user.Status != "active" {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
@@ -72,8 +72,8 @@ func (h *UserHandler) Login(c *gin.Context) {
 		})
 		return
 	}
-	
-	token, err := middleware.GenerateToken(&user)
+
+	token, expiresAt, err := middleware.IssueTokenSession(c.Request.Context(), &user)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
@@ -81,14 +81,17 @@ func (h *UserHandler) Login(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	user.LastLoginAt = time.Now().Unix()
 	h.DB.Model(&user).Update("last_login_at", user.LastLoginAt)
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": gin.H{
-			"token": token,
+			"token":            token,
+			"expires_at":       expiresAt,
+			"expires_in":       int64(middleware.GetAuthTokenTTL().Seconds()),
+			"refresh_interval": int64(middleware.GetAuthRefreshInterval().Seconds()),
 			"user": gin.H{
 				"id":       user.ID,
 				"username": user.Username,
@@ -97,6 +100,43 @@ func (h *UserHandler) Login(c *gin.Context) {
 				"avatar":   user.Avatar,
 				"role":     user.Role,
 			},
+		},
+	})
+}
+
+func (h *UserHandler) RefreshToken(c *gin.Context) {
+	token := ""
+	if v, ok := c.Get("auth_token"); ok {
+		token, _ = v.(string)
+	}
+	if token == "" {
+		var err error
+		token, err = middleware.ExtractBearerToken(c.GetHeader("Authorization"))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"code":    401,
+				"message": "登录已过期",
+			})
+			return
+		}
+	}
+
+	expiresAt, err := middleware.RefreshTokenSession(c.Request.Context(), token)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"code":    401,
+			"message": "登录已过期",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": gin.H{
+			"token":            token,
+			"expires_at":       expiresAt,
+			"expires_in":       int64(middleware.GetAuthTokenTTL().Seconds()),
+			"refresh_interval": int64(middleware.GetAuthRefreshInterval().Seconds()),
 		},
 	})
 }
@@ -110,7 +150,7 @@ func (h *UserHandler) Register(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	var existUser models.User
 	if h.DB.Where("username = ?", req.Username).First(&existUser).Error == nil {
 		c.JSON(http.StatusConflict, gin.H{
@@ -119,14 +159,14 @@ func (h *UserHandler) Register(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	user := &models.User{
 		Username: req.Username,
 		Email:    req.Email,
 		Role:     "user",
 		Status:   "active",
 	}
-	
+
 	if err := user.SetPassword(req.Password); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
@@ -134,7 +174,7 @@ func (h *UserHandler) Register(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	if err := h.DB.Create(user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
@@ -142,7 +182,7 @@ func (h *UserHandler) Register(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
 		"message": "注册成功",
@@ -151,7 +191,7 @@ func (h *UserHandler) Register(c *gin.Context) {
 
 func (h *UserHandler) GetUserInfo(c *gin.Context) {
 	userID := c.GetUint64("user_id")
-	
+
 	var user models.User
 	if err := h.DB.First(&user, userID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
@@ -160,19 +200,19 @@ func (h *UserHandler) GetUserInfo(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": gin.H{
-			"id":        user.ID,
-			"username":  user.Username,
-			"email":     user.Email,
-			"phone":     user.Phone,
-			"nickname":  user.Nickname,
-			"avatar":    user.Avatar,
-			"bio":       user.Bio,
-			"role":      user.Role,
-			"status":    user.Status,
+			"id":         user.ID,
+			"username":   user.Username,
+			"email":      user.Email,
+			"phone":      user.Phone,
+			"nickname":   user.Nickname,
+			"avatar":     user.Avatar,
+			"bio":        user.Bio,
+			"role":       user.Role,
+			"status":     user.Status,
 			"created_at": user.CreatedAt,
 		},
 	})
@@ -188,7 +228,7 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	updates := gin.H{}
 	if req.Nickname != "" {
 		updates["nickname"] = req.Nickname
@@ -202,7 +242,7 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 	if req.Bio != "" {
 		updates["bio"] = req.Bio
 	}
-	
+
 	if err := h.DB.Model(&models.User{}).Where("id = ?", userID).Updates(updates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
@@ -210,7 +250,7 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
 		"message": "更新成功",
@@ -219,7 +259,7 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 
 func (h *UserHandler) ChangePassword(c *gin.Context) {
 	userID := c.GetUint64("user_id")
-	
+
 	var req struct {
 		CurrentPassword string `json:"current_password" binding:"required"`
 		NewPassword     string `json:"new_password" binding:"required,min=6"`
@@ -231,7 +271,7 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	var user models.User
 	if err := h.DB.First(&user, userID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
@@ -240,7 +280,7 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	if !user.CheckPassword(req.CurrentPassword) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
@@ -248,7 +288,7 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	if err := user.SetPassword(req.NewPassword); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
@@ -256,9 +296,9 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	h.DB.Model(&user).Update("password", user.Password)
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
 		"message": "密码修改成功",
@@ -266,6 +306,19 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 }
 
 func (h *UserHandler) Logout(c *gin.Context) {
+	if session, ok := c.Get("session_id"); ok {
+		sessionID, _ := session.(string)
+		if sessionID != "" {
+			if err := middleware.RevokeSessionByID(c.Request.Context(), sessionID); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"code":    500,
+					"message": "退出失败",
+				})
+				return
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
 		"message": "退出成功",
@@ -275,13 +328,13 @@ func (h *UserHandler) Logout(c *gin.Context) {
 func (h *UserHandler) GetUserList(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
-	
+
 	var users []models.User
 	var total int64
-	
+
 	offset := (page - 1) * pageSize
 	h.DB.Model(&models.User{}).Count(&total)
-	
+
 	if err := h.DB.Offset(offset).Limit(pageSize).Find(&users).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
@@ -289,7 +342,7 @@ func (h *UserHandler) GetUserList(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": gin.H{

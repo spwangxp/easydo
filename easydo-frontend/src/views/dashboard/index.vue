@@ -97,6 +97,67 @@
             </el-table-column>
           </el-table>
         </div>
+
+        <div class="section-card">
+          <div class="section-header">
+            <h3 class="section-title">任务调度视图</h3>
+            <el-button type="text" @click="fetchTaskDispatchData">刷新</el-button>
+          </div>
+
+          <el-table :data="dispatchTasks" style="width: 100%" v-loading="dispatchLoading" empty-text="暂无任务调度记录">
+            <el-table-column label="流水线" min-width="160">
+              <template #default="{ row }">
+                <div class="pipeline-cell">
+                  <span class="pipeline-icon">{{ (row.pipeline_name || '-').charAt(0).toUpperCase() }}</span>
+                  <span>{{ row.pipeline_name || '-' }}</span>
+                </div>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="构建号" width="100">
+              <template #default="{ row }">
+                <span class="build-id">#{{ row.build_number || '-' }}</span>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="任务" min-width="200">
+              <template #default="{ row }">
+                <div class="task-cell">
+                  <span class="task-name">{{ row.name || row.node_id || `任务 #${row.id}` }}</span>
+                  <span class="task-node">{{ row.node_id || '-' }}</span>
+                </div>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="执行器" width="120" align="center">
+              <template #default="{ row }">
+                {{ row.agent_name || '-' }}
+              </template>
+            </el-table-column>
+
+            <el-table-column label="调度状态" width="110" align="center">
+              <template #default="{ row }">
+                <el-tag :type="getDispatchStatusType(row.dispatch_status)" size="small">
+                  {{ getDispatchStatusText(row.dispatch_status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="任务状态" width="110" align="center">
+              <template #default="{ row }">
+                <el-tag :type="getTaskStatusType(row.status)" size="small">
+                  {{ getTaskStatusText(row.status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="更新时间" width="180">
+              <template #default="{ row }">
+                {{ formatTime(row.updated_at || row.created_at) }}
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
       </div>
       
       <div class="content-sidebar">
@@ -175,9 +236,11 @@ import {
 } from '@element-plus/icons-vue'
 import { getPipelineList, getPipelineHistory } from '@/api/pipeline'
 import { getProjectList } from '@/api/project'
+import { getTaskDispatchList } from '@/api/task'
 
 const router = useRouter()
 const loading = ref(false)
+const dispatchLoading = ref(false)
 
 // 统计数据
 const stats = ref({
@@ -189,6 +252,7 @@ const stats = ref({
 
 // 最近运行记录
 const recentRuns = ref([])
+const dispatchTasks = ref([])
 
 // 获取今日日期范围
 const getTodayRange = () => {
@@ -232,11 +296,13 @@ const formatTime = (dateString) => {
 // 获取工作台统计数据
 const fetchDashboardData = async () => {
   loading.value = true
+  dispatchLoading.value = true
   try {
-    // 并行获取流水线和项目列表
-    const [pipelineRes, projectRes] = await Promise.all([
+    // 并行获取流水线、项目和任务调度视图
+    const [pipelineRes, projectRes, taskRes] = await Promise.all([
       getPipelineList({ page_size: 1000 }),
-      getProjectList({ page_size: 1000 })
+      getProjectList({ page_size: 1000 }),
+      getTaskDispatchList({ page: 1, page_size: 20 })
     ])
 
     // 计算流水线和项目数量
@@ -295,11 +361,14 @@ const fetchDashboardData = async () => {
       .sort((a, b) => new Date(b.rawTime) - new Date(a.rawTime))
       .slice(0, 4)
 
+    dispatchTasks.value = normalizeDispatchTasks(taskRes?.data?.list || [])
+
   } catch (error) {
     console.error('获取工作台数据失败:', error)
     ElMessage.error('获取数据失败，请稍后重试')
   } finally {
     loading.value = false
+    dispatchLoading.value = false
   }
 }
 
@@ -311,7 +380,9 @@ const getStatusType = (status) => {
   const types = {
     success: 'success',
     running: 'warning',
-    failed: 'danger'
+    failed: 'danger',
+    queued: 'info',
+    cancelled: 'info'
   }
   return types[status] || 'info'
 }
@@ -320,9 +391,93 @@ const getStatusText = (status) => {
   const texts = {
     success: '成功',
     running: '运行中',
-    failed: '失败'
+    failed: '失败',
+    queued: '排队中',
+    cancelled: '已取消'
   }
   return texts[status] || status
+}
+
+const resolveDispatchStatus = (task) => {
+  if (task?.run_status === 'queued') return 'queued'
+  if (task?.status === 'queued' || task?.status === 'pending') return 'pending'
+  if (task?.status === 'running') return 'running'
+  if (task?.status === 'success') return 'success'
+  if (task?.status === 'failed') return 'failed'
+  if (task?.status === 'cancelled') return 'cancelled'
+  return 'unknown'
+}
+
+const getDispatchStatusType = (status) => {
+  const types = {
+    queued: 'info',
+    pending: 'warning',
+    running: 'warning',
+    success: 'success',
+    failed: 'danger',
+    cancelled: 'info'
+  }
+  return types[status] || 'info'
+}
+
+const getDispatchStatusText = (status) => {
+  const texts = {
+    queued: '排队中',
+    pending: '待执行',
+    running: '运行中',
+    success: '成功',
+    failed: '失败',
+    cancelled: '已取消'
+  }
+  return texts[status] || '未知'
+}
+
+const getTaskStatusType = (status) => {
+  const types = {
+    queued: 'info',
+    pending: 'warning',
+    running: 'warning',
+    success: 'success',
+    failed: 'danger',
+    cancelled: 'info'
+  }
+  return types[status] || 'info'
+}
+
+const getTaskStatusText = (status) => {
+  const texts = {
+    queued: '排队中',
+    pending: '待执行',
+    running: '运行中',
+    success: '成功',
+    failed: '失败',
+    cancelled: '已取消'
+  }
+  return texts[status] || '未知'
+}
+
+const normalizeDispatchTasks = (tasks) => {
+  return tasks.map(task => ({
+    ...task,
+    dispatch_status: resolveDispatchStatus(task)
+  }))
+}
+
+const fetchTaskDispatchData = async () => {
+  dispatchLoading.value = true
+  try {
+    const res = await getTaskDispatchList({ page: 1, page_size: 20 })
+    if (res.code === 200) {
+      dispatchTasks.value = normalizeDispatchTasks(res.data?.list || [])
+    } else {
+      ElMessage.error(res.message || '获取任务调度失败')
+    }
+  } catch (error) {
+    console.error('获取任务调度失败:', error)
+    ElMessage.error('获取任务调度失败')
+  } finally {
+    dispatchLoading.value = false
+  }
 }
 
 const handleCreatePipeline = () => {
@@ -542,6 +697,23 @@ const viewAllPipelines = () => {
         font-family: $font-family-mono;
         font-weight: 600;
         color: var(--text-secondary);
+      }
+
+      .task-cell {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+
+        .task-name {
+          color: var(--text-primary);
+          font-weight: 600;
+        }
+
+        .task-node {
+          color: var(--text-muted);
+          font-size: 12px;
+          font-family: $font-family-mono;
+        }
       }
     }
 

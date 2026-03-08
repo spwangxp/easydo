@@ -8,6 +8,7 @@ import (
 	"easydo-server/internal/models"
 	"easydo-server/internal/services"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // CredentialHandler - 凭据管理处理器
@@ -55,6 +56,23 @@ type UpdateCredentialRequest struct {
 type RotateCredentialRequest struct {
 	SecretData map[string]interface{} `json:"secret_data" binding:"required"`
 	Reason     string                 `json:"reason"`
+}
+
+type CredentialImpactReference struct {
+	PipelineID     uint64 `json:"pipeline_id"`
+	PipelineName   string `json:"pipeline_name"`
+	NodeID         string `json:"node_id"`
+	TaskType       string `json:"task_type"`
+	CredentialSlot string `json:"credential_slot"`
+	UpdatedAt      int64  `json:"updated_at"`
+}
+
+type CredentialImpactSummary struct {
+	CredentialID   uint64                      `json:"credential_id"`
+	CredentialName string                      `json:"credential_name"`
+	ReferenceCount int64                       `json:"reference_count"`
+	PipelineCount  int64                       `json:"pipeline_count"`
+	References     []CredentialImpactReference `json:"references"`
 }
 
 // CreateCredential - 创建新凭据
@@ -508,6 +526,8 @@ func (h *CredentialHandler) DeleteCredential(c *gin.Context) {
 		return
 	}
 
+	models.DB.Where("credential_id = ?", credential.ID).Delete(&models.PipelineCredentialRef{})
+
 	if err := models.DB.Delete(&credential).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
@@ -519,6 +539,160 @@ func (h *CredentialHandler) DeleteCredential(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
 		"message": "Credential deleted successfully",
+	})
+}
+
+func buildCredentialImpactSummary(db *gorm.DB, credential models.Credential) (CredentialImpactSummary, error) {
+	refs := make([]CredentialImpactReference, 0)
+
+	type refRow struct {
+		PipelineID     uint64 `gorm:"column:pipeline_id"`
+		PipelineName   string `gorm:"column:pipeline_name"`
+		NodeID         string `gorm:"column:node_id"`
+		TaskType       string `gorm:"column:task_type"`
+		CredentialSlot string `gorm:"column:credential_slot"`
+		UpdatedAt      int64  `gorm:"column:updated_at"`
+	}
+	rows := make([]refRow, 0)
+	if err := db.Table("pipeline_credential_refs AS r").
+		Select("r.pipeline_id, p.name AS pipeline_name, r.node_id, r.task_type, r.credential_slot, CAST(UNIX_TIMESTAMP(r.updated_at) AS SIGNED) AS updated_at").
+		Joins("LEFT JOIN pipelines p ON p.id = r.pipeline_id").
+		Where("r.credential_id = ?", credential.ID).
+		Order("r.updated_at DESC").
+		Scan(&rows).Error; err != nil {
+		return CredentialImpactSummary{}, err
+	}
+
+	uniquePipelines := make(map[uint64]struct{})
+	for _, row := range rows {
+		refs = append(refs, CredentialImpactReference{
+			PipelineID:     row.PipelineID,
+			PipelineName:   row.PipelineName,
+			NodeID:         row.NodeID,
+			TaskType:       row.TaskType,
+			CredentialSlot: row.CredentialSlot,
+			UpdatedAt:      row.UpdatedAt,
+		})
+		uniquePipelines[row.PipelineID] = struct{}{}
+	}
+
+	return CredentialImpactSummary{
+		CredentialID:   credential.ID,
+		CredentialName: credential.Name,
+		ReferenceCount: int64(len(refs)),
+		PipelineCount:  int64(len(uniquePipelines)),
+		References:     refs,
+	}, nil
+}
+
+func (h *CredentialHandler) GetCredentialImpact(c *gin.Context) {
+	ownerID, role := getRequestUser(c)
+
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid credential ID",
+		})
+		return
+	}
+
+	var credential models.Credential
+	if err := models.DB.First(&credential, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "Credential not found",
+		})
+		return
+	}
+
+	if !canReadCredential(models.DB, &credential, ownerID, role) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "Access denied",
+		})
+		return
+	}
+
+	summary, err := buildCredentialImpactSummary(models.DB, credential)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to query credential impact: " + err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": summary,
+	})
+}
+
+type CredentialImpactBatchRequest struct {
+	IDs []uint64 `json:"ids" binding:"required,min=1"`
+}
+
+func (h *CredentialHandler) BatchCredentialImpact(c *gin.Context) {
+	ownerID, role := getRequestUser(c)
+
+	var req CredentialImpactBatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "Invalid request: " + err.Error(),
+		})
+		return
+	}
+	if len(req.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "IDs cannot be empty",
+		})
+		return
+	}
+
+	var credentials []models.Credential
+	if err := applyCredentialReadScope(models.DB.Model(&models.Credential{}), ownerID, role).
+		Where("id IN ?", req.IDs).
+		Find(&credentials).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "Failed to query credentials: " + err.Error(),
+		})
+		return
+	}
+
+	summaries := make([]CredentialImpactSummary, 0, len(credentials))
+	var totalReferences int64
+	for _, credential := range credentials {
+		summary, err := buildCredentialImpactSummary(models.DB, credential)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    500,
+				"message": "Failed to query credential impact: " + err.Error(),
+			})
+			return
+		}
+		totalReferences += summary.ReferenceCount
+		summaries = append(summaries, summary)
+	}
+
+	impactedCredentials := 0
+	for _, summary := range summaries {
+		if summary.ReferenceCount > 0 {
+			impactedCredentials++
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": gin.H{
+			"total_credentials":    len(summaries),
+			"impacted_credentials": impactedCredentials,
+			"total_references":     totalReferences,
+			"items":                summaries,
+		},
 	})
 }
 
@@ -966,6 +1140,7 @@ func (h *CredentialHandler) BatchDeleteCredentials(c *gin.Context) {
 			return
 		}
 	}
+	models.DB.Where("credential_id IN ?", req.IDs).Delete(&models.PipelineCredentialRef{})
 
 	// 删除凭据
 	if err := models.DB.Where("id IN ?", req.IDs).Delete(&models.Credential{}).Error; err != nil {

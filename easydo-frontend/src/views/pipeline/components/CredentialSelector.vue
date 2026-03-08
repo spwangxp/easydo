@@ -51,9 +51,17 @@ const props = defineProps({
     type: String,
     default: null
   },
+  credentialTypes: {
+    type: Array,
+    default: () => []
+  },
   credentialCategory: {
     type: String,
     default: null
+  },
+  credentialCategories: {
+    type: Array,
+    default: () => []
   }
 })
 
@@ -70,10 +78,15 @@ const selectedId = computed({
 })
 
 const filteredCredentials = computed(() => {
+  const typeSet = new Set((props.credentialTypes || []).map(v => String(v)))
+  const categorySet = new Set((props.credentialCategories || []).map(v => String(v)))
+
   return credentials.value.filter(cred => {
     if (cred.status !== 'active') return false
     if (props.credentialType && cred.type !== props.credentialType) return false
+    if (typeSet.size > 0 && !typeSet.has(String(cred.type))) return false
     if (props.credentialCategory && cred.category !== props.credentialCategory) return false
+    if (categorySet.size > 0 && !categorySet.has(String(cred.category))) return false
     return true
   })
 })

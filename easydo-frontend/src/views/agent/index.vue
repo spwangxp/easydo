@@ -153,6 +153,9 @@
                       移除
                     </el-dropdown-item>
                   </template>
+                  <el-dropdown-item command="tasks" divided>
+                    任务列表
+                  </el-dropdown-item>
                   <el-dropdown-item command="heartbeats" divided>心跳记录</el-dropdown-item>
                   <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
                 </el-dropdown-menu>
@@ -210,6 +213,10 @@
         <el-form-item label="心跳周期" prop="heartbeat_interval">
           <el-input-number v-model="formData.heartbeat_interval" :min="5" :max="300" placeholder="秒" />
           <span class="form-tip">单位：秒，建议 10-60 秒</span>
+        </el-form-item>
+        <el-form-item label="流水线并发" prop="max_concurrent_pipelines">
+          <el-input-number v-model="formData.max_concurrent_pipelines" :min="1" :max="100" placeholder="并发数量" />
+          <span class="form-tip">实时生效：达到上限后新任务将进入排队</span>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -273,6 +280,8 @@
           <el-descriptions :column="2" border>
             <el-descriptions-item label="版本">{{ currentAgent.version || '-' }}</el-descriptions-item>
             <el-descriptions-item label="最后心跳">{{ formatDateTime(currentAgent.last_heart_at) }}</el-descriptions-item>
+            <el-descriptions-item label="流水线并发上限">{{ currentAgent.max_concurrent_pipelines || 10 }}</el-descriptions-item>
+            <el-descriptions-item label="心跳周期">{{ currentAgent.heartbeat_interval || 10 }} 秒</el-descriptions-item>
           </el-descriptions>
         </div>
         <div class="detail-section" v-if="currentAgent.registration_status === 'approved'">
@@ -516,6 +525,115 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 执行器任务列表弹窗 -->
+    <el-dialog
+      v-model="taskDialogVisible"
+      :title="`任务列表 - ${taskDialogAgent?.name || ''}`"
+      width="1100px"
+    >
+      <div class="task-panel" v-loading="taskDialogLoading">
+        <div class="task-toolbar">
+          <el-input
+            v-model="taskFilters.keyword"
+            placeholder="搜索任务/节点/流水线"
+            clearable
+            style="width: 260px"
+            @keyup.enter="fetchAgentTasks(true)"
+            @clear="fetchAgentTasks(true)"
+          />
+          <el-select
+            v-model="taskFilters.status"
+            placeholder="任务状态"
+            clearable
+            style="width: 150px"
+            @change="fetchAgentTasks(true)"
+          >
+            <el-option label="排队中" value="queued" />
+            <el-option label="待执行" value="pending" />
+            <el-option label="运行中" value="running" />
+            <el-option label="成功" value="success" />
+            <el-option label="失败" value="failed" />
+            <el-option label="已取消" value="cancelled" />
+          </el-select>
+          <el-select
+            v-model="taskFilters.run_status"
+            placeholder="流水线状态"
+            clearable
+            style="width: 150px"
+            @change="fetchAgentTasks(true)"
+          >
+            <el-option label="排队中" value="queued" />
+            <el-option label="运行中" value="running" />
+            <el-option label="成功" value="success" />
+            <el-option label="失败" value="failed" />
+            <el-option label="已取消" value="cancelled" />
+          </el-select>
+          <el-button type="primary" plain @click="fetchAgentTasks(true)">
+            <el-icon><Search /></el-icon>
+            查询
+          </el-button>
+          <el-button @click="fetchAgentTasks(false)">
+            <el-icon><Refresh /></el-icon>
+            刷新
+          </el-button>
+        </div>
+
+        <el-table :data="agentTaskList" height="430" style="width: 100%">
+          <el-table-column label="任务" min-width="220">
+            <template #default="{ row }">
+              <div class="task-title-cell">
+                <span class="task-title">{{ row.name || row.node_id || `任务 #${row.id}` }}</span>
+                <span class="task-sub">{{ row.node_id || '-' }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="归属流水线" min-width="180">
+            <template #default="{ row }">
+              <div>{{ row.pipeline_name || '-' }}</div>
+              <div class="task-sub">#{{ row.build_number || '-' }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="流水线状态" width="110" align="center">
+            <template #default="{ row }">
+              <el-tag :type="getRunStatusType(row.run_status)" size="small">
+                {{ getRunStatusText(row.run_status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="任务状态" width="110" align="center">
+            <template #default="{ row }">
+              <el-tag :type="getTaskStatusType(row.status)" size="small">
+                {{ getTaskStatusText(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="开始时间" width="170" align="center">
+            <template #default="{ row }">
+              {{ formatDateTime(row.start_time) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="更新时间" width="170" align="center">
+            <template #default="{ row }">
+              {{ formatDateTime(row.updated_at) }}
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <div class="task-pagination">
+          <el-pagination
+            v-model:current-page="taskFilters.page"
+            v-model:page-size="taskFilters.page_size"
+            layout="total, prev, pager, next"
+            :total="agentTaskTotal"
+            @current-change="fetchAgentTasks(false)"
+          />
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="taskDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -534,6 +652,7 @@ import {
   CircleClose
 } from '@element-plus/icons-vue'
 import { getAgentList, getAgentDetail, updateAgent, deleteAgent, getAgentHeartbeats, refreshAgentToken, approveAgent, rejectAgent, removeAgent } from '@/api/agent'
+import { getTaskDispatchList } from '@/api/task'
 
 const activeTab = ref('all')
 const searchKeyword = ref('')
@@ -581,6 +700,18 @@ const removeLoading = ref(false)
 const heartbeatDialogVisible = ref(false)
 const heartbeatLoading = ref(false)
 const heartbeatList = ref([])
+const taskDialogVisible = ref(false)
+const taskDialogLoading = ref(false)
+const taskDialogAgent = ref(null)
+const agentTaskList = ref([])
+const agentTaskTotal = ref(0)
+const taskFilters = reactive({
+  keyword: '',
+  status: '',
+  run_status: '',
+  page: 1,
+  page_size: 20
+})
 
 const formData = reactive({
   name: '',
@@ -589,7 +720,8 @@ const formData = reactive({
   labels: '',
   tags: '',
   status: 'online',
-  heartbeat_interval: 10
+  heartbeat_interval: 10,
+  max_concurrent_pipelines: 10
 })
 
 const formRules = {
@@ -639,6 +771,52 @@ const getStatusText = (status) => {
     error: '错误'
   }
   return texts[status] || '未知'
+}
+
+const getTaskStatusType = (status) => {
+  const types = {
+    queued: 'info',
+    pending: 'warning',
+    running: 'warning',
+    success: 'success',
+    failed: 'danger',
+    cancelled: 'info'
+  }
+  return types[status] || 'info'
+}
+
+const getTaskStatusText = (status) => {
+  const texts = {
+    queued: '排队中',
+    pending: '待执行',
+    running: '运行中',
+    success: '成功',
+    failed: '失败',
+    cancelled: '已取消'
+  }
+  return texts[status] || '未知'
+}
+
+const getRunStatusType = (status) => {
+  const types = {
+    queued: 'info',
+    running: 'warning',
+    success: 'success',
+    failed: 'danger',
+    cancelled: 'info'
+  }
+  return types[status] || 'info'
+}
+
+const getRunStatusText = (status) => {
+  const texts = {
+    queued: '排队中',
+    running: '运行中',
+    success: '成功',
+    failed: '失败',
+    cancelled: '已取消'
+  }
+  return texts[status] || '-'
 }
 
 const getRegistrationStatusType = (status) => {
@@ -739,7 +917,7 @@ const fetchAgents = async () => {
       agentList.value = res.data.list || []
       total.value = res.data.total || 0
       
-      onlineCount.value = agentList.value.filter(a => a.status === 'online').length
+      onlineCount.value = agentList.value.filter(a => a.status === 'online' || a.status === 'busy').length
       offlineCount.value = agentList.value.filter(a => a.status === 'offline').length
       pendingCount.value = agentList.value.filter(a => a.registration_status === 'pending').length
     }
@@ -768,6 +946,7 @@ const handleEdit = (agent) => {
   formData.tags = agent.tags || ''
   formData.status = agent.status
   formData.heartbeat_interval = agent.heartbeat_interval || 10
+  formData.max_concurrent_pipelines = agent.max_concurrent_pipelines || 10
   dialogVisible.value = true
 }
 
@@ -920,6 +1099,53 @@ const handleHeartbeats = async (agent) => {
   }
 }
 
+const handleTasks = async (agent) => {
+  taskDialogAgent.value = agent
+  taskDialogVisible.value = true
+  taskFilters.keyword = ''
+  taskFilters.status = ''
+  taskFilters.run_status = ''
+  taskFilters.page = 1
+  await fetchAgentTasks(true)
+}
+
+const fetchAgentTasks = async (resetPage = false) => {
+  if (!taskDialogAgent.value) return
+  if (resetPage) {
+    taskFilters.page = 1
+  }
+  taskDialogLoading.value = true
+  try {
+    const params = {
+      page: taskFilters.page,
+      page_size: taskFilters.page_size,
+      agent_id: taskDialogAgent.value.id,
+      include_schedule: 1
+    }
+    if (taskFilters.keyword) {
+      params.keyword = taskFilters.keyword
+    }
+    if (taskFilters.status) {
+      params.status = taskFilters.status
+    }
+    if (taskFilters.run_status) {
+      params.run_status = taskFilters.run_status
+    }
+    const res = await getTaskDispatchList(params)
+    if (res.code === 200) {
+      agentTaskList.value = res.data.list || []
+      agentTaskTotal.value = res.data.total || 0
+    } else {
+      ElMessage.error(res.message || '获取任务列表失败')
+    }
+  } catch (error) {
+    console.error('获取执行器任务列表失败:', error)
+    ElMessage.error('获取任务列表失败')
+  } finally {
+    taskDialogLoading.value = false
+  }
+}
+
 const refreshHeartbeats = async () => {
   if (!currentAgent.value) return
   
@@ -950,6 +1176,9 @@ const handleCommand = (command, agent) => {
     case 'heartbeats':
       handleHeartbeats(agent)
       break
+    case 'tasks':
+      handleTasks(agent)
+      break
     case 'approve':
       handleApprove(agent)
       break
@@ -977,7 +1206,8 @@ const handleSubmit = async () => {
       labels: formData.labels,
       tags: formData.tags,
       status: formData.status,
-      heartbeat_interval: formData.heartbeat_interval
+      heartbeat_interval: formData.heartbeat_interval,
+      max_concurrent_pipelines: formData.max_concurrent_pipelines
     }
 
     if (isEdit.value) {
@@ -1384,6 +1614,39 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--text-muted);
   margin-top: 4px;
+}
+
+.task-panel {
+  .task-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+
+  .task-title-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+
+    .task-title {
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+  }
+
+  .task-sub {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-family: $font-family-mono;
+  }
+
+  .task-pagination {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 14px;
+  }
 }
 
 .text-muted {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +16,44 @@ import (
 
 type TaskHandler struct {
 	DB *gorm.DB
+}
+
+type taskScheduleListItem struct {
+	ID            uint64    `json:"id"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	AgentID       uint64    `json:"agent_id"`
+	PipelineRunID uint64    `json:"pipeline_run_id"`
+	NodeID        string    `json:"node_id"`
+	TaskType      string    `json:"task_type"`
+	Name          string    `json:"name"`
+	Params        string    `json:"params"`
+	Script        string    `json:"script"`
+	WorkDir       string    `json:"work_dir"`
+	EnvVars       string    `json:"env_vars"`
+	Status        string    `json:"status"`
+	Priority      int       `json:"priority"`
+	Timeout       int       `json:"timeout"`
+	RetryCount    int       `json:"retry_count"`
+	MaxRetries    int       `json:"max_retries"`
+	ExitCode      int       `json:"exit_code"`
+	ErrorMsg      string    `json:"error_msg"`
+	StartTime     int64     `json:"start_time"`
+	EndTime       int64     `json:"end_time"`
+	Duration      int       `json:"duration"`
+	ResultData    string    `json:"result_data"`
+	RepoURL       string    `json:"repo_url"`
+	RepoBranch    string    `json:"repo_branch"`
+	RepoCommit    string    `json:"repo_commit"`
+	RepoPath      string    `json:"repo_path"`
+	CreatedBy     uint64    `json:"created_by"`
+
+	PipelineID   uint64 `json:"pipeline_id"`
+	PipelineName string `json:"pipeline_name"`
+	BuildNumber  int    `json:"build_number"`
+	RunStatus    string `json:"run_status"`
+	TriggerUser  string `json:"trigger_user"`
+	AgentName    string `json:"agent_name"`
 }
 
 func NewTaskHandler() *TaskHandler {
@@ -122,9 +161,118 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 func (h *TaskHandler) GetTaskList(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 10
+	}
+
 	agentID := c.Query("agent_id")
 	status := c.Query("status")
 	pipelineRunID := c.Query("pipeline_run_id")
+	runStatus := c.Query("run_status")
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	includeSchedule := c.Query("include_schedule") == "1" || strings.EqualFold(c.Query("include_schedule"), "true")
+
+	useScheduleQuery := includeSchedule || runStatus != "" || keyword != ""
+	if useScheduleQuery {
+		applyFilters := func(query *gorm.DB) *gorm.DB {
+			if agentID != "" {
+				query = query.Where("t.agent_id = ?", agentID)
+			}
+			if status != "" {
+				query = query.Where("t.status = ?", status)
+			}
+			if pipelineRunID != "" {
+				query = query.Where("t.pipeline_run_id = ?", pipelineRunID)
+			}
+			if runStatus != "" {
+				query = query.Where("pr.status = ?", runStatus)
+			}
+			if keyword != "" {
+				like := "%" + keyword + "%"
+				query = query.Where(
+					"(t.name LIKE ? OR t.node_id LIKE ? OR p.name LIKE ? OR a.name LIKE ?)",
+					like, like, like, like,
+				)
+			}
+			return query
+		}
+
+		baseJoin := func(query *gorm.DB) *gorm.DB {
+			return query.
+				Joins("LEFT JOIN pipeline_runs pr ON pr.id = t.pipeline_run_id").
+				Joins("LEFT JOIN pipelines p ON p.id = pr.pipeline_id").
+				Joins("LEFT JOIN agents a ON a.id = t.agent_id")
+		}
+
+		var total int64
+		countQuery := applyFilters(baseJoin(h.DB.Table("agent_tasks AS t")))
+		countQuery.Count(&total)
+
+		offset := (page - 1) * pageSize
+		var tasks []taskScheduleListItem
+		listQuery := applyFilters(baseJoin(h.DB.Table("agent_tasks AS t")))
+		if err := listQuery.
+			Select(`
+				t.id,
+				t.created_at,
+				t.updated_at,
+				t.agent_id,
+				t.pipeline_run_id,
+				t.node_id,
+				t.task_type,
+				t.name,
+				t.params,
+				t.script,
+				t.work_dir,
+				t.env_vars,
+				t.status,
+				t.priority,
+				t.timeout,
+				t.retry_count,
+				t.max_retries,
+				t.exit_code,
+				t.error_msg,
+				t.start_time,
+				t.end_time,
+				t.duration,
+				t.result_data,
+				t.repo_url,
+				t.repo_branch,
+				t.repo_commit,
+				t.repo_path,
+				t.created_by,
+				COALESCE(pr.pipeline_id, 0) AS pipeline_id,
+				COALESCE(p.name, '') AS pipeline_name,
+				COALESCE(pr.build_number, 0) AS build_number,
+				COALESCE(pr.status, '') AS run_status,
+				COALESCE(pr.trigger_user, '') AS trigger_user,
+				COALESCE(a.name, '') AS agent_name
+			`).
+			Order("t.created_at DESC").
+			Offset(offset).
+			Limit(pageSize).
+			Scan(&tasks).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    500,
+				"message": "查询任务列表失败: " + err.Error(),
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"code": 200,
+			"data": gin.H{
+				"list":  tasks,
+				"total": total,
+				"page":  page,
+				"size":  pageSize,
+			},
+		})
+		return
+	}
 
 	var tasks []models.AgentTask
 	var total int64
@@ -424,7 +572,7 @@ func (h *TaskHandler) AgentReportTaskStatus(c *gin.Context) {
 
 	// Broadcast task status to all frontend clients subscribed to this run
 	wsHandler := SharedWebSocketHandler()
-	wsHandler.BroadcastTaskStatus(task.PipelineRunID, task.ID, task.Status, req.ExitCode, req.ErrorMsg, agent.Name)
+	wsHandler.BroadcastTaskStatus(task.PipelineRunID, task.ID, task.NodeID, task.Status, req.ExitCode, req.ErrorMsg, agent.Name)
 
 	// Check and update pipeline status if task is completed
 	if req.Status == models.TaskStatusSuccess || req.Status == models.TaskStatusFailed || req.Status == models.TaskStatusCancelled {
@@ -614,18 +762,5 @@ func (h *TaskHandler) GetPipelineRunLogs(c *gin.Context) {
 
 // checkAgentStatus updates agent status based on running tasks
 func (h *TaskHandler) checkAgentStatus(agentID uint64) {
-	var runningTasks int64
-	h.DB.Model(&models.AgentTask{}).Where("agent_id = ? AND status = ?", agentID, models.TaskStatusRunning).Count(&runningTasks)
-
-	var pendingTasks int64
-	h.DB.Model(&models.AgentTask{}).Where("agent_id = ? AND status = ?", agentID, models.TaskStatusPending).Count(&pendingTasks)
-
-	status := models.AgentStatusOnline
-	if runningTasks > 0 {
-		status = models.AgentStatusBusy
-	} else if pendingTasks > 0 {
-		status = models.AgentStatusBusy
-	}
-
-	h.DB.Model(&models.Agent{}).Where("id = ?", agentID).Update("status", status)
+	updateAgentStatusByPipelineConcurrency(h.DB, agentID)
 }

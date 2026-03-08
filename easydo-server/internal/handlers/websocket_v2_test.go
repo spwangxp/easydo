@@ -10,6 +10,12 @@ func TestIsValidTaskStatusTransition(t *testing.T) {
 		want bool
 	}{
 		{
+			name: "queued to pending",
+			from: "queued",
+			to:   "pending",
+			want: true,
+		},
+		{
 			name: "pending to running",
 			from: "pending",
 			to:   "running",

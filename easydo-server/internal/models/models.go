@@ -66,10 +66,13 @@ func autoMigrate() {
 		&SecretRotation{},
 		&WebhookConfig{},
 		&WebhookEvent{},
+		&Message{},
 		&SecretPermission{},
 		&Credential{},
 		&CredentialUsage{},
 		&CredentialAuditLog{},
+		&PipelineCredentialRef{},
+		&CredentialRotationLog{},
 		&MasterKey{},
 	)
 

@@ -84,26 +84,26 @@ type CredentialCategory string
 
 const (
 	// 代码托管平台
-	CategoryGitHub    CredentialCategory = "github"    // GitHub
-	CategoryGitLab    CredentialCategory = "gitlab"    // GitLab
-	CategoryGitee     CredentialCategory = "gitee"     // Gitee
+	CategoryGitHub CredentialCategory = "github" // GitHub
+	CategoryGitLab CredentialCategory = "gitlab" // GitLab
+	CategoryGitee  CredentialCategory = "gitee"  // Gitee
 
 	// 容器平台
-	CategoryDocker    CredentialCategory = "docker"    // Docker Registry
+	CategoryDocker     CredentialCategory = "docker"     // Docker Registry
 	CategoryKubernetes CredentialCategory = "kubernetes" // Kubernetes
 
 	// 协作平台
-	CategoryDingTalk  CredentialCategory = "dingtalk"  // 钉钉
-	CategoryWeChat    CredentialCategory = "wechat"    // 企业微信
+	CategoryDingTalk CredentialCategory = "dingtalk" // 钉钉
+	CategoryWeChat   CredentialCategory = "wechat"   // 企业微信
 
 	// 云平台
-	CategoryAWS       CredentialCategory = "aws"       // Amazon Web Services
-	CategoryGCP       CredentialCategory = "gcp"       // Google Cloud Platform
-	CategoryAzure     CredentialCategory = "azure"     // Microsoft Azure
+	CategoryAWS   CredentialCategory = "aws"   // Amazon Web Services
+	CategoryGCP   CredentialCategory = "gcp"   // Google Cloud Platform
+	CategoryAzure CredentialCategory = "azure" // Microsoft Azure
 
 	// 其他
-	CategoryEmail     CredentialCategory = "email"     // 邮件服务
-	CategoryCustom    CredentialCategory = "custom"    // 自定义
+	CategoryEmail  CredentialCategory = "email"  // 邮件服务
+	CategoryCustom CredentialCategory = "custom" // 自定义
 )
 
 // =============================================================================
@@ -135,27 +135,27 @@ const (
 
 type Credential struct {
 	BaseModel
-	Name        string           `gorm:"size:128;not null;index" json:"name"`
-	Description string           `gorm:"size:512" json:"description"`
-	Type        CredentialType   `gorm:"size:32;not null;index" json:"type"`
-	Category    CredentialCategory `gorm:"size:32;index" json:"category"`
-	EncryptedData   string `gorm:"type:longtext;not null" json:"-"`
-	EncryptionIV    string `gorm:"size:32" json:"-"`
-	EncryptionAlgo  string `gorm:"size:16;default:'aes-256-gcm'" json:"-"`
-	Metadata string `gorm:"type:text" json:"metadata"`
-	Scope     CredentialScope `gorm:"size:32;default:'user'" json:"scope"`
-	ProjectID uint64          `gorm:"index" json:"project_id"`
-	IsShared  bool            `gorm:"default:false" json:"is_shared"`
-	SharedWith string         `gorm:"type:text" json:"shared_with"`
-	OwnerID uint64 `gorm:"not null;index" json:"owner_id"`
-	LastUsedAt  int64 `json:"last_used_at"`
-	UsedCount   int64 `gorm:"default:0" json:"used_count"`
-	Version int `gorm:"default:1" json:"version"`
-	Status CredentialStatus `gorm:"size:32;default:'active';index" json:"status"`
-	ExpiresAt     *int64 `json:"expires_at"`
-	ExpiryWarning int    `gorm:"default:7" json:"expiry_warning"`
-	AutoRotate    bool   `gorm:"default:false" json:"auto_rotate"`
-	RotatePeriod  int    `gorm:"default:0" json:"rotate_period"`
+	Name           string             `gorm:"size:128;not null;index" json:"name"`
+	Description    string             `gorm:"size:512" json:"description"`
+	Type           CredentialType     `gorm:"size:32;not null;index" json:"type"`
+	Category       CredentialCategory `gorm:"size:32;index" json:"category"`
+	EncryptedData  string             `gorm:"type:longtext;not null" json:"-"`
+	EncryptionIV   string             `gorm:"size:32" json:"-"`
+	EncryptionAlgo string             `gorm:"size:16;default:'aes-256-gcm'" json:"-"`
+	Metadata       string             `gorm:"type:text" json:"metadata"`
+	Scope          CredentialScope    `gorm:"size:32;default:'user'" json:"scope"`
+	ProjectID      uint64             `gorm:"index" json:"project_id"`
+	IsShared       bool               `gorm:"default:false" json:"is_shared"`
+	SharedWith     string             `gorm:"type:text" json:"shared_with"`
+	OwnerID        uint64             `gorm:"not null;index" json:"owner_id"`
+	LastUsedAt     int64              `json:"last_used_at"`
+	UsedCount      int64              `gorm:"default:0" json:"used_count"`
+	Version        int                `gorm:"default:1" json:"version"`
+	Status         CredentialStatus   `gorm:"size:32;default:'active';index" json:"status"`
+	ExpiresAt      *int64             `json:"expires_at"`
+	ExpiryWarning  int                `gorm:"default:7" json:"expiry_warning"`
+	AutoRotate     bool               `gorm:"default:false" json:"auto_rotate"`
+	RotatePeriod   int                `gorm:"default:0" json:"rotate_period"`
 }
 
 func (Credential) TableName() string {
@@ -164,24 +164,24 @@ func (Credential) TableName() string {
 
 // CredentialResponse - 凭据响应结构
 type CredentialResponse struct {
-	ID           uint64              `json:"id"`
-	Name         string              `json:"name"`
-	Description  string              `json:"description"`
-	Type         CredentialType      `json:"type"`
-	Category     CredentialCategory  `json:"category"`
-	Scope        CredentialScope     `json:"scope"`
-	ProjectID    uint64              `json:"project_id"`
-	OwnerID      uint64              `json:"owner_id"`
-	Status       CredentialStatus    `json:"status"`
-	TypeInfo     TypeInfo            `json:"type_info"`
-	CategoryInfo CategoryInfo        `json:"category_info"`
-	StatusInfo   StatusInfo          `json:"status_info"`
-	ExpiresAt    *int64              `json:"expires_at"`
-	UsedCount    int64               `json:"used_count"`
-	LastUsedAt   int64               `json:"last_used_at"`
-	Version      int                 `json:"version"`
-	CreatedAt    time.Time           `json:"created_at"`
-	UpdatedAt    time.Time           `json:"updated_at"`
+	ID           uint64             `json:"id"`
+	Name         string             `json:"name"`
+	Description  string             `json:"description"`
+	Type         CredentialType     `json:"type"`
+	Category     CredentialCategory `json:"category"`
+	Scope        CredentialScope    `json:"scope"`
+	ProjectID    uint64             `json:"project_id"`
+	OwnerID      uint64             `json:"owner_id"`
+	Status       CredentialStatus   `json:"status"`
+	TypeInfo     TypeInfo           `json:"type_info"`
+	CategoryInfo CategoryInfo       `json:"category_info"`
+	StatusInfo   StatusInfo         `json:"status_info"`
+	ExpiresAt    *int64             `json:"expires_at"`
+	UsedCount    int64              `json:"used_count"`
+	LastUsedAt   int64              `json:"last_used_at"`
+	Version      int                `json:"version"`
+	CreatedAt    time.Time          `json:"created_at"`
+	UpdatedAt    time.Time          `json:"updated_at"`
 }
 
 // ToResponse - 将模型转换为响应结构
@@ -242,10 +242,10 @@ func (CredentialAuditLog) TableName() string {
 // =============================================================================
 
 const (
-	AuditActionShare   = "share"     // 分享凭据
-	AuditActionUnshare = "unshare"   // 取消分享
-	AuditActionVerify  = "verify"    // 验证凭据
-	AuditActionRotate  = "rotate"    // 轮换凭据
+	AuditActionShare   = "share"   // 分享凭据
+	AuditActionUnshare = "unshare" // 取消分享
+	AuditActionVerify  = "verify"  // 验证凭据
+	AuditActionRotate  = "rotate"  // 轮换凭据
 )
 
 // =============================================================================
@@ -478,10 +478,10 @@ var ChineseToEnglishTypeMap = map[string]CredentialType{
 	"密码":      TypePassword,
 	"SSH 密钥":  TypeSSHKey,
 	"API 令牌":  TypeToken,
-	"OAuth2":    TypeOAuth2,
+	"OAuth2":  TypeOAuth2,
 	"证书":      TypeCert,
-	"Passkey":   TypePasskey,
-	"多因素认证": TypeMFA,
+	"Passkey": TypePasskey,
+	"多因素认证":   TypeMFA,
 	"IAM 角色":  TypeIAM,
 }
 
@@ -601,75 +601,75 @@ func (t CredentialType) GetTypeLabel() string {
 func (c CredentialCategory) GetCategoryInfo() CategoryInfo {
 	infos := map[CredentialCategory]CategoryInfo{
 		CategoryGitHub: {
-			Name:        "GitHub",
-			Icon:        "Brand",
-			Description: "GitHub 代码托管平台",
+			Name:             "GitHub",
+			Icon:             "Brand",
+			Description:      "GitHub 代码托管平台",
 			RecommendedTypes: []CredentialType{TypeToken, TypeOAuth2},
 		},
 		CategoryGitLab: {
-			Name:        "GitLab",
-			Icon:        "Brand",
-			Description: "GitLab 代码托管平台",
+			Name:             "GitLab",
+			Icon:             "Brand",
+			Description:      "GitLab 代码托管平台",
 			RecommendedTypes: []CredentialType{TypeToken, TypePassword},
 		},
 		CategoryGitee: {
-			Name:        "Gitee",
-			Icon:        "Brand",
-			Description: "Gitee 代码托管平台",
+			Name:             "Gitee",
+			Icon:             "Brand",
+			Description:      "Gitee 代码托管平台",
 			RecommendedTypes: []CredentialType{TypeToken, TypePassword},
 		},
 		CategoryDocker: {
-			Name:        "Docker",
-			Icon:        "Box",
-			Description: "Docker 镜像仓库",
+			Name:             "Docker",
+			Icon:             "Box",
+			Description:      "Docker 镜像仓库",
 			RecommendedTypes: []CredentialType{TypePassword, TypeCert},
 		},
 		CategoryKubernetes: {
-			Name:        "Kubernetes",
-			Icon:        "Grid",
-			Description: "Kubernetes 集群",
+			Name:             "Kubernetes",
+			Icon:             "Grid",
+			Description:      "Kubernetes 集群",
 			RecommendedTypes: []CredentialType{TypeCert, TypeToken, TypeIAM},
 		},
 		CategoryDingTalk: {
-			Name:        "钉钉",
-			Icon:        "Chat",
-			Description: "钉钉企业协作平台",
+			Name:             "钉钉",
+			Icon:             "Chat",
+			Description:      "钉钉企业协作平台",
 			RecommendedTypes: []CredentialType{TypeOAuth2, TypeToken},
 		},
 		CategoryWeChat: {
-			Name:        "企业微信",
-			Icon:        "Chat",
-			Description: "企业微信协作平台",
+			Name:             "企业微信",
+			Icon:             "Chat",
+			Description:      "企业微信协作平台",
 			RecommendedTypes: []CredentialType{TypeOAuth2, TypeToken},
 		},
 		CategoryEmail: {
-			Name:        "邮件",
-			Icon:        "Message",
-			Description: "邮件服务",
+			Name:             "邮件",
+			Icon:             "Message",
+			Description:      "邮件服务",
 			RecommendedTypes: []CredentialType{TypePassword, TypeCert},
 		},
 		CategoryAWS: {
-			Name:        "AWS",
-			Icon:        "Cloud",
-			Description: "Amazon Web Services",
+			Name:             "AWS",
+			Icon:             "Cloud",
+			Description:      "Amazon Web Services",
 			RecommendedTypes: []CredentialType{TypeIAM, TypeCert, TypeToken},
 		},
 		CategoryGCP: {
-			Name:        "Google Cloud",
-			Icon:        "Cloud",
-			Description: "Google Cloud Platform",
+			Name:             "Google Cloud",
+			Icon:             "Cloud",
+			Description:      "Google Cloud Platform",
 			RecommendedTypes: []CredentialType{TypeIAM, TypeOAuth2},
 		},
 		CategoryAzure: {
-			Name:        "Azure",
-			Icon:        "Cloud",
-			Description: "Microsoft Azure",
+			Name:             "Azure",
+			Icon:             "Cloud",
+			Description:      "Microsoft Azure",
 			RecommendedTypes: []CredentialType{TypeIAM, TypeCert},
 		},
 		CategoryCustom: {
-			Name:        "自定义",
-			Icon:        "Setting",
-			Description: "自定义服务",
+			Name:             "自定义",
+			Icon:             "Setting",
+			Description:      "自定义服务",
 			RecommendedTypes: []CredentialType{TypePassword, TypeToken, TypeCert},
 		},
 	}
@@ -686,9 +686,9 @@ func (c CredentialCategory) GetCategoryInfo() CategoryInfo {
 
 // CategoryInfo - 分类详细信息
 type CategoryInfo struct {
-	Name             string         `json:"name"`
-	Icon             string         `json:"icon"`
-	Description      string         `json:"description"`
+	Name             string           `json:"name"`
+	Icon             string           `json:"icon"`
+	Description      string           `json:"description"`
 	RecommendedTypes []CredentialType `json:"recommended_types"`
 }
 
@@ -720,24 +720,24 @@ func (c CredentialCategory) GetLabel() string {
 func (s CredentialStatus) GetStatusInfo() StatusInfo {
 	infos := map[CredentialStatus]StatusInfo{
 		CredentialStatusActive: {
-			Label:  "活跃",
-			Type:   "success",
-			Desc:   "凭据处于正常可用状态",
+			Label: "活跃",
+			Type:  "success",
+			Desc:  "凭据处于正常可用状态",
 		},
 		CredentialStatusInactive: {
-			Label:  "已禁用",
-			Type:   "info",
-			Desc:   "凭据已被管理员禁用",
+			Label: "已禁用",
+			Type:  "info",
+			Desc:  "凭据已被管理员禁用",
 		},
 		CredentialStatusExpired: {
-			Label:  "已过期",
-			Type:   "warning",
-			Desc:   "凭据已超过有效期，需要更新",
+			Label: "已过期",
+			Type:  "warning",
+			Desc:  "凭据已超过有效期，需要更新",
 		},
 		CredentialStatusRevoked: {
-			Label:  "已撤销",
-			Type:   "danger",
-			Desc:   "凭据已被吊销，不可使用",
+			Label: "已撤销",
+			Type:  "danger",
+			Desc:  "凭据已被吊销，不可使用",
 		},
 	}
 	if info, ok := infos[s]; ok {
@@ -833,13 +833,14 @@ func (c *Credential) IsExpired() bool {
 
 // PipelineCredentialRef - 流水线中引用凭据的配置结构
 type PipelineCredentialRef struct {
-	ID           uint64         `json:"id" gorm:"primaryKey"`
-	PipelineID   uint64         `json:"pipeline_id" gorm:"index;not null"`
-	NodeID       string         `json:"node_id" gorm:"size:64;index"` // 流水线节点 ID
-	CredentialID uint64         `json:"credential_id" gorm:"index;not null"`
-	EnvVarName   string         `json:"env_var_name" gorm:"size:128"` // 注入的环境变量名称
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
+	ID             uint64    `json:"id" gorm:"primaryKey"`
+	PipelineID     uint64    `json:"pipeline_id" gorm:"index;not null"`
+	NodeID         string    `json:"node_id" gorm:"size:64;index"` // 流水线节点 ID
+	TaskType       string    `json:"task_type" gorm:"size:64;index"`
+	CredentialSlot string    `json:"credential_slot" gorm:"size:64;index"`
+	CredentialID   uint64    `json:"credential_id" gorm:"index;not null"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 
 	Credential *Credential `json:"credential,omitempty" gorm:"foreignKey:CredentialID"`
 }

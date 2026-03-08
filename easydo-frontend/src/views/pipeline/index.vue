@@ -124,7 +124,7 @@
               <el-icon v-if="row.last_build.status === 'success'" class="status-icon success"><CircleCheck /></el-icon>
               <el-icon v-else-if="row.last_build.status === 'running'" class="status-icon running"><Loading /></el-icon>
               <el-icon v-else-if="row.last_build.status === 'failed'" class="status-icon failed"><CircleClose /></el-icon>
-              <el-icon v-else-if="row.last_build.status === 'pending'" class="status-icon pending"><Clock /></el-icon>
+              <el-icon v-else-if="row.last_build.status === 'queued' || row.last_build.status === 'pending'" class="status-icon pending"><Clock /></el-icon>
               <el-icon v-else class="status-icon warning"><Warning /></el-icon>
             </div>
             <span v-else class="no-build">无构建</span>
@@ -487,8 +487,13 @@ const handleRun = async (row) => {
       type: 'info'
     })
     
-    await runPipeline(row.id)
-    ElMessage.success('已开始运行')
+    const res = await runPipeline(row.id)
+    const runStatus = res?.data?.status
+    if (runStatus === 'queued') {
+      ElMessage.success('已进入排队')
+    } else {
+      ElMessage.success('已开始运行')
+    }
     fetchPipelines()
   } catch (error) {
     if (error !== 'cancel') {

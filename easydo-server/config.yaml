@@ -30,3 +30,8 @@ jwt:
   # 通过环境变量覆盖: JWT_SECRET
   secret: ""
   expire: 24h
+
+auth:
+  # 通过环境变量覆盖: AUTH_TOKEN_TTL, AUTH_REFRESH_INTERVAL
+  token_ttl: 4h
+  refresh_interval: 10m

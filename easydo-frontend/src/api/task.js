@@ -8,6 +8,17 @@ export function getTaskList(params) {
   })
 }
 
+export function getTaskDispatchList(params = {}) {
+  return request({
+    url: '/tasks',
+    method: 'get',
+    params: {
+      include_schedule: 1,
+      ...params
+    }
+  })
+}
+
 export function getTaskDetail(id) {
   return request({
     url: `/tasks/${id}`,

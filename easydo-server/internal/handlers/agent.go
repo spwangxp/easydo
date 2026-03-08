@@ -223,7 +223,11 @@ func (h *AgentHandler) GetAgentList(c *gin.Context) {
 	query := h.DB.Model(&models.Agent{})
 
 	if status != "" {
-		query = query.Where("status = ?", status)
+		if status == models.AgentStatusOnline {
+			query = query.Where("status IN ?", []string{models.AgentStatusOnline, models.AgentStatusBusy})
+		} else {
+			query = query.Where("status = ?", status)
+		}
 	}
 
 	if labels != "" {
@@ -262,33 +266,34 @@ func (h *AgentHandler) GetAgentDetail(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": gin.H{
-			"id":                  agent.ID,
-			"name":                agent.Name,
-			"host":                agent.Host,
-			"port":                agent.Port,
-			"token":               agent.Token,
-			"register_key":        agent.RegisterKey,
-			"status":              agent.Status,
-			"registration_status": agent.RegistrationStatus,
-			"approved_at":         agent.ApprovedAt,
-			"approved_by":         agent.ApprovedBy,
-			"approved_remark":     agent.ApprovedRemark,
-			"labels":              agent.Labels,
-			"tags":                agent.Tags,
-			"version":             agent.Version,
-			"os":                  agent.OS,
-			"arch":                agent.Arch,
-			"cpu_cores":           agent.CPUCores,
-			"memory_total":        agent.MemoryTotal,
-			"disk_total":          agent.DiskTotal,
-			"hostname":            agent.Hostname,
-			"ip_address":          agent.IPAddress,
-			"last_heart_at":       agent.LastHeartAt,
-			"heartbeat_interval":  agent.HeartbeatInterval,
-			"owner_id":            agent.OwnerID,
-			"owner":               agent.Owner,
-			"created_at":          agent.CreatedAt,
-			"updated_at":          agent.UpdatedAt,
+			"id":                       agent.ID,
+			"name":                     agent.Name,
+			"host":                     agent.Host,
+			"port":                     agent.Port,
+			"token":                    agent.Token,
+			"register_key":             agent.RegisterKey,
+			"status":                   agent.Status,
+			"registration_status":      agent.RegistrationStatus,
+			"approved_at":              agent.ApprovedAt,
+			"approved_by":              agent.ApprovedBy,
+			"approved_remark":          agent.ApprovedRemark,
+			"labels":                   agent.Labels,
+			"tags":                     agent.Tags,
+			"version":                  agent.Version,
+			"os":                       agent.OS,
+			"arch":                     agent.Arch,
+			"cpu_cores":                agent.CPUCores,
+			"memory_total":             agent.MemoryTotal,
+			"disk_total":               agent.DiskTotal,
+			"hostname":                 agent.Hostname,
+			"ip_address":               agent.IPAddress,
+			"last_heart_at":            agent.LastHeartAt,
+			"heartbeat_interval":       agent.HeartbeatInterval,
+			"max_concurrent_pipelines": agent.MaxConcurrentPipelines,
+			"owner_id":                 agent.OwnerID,
+			"owner":                    agent.Owner,
+			"created_at":               agent.CreatedAt,
+			"updated_at":               agent.UpdatedAt,
 		},
 	})
 }
@@ -298,11 +303,12 @@ func (h *AgentHandler) UpdateAgent(c *gin.Context) {
 	id := c.Param("id")
 
 	var req struct {
-		Name              string `json:"name"`
-		Labels            string `json:"labels"`
-		Tags              string `json:"tags"`
-		Status            string `json:"status"`
-		HeartbeatInterval int    `json:"heartbeat_interval"`
+		Name                   string `json:"name"`
+		Labels                 string `json:"labels"`
+		Tags                   string `json:"tags"`
+		Status                 string `json:"status"`
+		HeartbeatInterval      int    `json:"heartbeat_interval"`
+		MaxConcurrentPipelines int    `json:"max_concurrent_pipelines"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -339,10 +345,15 @@ func (h *AgentHandler) UpdateAgent(c *gin.Context) {
 	if req.HeartbeatInterval > 0 {
 		updates["heartbeat_interval"] = req.HeartbeatInterval
 	}
+	if req.MaxConcurrentPipelines > 0 {
+		updates["max_concurrent_pipelines"] = normalizeAgentMaxConcurrentPipelines(req.MaxConcurrentPipelines)
+	}
 
 	if len(updates) > 0 {
 		h.DB.Model(&agent).Updates(updates)
 	}
+	updateAgentStatusByPipelineConcurrency(h.DB, agent.ID)
+	go NewPipelineHandler().scheduleQueuedPipelineRuns(h.DB)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
@@ -508,6 +519,9 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 	}
 
 	h.DB.Model(&agent).Updates(updates)
+	if agent.RegistrationStatus == models.AgentRegistrationStatusApproved {
+		updateAgentStatusByPipelineConcurrency(h.DB, agent.ID)
+	}
 
 	// Store heartbeat in WebSocket handler's memory (keep last 50 per agent)
 	newHeartbeat := models.AgentHeartbeat{
@@ -521,7 +535,7 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 	}
 
 	wsHandler := SharedWebSocketHandler()
-	wsHandler.storeHeartbeat(agentID, newHeartbeat)
+	recordAgentHeartbeat(h.DB, wsHandler, newHeartbeat)
 
 	// Get pending tasks for this agent (only if approved)
 	var pendingTasks []models.AgentTask
@@ -538,6 +552,10 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 			"heartbeat_interval": agent.HeartbeatInterval,
 		},
 	})
+
+	if agent.RegistrationStatus == models.AgentRegistrationStatusApproved {
+		go NewPipelineHandler().scheduleQueuedPipelineRuns(h.DB)
+	}
 }
 
 // GetAgentHeartbeats returns heartbeat history for an agent (from memory)
@@ -545,6 +563,12 @@ func (h *AgentHandler) GetAgentHeartbeats(c *gin.Context) {
 	id := c.Param("id")
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "100"))
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 100
+	}
 
 	agentID, err := strconv.ParseUint(id, 10, 64)
 	if err != nil {
@@ -555,15 +579,34 @@ func (h *AgentHandler) GetAgentHeartbeats(c *gin.Context) {
 		return
 	}
 
+	var total int64
+	query := h.DB.Model(&models.AgentHeartbeat{}).Where("agent_id = ?", agentID)
+	if err := query.Count(&total).Error; err == nil && total > 0 {
+		var heartbeats []models.AgentHeartbeat
+		offset := (page - 1) * pageSize
+		if err := query.Order("timestamp DESC").Offset(offset).Limit(pageSize).Find(&heartbeats).Error; err == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"code": 200,
+				"data": gin.H{
+					"list":  heartbeats,
+					"total": total,
+					"page":  page,
+					"size":  pageSize,
+				},
+			})
+			return
+		}
+	}
+
 	// Get heartbeats from WebSocket handler's shared memory
 	wsHandler := SharedWebSocketHandler()
-	heartbeats, total := wsHandler.GetHeartbeats(agentID, page, pageSize)
+	heartbeats, memoryTotal := wsHandler.GetHeartbeats(agentID, page, pageSize)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": gin.H{
 			"list":  heartbeats,
-			"total": total,
+			"total": memoryTotal,
 			"page":  page,
 			"size":  pageSize,
 		},
@@ -586,7 +629,7 @@ func (h *AgentHandler) SelectAgent(c *gin.Context) {
 		return
 	}
 
-	query := h.DB.Model(&models.Agent{}).Where("status = ?", models.AgentStatusOnline)
+	query := h.DB.Model(&models.Agent{}).Where("status IN ?", []string{models.AgentStatusOnline, models.AgentStatusBusy})
 	query = query.Where("registration_status = ?", models.AgentRegistrationStatusApproved)
 
 	if len(req.Exclude) > 0 {
@@ -594,7 +637,6 @@ func (h *AgentHandler) SelectAgent(c *gin.Context) {
 	}
 
 	// TODO: Implement label matching logic
-	// For now, return any online agent
 	var agents []models.Agent
 	query.Find(&agents)
 
@@ -607,17 +649,30 @@ func (h *AgentHandler) SelectAgent(c *gin.Context) {
 		return
 	}
 
-	// Simple load balancing: select agent with least running tasks
+	// 选择有并发容量的 agent（并发控制：running pipeline runs < max_concurrent_pipelines）
 	bestAgent := &agents[0]
-	minTasks := int64(999999)
+	minRuns := int64(999999)
+	hasCandidate := false
 
 	for _, agent := range agents {
-		var runningTasks int64
-		h.DB.Model(&models.AgentTask{}).Where("agent_id = ? AND status = ?", agent.ID, models.TaskStatusRunning).Count(&runningTasks)
-		if runningTasks < minTasks {
-			minTasks = runningTasks
-			bestAgent = &agent
+		runningRuns := countAgentRunningPipelines(h.DB, agent.ID)
+		maxConcurrent := normalizeAgentMaxConcurrentPipelines(agent.MaxConcurrentPipelines)
+		if runningRuns >= int64(maxConcurrent) {
+			continue
 		}
+		if runningRuns < minRuns {
+			minRuns = runningRuns
+			bestAgent = &agent
+			hasCandidate = true
+		}
+	}
+	if !hasCandidate {
+		c.JSON(http.StatusOK, gin.H{
+			"code":    200,
+			"data":    nil,
+			"message": "所有在线执行器已达到并发上限",
+		})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -829,6 +884,8 @@ func (h *AgentHandler) ApproveAgent(c *gin.Context) {
 		"approved_by":         approvedBy,
 		"approved_remark":     req.Remark,
 	})
+	updateAgentStatusByPipelineConcurrency(h.DB, agent.ID)
+	go NewPipelineHandler().scheduleQueuedPipelineRuns(h.DB)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,

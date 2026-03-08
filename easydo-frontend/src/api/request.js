@@ -33,7 +33,12 @@ request.interceptors.response.use(
       switch (status) {
         case 401:
           localStorage.removeItem('token')
-          window.location.href = '/login'
+          localStorage.removeItem('token_expires_at')
+          localStorage.removeItem('token_refresh_interval')
+          window.dispatchEvent(new Event('easydo-auth-invalid'))
+          if (window.location.pathname !== '/login') {
+            window.location.href = '/login'
+          }
           break
         case 400:
           // 业务错误（如参数验证失败、没有可用执行器等）

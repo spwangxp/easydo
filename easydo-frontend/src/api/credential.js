@@ -153,6 +153,29 @@ export function getCredentialUsage(id) {
 }
 
 /**
+ * 获取凭据影响范围
+ * @param {number} id - 凭据ID
+ */
+export function getCredentialImpact(id) {
+  return request({
+    url: `/v1/credentials/${id}/impact`,
+    method: 'get'
+  })
+}
+
+/**
+ * 批量获取凭据影响范围
+ * @param {Array<number>} ids - 凭据ID列表
+ */
+export function batchCredentialImpact(ids) {
+  return request({
+    url: '/v1/credentials/impact',
+    method: 'post',
+    data: { ids }
+  })
+}
+
+/**
  * 批量验证凭据
  * @param {Array<number>} ids - 凭据ID列表
  */

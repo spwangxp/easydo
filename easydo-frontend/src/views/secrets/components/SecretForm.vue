@@ -350,9 +350,9 @@
 
 <script setup>
 import { ref, reactive, computed, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Lock, User, Key, Setting } from '@element-plus/icons-vue'
-import { createCredential, updateCredential } from '@/api/credential'
+import { createCredential, updateCredential, getCredentialImpact } from '@/api/credential'
 
 const props = defineProps({
   initialData: {
@@ -631,6 +631,25 @@ async function handleSubmit() {
     
     let res
     if (props.initialData) {
+      try {
+        const impactRes = await getCredentialImpact(props.initialData.id)
+        const impact = impactRes?.data
+        if (impact && Number(impact.reference_count || 0) > 0) {
+          const warningLines = [
+            `该密钥当前被 ${impact.pipeline_count || 0} 条流水线、${impact.reference_count} 个任务节点引用。`,
+            '本次修改可能影响相关流水线后续运行认证。'
+          ]
+          await ElMessageBox.confirm(warningLines.join('\n'), '密钥变更影响提醒', {
+            type: 'warning',
+            confirmButtonText: '继续保存',
+            cancelButtonText: '取消'
+          })
+        }
+      } catch (error) {
+        if (error === 'cancel' || error === 'close') {
+          return
+        }
+      }
       res = await updateCredential(props.initialData.id, data)
     } else {
       res = await createCredential(data)

@@ -45,6 +45,8 @@ services:
       
       # JWT配置
       - JWT_SECRET=easydo-secret-key
+      - AUTH_TOKEN_TTL=4h
+      - AUTH_REFRESH_INTERVAL=10m
     depends_on:
       - db
       - redis
