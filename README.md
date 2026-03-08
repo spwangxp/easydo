@@ -15,6 +15,7 @@
 
 - [项目简介 / Project Introduction](#项目简介--project-introduction)
 - [核心功能 / Core Features](#核心功能--core-features)
+- [功能截图 / Feature Screenshots](#功能截图--feature-screenshots)
 - [技术架构 / Tech Stack](#技术架构--tech-stack)
 - [项目结构 / Project Structure](#项目结构--project-structure)
 - [快速开始 / Quick Start](#快速开始--quick-start)
@@ -103,6 +104,54 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 - 安全设置（修改密码）/ Security Settings (Change Password)
 - 偏好设置 / Preference Settings
 - 登录设备管理 / Login Device Management
+
+---
+
+## 功能截图 / Feature Screenshots
+
+### 1. 登录 / Login
+
+![Login](./screenshots/01-login.png)
+
+### 2. 工作台 / Dashboard
+
+![Dashboard](./screenshots/02-dashboard.png)
+
+### 3. 流水线管理 / Pipeline Management
+
+![Pipeline](./screenshots/03-pipeline.png)
+
+### 4. 项目管理 / Project Management
+
+![Project](./screenshots/04-project.png)
+
+### 5. 发布部署 / Release & Deployment
+
+![Deployment](./screenshots/05-deploy.png)
+
+### 6. 统计分析 / Statistics
+
+![Statistics](./screenshots/06-statistics.png)
+
+### 7. 系统设置 / System Settings
+
+![Settings](./screenshots/07-settings.png)
+
+### 8. 消息中心 / Messages
+
+![Messages](./screenshots/08-messages.png)
+
+### 9. 个人中心 / Personal Center
+
+![Profile](./screenshots/09-profile.png)
+
+### 10. 执行器管理 / Agent Management
+
+![Agent](./screenshots/10-agent.png)
+
+### 11. 密钥管理 / Secrets Management
+
+![Secrets](./screenshots/11-secrets.png)
 
 ---
 

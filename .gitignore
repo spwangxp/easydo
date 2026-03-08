@@ -24,7 +24,6 @@ logs/
 .sisyphus
 tests
 .git
-screenshots
 test-results
 
 **/node_modules/
