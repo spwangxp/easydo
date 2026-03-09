@@ -531,22 +531,9 @@ func (h *PipelineHandler) UpdatePipeline(c *gin.Context) {
 		updates["config"] = req.Config
 	}
 
-	// 使用Save方法更新
+	// 仅更新显式传入字段，避免将数据库中的 NULL project_id 回写为 0
 	if len(updates) > 0 {
-		if name, ok := updates["name"].(string); ok {
-			pipeline.Name = name
-		}
-		if desc, ok := updates["description"].(string); ok {
-			pipeline.Description = desc
-		}
-		if env, ok := updates["environment"].(string); ok {
-			pipeline.Environment = env
-		}
-		if config, ok := updates["config"].(string); ok {
-			pipeline.Config = config
-		}
-
-		if err := h.DB.Save(&pipeline).Error; err != nil {
+		if err := h.DB.Model(&models.Pipeline{}).Where("id = ?", pipeline.ID).Updates(updates).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"code":    500,
 				"message": "更新流水线失败: " + err.Error(),
@@ -721,6 +708,8 @@ type PipelineNode struct {
 	ID            string                 `json:"id"`
 	Type          string                 `json:"type"` // git_clone/npm/maven/gradle/docker/unit/integration/e2e/coverage/lint/ssh/kubernetes/docker-run/shell/sleep/email/webhook/in_app
 	Name          string                 `json:"name"`
+	X             *float64               `json:"x,omitempty"`
+	Y             *float64               `json:"y,omitempty"`
 	Config        map[string]interface{} `json:"config,omitempty"` // 新格式：config
 	Params        map[string]interface{} `json:"params,omitempty"` // 旧格式兼容：params
 	Timeout       int                    `json:"timeout"`

@@ -1,9 +1,25 @@
 <template>
   <div class="pipeline-design-container">
+    <div
+      class="library-toggle-anchor"
+      :class="{ collapsed: leftPanelCollapsed }"
+    >
+      <el-tooltip :content="leftPanelCollapsed ? '展开组件库' : '折叠组件库'" placement="right">
+        <el-button
+          circle
+          class="library-toggle-btn"
+          :aria-label="leftPanelCollapsed ? '展开组件库' : '折叠组件库'"
+          :title="leftPanelCollapsed ? '展开组件库' : '折叠组件库'"
+          @click="leftPanelCollapsed = !leftPanelCollapsed"
+        >
+          <el-icon><component :is="leftPanelCollapsed ? 'Expand' : 'Fold'" /></el-icon>
+        </el-button>
+      </el-tooltip>
+    </div>
+
     <!-- 左侧组件库面板 -->
-    <div class="components-panel" :style="{ width: leftPanelCollapsed ? '0' : '260px' }">
+    <div class="components-panel" :class="{ collapsed: leftPanelCollapsed }" :style="{ width: leftPanelCollapsed ? '0' : '260px' }">
       <div class="panel-header">
-        <el-icon><component :is="leftPanelCollapsed ? 'Expand' : 'Fold'" /></el-icon>
         <span>组件库</span>
       </div>
       <div class="components-content" v-show="!leftPanelCollapsed">
@@ -57,26 +73,6 @@
             </el-button>
           </el-tooltip>
         </div>
-        <div class="toolbar-center">
-          <el-button-group>
-            <el-tooltip content="缩小" placement="bottom">
-              <el-button @click="zoomOut">
-                <el-icon><ZoomOut /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-button class="zoom-text">{{ Math.round(canvasScale * 100) }}%</el-button>
-            <el-tooltip content="放大" placement="bottom">
-              <el-button @click="zoomIn">
-                <el-icon><ZoomIn /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="适应屏幕" placement="bottom">
-              <el-button @click="fitToScreen">
-                <el-icon><FullScreen /></el-icon>
-              </el-button>
-            </el-tooltip>
-          </el-button-group>
-        </div>
         <div class="toolbar-right">
           <el-tooltip content="网格对齐" placement="bottom">
             <el-button :type="gridSnap ? 'primary' : ''" @click="gridSnap = !gridSnap">
@@ -102,8 +98,7 @@
         @mousedown="handleCanvasMouseDown"
         @mousemove="handleCanvasMouseMove"
         @mouseup="handleCanvasMouseUp"
-        @wheel="handleWheel"
-        @dragover="handleDragOver"
+                @dragover="handleDragOver"
         @drop="handleDrop"
       >
         <!-- 网格背景 -->
@@ -111,7 +106,7 @@
           class="grid-background"
           :style="{
             backgroundPosition: `${canvasOffset.x}px ${canvasOffset.y}px`,
-            backgroundSize: `${20 * canvasScale}px`
+            backgroundSize: `20px`
           }"
         ></div>
 
@@ -121,7 +116,7 @@
           :style="{
             width: `${canvasWidth}px`,
             height: `${canvasHeight}px`,
-            transform: `translate(${canvasOffset.x}px, ${canvasOffset.y}px) scale(${canvasScale})`,
+            transform: `translate(${canvasOffset.x}px, ${canvasOffset.y}px)`,
             transformOrigin: '0 0'
           }"
         >
@@ -132,17 +127,17 @@
             :viewBox="`0 0 ${canvasWidth} ${canvasHeight}`"
           >
             <defs>
-              <!-- 常规连接箭头 -->
-              <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-                <polygon points="0 0, 10 3.5, 0 7" fill="var(--pipeline-connection-color)" />
+              <!-- 常规连接箭头：细线空心，偏工程化精致感 -->
+              <marker id="arrowhead" markerWidth="14" markerHeight="14" refX="11.5" refY="7" orient="auto" markerUnits="userSpaceOnUse">
+                <path d="M 2 2 L 11 7 L 2 12" fill="none" stroke="var(--pipeline-connection-color)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
               </marker>
               <!-- 选中连接箭头 -->
-              <marker id="arrowhead-selected" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-                <polygon points="0 0, 10 3.5, 0 7" fill="var(--pipeline-connection-selected)" />
+              <marker id="arrowhead-selected" markerWidth="14" markerHeight="14" refX="11.5" refY="7" orient="auto" markerUnits="userSpaceOnUse">
+                <path d="M 2 2 L 11 7 L 2 12" fill="none" stroke="var(--pipeline-connection-selected)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" />
               </marker>
               <!-- 虚线连接标记 -->
-              <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-                <polygon points="0 0, 10 3.5, 0 7" fill="var(--text-muted)" />
+              <marker id="arrowhead-dashed" markerWidth="14" markerHeight="14" refX="11.5" refY="7" orient="auto" markerUnits="userSpaceOnUse">
+                <path d="M 2 2 L 11 7 L 2 12" fill="none" stroke="var(--text-muted)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
               </marker>
             </defs>
             <!-- 已完成的连接线 -->
@@ -183,7 +178,7 @@
         <div 
           class="nodes-layer"
           :style="{
-            transform: `translate(${canvasOffset.x}px, ${canvasOffset.y}px) scale(${canvasScale})`
+            transform: `translate(${canvasOffset.x}px, ${canvasOffset.y}px)`
           }"
         >
           <div
@@ -487,9 +482,6 @@ import {
   Expand,
   Top,
   Bottom,
-  ZoomIn,
-  ZoomOut,
-  FullScreen,
   Grid,
   Delete,
   Close,
@@ -497,6 +489,7 @@ import {
   Check
 } from '@element-plus/icons-vue'
 import { updatePipeline, getPipelineDetail, getPipelineTaskTypes } from '@/api/pipeline'
+import { buildConnectionPath } from './connectionGeometry'
 
 const route = useRoute()
 const pipelineId = computed(() => parseInt(route.params.id))
@@ -506,7 +499,6 @@ const loadedCredentialBindingSnapshot = ref([])
 // 画布状态
 const canvasArea = ref(null)
 const canvasWrapper = ref(null)
-const canvasScale = ref(1)
 const canvasOffset = reactive({ x: 0, y: 0 })
 const canvasWidth = ref(5000)
 const canvasHeight = ref(5000)
@@ -797,93 +789,15 @@ const getNodeParams = (type) => {
   return paramDefs[type] || []
 }
 
-// 辅助函数：获取连接点的水平偏移位置
-// 当多个连接指向同一个节点时，将连接点均匀分布在节点边缘
-const getConnectionOffset = (conn, nodeId, isTarget) => {
-  const node = nodes.value.find(n => n.id === nodeId)
-  if (!node) return { x: 100, index: 0, total: 1 }
-
-  // 获取所有连接到该节点的连接（入站或出站）
-  const connectionsList = isTarget
-    ? connections.value.filter(c => c.to === nodeId)
-    : connections.value.filter(c => c.from === nodeId)
-
-  // 按另一节点的X位置排序，确保从左到右的顺序一致
-  connectionsList.sort((a, b) => {
-    const otherNodeA = nodes.value.find(n => n.id === (isTarget ? a.from : a.to))
-    const otherNodeB = nodes.value.find(n => n.id === (isTarget ? b.from : b.to))
-    return (otherNodeA?.x || 0) - (otherNodeB?.x || 0)
-  })
-
-  const index = connectionsList.findIndex(c => c.id === conn.id)
-  const total = connectionsList.length
-  const sectionWidth = node.width / (total + 1)
-
-  return {
-    x: sectionWidth * (index + 1),  // 在节点坐标系中的位置
-    index: index,                    // 在所有连接中的索引（从0开始）
-    total: total                     // 连接总数
-  }
-}
-
-// 获取连接路径 - 优化后的贝塞尔曲线，支持多连接的水平偏移
-// 连接线从源节点的右侧输出端口连接到目标节点的左侧输入端口
-const getConnectionPath = (conn) => {
-  const fromNode = nodes.value.find(n => n.id === conn.from)
-  const toNode = nodes.value.find(n => n.id === conn.to)
-  if (!fromNode || !toNode) return ''
-
-  const nodeHeight = 100 // 节点高度估算
-  const portY = 60 // 端口在节点内的 Y 位置（与 CSS 中的 top: 60px 对应）
-  const portOffsetX = 10 // 端口向外延伸的距离
-
-  // 获取源节点（出站连接）的偏移信息
-  const fromOffset = getConnectionOffset(conn, fromNode.id, false)
-  // 输出端口在节点右侧
-  const fromX = fromNode.x + fromOffset.x + portOffsetX
-  const fromY = fromNode.y + portY
-
-  // 获取目标节点（入站连接）的偏移信息
-  const toOffset = getConnectionOffset(conn, toNode.id, true)
-  // 输入端口在节点左侧
-  const toX = toNode.x + toOffset.x - portOffsetX
-  const toY = toNode.y + portY
-
-  // 计算水平距离
-  const dx = toX - fromX
-  const absDx = Math.abs(dx)
-
-  // 根据节点相对位置选择不同的曲线类型
-  let path = ''
-
-  if (absDx < 50) {
-    // 节点非常接近，使用简单的曲线
-    const controlOffset = 30
-    path = `M ${fromX} ${fromY} C ${fromX + controlOffset} ${fromY}, ${toX - controlOffset} ${toY}, ${toX} ${toY}`
-  } else if (absDx < 300) {
-    // 水平距离适中，使用标准贝塞尔曲线
-    const controlOffset = absDx / 2
-    path = `M ${fromX} ${fromY} C ${fromX + controlOffset} ${fromY}, ${toX - controlOffset} ${toY}, ${toX} ${toY}`
-  } else {
-    // 水平距离较大，使用更平滑的曲线
-    const controlOffset = Math.min(absDx / 2, 150)
-    path = `M ${fromX} ${fromY} C ${fromX + controlOffset} ${fromY}, ${toX - controlOffset} ${toY}, ${toX} ${toY}`
-  }
-
-  return path
-}
+// 获取连接路径 - 使用节点两侧锚点，确保终点箭头在节点外侧清晰可见
+const getConnectionPath = (conn) => buildConnectionPath({
+  conn,
+  nodes: nodes.value,
+  connections: connections.value
+})
 
 // 缩放控制
-const zoomIn = () => {
-  canvasScale.value = Math.min(canvasScale.value + 0.1, 2)
-}
-
-const zoomOut = () => {
-  canvasScale.value = Math.max(canvasScale.value - 0.1, 0.3)
-}
-
-const fitToScreen = () => {
-  canvasScale.value = 1
+const resetCanvasView = () => {
   canvasOffset.x = 100
   canvasOffset.y = 100
 }
@@ -957,13 +871,13 @@ const handleDrop = (event) => {
     // 计算节点在画布中的位置
     // 节点的位置(node.x, node.y)是相对于nodes-layer未变换坐标系的
     // 需要将鼠标位置从canvas-wrapper坐标系转换到nodes-layer坐标系
-    // 转换公式: nodePosition = (mouseInWrapper - canvasOffset) / scale
+    // 转换公式: nodePosition = mouseInWrapper - canvasOffset
     const mouseInWrapperX = event.clientX - canvasRect.left
     const mouseInWrapperY = event.clientY - canvasRect.top
     
     // 考虑拖拽偏移量（鼠标点击位置相对于组件中心的偏移）
-    let finalX = (mouseInWrapperX - canvasOffset.x - (component.dragOffset?.x || 0)) / canvasScale.value
-    let finalY = (mouseInWrapperY - canvasOffset.y - (component.dragOffset?.y || 0)) / canvasScale.value
+    let finalX = mouseInWrapperX - canvasOffset.x - (component.dragOffset?.x || 0)
+    let finalY = mouseInWrapperY - canvasOffset.y - (component.dragOffset?.y || 0)
     
     // 网格对齐
     if (gridSnap.value) {
@@ -1198,26 +1112,23 @@ const handleNodeMouseDown = (event, node) => {
 }
 
 // 画布鼠标事件
-let mouseMoveHandler = null
-let mouseUpHandler = null
-
 const handleCanvasMouseDown = (event) => {
-  if (event.button === 1 || (event.button === 0 && event.altKey)) {
-    // 中键或 Alt+左键 拖动画布
+  if (event.button === 0 && !event.target.closest('.pipeline-node') && !event.target.closest('.connection-line')) {
+    selectedNode.value = null
+    selectedConnection.value = null
     isPanning.value = true
     panStart.x = event.clientX - canvasOffset.x
     panStart.y = event.clientY - canvasOffset.y
-  } else if (event.button === 0 && !event.target.closest('.pipeline-node')) {
-    // 点击空白处取消选择
-    selectedNode.value = null
-    selectedConnection.value = null
+  } else if (event.button === 1 || (event.button === 0 && event.altKey)) {
+    isPanning.value = true
+    panStart.x = event.clientX - canvasOffset.x
+    panStart.y = event.clientY - canvasOffset.y
   }
 }
 
 const handleCanvasMouseMove = (event) => {
   // 拖拽节点
   if (nodeDragging.value) {
-    const scale = canvasScale.value
     const canvasRect = canvasWrapper.value.getBoundingClientRect()
     
     // 计算鼠标在canvas-wrapper中的位置
@@ -1227,9 +1138,9 @@ const handleCanvasMouseMove = (event) => {
     // 计算节点左上角在nodes-layer坐标系中的位置
     // 节点屏幕位置 = mouseInWrapper - 节点相对于wrapper的偏移
     // 节点相对于wrapper的偏移 = mouseInWrapper - nodeDragOffset
-    // 节点在nodes-layer中的位置 = (mouseInWrapper - nodeDragOffset - canvasOffset) / scale
-    let newX = (mouseInWrapperX - nodeDragOffset.x - canvasOffset.x) / scale
-    let newY = (mouseInWrapperY - nodeDragOffset.y - canvasOffset.y) / scale
+    // 节点在nodes-layer中的位置 = mouseInWrapper - nodeDragOffset - canvasOffset
+    let newX = mouseInWrapperX - nodeDragOffset.x - canvasOffset.x
+    let newY = mouseInWrapperY - nodeDragOffset.y - canvasOffset.y
     
     if (gridSnap.value) {
       newX = Math.round(newX / 20) * 20
@@ -1254,14 +1165,6 @@ const handleCanvasMouseUp = () => {
   nodeDragging.value = null
   isPanning.value = false
 }
-
-// 鼠标滚轮缩放
-const handleWheel = (event) => {
-  event.preventDefault()
-  const delta = event.deltaY > 0 ? -0.1 : 0.1
-  canvasScale.value = Math.max(0.3, Math.min(2, canvasScale.value + delta))
-}
-
 // 键盘事件
 const handleKeyDown = (event) => {
   // 检查焦点是否在输入框中
@@ -2150,8 +2053,8 @@ onMounted(async () => {
   window.addEventListener('keydown', handleKeyDown)
   window.addEventListener('keyup', handleKeyUp)
   
-  // 初始缩放
-  fitToScreen()
+  // 初始视图位置
+  resetCanvasView()
 })
 
 onUnmounted(() => {
@@ -2164,10 +2067,42 @@ onUnmounted(() => {
 @import '@/assets/styles/variables.scss';
 
 .pipeline-design-container {
+  position: relative;
   display: flex;
   height: calc(100vh - 120px);
   background: var(--bg-primary);
   overflow: hidden;
+}
+
+.library-toggle-anchor {
+  position: absolute;
+  top: 18px;
+  left: 244px;
+  z-index: 30;
+  transition: left 0.3s ease;
+
+  &.collapsed {
+    left: 12px;
+  }
+
+  :deep(.library-toggle-btn) {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--border-color-light);
+    background: color-mix(in srgb, var(--bg-card) 82%, transparent);
+    color: var(--text-secondary);
+    box-shadow: 0 14px 30px rgba(14, 35, 68, 0.14);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+
+    &:hover {
+      color: var(--primary-color);
+      border-color: color-mix(in srgb, var(--primary-color) 34%, var(--border-color-light));
+      background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
+      box-shadow: 0 16px 34px rgba(14, 35, 68, 0.2);
+    }
+  }
 }
 
 /* 左侧组件库面板 */
@@ -2175,10 +2110,16 @@ onUnmounted(() => {
   width: 260px;
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-color);
-  transition: width 0.3s ease;
+  transition: width 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
   overflow: hidden;
   flex-shrink: 0;
+  min-width: 0;
   box-shadow: 4px 0 24px rgba(0, 0, 0, 0.04);
+
+  &.collapsed {
+    border-right-color: transparent;
+    box-shadow: none;
+  }
 
   .panel-header {
     display: flex;
@@ -2189,7 +2130,7 @@ onUnmounted(() => {
     font-size: 14px;
     font-weight: 600;
     border-bottom: 1px solid var(--border-color);
-    cursor: pointer;
+    cursor: default;
     background: var(--bg-card);
     box-shadow: var(--shadow-sm);
 
@@ -2318,18 +2259,10 @@ onUnmounted(() => {
   z-index: 10;
 
   .toolbar-left,
-  .toolbar-center,
   .toolbar-right {
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-
-  .zoom-text {
-    min-width: 60px;
-    text-align: center;
-    color: var(--text-secondary);
-    font-weight: 500;
   }
 
   :deep(.el-button) {
@@ -2401,51 +2334,56 @@ onUnmounted(() => {
       .connection-item {
         .connection-line-glow {
           stroke: var(--pipeline-connection-glow);
-          stroke-width: 8;
+          stroke-width: 5.5;
           stroke-linecap: round;
           stroke-linejoin: round;
-          opacity: 0.56;
-          transition: opacity $transition-fast, stroke $transition-fast;
+          opacity: 0.22;
+          transition: opacity $transition-fast, stroke $transition-fast, stroke-width $transition-fast;
         }
 
         .connection-line {
           cursor: pointer;
           pointer-events: stroke;
           stroke: var(--pipeline-connection-color);
-          stroke-width: 3;
+          stroke-width: 2.35;
           stroke-linecap: round;
           stroke-linejoin: round;
-          opacity: 0.94;
+          opacity: 0.9;
           transition: stroke $transition-fast, stroke-width $transition-fast, opacity $transition-fast;
         }
 
         &:hover {
           .connection-line-glow {
-            opacity: 0.84;
+            opacity: 0.38;
+            stroke-width: 6.2;
           }
 
           .connection-line {
-            stroke-width: 3.8;
+            opacity: 0.98;
+            stroke-width: 2.7;
           }
         }
 
         &.selected {
           .connection-line-glow {
             stroke: var(--pipeline-node-selected-ring);
-            opacity: 0.96;
+            opacity: 0.52;
+            stroke-width: 6.8;
           }
 
           .connection-line {
             stroke: var(--pipeline-connection-selected);
-            stroke-width: 4.2;
+            stroke-width: 2.9;
+            opacity: 1;
           }
         }
       }
 
       .connecting-line-temp {
         pointer-events: none;
-        opacity: 0.78;
+        opacity: 0.62;
         stroke: var(--pipeline-connection-color);
+        stroke-width: 1.8;
       }
     }
   }

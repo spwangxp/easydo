@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"bytes"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -216,6 +218,59 @@ func TestPipelineConfig_ParseAndValidate(t *testing.T) {
 	}
 	if !hasEdge23 {
 		t.Error("Expected edge from 2 to 3")
+	}
+}
+
+func TestParseAndValidatePipelineConfig_PreservesNodeCoordinates(t *testing.T) {
+	handler := &PipelineHandler{}
+	raw := `{
+		"version":"2.0",
+		"nodes":[
+			{"id":"1","type":"shell","name":"Build","x":0,"y":0,"config":{"script":"echo build"}},
+			{"id":"2","type":"shell","name":"Test","x":520,"y":340,"config":{"script":"echo test"}}
+		],
+		"edges":[
+			{"from":"1","to":"2"}
+		]
+	}`
+
+	config, refs, errMsg, err := handler.parseAndValidatePipelineConfig(raw, 0, "", 0)
+	if err != nil {
+		t.Fatalf("expected parse success, got err=%v, msg=%s", err, errMsg)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("expected no credential refs, got %d", len(refs))
+	}
+
+	normalized, err := json.Marshal(config)
+	if err != nil {
+		t.Fatalf("marshal normalized config failed: %v", err)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(normalized, &payload); err != nil {
+		t.Fatalf("unmarshal normalized payload failed: %v", err)
+	}
+
+	nodes, ok := payload["nodes"].([]interface{})
+	if !ok || len(nodes) != 2 {
+		t.Fatalf("expected 2 nodes in normalized payload, got %#v", payload["nodes"])
+	}
+
+	firstNode, ok := nodes[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected first node object, got %#v", nodes[0])
+	}
+	secondNode, ok := nodes[1].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected second node object, got %#v", nodes[1])
+	}
+
+	if firstNode["x"] != float64(0) || firstNode["y"] != float64(0) {
+		t.Fatalf("expected first node coordinates to persist, got x=%v y=%v", firstNode["x"], firstNode["y"])
+	}
+	if secondNode["x"] != float64(520) || secondNode["y"] != float64(340) {
+		t.Fatalf("expected second node coordinates to persist, got x=%v y=%v", secondNode["x"], secondNode["y"])
 	}
 }
 
@@ -678,6 +733,52 @@ func TestParseAndValidatePipelineConfig_NormalizesTaskType(t *testing.T) {
 	}
 	if config.Nodes[0].Type != "git_clone" {
 		t.Fatalf("expected normalized type git_clone, got %s", config.Nodes[0].Type)
+	}
+}
+
+func TestUpdatePipeline_NullProjectIDRemainsNull(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+
+	if err := db.Exec("INSERT INTO pipelines (created_at, updated_at, name, description, config, project_id, owner_id, environment, is_public, is_favorite) VALUES (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, NULL, ?, ?, ?, ?)",
+		"null-project-pipeline",
+		"pipeline without project",
+		`{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo build"}}],"edges":[]}`,
+		uint64(1),
+		"test",
+		false,
+		false,
+	).Error; err != nil {
+		t.Fatalf("insert pipeline failed: %v", err)
+	}
+
+	var pipeline models.Pipeline
+	if err := db.Where("name = ?", "null-project-pipeline").First(&pipeline).Error; err != nil {
+		t.Fatalf("load pipeline failed: %v", err)
+	}
+
+	body := bytes.NewBufferString(`{"description":"updated description"}`)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/pipelines/1", body)
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Params = gin.Params{{Key: "id", Value: "1"}}
+	c.Set("user_id", uint64(1))
+	c.Set("role", "admin")
+
+	h.UpdatePipeline(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var projectID sql.NullInt64
+	if err := db.Raw("SELECT project_id FROM pipelines WHERE id = ?", pipeline.ID).Scan(&projectID).Error; err != nil {
+		t.Fatalf("query project_id failed: %v", err)
+	}
+	if projectID.Valid {
+		t.Fatalf("expected project_id to remain NULL, got %d", projectID.Int64)
 	}
 }
 
