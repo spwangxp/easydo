@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { login, logout, getUserInfo, refreshAuthToken } from '@/api/user'
+import { pickNextWorkspace, shouldRecoverFromWorkspaceError } from './workspaceRecovery'
 
 const DEFAULT_REFRESH_INTERVAL_SECONDS = 10 * 60
 let authInvalidListenerBound = false
@@ -11,10 +12,13 @@ export const useUserStore = defineStore('user', () => {
   const tokenRefreshInterval = ref(Number(localStorage.getItem('token_refresh_interval') || DEFAULT_REFRESH_INTERVAL_SECONDS))
   const userInfo = ref({})
   const permissions = ref([])
+  const workspaces = ref([])
+  const currentWorkspace = ref(null)
   let refreshTimer = null
   let isRefreshing = false
 
   const isLoggedIn = computed(() => !!token.value)
+  const currentWorkspaceId = computed(() => currentWorkspace.value?.id || 0)
 
   function clearRefreshTimer() {
     if (refreshTimer) {
@@ -35,9 +39,34 @@ export const useUserStore = defineStore('user', () => {
     tokenRefreshInterval.value = DEFAULT_REFRESH_INTERVAL_SECONDS
     userInfo.value = {}
     permissions.value = []
+    workspaces.value = []
+    currentWorkspace.value = null
     localStorage.removeItem('token')
     localStorage.removeItem('token_expires_at')
     localStorage.removeItem('token_refresh_interval')
+    localStorage.removeItem('current_workspace_id')
+  }
+
+  function normalizeWorkspaces(items = []) {
+    return Array.isArray(items) ? items.filter(item => item && item.id) : []
+  }
+
+  function setCurrentWorkspace(workspace) {
+    currentWorkspace.value = workspace || null
+    if (workspace?.id) {
+      localStorage.setItem('current_workspace_id', String(workspace.id))
+    } else {
+      localStorage.removeItem('current_workspace_id')
+    }
+  }
+
+  function setCurrentWorkspaceById(workspaceId) {
+    const nextWorkspace = workspaces.value.find(item => Number(item.id) === Number(workspaceId)) || null
+    setCurrentWorkspace(nextWorkspace)
+    if (nextWorkspace) {
+      permissions.value = nextWorkspace.capabilities || permissions.value
+    }
+    return nextWorkspace
   }
 
   function applyTokenMeta(data = {}) {
@@ -127,9 +156,27 @@ export const useUserStore = defineStore('user', () => {
 
   async function getUserInfoAction() {
     try {
-      const response = await getUserInfo()
+      const storedWorkspaceId = Number(localStorage.getItem('current_workspace_id') || 0)
+      let response
+      try {
+        response = await getUserInfo()
+      } catch (error) {
+        if (storedWorkspaceId && shouldRecoverFromWorkspaceError(error)) {
+          localStorage.removeItem('current_workspace_id')
+          response = await getUserInfo()
+        } else {
+          throw error
+        }
+      }
       userInfo.value = response.data
-      permissions.value = response.data.permissions || []
+      workspaces.value = normalizeWorkspaces(response.data.workspaces)
+      const effectiveStoredWorkspaceId = Number(localStorage.getItem('current_workspace_id') || 0)
+      const responseWorkspace = response.data.current_workspace?.id
+        ? response.data.current_workspace
+        : null
+      const nextWorkspace = pickNextWorkspace(workspaces.value, effectiveStoredWorkspaceId, responseWorkspace)
+      setCurrentWorkspace(nextWorkspace)
+      permissions.value = nextWorkspace?.capabilities || response.data.permissions || []
     } catch (error) {
       console.error('获取用户信息失败:', error)
     }
@@ -166,6 +213,10 @@ export const useUserStore = defineStore('user', () => {
     return permissions.value.includes(permission)
   }
 
+  function hasAnyPermission(list = []) {
+    return list.some(item => hasPermission(item))
+  }
+
   bindAuthInvalidListener()
 
   return {
@@ -174,6 +225,9 @@ export const useUserStore = defineStore('user', () => {
     tokenRefreshInterval,
     userInfo,
     permissions,
+    workspaces,
+    currentWorkspace,
+    currentWorkspaceId,
     isLoggedIn,
     doLogin,
     getUserInfoAction,
@@ -181,6 +235,9 @@ export const useUserStore = defineStore('user', () => {
     restoreAuthFromStorage,
     startTokenAutoRefresh,
     doLogout,
-    hasPermission
+    hasPermission,
+    hasAnyPermission,
+    setCurrentWorkspace,
+    setCurrentWorkspaceById
   }
 })

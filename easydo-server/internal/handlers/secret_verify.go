@@ -378,6 +378,7 @@ func (h *SecretHandler) Rotate(c *gin.Context) {
 // GetStatistics 获取使用统计
 func (h *SecretHandler) Statistics(c *gin.Context) {
 	userID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	// 按类型统计
 	typeStats := make([]map[string]interface{}, 0)
@@ -390,6 +391,7 @@ func (h *SecretHandler) Statistics(c *gin.Context) {
 	} {
 		var count int64
 		applySecretReadScope(h.DB.Model(&models.Secret{}), userID, role).
+			Where("workspace_id = ?", workspaceID).
 			Where("type = ?", st).
 			Count(&count)
 
@@ -409,6 +411,7 @@ func (h *SecretHandler) Statistics(c *gin.Context) {
 	} {
 		var count int64
 		applySecretReadScope(h.DB.Model(&models.Secret{}), userID, role).
+			Where("workspace_id = ?", workspaceID).
 			Where("status = ?", ss).
 			Count(&count)
 
@@ -421,6 +424,7 @@ func (h *SecretHandler) Statistics(c *gin.Context) {
 	// 最近使用排行
 	var recentUsage []map[string]interface{}
 	applySecretReadScope(h.DB.Model(&models.Secret{}), userID, role).
+		Where("workspace_id = ?", workspaceID).
 		Where("last_used_at > ?", 0).
 		Order("last_used_at DESC").
 		Limit(10).
@@ -435,7 +439,7 @@ func (h *SecretHandler) Statistics(c *gin.Context) {
 
 		var count int64
 		h.DB.Model(&models.SecretUsage{}).
-			Where("secret_id IN (?)", accessibleSecretIDsSubQuery(h.DB, userID, role)).
+			Where("secret_id IN (?)", accessibleSecretIDsInWorkspaceSubQuery(h.DB, workspaceID, userID, role)).
 			Where("used_at >= ? AND used_at < ?", dayStart, dayEnd).
 			Count(&count)
 
@@ -447,9 +451,9 @@ func (h *SecretHandler) Statistics(c *gin.Context) {
 
 	// 总统计
 	var totalSecrets, totalUsages int64
-	applySecretReadScope(h.DB.Model(&models.Secret{}), userID, role).Count(&totalSecrets)
+	applySecretReadScope(h.DB.Model(&models.Secret{}), userID, role).Where("workspace_id = ?", workspaceID).Count(&totalSecrets)
 	h.DB.Model(&models.SecretUsage{}).
-		Where("secret_id IN (?)", accessibleSecretIDsSubQuery(h.DB, userID, role)).
+		Where("secret_id IN (?)", accessibleSecretIDsInWorkspaceSubQuery(h.DB, workspaceID, userID, role)).
 		Count(&totalUsages)
 
 	c.JSON(http.StatusOK, gin.H{

@@ -51,7 +51,7 @@ func InitRouter() *gin.Engine {
 			auth.POST("/login", userHandler.Login)
 			auth.POST("/register", userHandler.Register)
 			auth.POST("/refresh", middleware.JWTAuth(), userHandler.RefreshToken)
-			auth.GET("/userinfo", middleware.JWTAuth(), userHandler.GetUserInfo)
+			auth.GET("/userinfo", middleware.JWTAuth(), middleware.WorkspaceContext(), userHandler.GetUserInfo)
 			auth.PUT("/profile", middleware.JWTAuth(), userHandler.UpdateProfile)
 			auth.PUT("/password", middleware.JWTAuth(), userHandler.ChangePassword)
 			auth.POST("/logout", middleware.JWTAuth(), userHandler.Logout)
@@ -59,7 +59,7 @@ func InitRouter() *gin.Engine {
 
 		// 流水线相关
 		pipeline := api.Group("/pipelines")
-		pipeline.Use(middleware.JWTAuth())
+		pipeline.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
 		{
 			pipelineHandler := handlers.NewPipelineHandler()
 			pipeline.GET("", pipelineHandler.GetPipelineList)
@@ -81,7 +81,7 @@ func InitRouter() *gin.Engine {
 
 		// 项目相关
 		project := api.Group("/projects")
-		project.Use(middleware.JWTAuth())
+		project.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
 		{
 			projectHandler := handlers.NewProjectHandler()
 			project.GET("", projectHandler.GetProjectList)
@@ -97,33 +97,51 @@ func InitRouter() *gin.Engine {
 		users.Use(middleware.JWTAuth())
 		{
 			userHandler := handlers.NewUserHandler()
-			users.GET("", userHandler.GetUserList)
+			users.POST("", userHandler.CreateUser)
+			users.GET("", middleware.AdminRequired(), userHandler.GetUserList)
+		}
+
+		workspaces := api.Group("/workspaces")
+		workspaces.Use(middleware.JWTAuth(), middleware.WorkspaceContext())
+		{
+			workspaceHandler := handlers.NewWorkspaceHandler()
+			workspaces.GET("", workspaceHandler.GetWorkspaceList)
+			workspaces.POST("", workspaceHandler.CreateWorkspace)
+			workspaces.GET("/:id", workspaceHandler.GetWorkspace)
+			workspaces.PATCH("/:id", workspaceHandler.UpdateWorkspace)
+			workspaces.GET("/:id/members", workspaceHandler.ListMembers)
+			workspaces.PATCH("/:id/members/:member_id", workspaceHandler.UpdateMember)
+			workspaces.DELETE("/:id/members/:member_id", workspaceHandler.RemoveMember)
+			workspaces.GET("/:id/invitations", workspaceHandler.ListInvitations)
+			workspaces.POST("/:id/invitations", workspaceHandler.CreateInvitation)
+			workspaces.DELETE("/:id/invitations/:invite_id", workspaceHandler.RevokeInvitation)
+			workspaces.POST("/invitations/:token/accept", workspaceHandler.AcceptInvitation)
 		}
 
 		// Agent管理
 		agents := api.Group("/agents")
 		{
 			agentHandler := handlers.NewAgentHandler()
-			agents.POST("/register", agentHandler.RegisterAgent) // Agent注册，不需要认证
-			agents.POST("/heartbeat", agentHandler.Heartbeat)    // Agent心跳，不需要认证
-			agents.POST("/select", agentHandler.SelectAgent)     // 选择合适的Agent
-			agents.POST("/self", agentHandler.GetAgentSelf)      // Agent获取自己的信息（使用token验证）
-			agents.GET("", middleware.JWTAuth(), agentHandler.GetAgentList)
-			agents.GET("/:id", middleware.JWTAuth(), agentHandler.GetAgentDetail)
-			agents.PUT("/:id", middleware.JWTAuth(), agentHandler.UpdateAgent)
-			agents.DELETE("/:id", middleware.JWTAuth(), agentHandler.DeleteAgent)
-			agents.GET("/:id/heartbeats", middleware.JWTAuth(), agentHandler.GetAgentHeartbeats)
+			agents.POST("/register", agentHandler.RegisterAgent)                                                                                        // Agent注册，不需要认证
+			agents.POST("/heartbeat", agentHandler.Heartbeat)                                                                                           // Agent心跳，不需要认证
+			agents.POST("/select", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), agentHandler.SelectAgent) // 选择合适的Agent
+			agents.POST("/self", agentHandler.GetAgentSelf)                                                                                             // Agent获取自己的信息（使用token验证）
+			agents.GET("", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), agentHandler.GetAgentList)
+			agents.GET("/:id", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), agentHandler.GetAgentDetail)
+			agents.PUT("/:id", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceRoleRequired("maintainer"), agentHandler.UpdateAgent)
+			agents.DELETE("/:id", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceRoleRequired("maintainer"), agentHandler.DeleteAgent)
+			agents.GET("/:id/heartbeats", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), agentHandler.GetAgentHeartbeats)
 			// Agent审批相关路由 - 需要管理员权限
-			agents.GET("/pending", middleware.JWTAuth(), agentHandler.GetPendingAgents)
-			agents.POST("/:id/approve", middleware.JWTAuth(), middleware.AdminRequired(), agentHandler.ApproveAgent)
-			agents.POST("/:id/reject", middleware.JWTAuth(), middleware.AdminRequired(), agentHandler.RejectAgent)
-			agents.POST("/:id/refresh-token", middleware.JWTAuth(), middleware.AdminRequired(), agentHandler.RefreshAgentToken)
-			agents.POST("/:id/remove", middleware.JWTAuth(), middleware.AdminRequired(), agentHandler.RemoveAgent)
+			agents.GET("/pending", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceRoleRequired("maintainer"), agentHandler.GetPendingAgents)
+			agents.POST("/:id/approve", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceRoleRequired("maintainer"), agentHandler.ApproveAgent)
+			agents.POST("/:id/reject", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceRoleRequired("maintainer"), agentHandler.RejectAgent)
+			agents.POST("/:id/refresh-token", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceRoleRequired("maintainer"), agentHandler.RefreshAgentToken)
+			agents.POST("/:id/remove", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceRoleRequired("maintainer"), agentHandler.RemoveAgent)
 		}
 
 		// 消息相关路由
 		messages := api.Group("/messages")
-		messages.Use(middleware.JWTAuth())
+		messages.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
 		{
 			messageHandler := handlers.NewMessageHandler()
 			messages.GET("", messageHandler.GetMessageList)
@@ -136,12 +154,12 @@ func InitRouter() *gin.Engine {
 		tasks := api.Group("/tasks")
 		{
 			taskHandler := handlers.NewTaskHandler()
-			tasks.POST("", middleware.JWTAuth(), taskHandler.CreateTask)
-			tasks.GET("", middleware.JWTAuth(), taskHandler.GetTaskList)
-			tasks.GET("/:id", middleware.JWTAuth(), taskHandler.GetTaskDetail)
-			tasks.GET("/:id/logs", middleware.JWTAuth(), taskHandler.GetTaskLogs)
-			tasks.POST("/:id/cancel", middleware.JWTAuth(), taskHandler.CancelTask)
-			tasks.POST("/:id/retry", middleware.JWTAuth(), taskHandler.RetryTask)
+			tasks.POST("", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.CreateTask)
+			tasks.GET("", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.GetTaskList)
+			tasks.GET("/:id", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.GetTaskDetail)
+			tasks.GET("/:id/logs", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.GetTaskLogs)
+			tasks.POST("/:id/cancel", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.CancelTask)
+			tasks.POST("/:id/retry", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.RetryTask)
 			// Agent上报接口（不需要认证，使用token验证）
 			tasks.POST("/report/status", taskHandler.AgentReportTaskStatus)
 			tasks.POST("/report/log", taskHandler.AgentReportLog)
@@ -150,7 +168,7 @@ func InitRouter() *gin.Engine {
 
 		// 密钥管理
 		secrets := api.Group("/secrets")
-		secrets.Use(middleware.JWTAuth())
+		secrets.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
 		{
 			secretHandler := handlers.NewSecretHandler()
 			secrets.GET("", secretHandler.List)
@@ -169,7 +187,7 @@ func InitRouter() *gin.Engine {
 
 		// 凭据管理 (Credentials)
 		credentials := api.Group("/v1/credentials")
-		credentials.Use(middleware.JWTAuth())
+		credentials.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
 		{
 			credentialHandler := handlers.NewCredentialHandler()
 			credentials.GET("", credentialHandler.ListCredentials)
@@ -192,7 +210,7 @@ func InitRouter() *gin.Engine {
 
 		// Webhook管理
 		webhooks := api.Group("/webhooks")
-		webhooks.Use(middleware.JWTAuth())
+		webhooks.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
 		{
 			webhookHandler := handlers.NewWebhookHandler()
 			webhooks.GET("", webhookHandler.ListConfigs)
@@ -205,7 +223,7 @@ func InitRouter() *gin.Engine {
 
 		// 统计分析
 		stats := api.Group("/stats")
-		stats.Use(middleware.JWTAuth())
+		stats.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
 		{
 			statsHandler := handlers.NewStatisticsHandler()
 			stats.GET("/overview", statsHandler.GetOverview)

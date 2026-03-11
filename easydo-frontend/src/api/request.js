@@ -12,8 +12,12 @@ const request = axios.create({
 request.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('token')
+    const workspaceId = localStorage.getItem('current_workspace_id')
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
+    }
+    if (workspaceId) {
+      config.headers['X-Workspace-ID'] = workspaceId
     }
     return config
   },

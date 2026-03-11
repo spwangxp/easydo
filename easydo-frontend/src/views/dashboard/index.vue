@@ -1,7 +1,10 @@
 <template>
   <div class="dashboard-container">
     <div class="dashboard-header">
-      <h1 class="page-title">工作台</h1>
+      <div>
+        <h1 class="page-title">工作台</h1>
+        <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
+      </div>
       <div class="header-actions">
         <el-button type="primary" @click="handleCreatePipeline">
           <el-icon><Plus /></el-icon>
@@ -237,8 +240,10 @@ import {
 import { getPipelineList, getPipelineHistory } from '@/api/pipeline'
 import { getProjectList } from '@/api/project'
 import { getTaskDispatchList } from '@/api/task'
+import { useUserStore } from '@/stores/user'
 
 const router = useRouter()
+const userStore = useUserStore()
 const loading = ref(false)
 const dispatchLoading = ref(false)
 

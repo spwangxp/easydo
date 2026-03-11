@@ -1200,6 +1200,7 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 			if err != nil {
 				fmt.Printf("[ERROR] Failed to render script for downstream node %s: %v\n", downstreamID, err)
 				failedTask := &models.AgentTask{
+					WorkspaceID:   run.WorkspaceID,
 					AgentID:       run.AgentID,
 					PipelineRunID: runID,
 					NodeID:        downstreamID,
@@ -1250,6 +1251,7 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 			}
 
 			newTask := &models.AgentTask{
+				WorkspaceID:   run.WorkspaceID,
 				AgentID:       run.AgentID,
 				PipelineRunID: runID,
 				NodeID:        downstreamID,

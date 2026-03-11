@@ -9,6 +9,10 @@ server:
 agent:
   # Agent name (defaults to hostname if empty)
   name: ""
+
+  # Optional workspace ID. When set, the agent will register as a private agent
+  # for that workspace. Leave empty or set to 0 to register as a platform agent.
+  workspace_id: 0
   
   # Token file path (in container: /data/agent/token)
   token_file: "/data/agent/token"

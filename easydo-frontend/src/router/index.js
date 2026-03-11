@@ -9,6 +9,12 @@ const routes = [
     meta: { requiresAuth: false }
   },
   {
+    path: '/workspace-invitations/:token',
+    name: 'WorkspaceInvitation',
+    component: () => import('@/views/workspace-invitation/index.vue'),
+    meta: { requiresAuth: false }
+  },
+  {
     path: '',
     component: () => import('@/views/layout/index.vue'),
     meta: { requiresAuth: true },
@@ -21,7 +27,8 @@ const routes = [
       {
         path: 'pipeline',
         name: 'Pipeline',
-        component: () => import('@/views/pipeline/index.vue')
+        component: () => import('@/views/pipeline/index.vue'),
+        meta: { permission: 'pipeline.read' }
       },
       {
         path: 'pipeline/:id',
@@ -31,7 +38,8 @@ const routes = [
       {
         path: 'project',
         name: 'Project',
-        component: () => import('@/views/project/index.vue')
+        component: () => import('@/views/project/index.vue'),
+        meta: { permission: 'project.read' }
       },
       {
         path: 'deploy',
@@ -41,12 +49,14 @@ const routes = [
       {
         path: 'statistics',
         name: 'Statistics',
-        component: () => import('@/views/statistics/index.vue')
+        component: () => import('@/views/statistics/index.vue'),
+        meta: { permission: 'workspace.read' }
       },
       {
         path: 'settings',
         name: 'Settings',
-        component: () => import('@/views/settings/index.vue')
+        component: () => import('@/views/settings/index.vue'),
+        meta: { permission: 'workspace.read' }
       },
       {
         path: 'messages',
@@ -61,17 +71,20 @@ const routes = [
       {
         path: 'agent',
         name: 'Agent',
-        component: () => import('@/views/agent/index.vue')
+        component: () => import('@/views/agent/index.vue'),
+        meta: { permission: 'agent.read' }
       },
       {
         path: 'agent/pending',
         name: 'AgentPending',
-        component: () => import('@/views/agent/pending.vue')
+        component: () => import('@/views/agent/pending.vue'),
+        meta: { permission: 'agent.approve' }
       },
       {
         path: 'secrets',
         name: 'Secrets',
-        component: () => import('@/views/secrets/index.vue')
+        component: () => import('@/views/secrets/index.vue'),
+        meta: { permission: 'credential.read' }
       },
       {
         path: 'credentials',
@@ -93,12 +106,17 @@ const router = createRouter({
 // 路由守卫
 router.beforeEach((to, from, next) => {
   // 延迟导入store，避免循环依赖
-  import('@/stores/user').then(({ useUserStore }) => {
+  import('@/stores/user').then(async ({ useUserStore }) => {
     const userStore = useUserStore()
+    if (userStore.isLoggedIn && !userStore.userInfo?.id) {
+      await userStore.getUserInfoAction()
+    }
     
     if (to.meta.requiresAuth && !userStore.isLoggedIn) {
       next({ name: 'Login', query: { redirect: to.fullPath } })
     } else if (to.name === 'Login' && userStore.isLoggedIn) {
+      next({ name: 'Dashboard' })
+    } else if (to.meta.permission && !userStore.hasPermission(to.meta.permission)) {
       next({ name: 'Dashboard' })
     } else {
       next()

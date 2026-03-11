@@ -36,3 +36,11 @@ export function updatePassword(data) {
     data
   })
 }
+
+export function createUser(data) {
+  return request({
+    url: '/users',
+    method: 'post',
+    data
+  })
+}

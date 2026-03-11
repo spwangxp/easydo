@@ -6,8 +6,8 @@ type Agent struct {
 	Name                   string  `gorm:"size:128;not null" json:"name"`
 	Host                   string  `gorm:"size:255;not null" json:"host"`
 	Port                   int     `gorm:"not null" json:"port"`
-	Token                  string  `gorm:"size:256;not null" json:"token"`                                             // Secret token for authentication
-	RegisterKey            string  `gorm:"size:256" json:"register_key"`                                               // Registration key for fetching token after approval
+	Token                  string  `gorm:"size:256;not null" json:"-"`                                                 // Secret token for authentication
+	RegisterKey            string  `gorm:"size:256" json:"-"`                                                          // Registration key for fetching token after approval
 	Status                 string  `gorm:"size:32;default:'offline'" json:"status"`                                    // online, offline, busy, error
 	RegistrationStatus     string  `gorm:"size:32;default:'pending'" json:"registration_status"`                       // pending, approved, rejected
 	MaxConcurrentPipelines int     `gorm:"column:max_concurrent_pipelines;default:10" json:"max_concurrent_pipelines"` // 最大并发流水线数
@@ -28,9 +28,13 @@ type Agent struct {
 	HeartbeatInterval      int     `gorm:"column:heartbeat_interval;default:10" json:"heartbeat_interval"` // Heartbeat interval in seconds
 	ConsecutiveSuccess     int     `gorm:"default:0" json:"consecutive_success"`                           // Consecutive successful heartbeats (max 3)
 	ConsecutiveFailures    int     `gorm:"default:0" json:"consecutive_failures"`                          // Consecutive failed heartbeats (max 3)
-	OwnerID                *uint64 `gorm:"index" json:"owner_id"`                                          // Optional owner
+	ScopeType              string  `gorm:"size:32;default:'platform';index" json:"scope_type"`
+	WorkspaceID            uint64  `gorm:"index" json:"workspace_id"`
+	CreatedBy              uint64  `gorm:"index" json:"created_by"`
+	OwnerID                *uint64 `gorm:"index" json:"owner_id"` // Optional owner
 
-	Owner *User `gorm:"foreignKey:OwnerID" json:"owner"`
+	Workspace *Workspace `gorm:"-" json:"workspace,omitempty"`
+	Owner     *User      `gorm:"foreignKey:OwnerID" json:"owner"`
 }
 
 // AgentStatus constants
@@ -51,6 +55,7 @@ const (
 // AgentTask represents a task assigned to an agent
 type AgentTask struct {
 	BaseModel
+	WorkspaceID   uint64 `gorm:"index" json:"workspace_id"`
 	AgentID       uint64 `gorm:"index;not null" json:"agent_id"`
 	PipelineRunID uint64 `gorm:"index" json:"pipeline_run_id"`      // Associated pipeline run
 	NodeID        string `gorm:"size:128;index" json:"node_id"`     // Node ID in pipeline config

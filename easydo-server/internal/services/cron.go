@@ -66,18 +66,40 @@ func (c *Cron) checkAgentOffline() {
 		// 如果超过3个心跳周期没有收到心跳，标记为离线
 		if agent.LastHeartAt < offlineThreshold {
 			c.DB.Model(&agent).Updates(map[string]interface{}{
-				"status":              models.AgentStatusOffline,
-				"consecutive_success": 0,
+				"status":               models.AgentStatusOffline,
+				"consecutive_success":  0,
 				"consecutive_failures": 3,
 			})
 
-			// 创建离线消息
-			message := models.Message{
-				Type:    "agent_offline",
-				Title:   "Agent离线告警",
-				Content: fmt.Sprintf("执行器 [%s] 已离线（超过 %d 秒未收到心跳）", agent.Name, timeoutSeconds),
+			messageContent := fmt.Sprintf("执行器 [%s] 已离线（超过 %d 秒未收到心跳）", agent.Name, timeoutSeconds)
+			if agent.ScopeType == models.AgentScopeWorkspace && agent.WorkspaceID > 0 {
+				var members []models.WorkspaceMember
+				c.DB.Where("workspace_id = ? AND status = ?", agent.WorkspaceID, models.WorkspaceMemberStatusActive).Find(&members)
+				for _, member := range members {
+					recipientID := member.UserID
+					message := models.Message{
+						WorkspaceID: agent.WorkspaceID,
+						RecipientID: &recipientID,
+						Type:        "agent_offline",
+						Title:       "Agent离线告警",
+						Content:     messageContent,
+					}
+					c.DB.Create(&message)
+				}
+			} else {
+				var admins []models.User
+				c.DB.Where("role = ?", "admin").Find(&admins)
+				for _, admin := range admins {
+					recipientID := admin.ID
+					message := models.Message{
+						Type:        "agent_offline",
+						Title:       "Agent离线告警",
+						Content:     messageContent,
+						RecipientID: &recipientID,
+					}
+					c.DB.Create(&message)
+				}
 			}
-			c.DB.Create(&message)
 		}
 	}
 }

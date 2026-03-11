@@ -1,7 +1,10 @@
 <template>
   <div class="messages-container">
     <div class="messages-header">
-      <h1 class="page-title">消息</h1>
+      <div>
+        <h1 class="page-title">消息</h1>
+        <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
+      </div>
       <el-button type="text" @click="handleMarkAllRead">全部已读</el-button>
     </div>
     
@@ -64,7 +67,9 @@ import {
   Connection
 } from '@element-plus/icons-vue'
 import { getMessageList, getUnreadCount, markAsRead, markAllAsRead } from '@/api/message'
+import { useUserStore } from '@/stores/user'
 
+const userStore = useUserStore()
 const activeTab = ref('all')
 const loading = ref(false)
 const messageList = ref([])

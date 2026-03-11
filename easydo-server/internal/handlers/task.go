@@ -104,6 +104,16 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 		return
 	}
 
+	workspaceID := c.GetUint64("workspace_id")
+	role := c.GetString("role")
+	if !agentVisibleInWorkspace(&agent, workspaceID, role) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "无权使用该执行器",
+		})
+		return
+	}
+
 	// Get user ID from JWT
 	userID, _ := c.Get("user_id")
 	createdBy := uint64(0)
@@ -122,19 +132,20 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 	}
 
 	task := &models.AgentTask{
-		AgentID:    req.AgentID,
-		NodeID:     req.NodeID,
-		TaskType:   req.TaskType,
-		Name:       req.Name,
-		Params:     req.Params,
-		Script:     req.Script,
-		WorkDir:    req.WorkDir,
-		EnvVars:    req.EnvVars,
-		Status:     models.TaskStatusPending,
-		Priority:   req.Priority,
-		Timeout:    timeout,
-		MaxRetries: maxRetries,
-		CreatedBy:  createdBy,
+		WorkspaceID: workspaceID,
+		AgentID:     req.AgentID,
+		NodeID:      req.NodeID,
+		TaskType:    req.TaskType,
+		Name:        req.Name,
+		Params:      req.Params,
+		Script:      req.Script,
+		WorkDir:     req.WorkDir,
+		EnvVars:     req.EnvVars,
+		Status:      models.TaskStatusPending,
+		Priority:    req.Priority,
+		Timeout:     timeout,
+		MaxRetries:  maxRetries,
+		CreatedBy:   createdBy,
 	}
 
 	if err := h.DB.Omit("PipelineRunID").Create(task).Error; err != nil {
@@ -174,10 +185,12 @@ func (h *TaskHandler) GetTaskList(c *gin.Context) {
 	runStatus := c.Query("run_status")
 	keyword := strings.TrimSpace(c.Query("keyword"))
 	includeSchedule := c.Query("include_schedule") == "1" || strings.EqualFold(c.Query("include_schedule"), "true")
+	workspaceID := c.GetUint64("workspace_id")
 
 	useScheduleQuery := includeSchedule || runStatus != "" || keyword != ""
 	if useScheduleQuery {
 		applyFilters := func(query *gorm.DB) *gorm.DB {
+			query = query.Where("t.workspace_id = ?", workspaceID)
 			if agentID != "" {
 				query = query.Where("t.agent_id = ?", agentID)
 			}
@@ -278,6 +291,7 @@ func (h *TaskHandler) GetTaskList(c *gin.Context) {
 	var total int64
 
 	query := h.DB.Model(&models.AgentTask{})
+	query = query.Where("workspace_id = ?", workspaceID)
 
 	if agentID != "" {
 		query = query.Where("agent_id = ?", agentID)
@@ -310,9 +324,10 @@ func (h *TaskHandler) GetTaskList(c *gin.Context) {
 // GetTaskDetail returns task details
 func (h *TaskHandler) GetTaskDetail(c *gin.Context) {
 	id := c.Param("id")
+	workspaceID := c.GetUint64("workspace_id")
 
 	var task models.AgentTask
-	if err := h.DB.Preload("Agent").Preload("Executions").First(&task, id).Error; err != nil {
+	if err := h.DB.Preload("Agent").Preload("Executions").Where("workspace_id = ?", workspaceID).First(&task, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "任务不存在",
@@ -330,9 +345,10 @@ func (h *TaskHandler) GetTaskDetail(c *gin.Context) {
 func (h *TaskHandler) GetTaskLogs(c *gin.Context) {
 	id := c.Param("id")
 	level := c.DefaultQuery("level", "")
+	workspaceID := c.GetUint64("workspace_id")
 
 	var task models.AgentTask
-	if err := h.DB.First(&task, id).Error; err != nil {
+	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&task, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "任务不存在",
@@ -361,9 +377,10 @@ func (h *TaskHandler) GetTaskLogs(c *gin.Context) {
 // CancelTask cancels a pending or running task
 func (h *TaskHandler) CancelTask(c *gin.Context) {
 	id := c.Param("id")
+	workspaceID := c.GetUint64("workspace_id")
 
 	var task models.AgentTask
-	if err := h.DB.First(&task, id).Error; err != nil {
+	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&task, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "任务不存在",
@@ -398,9 +415,10 @@ func (h *TaskHandler) CancelTask(c *gin.Context) {
 // RetryTask retries a failed task
 func (h *TaskHandler) RetryTask(c *gin.Context) {
 	id := c.Param("id")
+	workspaceID := c.GetUint64("workspace_id")
 
 	var task models.AgentTask
-	if err := h.DB.First(&task, id).Error; err != nil {
+	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&task, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "任务不存在",
@@ -714,9 +732,15 @@ func (h *TaskHandler) GetPendingTasks(c *gin.Context) {
 // GetPipelineRunTasks returns all tasks for a pipeline run
 func (h *TaskHandler) GetPipelineRunTasks(c *gin.Context) {
 	runID := c.Param("run_id")
+	workspaceID := c.GetUint64("workspace_id")
+	runIDNum, err := strconv.ParseUint(runID, 10, 64)
+	if err != nil || !pipelineRunBelongsToWorkspace(h.DB, runIDNum, workspaceID) {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "运行记录不存在"})
+		return
+	}
 
 	var tasks []models.AgentTask
-	h.DB.Where("pipeline_run_id = ?", runID).Preload("Agent").Order("created_at ASC").Find(&tasks)
+	h.DB.Where("workspace_id = ? AND pipeline_run_id = ?", workspaceID, runID).Preload("Agent").Order("created_at ASC").Find(&tasks)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -732,6 +756,7 @@ func (h *TaskHandler) GetPipelineRunLogs(c *gin.Context) {
 	runID := c.Param("run_id")
 	level := c.DefaultQuery("level", "")
 	source := c.DefaultQuery("source", "")
+	workspaceID := c.GetUint64("workspace_id")
 
 	runIDNum, err := strconv.ParseUint(runID, 10, 64)
 	if err != nil {
@@ -739,6 +764,10 @@ func (h *TaskHandler) GetPipelineRunLogs(c *gin.Context) {
 			"code":    400,
 			"message": "无效的运行ID",
 		})
+		return
+	}
+	if !pipelineRunBelongsToWorkspace(h.DB, runIDNum, workspaceID) {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "运行记录不存在"})
 		return
 	}
 

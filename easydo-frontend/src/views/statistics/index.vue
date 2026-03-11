@@ -1,7 +1,10 @@
 <template>
   <div class="statistics-container">
     <div class="statistics-header">
-      <h1 class="page-title">统计</h1>
+      <div>
+        <h1 class="page-title">统计</h1>
+        <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
+      </div>
       <div class="date-range-picker">
         <el-date-picker
           v-model="dateRange"
@@ -186,6 +189,9 @@ import {
 } from '@element-plus/icons-vue'
 import { getStatsOverview, getStatsTrend, getTopPipelines } from '@/api/statistics'
 import { ElMessage } from 'element-plus'
+import { useUserStore } from '@/stores/user'
+
+const userStore = useUserStore()
 
 const dateRange = ref([
   new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),

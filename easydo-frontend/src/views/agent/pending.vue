@@ -2,6 +2,7 @@
   <div class="pending-container">
     <div class="pending-header">
       <h1 class="page-title">待接纳执行器</h1>
+      <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '平台级' }}</div>
     </div>
 
     <div class="pending-table" v-loading="loading">
@@ -40,6 +41,16 @@
             <span>{{ row.os }} {{ row.arch }}</span>
           </template>
         </el-table-column>
+        <el-table-column label="类型" width="180" align="center">
+          <template #default="{ row }">
+            <div class="scope-cell">
+              <el-tag :type="row.scope_type === 'platform' ? 'primary' : 'info'" size="small">
+                {{ row.scope_type === 'platform' ? '平台型' : '工作空间私有' }}
+              </el-tag>
+              <span v-if="row.scope_type !== 'platform'" class="scope-text">{{ agentWorkspaceName(row) }}</span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="资源" width="150" align="center">
           <template #default="{ row }">
             <span class="resource-info">
@@ -59,8 +70,9 @@
         </el-table-column>
         <el-table-column label="操作" width="180" align="center">
           <template #default="{ row }">
-            <el-button type="primary" size="small" @click="handleApprove(row)">接纳</el-button>
-            <el-button type="danger" size="small" @click="handleReject(row)">拒绝</el-button>
+            <el-button v-if="canApproveAgent(row)" type="primary" size="small" @click="handleApprove(row)">接纳</el-button>
+            <el-button v-if="canRejectAgent(row)" type="danger" size="small" @click="handleReject(row)">拒绝</el-button>
+            <span v-if="!canApproveAgent(row) && !canRejectAgent(row)" class="text-muted">仅可查看</span>
           </template>
         </el-table-column>
       </el-table>
@@ -79,6 +91,12 @@
         <el-descriptions :column="1" border>
           <el-descriptions-item label="名称">{{ currentAgent.name }}</el-descriptions-item>
           <el-descriptions-item label="主机">{{ currentAgent.host }}:{{ currentAgent.port }}</el-descriptions-item>
+          <el-descriptions-item label="类型">
+            <el-tag :type="currentAgent.scope_type === 'platform' ? 'primary' : 'info'" size="small">
+              {{ currentAgent.scope_type === 'platform' ? '平台型' : '工作空间私有' }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="归属范围">{{ currentAgent.scope_type === 'platform' ? '平台级' : agentWorkspaceName(currentAgent) }}</el-descriptions-item>
           <el-descriptions-item label="操作系统">{{ currentAgent.os }} {{ currentAgent.arch }}</el-descriptions-item>
           <el-descriptions-item label="CPU">{{ currentAgent.cpu_cores }} 核</el-descriptions-item>
           <el-descriptions-item label="内存">{{ formatMemory(currentAgent.memory_total) }}</el-descriptions-item>
@@ -139,11 +157,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useUserStore } from '@/stores/user'
 import { Monitor, Cpu, Grid, Warning } from '@element-plus/icons-vue'
 import { getPendingAgents, approveAgent, rejectAgent } from '@/api/agent'
 
+const userStore = useUserStore()
 const loading = ref(false)
 const pendingList = ref([])
 
@@ -160,6 +180,40 @@ const approveForm = reactive({
 const rejectForm = reactive({
   remark: ''
 })
+
+const isPlatformAdmin = computed(() => String(userStore.userInfo?.role || '').toLowerCase() === 'admin')
+const isWorkspaceMaintainerLike = computed(() => ['owner', 'maintainer'].includes(String(userStore.currentWorkspace?.role || '').toLowerCase()))
+const isPlatformScoped = (agent) => (agent?.scope_type || 'platform') === 'platform'
+const workspaceEntryById = (workspaceId) => userStore.workspaces?.find(item => Number(item.id) === Number(workspaceId)) || null
+const agentWorkspaceName = (agent) => {
+  if (isPlatformScoped(agent)) {
+    return '平台级'
+  }
+  const workspaceID = Number(agent?.workspace_id || 0)
+  const workspace = workspaceEntryById(workspaceID)
+  if (workspace?.name) {
+    return `${workspace.name} (#${workspace.id})`
+  }
+  if (workspaceID > 0) {
+    return `工作空间 #${workspaceID}`
+  }
+  return '未指定工作空间'
+}
+const canManageAgent = (agent) => {
+  if (!agent) {
+    return false
+  }
+  if (isPlatformScoped(agent)) {
+    return isPlatformAdmin.value
+  }
+  if (isPlatformAdmin.value) {
+    return true
+  }
+  return isWorkspaceMaintainerLike.value && Number(agent.workspace_id) === Number(userStore.currentWorkspaceId)
+}
+const canApproveAgent = (agent) => canManageAgent(agent)
+const canRejectAgent = (agent) => canManageAgent(agent)
+const routeRefresh = computed(() => userStore.currentWorkspaceId)
 
 const parseLabels = (labelsStr) => {
   if (!labelsStr) return []
@@ -263,6 +317,10 @@ const handleRejectConfirm = async () => {
 onMounted(() => {
   fetchPendingAgents()
 })
+
+watch(routeRefresh, () => {
+  fetchPendingAgents()
+})
 </script>
 
 <style lang="scss" scoped>
@@ -280,6 +338,12 @@ onMounted(() => {
       font-weight: 760;
       letter-spacing: -0.03em;
       color: var(--text-primary);
+    }
+
+    .page-subtitle {
+      margin-top: 8px;
+      color: var(--text-secondary);
+      font-size: 13px;
     }
   }
 
@@ -358,6 +422,18 @@ onMounted(() => {
   .agent-tag {
     margin: 0;
   }
+}
+
+.scope-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+}
+
+.scope-text {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .resource-info {

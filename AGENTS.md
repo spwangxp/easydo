@@ -44,6 +44,6 @@
 
 ## TEST ACCOUNTS
 
-- **demo** / 1qaz2WSX (管理员)
+- **demo** / 1qaz2WSX (普通用户)
 - **admin** / 1qaz2WSX (管理员)
 - **test** / 1qaz2WSX (普通用户)

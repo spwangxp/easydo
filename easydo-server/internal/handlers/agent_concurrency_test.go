@@ -39,6 +39,8 @@ func TestSelectAgentWithPipelineCapacity_PicksLeastLoaded(t *testing.T) {
 			Status:                 models.AgentStatusOnline,
 			RegistrationStatus:     models.AgentRegistrationStatusApproved,
 			MaxConcurrentPipelines: 1,
+			ScopeType:              models.AgentScopeWorkspace,
+			WorkspaceID:            1,
 		},
 		{
 			Name:                   "busy-with-capacity",
@@ -48,6 +50,8 @@ func TestSelectAgentWithPipelineCapacity_PicksLeastLoaded(t *testing.T) {
 			Status:                 models.AgentStatusBusy,
 			RegistrationStatus:     models.AgentRegistrationStatusApproved,
 			MaxConcurrentPipelines: 3,
+			ScopeType:              models.AgentScopeWorkspace,
+			WorkspaceID:            1,
 		},
 		{
 			Name:                   "least-loaded",
@@ -57,6 +61,8 @@ func TestSelectAgentWithPipelineCapacity_PicksLeastLoaded(t *testing.T) {
 			Status:                 models.AgentStatusOnline,
 			RegistrationStatus:     models.AgentRegistrationStatusApproved,
 			MaxConcurrentPipelines: 2,
+			ScopeType:              models.AgentScopeWorkspace,
+			WorkspaceID:            1,
 		},
 		{
 			Name:                   "pending-agent",
@@ -66,6 +72,8 @@ func TestSelectAgentWithPipelineCapacity_PicksLeastLoaded(t *testing.T) {
 			Status:                 models.AgentStatusOnline,
 			RegistrationStatus:     models.AgentRegistrationStatusPending,
 			MaxConcurrentPipelines: 2,
+			ScopeType:              models.AgentScopeWorkspace,
+			WorkspaceID:            1,
 		},
 	}
 	if err := db.Create(&agents).Error; err != nil {
@@ -73,28 +81,28 @@ func TestSelectAgentWithPipelineCapacity_PicksLeastLoaded(t *testing.T) {
 	}
 
 	runs := []models.PipelineRun{
-		{PipelineID: 1, BuildNumber: 1, AgentID: agents[0].ID, Status: models.PipelineRunStatusRunning},
-		{PipelineID: 2, BuildNumber: 1, AgentID: agents[1].ID, Status: models.PipelineRunStatusRunning},
+		{WorkspaceID: 1, PipelineID: 1, BuildNumber: 1, AgentID: agents[0].ID, Status: models.PipelineRunStatusRunning},
+		{WorkspaceID: 1, PipelineID: 2, BuildNumber: 1, AgentID: agents[1].ID, Status: models.PipelineRunStatusRunning},
 	}
 	if err := db.Create(&runs).Error; err != nil {
 		t.Fatalf("create runs failed: %v", err)
 	}
 
-	selected := selectAgentWithPipelineCapacity(db)
+	selected := selectAgentWithPipelineCapacity(db, 1)
 	if selected != agents[2].ID {
 		t.Fatalf("selected=%d, want=%d", selected, agents[2].ID)
 	}
 
 	// Fill the remaining agent capacity so only agent[1] is available.
 	fill := []models.PipelineRun{
-		{PipelineID: 3, BuildNumber: 1, AgentID: agents[2].ID, Status: models.PipelineRunStatusRunning},
-		{PipelineID: 4, BuildNumber: 1, AgentID: agents[2].ID, Status: models.PipelineRunStatusRunning},
+		{WorkspaceID: 1, PipelineID: 3, BuildNumber: 1, AgentID: agents[2].ID, Status: models.PipelineRunStatusRunning},
+		{WorkspaceID: 1, PipelineID: 4, BuildNumber: 1, AgentID: agents[2].ID, Status: models.PipelineRunStatusRunning},
 	}
 	if err := db.Create(&fill).Error; err != nil {
 		t.Fatalf("fill runs failed: %v", err)
 	}
 
-	selected = selectAgentWithPipelineCapacity(db)
+	selected = selectAgentWithPipelineCapacity(db, 1)
 	if selected != agents[1].ID {
 		t.Fatalf("selected=%d, want=%d", selected, agents[1].ID)
 	}
@@ -111,17 +119,19 @@ func TestSelectAgentWithPipelineCapacity_ReturnsZeroWhenAllAtCapacity(t *testing
 		Status:                 models.AgentStatusOnline,
 		RegistrationStatus:     models.AgentRegistrationStatusApproved,
 		MaxConcurrentPipelines: 1,
+		ScopeType:              models.AgentScopeWorkspace,
+		WorkspaceID:            1,
 	}
 	if err := db.Create(&agent).Error; err != nil {
 		t.Fatalf("create agent failed: %v", err)
 	}
 	if err := db.Create(&models.PipelineRun{
-		PipelineID: 1, BuildNumber: 1, AgentID: agent.ID, Status: models.PipelineRunStatusRunning,
+		WorkspaceID: 1, PipelineID: 1, BuildNumber: 1, AgentID: agent.ID, Status: models.PipelineRunStatusRunning,
 	}).Error; err != nil {
 		t.Fatalf("create running run failed: %v", err)
 	}
 
-	selected := selectAgentWithPipelineCapacity(db)
+	selected := selectAgentWithPipelineCapacity(db, 1)
 	if selected != 0 {
 		t.Fatalf("selected=%d, want=0", selected)
 	}
@@ -138,6 +148,8 @@ func TestUpdateAgentStatusByPipelineConcurrency_Transitions(t *testing.T) {
 		Status:                 models.AgentStatusOnline,
 		RegistrationStatus:     models.AgentRegistrationStatusApproved,
 		MaxConcurrentPipelines: 1,
+		ScopeType:              models.AgentScopeWorkspace,
+		WorkspaceID:            1,
 	}
 	if err := db.Create(&agent).Error; err != nil {
 		t.Fatalf("create agent failed: %v", err)
@@ -153,7 +165,7 @@ func TestUpdateAgentStatusByPipelineConcurrency_Transitions(t *testing.T) {
 	}
 
 	runningRun := models.PipelineRun{
-		PipelineID: 1, BuildNumber: 1, AgentID: agent.ID, Status: models.PipelineRunStatusRunning,
+		WorkspaceID: 1, PipelineID: 1, BuildNumber: 1, AgentID: agent.ID, Status: models.PipelineRunStatusRunning,
 	}
 	if err := db.Create(&runningRun).Error; err != nil {
 		t.Fatalf("create run failed: %v", err)
@@ -190,6 +202,8 @@ func TestUpdateAgentStatusByPipelineConcurrency_RespectsOfflineAndError(t *testi
 		Status:                 models.AgentStatusOffline,
 		RegistrationStatus:     models.AgentRegistrationStatusApproved,
 		MaxConcurrentPipelines: 1,
+		ScopeType:              models.AgentScopeWorkspace,
+		WorkspaceID:            1,
 	}
 	errAgent := models.Agent{
 		Name:                   "error-agent",
@@ -199,6 +213,8 @@ func TestUpdateAgentStatusByPipelineConcurrency_RespectsOfflineAndError(t *testi
 		Status:                 models.AgentStatusError,
 		RegistrationStatus:     models.AgentRegistrationStatusApproved,
 		MaxConcurrentPipelines: 1,
+		ScopeType:              models.AgentScopeWorkspace,
+		WorkspaceID:            1,
 	}
 	if err := db.Create(&offline).Error; err != nil {
 		t.Fatalf("create offline agent failed: %v", err)
@@ -208,10 +224,10 @@ func TestUpdateAgentStatusByPipelineConcurrency_RespectsOfflineAndError(t *testi
 	}
 
 	_ = db.Create(&models.PipelineRun{
-		PipelineID: 1, BuildNumber: 1, AgentID: offline.ID, Status: models.PipelineRunStatusRunning,
+		WorkspaceID: 1, PipelineID: 1, BuildNumber: 1, AgentID: offline.ID, Status: models.PipelineRunStatusRunning,
 	}).Error
 	_ = db.Create(&models.PipelineRun{
-		PipelineID: 2, BuildNumber: 1, AgentID: errAgent.ID, Status: models.PipelineRunStatusRunning,
+		WorkspaceID: 1, PipelineID: 2, BuildNumber: 1, AgentID: errAgent.ID, Status: models.PipelineRunStatusRunning,
 	}).Error
 
 	updateAgentStatusByPipelineConcurrency(db, offline.ID)

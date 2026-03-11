@@ -62,11 +62,12 @@ type TopPipelinesResponse struct {
 func (h *StatisticsHandler) GetOverview(c *gin.Context) {
 	startDate := c.DefaultQuery("start_date", "")
 	endDate := c.DefaultQuery("end_date", "")
+	workspaceID := c.GetUint64("workspace_id")
 
-	totalQuery := h.DB.Model(&models.PipelineRun{})
-	successQuery := h.DB.Model(&models.PipelineRun{})
-	failedQuery := h.DB.Model(&models.PipelineRun{})
-	durationQuery := h.DB.Model(&models.PipelineRun{})
+	totalQuery := h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ?", workspaceID)
+	successQuery := h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ?", workspaceID)
+	failedQuery := h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ?", workspaceID)
+	durationQuery := h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ?", workspaceID)
 
 	if startDate != "" {
 		startTime, err := time.Parse("2006-01-02", startDate)
@@ -112,15 +113,15 @@ func (h *StatisticsHandler) GetOverview(c *gin.Context) {
 	avgDurationStr := formatDuration(int(avgDuration))
 
 	var pipelineCount int64
-	h.DB.Model(&models.Pipeline{}).Count(&pipelineCount)
+	h.DB.Model(&models.Pipeline{}).Where("workspace_id = ?", workspaceID).Count(&pipelineCount)
 
 	var projectCount int64
-	h.DB.Model(&models.Project{}).Count(&projectCount)
+	h.DB.Model(&models.Project{}).Where("workspace_id = ?", workspaceID).Count(&projectCount)
 
 	today := time.Now()
 	todayStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
 	var todayRuns int64
-	h.DB.Model(&models.PipelineRun{}).Where("created_at >= ?", todayStart).Count(&todayRuns)
+	h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND created_at >= ?", workspaceID, todayStart).Count(&todayRuns)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -138,6 +139,7 @@ func (h *StatisticsHandler) GetOverview(c *gin.Context) {
 
 // GetTrend returns daily run statistics for trend chart
 func (h *StatisticsHandler) GetTrend(c *gin.Context) {
+	workspaceID := c.GetUint64("workspace_id")
 	// Get date range (default: last 7 days)
 	days := 7
 	if daysStr := c.DefaultQuery("days", "7"); daysStr != "" {
@@ -157,17 +159,17 @@ func (h *StatisticsHandler) GetTrend(c *gin.Context) {
 		// Get runs for this day
 		var total int64
 		h.DB.Model(&models.PipelineRun{}).
-			Where("created_at >= ? AND created_at < ?", dateStart, dateEnd).
+			Where("workspace_id = ? AND created_at >= ? AND created_at < ?", workspaceID, dateStart, dateEnd).
 			Count(&total)
 
 		var success int64
 		h.DB.Model(&models.PipelineRun{}).
-			Where("created_at >= ? AND created_at < ? AND status = ?", dateStart, dateEnd, "success").
+			Where("workspace_id = ? AND created_at >= ? AND created_at < ? AND status = ?", workspaceID, dateStart, dateEnd, "success").
 			Count(&success)
 
 		var failed int64
 		h.DB.Model(&models.PipelineRun{}).
-			Where("created_at >= ? AND created_at < ? AND status = ?", dateStart, dateEnd, "failed").
+			Where("workspace_id = ? AND created_at >= ? AND created_at < ? AND status = ?", workspaceID, dateStart, dateEnd, "failed").
 			Count(&failed)
 
 		successRate := float64(0)
@@ -199,6 +201,7 @@ func (h *StatisticsHandler) GetTrend(c *gin.Context) {
 
 // GetTopPipelines returns top pipelines by run count
 func (h *StatisticsHandler) GetTopPipelines(c *gin.Context) {
+	workspaceID := c.GetUint64("workspace_id")
 	limit := 10
 	if limitStr := c.DefaultQuery("limit", "10"); limitStr != "" {
 		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
@@ -212,13 +215,13 @@ func (h *StatisticsHandler) GetTopPipelines(c *gin.Context) {
 
 	// Get all pipelines with their run statistics
 	var pipelines []models.Pipeline
-	h.DB.Find(&pipelines)
+	h.DB.Where("workspace_id = ?", workspaceID).Find(&pipelines)
 
 	pipelineStats := make([]PipelineStats, 0, len(pipelines))
 
 	for _, pipeline := range pipelines {
 		// Build query for this pipeline's runs
-		runQuery := h.DB.Model(&models.PipelineRun{}).Where("pipeline_id = ?", pipeline.ID)
+		runQuery := h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipeline.ID)
 
 		// Apply date filter if provided
 		if startDate != "" {
@@ -253,7 +256,7 @@ func (h *StatisticsHandler) GetTopPipelines(c *gin.Context) {
 		// Calculate average duration
 		var totalDuration int64
 		h.DB.Model(&models.PipelineRun{}).
-			Where("pipeline_id = ? AND duration > 0", pipeline.ID).
+			Where("workspace_id = ? AND pipeline_id = ? AND duration > 0", workspaceID, pipeline.ID).
 			Pluck("COALESCE(SUM(duration), 0)", &totalDuration)
 
 		avgDuration := float64(totalDuration) / float64(runCount)

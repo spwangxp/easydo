@@ -105,6 +105,9 @@ func (r *Register) newRegistration(ctx context.Context) (uint64, string, Registr
 		"memory_total": r.sysInfo.MemoryTotal,
 		"disk_total":   r.sysInfo.DiskTotal,
 	}
+	if r.cfg != nil && r.cfg.Agent.WorkspaceID > 0 {
+		registerReq["workspace_id"] = r.cfg.Agent.WorkspaceID
+	}
 
 	resp, err := r.client.Post(ctx, "/api/agents/register", registerReq)
 	if err != nil {

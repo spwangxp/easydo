@@ -144,6 +144,7 @@ type Credential struct {
 	EncryptionAlgo string             `gorm:"size:16;default:'aes-256-gcm'" json:"-"`
 	Metadata       string             `gorm:"type:text" json:"metadata"`
 	Scope          CredentialScope    `gorm:"size:32;default:'user'" json:"scope"`
+	WorkspaceID    uint64             `gorm:"not null;index" json:"workspace_id"`
 	ProjectID      uint64             `gorm:"index" json:"project_id"`
 	IsShared       bool               `gorm:"default:false" json:"is_shared"`
 	SharedWith     string             `gorm:"type:text" json:"shared_with"`
@@ -170,6 +171,7 @@ type CredentialResponse struct {
 	Type         CredentialType     `json:"type"`
 	Category     CredentialCategory `json:"category"`
 	Scope        CredentialScope    `json:"scope"`
+	WorkspaceID  uint64             `json:"workspace_id"`
 	ProjectID    uint64             `json:"project_id"`
 	OwnerID      uint64             `json:"owner_id"`
 	Status       CredentialStatus   `json:"status"`
@@ -193,6 +195,7 @@ func (c *Credential) ToResponse() CredentialResponse {
 		Type:         c.Type,
 		Category:     c.Category,
 		Scope:        c.Scope,
+		WorkspaceID:  c.WorkspaceID,
 		ProjectID:    c.ProjectID,
 		OwnerID:      c.OwnerID,
 		Status:       c.Status,

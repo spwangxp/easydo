@@ -8,9 +8,10 @@
           密钥管理
         </h2>
         <p class="header-desc">统一管理所有身份验证凭据和密钥</p>
+        <p class="header-desc">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</p>
       </div>
       <div class="header-actions">
-        <el-button type="primary" @click="showCreateDialog">
+        <el-button v-if="canWriteCredentials" type="primary" @click="showCreateDialog">
           <el-icon><Plus /></el-icon>
           新建密钥
         </el-button>
@@ -171,7 +172,7 @@
             </el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="edit">
+                 <el-dropdown-item v-if="canWriteCredentials" command="edit">
                   <el-icon><Edit /></el-icon>
                   编辑
                 </el-dropdown-item>
@@ -179,7 +180,7 @@
                   <el-icon><CircleCheck /></el-icon>
                   验证
                 </el-dropdown-item>
-                <el-dropdown-item command="rotate">
+                 <el-dropdown-item v-if="canWriteCredentials" command="rotate">
                   <el-icon><Refresh /></el-icon>
                   轮换
                 </el-dropdown-item>
@@ -191,7 +192,7 @@
                   <el-icon><CopyDocument /></el-icon>
                   复制
                 </el-dropdown-item>
-                <el-dropdown-item command="delete" divided>
+                 <el-dropdown-item v-if="canWriteCredentials" command="delete" divided>
                   <el-icon><Delete /></el-icon>
                   删除
                 </el-dropdown-item>
@@ -297,7 +298,7 @@
       
       <el-table-column label="操作" width="200" fixed="right">
         <template #default="{ row }">
-          <el-button type="primary" link size="small" @click="handleEdit(row)">
+           <el-button v-if="canWriteCredentials" type="primary" link size="small" @click="handleEdit(row)">
             <el-icon><Edit /></el-icon>
             编辑
           </el-button>
@@ -305,7 +306,7 @@
             <el-icon><CircleCheck /></el-icon>
             验证
           </el-button>
-          <el-button type="danger" link size="small" @click="handleDelete(row)">
+           <el-button v-if="canWriteCredentials" type="danger" link size="small" @click="handleDelete(row)">
             <el-icon><Delete /></el-icon>
             删除
           </el-button>
@@ -499,6 +500,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useUserStore } from '@/stores/user'
 import {
   Key, Plus, Upload, Download, Search, Grid, List,
   MoreFilled, Edit, CircleCheck, Refresh, DataLine,
@@ -506,6 +508,8 @@ import {
 } from '@element-plus/icons-vue'
 import { getCredentialList, deleteCredential, verifyCredential, getCredentialTypes, getCredentialCategories, getCredentialUsage, rotateCredential, createCredential, batchVerifyCredentials, batchDeleteCredentials, exportCredentials, getCredentialSecretData, getCredentialImpact, batchCredentialImpact } from '@/api/credential'
 import SecretForm from './components/SecretForm.vue'
+
+const userStore = useUserStore()
 
 // 状态
 const loading = ref(false)
@@ -528,6 +532,7 @@ const usageData = ref(null)
 const importDialogVisible = ref(false)
 const importPreview = ref([])
 const importFile = ref(null)
+const canWriteCredentials = computed(() => userStore.hasPermission('credential.write'))
 
 // 分页
 const pagination = reactive({

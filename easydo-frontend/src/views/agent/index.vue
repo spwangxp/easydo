@@ -1,7 +1,11 @@
 <template>
   <div class="agent-container">
     <div class="agent-header">
-      <h1 class="page-title">执行器管理</h1>
+      <div>
+        <h1 class="page-title">执行器管理</h1>
+        <div class="page-subtitle">{{ workspaceLabel }}</div>
+        <div class="page-guidance">{{ workspaceRegistrationHint }}</div>
+      </div>
     </div>
 
     <div class="agent-filters">
@@ -15,6 +19,7 @@
           <span class="tab-count">{{ total }}</span>
         </div>
         <div
+          v-if="canManagePendingTab"
           class="tab-item"
           :class="{ active: activeTab === 'pending' }"
           @click="activeTab = 'pending'; fetchAgents()"
@@ -81,6 +86,16 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="类型" width="180" align="center">
+          <template #default="{ row }">
+            <div class="scope-cell">
+              <el-tag :type="isPlatformScoped(row) ? 'primary' : 'info'" size="small">
+                {{ isPlatformScoped(row) ? '平台型' : '工作空间私有' }}
+              </el-tag>
+              <span v-if="!isPlatformScoped(row)" class="scope-text">{{ agentWorkspaceName(row) }}</span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="标签" min-width="150" align="center">
           <template #default="{ row }">
             <div class="agent-tags" v-if="row.labels">
@@ -126,11 +141,12 @@
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="detail">详情</el-dropdown-item>
-                  <el-dropdown-item command="edit">编辑</el-dropdown-item>
+                  <el-dropdown-item v-if="canEditAgent(row)" command="edit">编辑</el-dropdown-item>
                   <!-- 待接纳状态显示接纳/拒绝选项 -->
                   <template v-if="row.registration_status === 'pending'">
                     <el-dropdown-item 
                       :command="'approve'" 
+                      v-if="canApproveAgent(row)"
                       :disabled="row.status !== 'online'"
                       divided
                     >
@@ -141,14 +157,14 @@
                         </span>
                       </el-tooltip>
                     </el-dropdown-item>
-                    <el-dropdown-item command="reject">
+                    <el-dropdown-item v-if="canRejectAgent(row)" command="reject">
                       <el-icon><CircleClose /></el-icon>
                       拒绝
                     </el-dropdown-item>
                   </template>
                   <!-- 已接纳状态显示移除选项 -->
                   <template v-else-if="row.registration_status === 'approved'">
-                    <el-dropdown-item command="remove" divided>
+                    <el-dropdown-item v-if="canRemoveAgent(row)" command="remove" divided>
                       <el-icon><CircleClose /></el-icon>
                       移除
                     </el-dropdown-item>
@@ -157,7 +173,7 @@
                     任务列表
                   </el-dropdown-item>
                   <el-dropdown-item command="heartbeats" divided>心跳记录</el-dropdown-item>
-                  <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                  <el-dropdown-item v-if="canDeleteAgent(row)" command="delete" divided>删除</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -175,9 +191,9 @@
       width="560px"
       :close-on-click-modal="false"
     >
-      <el-form
-        ref="formRef"
-        :model="formData"
+        <el-form
+          ref="formRef"
+          :model="formData"
         :rules="formRules"
         label-width="100px"
       >
@@ -210,6 +226,25 @@
             <el-option label="错误" value="error" />
           </el-select>
         </el-form-item>
+        <template v-if="isPlatformAdmin">
+          <el-form-item label="执行器类型">
+            <el-select v-model="formData.scope_type" placeholder="选择执行器类型">
+              <el-option label="平台型" value="platform" />
+              <el-option label="工作空间私有" value="workspace" />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="formData.scope_type === 'workspace'" label="归属工作空间">
+            <el-select v-model="formData.workspace_id" placeholder="选择归属工作空间" filterable>
+              <el-option
+                v-for="workspace in userStore.workspaces"
+                :key="workspace.id"
+                :label="`${workspace.name} (#${workspace.id})`"
+                :value="workspace.id"
+              />
+            </el-select>
+            <div class="form-tip">执行器私有归属工作空间，启动配置时可使用该工作空间 ID。</div>
+          </el-form-item>
+        </template>
         <el-form-item label="心跳周期" prop="heartbeat_interval">
           <el-input-number v-model="formData.heartbeat_interval" :min="5" :max="300" placeholder="秒" />
           <span class="form-tip">单位：秒，建议 10-60 秒</span>
@@ -240,6 +275,12 @@
             <el-descriptions-item label="ID">{{ currentAgent.id }}</el-descriptions-item>
             <el-descriptions-item label="名称">{{ currentAgent.name }}</el-descriptions-item>
             <el-descriptions-item label="主机">{{ currentAgent.host }}:{{ currentAgent.port }}</el-descriptions-item>
+            <el-descriptions-item label="类型">
+              <el-tag :type="isPlatformScoped(currentAgent) ? 'primary' : 'info'" size="small">
+                {{ isPlatformScoped(currentAgent) ? '平台型' : '工作空间私有' }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="归属范围">{{ isPlatformScoped(currentAgent) ? '平台级' : agentWorkspaceName(currentAgent) }}</el-descriptions-item>
             <el-descriptions-item label="状态">
               <el-tag :type="getStatusType(currentAgent.status)" size="small">
                 {{ getStatusText(currentAgent.status) }}
@@ -284,7 +325,7 @@
             <el-descriptions-item label="心跳周期">{{ currentAgent.heartbeat_interval || 10 }} 秒</el-descriptions-item>
           </el-descriptions>
         </div>
-        <div class="detail-section" v-if="currentAgent.registration_status === 'approved'">
+        <div class="detail-section" v-if="currentAgent.registration_status === 'approved' && canRefreshToken(currentAgent)">
           <div class="section-title">Token信息</div>
           <el-descriptions :column="1" border>
             <el-descriptions-item label="Token">
@@ -638,8 +679,9 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useUserStore } from '@/stores/user'
 import {
   Search,
   MoreFilled,
@@ -651,8 +693,10 @@ import {
   CircleCheck,
   CircleClose
 } from '@element-plus/icons-vue'
-import { getAgentList, getAgentDetail, updateAgent, deleteAgent, getAgentHeartbeats, refreshAgentToken, approveAgent, rejectAgent, removeAgent } from '@/api/agent'
+import { getAgentList, getAgentDetail, updateAgent, deleteAgent, getAgentHeartbeats, refreshAgentToken, approveAgent, rejectAgent, removeAgent, getPendingAgents } from '@/api/agent'
 import { getTaskDispatchList } from '@/api/task'
+
+const userStore = useUserStore()
 
 const activeTab = ref('all')
 const searchKeyword = ref('')
@@ -720,6 +764,8 @@ const formData = reactive({
   labels: '',
   tags: '',
   status: 'online',
+  scope_type: 'platform',
+  workspace_id: null,
   heartbeat_interval: 10,
   max_concurrent_pipelines: 10
 })
@@ -742,6 +788,56 @@ let pollingTimer = null
 
 // Polling interval for agent status (milliseconds)
 const POLLING_INTERVAL = 5000
+const isPlatformAdmin = computed(() => String(userStore.userInfo?.role || '').toLowerCase() === 'admin')
+const isWorkspaceMaintainerLike = computed(() => ['owner', 'maintainer'].includes(String(userStore.currentWorkspace?.role || '').toLowerCase()))
+const canManageAgents = computed(() => userStore.hasAnyPermission(['agent.write', 'agent.approve', 'agent.token.rotate']))
+const canManagePendingTab = computed(() => isPlatformAdmin.value || isWorkspaceMaintainerLike.value || canManageAgents.value)
+const workspaceLabel = computed(() => {
+  if (!userStore.currentWorkspace?.name) {
+    return '当前查看：平台执行器'
+  }
+  return `当前工作空间：${userStore.currentWorkspace.name}（ID: ${userStore.currentWorkspace.id}）`
+})
+const workspaceRegistrationHint = computed(() => {
+  if (!userStore.currentWorkspaceId) {
+    return '未选择具体工作空间：启动执行器时不填写 workspace_id，将默认注册为平台型执行器。'
+  }
+  return `若希望执行器注册为当前工作空间私有，请在启动配置中填写 workspace_id=${userStore.currentWorkspaceId}；不填写则默认注册为平台型执行器。`
+})
+const isPlatformScoped = (agent) => (agent?.scope_type || 'platform') === 'platform'
+const workspaceEntryById = (workspaceId) => userStore.workspaces?.find(item => Number(item.id) === Number(workspaceId)) || null
+const agentWorkspaceName = (agent) => {
+  if (isPlatformScoped(agent)) {
+    return '平台级'
+  }
+  const workspaceID = Number(agent?.workspace_id || 0)
+  const workspace = workspaceEntryById(workspaceID)
+  if (workspace?.name) {
+    return `${workspace.name} (#${workspace.id})`
+  }
+  if (workspaceID > 0) {
+    return `工作空间 #${workspaceID}`
+  }
+  return '未指定工作空间'
+}
+const canManageAgent = (agent) => {
+  if (!agent) {
+    return false
+  }
+  if (isPlatformScoped(agent)) {
+    return isPlatformAdmin.value
+  }
+  if (isPlatformAdmin.value) {
+    return true
+  }
+  return isWorkspaceMaintainerLike.value && Number(agent.workspace_id) === Number(userStore.currentWorkspaceId)
+}
+const canApproveAgent = (agent) => canManageAgent(agent)
+const canRejectAgent = (agent) => canManageAgent(agent)
+const canEditAgent = (agent) => canManageAgent(agent)
+const canRefreshToken = (agent) => canManageAgent(agent)
+const canRemoveAgent = (agent) => canManageAgent(agent)
+const canDeleteAgent = (agent) => canManageAgent(agent)
 
 const getStatusColor = (status) => {
   const colors = {
@@ -895,31 +991,31 @@ const formatDateTime = (timestamp) => {
 const fetchAgents = async () => {
   loading.value = true
   try {
-    const params = {
-      page: 1,
-      page_size: 100
-    }
-
+    const params = { page: 1, page_size: 100 }
     if (searchKeyword.value) {
       params.keyword = searchKeyword.value
     }
-
     if (activeTab.value === 'online') {
       params.status = 'online'
     } else if (activeTab.value === 'offline') {
       params.status = 'offline'
-    } else if (activeTab.value === 'pending') {
-      params.registration_status = 'pending'
     }
 
-    const res = await getAgentList(params)
+    const [allRes, pendingRes] = await Promise.all([
+      getAgentList(params),
+      canManagePendingTab.value ? getPendingAgents({ page: 1, page_size: 100 }) : Promise.resolve({ code: 200, data: { list: [], total: 0 } })
+    ])
+
+    const sourceRes = activeTab.value === 'pending' ? pendingRes : allRes
+    const res = sourceRes
     if (res.code === 200) {
       agentList.value = res.data.list || []
       total.value = res.data.total || 0
-      
-      onlineCount.value = agentList.value.filter(a => a.status === 'online' || a.status === 'busy').length
-      offlineCount.value = agentList.value.filter(a => a.status === 'offline').length
-      pendingCount.value = agentList.value.filter(a => a.registration_status === 'pending').length
+
+      const allAgents = allRes?.data?.list || []
+      onlineCount.value = allAgents.filter(a => a.status === 'online' || a.status === 'busy').length
+      offlineCount.value = allAgents.filter(a => a.status === 'offline').length
+      pendingCount.value = pendingRes?.data?.total || 0
     }
   } catch (error) {
     console.error('获取执行器列表失败:', error)
@@ -945,6 +1041,8 @@ const handleEdit = (agent) => {
   formData.labels = agent.labels || ''
   formData.tags = agent.tags || ''
   formData.status = agent.status
+  formData.scope_type = isPlatformScoped(agent) ? 'platform' : 'workspace'
+  formData.workspace_id = agent.workspace_id || null
   formData.heartbeat_interval = agent.heartbeat_interval || 10
   formData.max_concurrent_pipelines = agent.max_concurrent_pipelines || 10
   dialogVisible.value = true
@@ -1201,6 +1299,11 @@ const handleSubmit = async () => {
     await formRef.value.validate()
     submitting.value = true
 
+    if (isPlatformAdmin.value && formData.scope_type === 'workspace' && !formData.workspace_id) {
+      ElMessage.warning('请选择归属工作空间')
+      return
+    }
+
     const data = {
       name: formData.name,
       labels: formData.labels,
@@ -1208,6 +1311,10 @@ const handleSubmit = async () => {
       status: formData.status,
       heartbeat_interval: formData.heartbeat_interval,
       max_concurrent_pipelines: formData.max_concurrent_pipelines
+    }
+    if (isPlatformAdmin.value) {
+      data.scope_type = formData.scope_type
+      data.workspace_id = formData.scope_type === 'workspace' ? Number(formData.workspace_id || 0) : 0
     }
 
     if (isEdit.value) {
@@ -1280,6 +1387,15 @@ onMounted(() => {
   }, POLLING_INTERVAL)
 })
 
+const routeRefresh = computed(() => userStore.currentWorkspaceId)
+
+watch(routeRefresh, () => {
+  if (!canManagePendingTab.value && activeTab.value === 'pending') {
+    activeTab.value = 'all'
+  }
+  fetchAgents()
+})
+
 onUnmounted(() => {
   // Clean up polling timer
   if (pollingTimer) {
@@ -1305,6 +1421,13 @@ onUnmounted(() => {
       font-weight: 700;
       color: var(--text-primary);
       letter-spacing: -0.02em;
+    }
+
+    .page-guidance {
+      margin-top: 8px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-muted);
     }
   }
 
@@ -1471,6 +1594,18 @@ onUnmounted(() => {
 
       .agent-tag {
         margin: 0;
+      }
+    }
+
+    .scope-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      align-items: center;
+
+      .scope-text {
+        font-size: 12px;
+        color: var(--text-muted);
       }
     }
 

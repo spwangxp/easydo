@@ -14,18 +14,19 @@ type ServerConfig struct {
 
 // Config represents the agent configuration
 type Config struct {
-	ServerURL string `yaml:"server_url"`
-	Server    ServerConfig `yaml:"server"`
-	Agent     AgentConfig `yaml:"agent"`
+	ServerURL string          `yaml:"server_url"`
+	Server    ServerConfig    `yaml:"server"`
+	Agent     AgentConfig     `yaml:"agent"`
 	Heartbeat HeartbeatConfig `yaml:"heartbeat"`
-	Task      TaskConfig `yaml:"task"`
-	Logging   LoggingConfig `yaml:"logging"`
+	Task      TaskConfig      `yaml:"task"`
+	Logging   LoggingConfig   `yaml:"logging"`
 }
 
 // AgentConfig holds agent-specific configuration
 type AgentConfig struct {
-	Name      string `yaml:"name"`
-	TokenFile string `yaml:"token_file"`
+	Name        string `yaml:"name"`
+	TokenFile   string `yaml:"token_file"`
+	WorkspaceID uint64 `yaml:"workspace_id"`
 }
 
 // HeartbeatConfig holds heartbeat configuration
@@ -37,9 +38,9 @@ type HeartbeatConfig struct {
 
 // TaskConfig holds task polling configuration
 type TaskConfig struct {
-	PollInterval      int `yaml:"poll_interval"`
-	ExecutionTimeout  int `yaml:"execution_timeout"`
-	WorkspacePath     string `yaml:"workspace_path"`
+	PollInterval     int    `yaml:"poll_interval"`
+	ExecutionTimeout int    `yaml:"execution_timeout"`
+	WorkspacePath    string `yaml:"workspace_path"`
 }
 
 // LoggingConfig holds logging configuration
@@ -120,6 +121,13 @@ func applyEnvOverrides(cfg *Config) {
 	// Token file
 	if v := os.Getenv("AGENT_TOKEN_FILE"); v != "" {
 		cfg.Agent.TokenFile = v
+	}
+
+	if v := os.Getenv("AGENT_WORKSPACE_ID"); v != "" {
+		var workspaceID uint64
+		if _, err := fmt.Sscanf(v, "%d", &workspaceID); err == nil {
+			cfg.Agent.WorkspaceID = workspaceID
+		}
 	}
 
 	// Agent token (for re-registration)

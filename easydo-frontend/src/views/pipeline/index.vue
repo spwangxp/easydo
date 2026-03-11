@@ -1,7 +1,10 @@
 <template>
   <div class="pipeline-container">
     <div class="pipeline-header">
-      <h1 class="page-title">流水线</h1>
+      <div>
+        <h1 class="page-title">流水线</h1>
+        <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
+      </div>
       <el-button type="primary" @click="handleCreate">
         <el-icon><Plus /></el-icon>
         新建流水线
@@ -305,7 +308,9 @@ import {
 } from '@element-plus/icons-vue'
 import { getPipelineList, createPipeline, runPipeline, toggleFavorite as apiToggleFavorite, deletePipeline } from '@/api/pipeline'
 import { getProjectList } from '@/api/project'
+import { useUserStore } from '@/stores/user'
 
+const userStore = useUserStore()
 const activeTab = ref('all')
 const searchKeyword = ref('')
 const filterProject = ref('')

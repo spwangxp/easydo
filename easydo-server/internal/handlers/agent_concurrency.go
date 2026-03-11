@@ -24,12 +24,16 @@ func countAgentRunningPipelines(db *gorm.DB, agentID uint64) int64 {
 	return running
 }
 
-func selectAgentWithPipelineCapacity(db *gorm.DB) uint64 {
+func selectAgentWithPipelineCapacity(db *gorm.DB, workspaceID uint64) uint64 {
 	var agents []models.Agent
-	db.Where("registration_status = ? AND status IN ?",
+	query := db.Where("registration_status = ? AND status IN ?",
 		models.AgentRegistrationStatusApproved,
 		[]string{models.AgentStatusOnline, models.AgentStatusBusy},
-	).Find(&agents)
+	)
+	if workspaceID > 0 {
+		query = query.Where("scope_type = ? OR (scope_type = ? AND workspace_id = ?)", models.AgentScopePlatform, models.AgentScopeWorkspace, workspaceID)
+	}
+	query.Find(&agents)
 
 	if len(agents) == 0 {
 		return 0

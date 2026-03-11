@@ -2,6 +2,7 @@
   <div class="profile-container">
     <div class="profile-header">
       <h1 class="page-title">个人中心</h1>
+      <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
     </div>
     
     <div class="profile-layout">
@@ -185,7 +186,8 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
+import { useUserStore } from '@/stores/user'
 import { 
   User, 
   Lock, 
@@ -195,6 +197,7 @@ import {
 } from '@element-plus/icons-vue'
 
 const activeMenu = ref('profile')
+const userStore = useUserStore()
 
 const menuItems = [
   { key: 'profile', name: '基本资料', icon: User },
@@ -203,18 +206,23 @@ const menuItems = [
   { key: 'devices', name: '登录设备', icon: Monitor }
 ]
 
-const userInfo = reactive({
-  username: 'demo',
-  email: 'demo@example.com',
-  avatar: ''
-})
+const userInfo = computed(() => ({
+  username: userStore.userInfo?.username || '-',
+  email: userStore.userInfo?.email || '-',
+  avatar: userStore.userInfo?.avatar || ''
+}))
 
 const profileForm = reactive({
-  username: 'demo',
-  email: 'demo@example.com',
+  username: '',
+  email: '',
   phone: '',
   bio: ''
 })
+
+watch(() => userStore.userInfo, (value) => {
+  profileForm.username = value?.username || ''
+  profileForm.email = value?.email || ''
+}, { immediate: true, deep: true })
 
 const preferences = reactive({
   language: 'zh-CN',

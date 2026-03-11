@@ -16,10 +16,11 @@ type User struct {
 	Role        string `gorm:"size:32;default:'user'" json:"role"`
 	Status      string `gorm:"size:32;default:'active'" json:"status"`
 	LastLoginAt int64  `json:"last_login_at"`
-	
-	Projects    []Project    `gorm:"foreignKey:OwnerID" json:"projects"`
-	Pipelines   []Pipeline   `gorm:"foreignKey:OwnerID" json:"pipelines"`
-	DeployRecords []DeployRecord `gorm:"foreignKey:DeployerID" json:"deploy_records"`
+
+	Projects         []Project         `gorm:"foreignKey:OwnerID" json:"projects"`
+	Pipelines        []Pipeline        `gorm:"foreignKey:OwnerID" json:"pipelines"`
+	DeployRecords    []DeployRecord    `gorm:"foreignKey:DeployerID" json:"deploy_records"`
+	WorkspaceMembers []WorkspaceMember `gorm:"foreignKey:UserID" json:"workspace_members"`
 }
 
 // SetPassword 加密密码

@@ -21,9 +21,9 @@ func NewWebhookService(db *gorm.DB) *WebhookService {
 	return &WebhookService{db: db}
 }
 
-func (s *WebhookService) SendWebhook(eventType string, payload map[string]interface{}) error {
+func (s *WebhookService) SendWebhook(workspaceID uint64, eventType string, payload map[string]interface{}) error {
 	var configs []models.WebhookConfig
-	s.db.Where("is_active = ?", true).Find(&configs)
+	s.db.Where("workspace_id = ? AND is_active = ?", workspaceID, true).Find(&configs)
 
 	for _, config := range configs {
 		var events []string
@@ -66,11 +66,12 @@ func (s *WebhookService) sendToURL(config models.WebhookConfig, eventType string
 	}
 
 	event := models.WebhookEvent{
-		ConfigID:  config.ID,
-		EventType: eventType,
-		Payload:   string(body),
-		Status:    status,
-		Response:  responseBody,
+		WorkspaceID: config.WorkspaceID,
+		ConfigID:    config.ID,
+		EventType:   eventType,
+		Payload:     string(body),
+		Status:      status,
+		Response:    responseBody,
 	}
 	s.db.Create(&event)
 }

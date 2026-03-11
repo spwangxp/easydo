@@ -26,6 +26,7 @@ func performUpdateAgentRequest(t *testing.T, h *AgentHandler, agentID uint64, pa
 	c.Request = httptest.NewRequest(http.MethodPut, "/api/agents/"+strconv.FormatUint(agentID, 10), bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(agentID, 10)}}
+	c.Set("role", "admin")
 
 	h.UpdateAgent(c)
 	return w

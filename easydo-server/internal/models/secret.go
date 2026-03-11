@@ -4,26 +4,26 @@ package models
 type SecretType string
 
 const (
-	SecretTypeSSH          SecretType = "ssh"
-	SecretTypeToken        SecretType = "token"
-	SecretTypeRegistry     SecretType = "registry"
-	SecretTypeAPIKey       SecretType = "api_key"
-	SecretTypeKubernetes   SecretType = "kubernetes"
-	SecretTypeCertificate  SecretType = "certificate"
+	SecretTypeSSH         SecretType = "ssh"
+	SecretTypeToken       SecretType = "token"
+	SecretTypeRegistry    SecretType = "registry"
+	SecretTypeAPIKey      SecretType = "api_key"
+	SecretTypeKubernetes  SecretType = "kubernetes"
+	SecretTypeCertificate SecretType = "certificate"
 )
 
 // SecretCategory 密钥分类
 type SecretCategory string
 
 const (
-	SecretCategoryGitHub       SecretCategory = "github"
-	SecretCategoryGitLab       SecretCategory = "gitlab"
-	SecretCategoryGitee        SecretCategory = "gitee"
-	SecretCategoryDocker       SecretCategory = "docker"
-	SecretCategoryDingTalk     SecretCategory = "dingtalk"
-	SecretCategoryWeChat       SecretCategory = "wechat"
-	SecretCategoryKubernetes   SecretCategory = "kubernetes"
-	SecretCategoryCustom       SecretCategory = "custom"
+	SecretCategoryGitHub     SecretCategory = "github"
+	SecretCategoryGitLab     SecretCategory = "gitlab"
+	SecretCategoryGitee      SecretCategory = "gitee"
+	SecretCategoryDocker     SecretCategory = "docker"
+	SecretCategoryDingTalk   SecretCategory = "dingtalk"
+	SecretCategoryWeChat     SecretCategory = "wechat"
+	SecretCategoryKubernetes SecretCategory = "kubernetes"
+	SecretCategoryCustom     SecretCategory = "custom"
 )
 
 // SecretScope 密钥使用范围
@@ -59,10 +59,11 @@ type Secret struct {
 
 	Metadata string `gorm:"type:text" json:"metadata"`
 
-	Scope     SecretScope `gorm:"size:32;default:'all'" json:"scope"`
-	ProjectID uint64      `gorm:"index" json:"project_id"`
-	IsShared  bool        `gorm:"default:false" json:"is_shared"`
-	SharedWith string     `gorm:"type:text" json:"shared_with"`
+	Scope       SecretScope `gorm:"size:32;default:'all'" json:"scope"`
+	WorkspaceID uint64      `gorm:"not null;index" json:"workspace_id"`
+	ProjectID   uint64      `gorm:"index" json:"project_id"`
+	IsShared    bool        `gorm:"default:false" json:"is_shared"`
+	SharedWith  string      `gorm:"type:text" json:"shared_with"`
 
 	CreatedBy  uint64       `gorm:"not null;index" json:"created_by"`
 	LastUsedAt int64        `json:"last_used_at"`

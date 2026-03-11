@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"easydo-server/internal/middleware"
 	"easydo-server/internal/models"
 	"gorm.io/gorm"
 )
@@ -22,6 +23,114 @@ type ContextGetter interface {
 
 func isAdminRole(role string) bool {
 	return strings.EqualFold(strings.TrimSpace(role), "admin")
+}
+
+func getRequestWorkspace(c ContextGetter) (uint64, string) {
+	workspaceID := c.GetUint64("workspace_id")
+	workspaceRole := strings.TrimSpace(c.GetString("workspace_role"))
+	return workspaceID, models.NormalizeWorkspaceRole(workspaceRole)
+}
+
+func userWorkspaceRole(db *gorm.DB, workspaceID, userID uint64) (string, bool) {
+	if db == nil || workspaceID == 0 || userID == 0 {
+		return "", false
+	}
+	var member models.WorkspaceMember
+	if err := db.Where(
+		"workspace_id = ? AND user_id = ? AND status = ?",
+		workspaceID,
+		userID,
+		models.WorkspaceMemberStatusActive,
+	).First(&member).Error; err != nil {
+		return "", false
+	}
+	return models.NormalizeWorkspaceRole(member.Role), true
+}
+
+func userHasWorkspaceRole(db *gorm.DB, workspaceID, userID uint64, systemRole string, minRole string) bool {
+	if isAdminRole(systemRole) {
+		return true
+	}
+	role, ok := userWorkspaceRole(db, workspaceID, userID)
+	if !ok {
+		return false
+	}
+	return middleware.WorkspaceRoleAtLeast(role, minRole)
+}
+
+func userCanAccessWorkspace(db *gorm.DB, workspaceID, userID uint64, systemRole string) bool {
+	return userHasWorkspaceRole(db, workspaceID, userID, systemRole, models.WorkspaceRoleViewer)
+}
+
+func userCanWriteWorkspaceResource(db *gorm.DB, workspaceID, userID uint64, systemRole string) bool {
+	return userHasWorkspaceRole(db, workspaceID, userID, systemRole, models.WorkspaceRoleDeveloper)
+}
+
+func userCanManageWorkspace(db *gorm.DB, workspaceID, userID uint64, systemRole string) bool {
+	return userHasWorkspaceRole(db, workspaceID, userID, systemRole, models.WorkspaceRoleMaintainer)
+}
+
+func projectWorkspaceID(db *gorm.DB, projectID uint64) uint64 {
+	if db == nil || projectID == 0 {
+		return 0
+	}
+	var workspaceID uint64
+	db.Model(&models.Project{}).Where("id = ?", projectID).Pluck("workspace_id", &workspaceID)
+	return workspaceID
+}
+
+func pipelineWorkspaceID(db *gorm.DB, pipelineID uint64) uint64 {
+	if db == nil || pipelineID == 0 {
+		return 0
+	}
+	var workspaceID uint64
+	db.Model(&models.Pipeline{}).Where("id = ?", pipelineID).Pluck("workspace_id", &workspaceID)
+	return workspaceID
+}
+
+func pipelineBelongsToWorkspace(db *gorm.DB, pipelineID, workspaceID uint64) bool {
+	if db == nil || pipelineID == 0 || workspaceID == 0 {
+		return false
+	}
+	var count int64
+	db.Model(&models.Pipeline{}).Where("id = ? AND workspace_id = ?", pipelineID, workspaceID).Count(&count)
+	return count > 0
+}
+
+func pipelineRunBelongsToWorkspace(db *gorm.DB, runID, workspaceID uint64) bool {
+	if db == nil || runID == 0 || workspaceID == 0 {
+		return false
+	}
+	var count int64
+	db.Model(&models.PipelineRun{}).Where("id = ? AND workspace_id = ?", runID, workspaceID).Count(&count)
+	return count > 0
+}
+
+func taskBelongsToWorkspace(db *gorm.DB, taskID, workspaceID uint64) bool {
+	if db == nil || taskID == 0 || workspaceID == 0 {
+		return false
+	}
+	var count int64
+	db.Model(&models.AgentTask{}).Where("id = ? AND workspace_id = ?", taskID, workspaceID).Count(&count)
+	return count > 0
+}
+
+func webhookConfigBelongsToWorkspace(db *gorm.DB, configID, workspaceID uint64) bool {
+	if db == nil || configID == 0 || workspaceID == 0 {
+		return false
+	}
+	var count int64
+	db.Model(&models.WebhookConfig{}).Where("id = ? AND workspace_id = ?", configID, workspaceID).Count(&count)
+	return count > 0
+}
+
+func projectBelongsToWorkspace(db *gorm.DB, projectID, workspaceID uint64) bool {
+	if db == nil || projectID == 0 || workspaceID == 0 {
+		return false
+	}
+	var count int64
+	db.Model(&models.Project{}).Where("id = ? AND workspace_id = ?", projectID, workspaceID).Count(&count)
+	return count > 0
 }
 
 func userOwnsProject(db *gorm.DB, projectID, userID uint64) bool {
@@ -74,109 +183,79 @@ func canReadCredential(db *gorm.DB, credential *models.Credential, userID uint64
 	if credential == nil {
 		return false
 	}
-	if isAdminRole(role) || credential.OwnerID == userID {
-		return true
-	}
-	if credential.Scope == models.ScopeGlobal {
-		return true
-	}
-	if credential.IsShared && userInSharedList(credential.SharedWith, userID) {
-		return true
-	}
-	if credential.Scope == models.ScopeProject && userOwnsProject(db, credential.ProjectID, userID) {
-		return true
-	}
-	return false
+	return userCanAccessWorkspace(db, credential.WorkspaceID, userID, role)
 }
 
 func canWriteCredential(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
 	if credential == nil {
 		return false
 	}
-	if isAdminRole(role) || credential.OwnerID == userID {
-		return true
+	return userCanWriteWorkspaceResource(db, credential.WorkspaceID, userID, role)
+}
+
+func canReadCredentialValue(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
+	if credential == nil {
+		return false
 	}
-	if credential.Scope == models.ScopeProject && userOwnsProject(db, credential.ProjectID, userID) {
-		return true
-	}
-	return false
+	return userCanWriteWorkspaceResource(db, credential.WorkspaceID, userID, role)
 }
 
 func canReadSecret(db *gorm.DB, secret *models.Secret, userID uint64, role string) bool {
 	if secret == nil {
 		return false
 	}
-	if isAdminRole(role) || secret.CreatedBy == userID {
-		return true
-	}
-	if secret.Scope == models.SecretScopeAll {
-		return true
-	}
-	if secret.IsShared && userInSharedList(secret.SharedWith, userID) {
-		return true
-	}
-	if secret.Scope == models.SecretScopeProject && userOwnsProject(db, secret.ProjectID, userID) {
-		return true
-	}
-	return false
+	return userCanAccessWorkspace(db, secret.WorkspaceID, userID, role)
 }
 
 func canWriteSecret(db *gorm.DB, secret *models.Secret, userID uint64, role string) bool {
 	if secret == nil {
 		return false
 	}
-	if isAdminRole(role) || secret.CreatedBy == userID {
-		return true
+	return userCanWriteWorkspaceResource(db, secret.WorkspaceID, userID, role)
+}
+
+func canReadSecretValue(db *gorm.DB, secret *models.Secret, userID uint64, role string) bool {
+	if secret == nil {
+		return false
 	}
-	if secret.Scope == models.SecretScopeProject && userOwnsProject(db, secret.ProjectID, userID) {
-		return true
-	}
-	return false
+	return userCanWriteWorkspaceResource(db, secret.WorkspaceID, userID, role)
 }
 
 func applyCredentialReadScope(db *gorm.DB, userID uint64, role string) *gorm.DB {
 	if isAdminRole(role) {
 		return db
 	}
-	projectSubQuery := db.Session(&gorm.Session{}).
-		Model(&models.Project{}).
-		Select("id").
-		Where("owner_id = ?", userID)
+	workspaceSubQuery := db.Session(&gorm.Session{}).
+		Model(&models.WorkspaceMember{}).
+		Select("workspace_id").
+		Where("user_id = ? AND status = ?", userID, models.WorkspaceMemberStatusActive)
 
-	return db.Where(
-		"owner_id = ? OR scope = ? OR (is_shared = ? AND (shared_with = '' OR shared_with LIKE ?)) OR (scope = ? AND project_id IN (?))",
-		userID,
-		models.ScopeGlobal,
-		true,
-		"%"+strconv.FormatUint(userID, 10)+"%",
-		models.ScopeProject,
-		projectSubQuery,
-	)
+	return db.Where("workspace_id IN (?)", workspaceSubQuery)
 }
 
 func applySecretReadScope(db *gorm.DB, userID uint64, role string) *gorm.DB {
 	if isAdminRole(role) {
 		return db
 	}
-	projectSubQuery := db.Session(&gorm.Session{}).
-		Model(&models.Project{}).
-		Select("id").
-		Where("owner_id = ?", userID)
+	workspaceSubQuery := db.Session(&gorm.Session{}).
+		Model(&models.WorkspaceMember{}).
+		Select("workspace_id").
+		Where("user_id = ? AND status = ?", userID, models.WorkspaceMemberStatusActive)
 
-	return db.Where(
-		"created_by = ? OR scope = ? OR (is_shared = ? AND (shared_with = '' OR shared_with LIKE ?)) OR (scope = ? AND project_id IN (?))",
-		userID,
-		models.SecretScopeAll,
-		true,
-		"%"+strconv.FormatUint(userID, 10)+"%",
-		models.SecretScopeProject,
-		projectSubQuery,
-	)
+	return db.Where("workspace_id IN (?)", workspaceSubQuery)
 }
 
 func accessibleSecretIDsSubQuery(db *gorm.DB, userID uint64, role string) *gorm.DB {
 	return applySecretReadScope(
 		db.Session(&gorm.Session{}).Model(&models.Secret{}).Select("id"),
+		userID,
+		role,
+	)
+}
+
+func accessibleSecretIDsInWorkspaceSubQuery(db *gorm.DB, workspaceID, userID uint64, role string) *gorm.DB {
+	return applySecretReadScope(
+		db.Session(&gorm.Session{}).Model(&models.Secret{}).Select("id").Where("workspace_id = ?", workspaceID),
 		userID,
 		role,
 	)

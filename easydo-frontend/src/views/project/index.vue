@@ -1,7 +1,10 @@
 <template>
   <div class="project-container">
     <div class="project-header">
-      <h1 class="page-title">项目</h1>
+      <div>
+        <h1 class="page-title">项目</h1>
+        <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
+      </div>
       <el-button type="primary" @click="handleCreate">
         <el-icon><Plus /></el-icon>
         添加项目
@@ -214,6 +217,9 @@ import {
   Warning
 } from '@element-plus/icons-vue'
 import { getProjectList, createProject, updateProject, deleteProject, toggleFavorite } from '@/api/project'
+import { useUserStore } from '@/stores/user'
+
+const userStore = useUserStore()
 
 const activeTab = ref('all')
 const searchKeyword = ref('')

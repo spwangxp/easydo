@@ -2,6 +2,7 @@ package models
 
 type PipelineRun struct {
 	BaseModel
+	WorkspaceID     uint64 `gorm:"not null;index" json:"workspace_id"`
 	PipelineID      uint64 `gorm:"index;not null" json:"pipeline_id"`
 	BuildNumber     int    `gorm:"not null" json:"build_number"`
 	Status          string `gorm:"size:32;not null" json:"status"` // queued/pending/running/success/failed/cancelled
@@ -23,9 +24,10 @@ type PipelineRun struct {
 	AgentID uint64 `gorm:"index" json:"agent_id"`
 
 	// 关联
-	Pipeline *Pipeline   `gorm:"foreignKey:PipelineID" json:"pipeline"`
-	Agent    *Agent      `gorm:"-" json:"-"`                            // 不创建外键约束
-	Tasks    []AgentTask `gorm:"foreignKey:PipelineRunID" json:"tasks"` // 所有子任务
+	Workspace *Workspace  `gorm:"foreignKey:WorkspaceID" json:"workspace,omitempty"`
+	Pipeline  *Pipeline   `gorm:"foreignKey:PipelineID" json:"pipeline"`
+	Agent     *Agent      `gorm:"-" json:"-"`                            // 不创建外键约束
+	Tasks     []AgentTask `gorm:"foreignKey:PipelineRunID" json:"tasks"` // 所有子任务
 }
 
 const (

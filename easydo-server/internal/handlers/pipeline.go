@@ -103,7 +103,7 @@ type pipelineCredentialBinding struct {
 	CredentialID uint64
 }
 
-func (h *PipelineHandler) validatePipelineCredentialBindings(config *PipelineConfig, userID uint64, role string, pipelineID uint64) ([]models.PipelineCredentialRef, error) {
+func (h *PipelineHandler) validatePipelineCredentialBindings(config *PipelineConfig, userID uint64, role string, pipelineID uint64, workspaceID uint64) ([]models.PipelineCredentialRef, error) {
 	if config == nil || len(config.Nodes) == 0 {
 		return nil, nil
 	}
@@ -182,6 +182,7 @@ func (h *PipelineHandler) validatePipelineCredentialBindings(config *PipelineCon
 
 	var credentials []models.Credential
 	if err := applyCredentialReadScope(h.DB.Model(&models.Credential{}), userID, role).
+		Where("workspace_id = ?", workspaceID).
 		Where("id IN ?", credentialIDs).
 		Find(&credentials).Error; err != nil {
 		return nil, err
@@ -211,7 +212,7 @@ func (h *PipelineHandler) validatePipelineCredentialBindings(config *PipelineCon
 	return refs, nil
 }
 
-func (h *PipelineHandler) parseAndValidatePipelineConfig(rawConfig string, userID uint64, role string, pipelineID uint64) (PipelineConfig, []models.PipelineCredentialRef, string, error) {
+func (h *PipelineHandler) parseAndValidatePipelineConfig(rawConfig string, userID uint64, role string, pipelineID uint64, workspaceID uint64) (PipelineConfig, []models.PipelineCredentialRef, string, error) {
 	var config PipelineConfig
 	if err := json.Unmarshal([]byte(rawConfig), &config); err != nil {
 		return PipelineConfig{}, nil, "流水线配置JSON解析失败: " + err.Error(), err
@@ -224,7 +225,7 @@ func (h *PipelineHandler) parseAndValidatePipelineConfig(rawConfig string, userI
 		return PipelineConfig{}, nil, errMsg, errors.New(errMsg)
 	}
 
-	refs, err := h.validatePipelineCredentialBindings(&config, userID, role, pipelineID)
+	refs, err := h.validatePipelineCredentialBindings(&config, userID, role, pipelineID, workspaceID)
 	if err != nil {
 		return PipelineConfig{}, nil, "流水线凭据配置无效: " + err.Error(), err
 	}
@@ -255,8 +256,9 @@ func (h *PipelineHandler) GetPipelineList(c *gin.Context) {
 
 	var pipelines []models.Pipeline
 	var total int64
+	workspaceID := c.GetUint64("workspace_id")
 
-	query := h.DB.Model(&models.Pipeline{})
+	query := h.DB.Model(&models.Pipeline{}).Where("workspace_id = ?", workspaceID)
 
 	if keyword != "" {
 		query = query.Where("name LIKE ?", "%"+keyword+"%")
@@ -285,9 +287,9 @@ func (h *PipelineHandler) GetPipelineList(c *gin.Context) {
 
 	// 计算各tab的数量
 	var allCount, createdCount, favoritedCount int64
-	h.DB.Model(&models.Pipeline{}).Count(&allCount)
-	h.DB.Model(&models.Pipeline{}).Where("owner_id = ?", userID).Count(&createdCount)
-	h.DB.Model(&models.Pipeline{}).Where("is_favorite = ?", true).Count(&favoritedCount)
+	h.DB.Model(&models.Pipeline{}).Where("workspace_id = ?", workspaceID).Count(&allCount)
+	h.DB.Model(&models.Pipeline{}).Where("workspace_id = ? AND owner_id = ?", workspaceID, userID).Count(&createdCount)
+	h.DB.Model(&models.Pipeline{}).Where("workspace_id = ? AND is_favorite = ?", workspaceID, true).Count(&favoritedCount)
 
 	query.Count(&total)
 
@@ -350,9 +352,10 @@ func (h *PipelineHandler) GetPipelineList(c *gin.Context) {
 
 func (h *PipelineHandler) GetPipelineDetail(c *gin.Context) {
 	id := c.Param("id")
+	workspaceID := c.GetUint64("workspace_id")
 
 	var pipeline models.Pipeline
-	if err := h.DB.Preload("Owner").Preload("Project").First(&pipeline, id).Error; err != nil {
+	if err := h.DB.Preload("Owner").Preload("Project").Where("id = ? AND workspace_id = ?", id, workspaceID).First(&pipeline).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "流水线不存在",
@@ -385,10 +388,19 @@ func (h *PipelineHandler) CreatePipeline(c *gin.Context) {
 
 	userID := c.GetUint64("user_id")
 	role := c.GetString("role")
+	workspaceID := c.GetUint64("workspace_id")
+	if !userCanWriteWorkspaceResource(h.DB, workspaceID, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权在当前工作空间创建流水线"})
+		return
+	}
+	if req.ProjectID != 0 && !projectBelongsToWorkspace(h.DB, req.ProjectID, workspaceID) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "项目不属于当前工作空间"})
+		return
+	}
 	credentialRefs := make([]models.PipelineCredentialRef, 0)
 
 	if req.Config != "" {
-		config, refs, errMsg, err := h.parseAndValidatePipelineConfig(req.Config, userID, role, 0)
+		config, refs, errMsg, err := h.parseAndValidatePipelineConfig(req.Config, userID, role, 0, workspaceID)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"code":    400,
@@ -404,49 +416,11 @@ func (h *PipelineHandler) CreatePipeline(c *gin.Context) {
 	pipeline := &models.Pipeline{
 		Name:        req.Name,
 		Description: req.Description,
+		WorkspaceID: workspaceID,
 		ProjectID:   req.ProjectID,
 		Environment: req.Environment,
 		Config:      req.Config,
 		OwnerID:     userID,
-	}
-
-	// 如果 project_id 为 0，设置 为 NULL（不创建外键关联）
-	if req.ProjectID == 0 {
-		// 使用原始 SQL 设置 NULL
-		err := h.DB.Exec("INSERT INTO pipelines (created_at, updated_at, name, description, config, project_id, owner_id, environment, is_public, is_favorite) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)",
-			time.Now(), time.Now(), req.Name, req.Description, req.Config, userID, req.Environment, false, false).Error
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"code":    500,
-				"message": "创建流水线失败: " + err.Error(),
-			})
-			return
-		}
-
-		// 获取刚创建的流水线
-		var createdPipeline models.Pipeline
-		h.DB.Where("name = ? AND owner_id = ?", req.Name, userID).Order("id DESC").First(&createdPipeline)
-		if createdPipeline.ID == 0 {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"code":    500,
-				"message": "创建流水线失败: 无法获取流水线ID",
-			})
-			return
-		}
-
-		if err := h.replacePipelineCredentialRefs(h.DB, createdPipeline.ID, credentialRefs); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"code":    500,
-				"message": "创建流水线失败: 同步凭据引用失败: " + err.Error(),
-			})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"code": 200,
-			"data": createdPipeline,
-		})
-		return
 	}
 
 	if err := h.DB.Create(pipeline).Error; err != nil {
@@ -488,9 +462,10 @@ func (h *PipelineHandler) UpdatePipeline(c *gin.Context) {
 		return
 	}
 
+	workspaceID := c.GetUint64("workspace_id")
 	// 先查询流水线是否存在
 	var pipeline models.Pipeline
-	if err := h.DB.First(&pipeline, id).Error; err != nil {
+	if err := h.DB.Where("id = ? AND workspace_id = ?", id, workspaceID).First(&pipeline).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "流水线不存在",
@@ -500,10 +475,14 @@ func (h *PipelineHandler) UpdatePipeline(c *gin.Context) {
 
 	userID := c.GetUint64("user_id")
 	role := c.GetString("role")
+	if !userCanWriteWorkspaceResource(h.DB, workspaceID, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权修改该流水线"})
+		return
+	}
 	credentialRefs := make([]models.PipelineCredentialRef, 0)
 
 	if req.Config != "" {
-		config, refs, errMsg, err := h.parseAndValidatePipelineConfig(req.Config, userID, role, pipeline.ID)
+		config, refs, errMsg, err := h.parseAndValidatePipelineConfig(req.Config, userID, role, pipeline.ID, workspaceID)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"code":    400,
@@ -559,12 +538,24 @@ func (h *PipelineHandler) UpdatePipeline(c *gin.Context) {
 
 func (h *PipelineHandler) DeletePipeline(c *gin.Context) {
 	id := c.Param("id")
+	workspaceID := c.GetUint64("workspace_id")
+	userID := c.GetUint64("user_id")
+	role := c.GetString("role")
+	if !userCanManageWorkspace(h.DB, workspaceID, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权删除该流水线"})
+		return
+	}
+	var pipeline models.Pipeline
+	if err := h.DB.Where("id = ? AND workspace_id = ?", id, workspaceID).First(&pipeline).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "流水线不存在"})
+		return
+	}
 
 	// 先删除关联的运行记录
 	h.DB.Where("pipeline_id = ?", id).Delete(&models.PipelineRun{})
 	h.DB.Where("pipeline_id = ?", id).Delete(&models.PipelineCredentialRef{})
 
-	if err := h.DB.Delete(&models.Pipeline{}, id).Error; err != nil {
+	if err := h.DB.Delete(&pipeline).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "删除流水线失败",
@@ -580,9 +571,10 @@ func (h *PipelineHandler) DeletePipeline(c *gin.Context) {
 
 func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 	id := c.Param("id")
+	workspaceID := c.GetUint64("workspace_id")
 
 	var pipeline models.Pipeline
-	if err := h.DB.First(&pipeline, id).Error; err != nil {
+	if err := h.DB.Where("id = ? AND workspace_id = ?", id, workspaceID).First(&pipeline).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "流水线不存在",
@@ -615,7 +607,7 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 		triggerUsername = "system"
 	}
 
-	if _, err := h.validatePipelineCredentialBindings(&config, triggerUserID, triggerRole, pipeline.ID); err != nil {
+	if _, err := h.validatePipelineCredentialBindings(&config, triggerUserID, triggerRole, pipeline.ID, workspaceID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
 			"message": "流水线凭据配置无效: " + err.Error(),
@@ -650,6 +642,7 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 
 	// 创建新的构建记录，保存配置快照
 	run := &models.PipelineRun{
+		WorkspaceID:     pipeline.WorkspaceID,
 		PipelineID:      pipeline.ID,
 		BuildNumber:     buildNumber,
 		Status:          runStatus,
@@ -980,6 +973,7 @@ func (h *PipelineHandler) createAllNodeTasks(pipeline models.Pipeline, run *mode
 		}
 
 		task := &models.AgentTask{
+			WorkspaceID:   run.WorkspaceID,
 			PipelineRunID: run.ID,
 			NodeID:        node.ID,
 			TaskType:      taskType,
@@ -1043,7 +1037,7 @@ func (h *PipelineHandler) executePipelineTasks(pipeline models.Pipeline, run *mo
 	agentID := run.AgentID
 	if hasAgentNode {
 		if agentID == 0 {
-			agentID = h.selectAgentForPipeline(h.DB)
+			agentID = h.selectAgentForPipeline(h.DB, pipeline.WorkspaceID)
 		}
 		if agentID == 0 {
 			h.updateRunStatus(run.ID, models.PipelineRunStatusFailed, "没有可用的Agent")
@@ -1081,8 +1075,8 @@ func (h *PipelineHandler) executePipelineTasks(pipeline models.Pipeline, run *mo
 	// 任务执行由 agent 通过 WebSocket 驱动，下游任务由 triggerDownstreamTasks 在任务完成时触发
 }
 
-func (h *PipelineHandler) selectAgentForPipeline(db *gorm.DB) uint64 {
-	return selectAgentWithPipelineCapacity(db)
+func (h *PipelineHandler) selectAgentForPipeline(db *gorm.DB, workspaceID uint64) uint64 {
+	return selectAgentWithPipelineCapacity(db, workspaceID)
 }
 
 func resolveTaskMaxRetries(nodeConfig map[string]interface{}) int {
@@ -1216,6 +1210,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 	if result.Error != nil {
 		task = models.AgentTask{
 			AgentID:       agentID,
+			WorkspaceID:   run.WorkspaceID,
 			PipelineRunID: run.ID,
 			NodeID:        node.ID,
 			TaskType:      "shell",
@@ -1266,7 +1261,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 func (h *PipelineHandler) executeNode(db *gorm.DB, pipeline models.Pipeline, run *models.PipelineRun, node *PipelineNode, nodeMap map[string]*PipelineNode, resolver *VariableResolver) (bool, map[string]interface{}) {
 	agentID := uint64(0)
 	if isAgentPipelineTaskType(node.Type) {
-		agentID = h.selectAgentForPipeline(db)
+		agentID = h.selectAgentForPipeline(db, pipeline.WorkspaceID)
 		if agentID == 0 {
 			return false, nil
 		}
@@ -1577,6 +1572,7 @@ func (h *PipelineHandler) executeServerTask(db *gorm.DB, run *models.PipelineRun
 	if result.Error != nil {
 		task = models.AgentTask{
 			AgentID:       serverTaskAgentID,
+			WorkspaceID:   run.WorkspaceID,
 			PipelineRunID: run.ID,
 			NodeID:        node.ID,
 			TaskType:      canonicalType,
@@ -1912,12 +1908,17 @@ func (h *PipelineHandler) executeInAppTask(db *gorm.DB, run *models.PipelineRun,
 	metadataJSON, _ := json.Marshal(metadata)
 
 	message := &models.Message{
-		Type:       msgType,
-		Title:      title,
-		Content:    content,
-		SenderType: "system",
-		Priority:   priority,
-		Metadata:   string(metadataJSON),
+		WorkspaceID: run.WorkspaceID,
+		Type:        msgType,
+		Title:       title,
+		Content:     content,
+		SenderType:  "system",
+		Priority:    priority,
+		Metadata:    string(metadataJSON),
+	}
+	if run.TriggerUserID > 0 {
+		triggerUserID := run.TriggerUserID
+		message.RecipientID = &triggerUserID
 	}
 	if err := db.Create(message).Error; err != nil {
 		return false, "站内信创建失败: " + err.Error()
@@ -2080,14 +2081,20 @@ func (h *PipelineHandler) GetPipelineRuns(c *gin.Context) {
 	id := c.Param("id")
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
+	workspaceID := c.GetUint64("workspace_id")
+	pipelineID, _ := strconv.ParseUint(id, 10, 64)
+	if !pipelineBelongsToWorkspace(h.DB, pipelineID, workspaceID) {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "流水线不存在"})
+		return
+	}
 
 	var runs []models.PipelineRun
 	var total int64
 
-	h.DB.Model(&models.PipelineRun{}).Where("pipeline_id = ?", id).Count(&total)
+	h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipelineID).Count(&total)
 
 	offset := (page - 1) * pageSize
-	h.DB.Where("pipeline_id = ?", id).Order("created_at DESC").Offset(offset).Limit(pageSize).Find(&runs)
+	h.DB.Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipelineID).Order("created_at DESC").Offset(offset).Limit(pageSize).Find(&runs)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -2102,9 +2109,10 @@ func (h *PipelineHandler) GetPipelineRuns(c *gin.Context) {
 
 func (h *PipelineHandler) ToggleFavorite(c *gin.Context) {
 	id := c.Param("id")
+	workspaceID := c.GetUint64("workspace_id")
 
 	var pipeline models.Pipeline
-	if err := h.DB.First(&pipeline, id).Error; err != nil {
+	if err := h.DB.Where("id = ? AND workspace_id = ?", id, workspaceID).First(&pipeline).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "流水线不存在",
@@ -2123,17 +2131,23 @@ func (h *PipelineHandler) ToggleFavorite(c *gin.Context) {
 
 func (h *PipelineHandler) GetPipelineStatistics(c *gin.Context) {
 	id := c.Param("id")
+	workspaceID := c.GetUint64("workspace_id")
+	pipelineID, _ := strconv.ParseUint(id, 10, 64)
+	if !pipelineBelongsToWorkspace(h.DB, pipelineID, workspaceID) {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "流水线不存在"})
+		return
+	}
 
 	var totalRuns, successfulRuns, failedRuns int64
 	var avgDuration float64
 
-	h.DB.Model(&models.PipelineRun{}).Where("pipeline_id = ?", id).Count(&totalRuns)
-	h.DB.Model(&models.PipelineRun{}).Where("pipeline_id = ? AND status = ?", id, models.PipelineRunStatusSuccess).Count(&successfulRuns)
-	h.DB.Model(&models.PipelineRun{}).Where("pipeline_id = ? AND status = ?", id, models.PipelineRunStatusFailed).Count(&failedRuns)
+	h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipelineID).Count(&totalRuns)
+	h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND pipeline_id = ? AND status = ?", workspaceID, pipelineID, models.PipelineRunStatusSuccess).Count(&successfulRuns)
+	h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND pipeline_id = ? AND status = ?", workspaceID, pipelineID, models.PipelineRunStatusFailed).Count(&failedRuns)
 
 	// 计算平均耗时
 	var totalDuration int64
-	h.DB.Model(&models.PipelineRun{}).Where("pipeline_id = ? AND duration > 0", id).Pluck("duration", &totalDuration)
+	h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND pipeline_id = ? AND duration > 0", workspaceID, pipelineID).Pluck("duration", &totalDuration)
 	if totalRuns > 0 {
 		avgDuration = float64(totalDuration) / float64(totalRuns) / 60 // 转换为分钟
 	}
@@ -2195,9 +2209,10 @@ func (h *PipelineHandler) GetPipelineTestReports(c *gin.Context) {
 func (h *PipelineHandler) GetRunDetail(c *gin.Context) {
 	id := c.Param("id")
 	runID := c.Param("run_id")
+	workspaceID := c.GetUint64("workspace_id")
 
 	var run models.PipelineRun
-	if err := h.DB.Preload("Pipeline").First(&run, runID).Error; err != nil {
+	if err := h.DB.Preload("Pipeline").Where("workspace_id = ?", workspaceID).First(&run, runID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "运行记录不存在",
@@ -2226,10 +2241,11 @@ func (h *PipelineHandler) GetRunDetail(c *gin.Context) {
 func (h *PipelineHandler) GetRunTasks(c *gin.Context) {
 	id := c.Param("id")
 	runID := c.Param("run_id")
+	workspaceID := c.GetUint64("workspace_id")
 
 	// 验证运行记录存在且属于指定流水线
 	var run models.PipelineRun
-	if err := h.DB.First(&run, runID).Error; err != nil {
+	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&run, runID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "运行记录不存在",
@@ -2247,7 +2263,7 @@ func (h *PipelineHandler) GetRunTasks(c *gin.Context) {
 
 	// 获取所有已执行的任务
 	var tasks []models.AgentTask
-	h.DB.Where("pipeline_run_id = ?", runID).Preload("Agent").Order("created_at ASC").Find(&tasks)
+	h.DB.Where("workspace_id = ? AND pipeline_run_id = ?", workspaceID, runID).Preload("Agent").Order("created_at ASC").Find(&tasks)
 
 	// 构建 NodeID -> Task 映射
 	taskMap := make(map[string]*models.AgentTask)
@@ -2442,10 +2458,11 @@ func (h *PipelineHandler) GetRunLogs(c *gin.Context) {
 	runID := c.Param("run_id")
 	level := c.DefaultQuery("level", "")
 	source := c.DefaultQuery("source", "")
+	workspaceID := c.GetUint64("workspace_id")
 
 	// 验证运行记录存在且属于指定流水线
 	var run models.PipelineRun
-	if err := h.DB.First(&run, runID).Error; err != nil {
+	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&run, runID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "运行记录不存在",

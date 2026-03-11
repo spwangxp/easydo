@@ -18,7 +18,7 @@
         <el-col :span="12">
           <el-form-item label="使用范围" prop="scope">
             <el-select v-model="form.scope" placeholder="选择使用范围" style="width: 100%">
-              <el-option label="个人" value="user" />
+              <el-option label="工作空间" value="user" />
               <el-option label="项目" value="project" />
             </el-select>
           </el-form-item>

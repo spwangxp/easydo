@@ -1,7 +1,10 @@
 <template>
   <div class="deploy-container">
     <div class="deploy-header">
-      <h1 class="page-title">发布</h1>
+      <div>
+        <h1 class="page-title">发布</h1>
+        <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
+      </div>
       <el-button type="primary" @click="handleCreate">
         <el-icon><Plus /></el-icon>
         新建发布
@@ -141,6 +144,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { useUserStore } from '@/stores/user'
 import { 
   Plus, 
   Search, 
@@ -150,6 +154,7 @@ import {
   View
 } from '@element-plus/icons-vue'
 
+const userStore = useUserStore()
 const activeTab = ref('all')
 const searchKeyword = ref('')
 const filterProject = ref('')

@@ -310,7 +310,7 @@ docker-compose logs -f
 
 | 用户名 / Username | 密码 / Password | 角色 / Role | 描述 / Description |
 |--------|------|------|------|
-| demo | 1qaz2WSX | 管理员 / Admin | 演示管理员账号 / Demo Admin Account |
+| demo | 1qaz2WSX | 普通用户 / User | 演示用户账号 / Demo User Account |
 | admin | 1qaz2WSX | 管理员 / Admin | 系统管理员账号 / System Admin Account |
 | test | 1qaz2WSX | 普通用户 / User | 测试用户账号 / Test User Account |
 

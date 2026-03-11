@@ -48,7 +48,7 @@ func (h *PipelineHandler) assignOneQueuedRun(db *gorm.DB) (uint64, bool) {
 
 	for i := range queuedRuns {
 		run := queuedRuns[i]
-		agentID := selectAgentWithPipelineCapacity(db)
+		agentID := selectAgentWithPipelineCapacity(db, run.WorkspaceID)
 		if agentID == 0 {
 			return 0, false
 		}

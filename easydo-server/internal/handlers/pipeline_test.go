@@ -234,7 +234,7 @@ func TestParseAndValidatePipelineConfig_PreservesNodeCoordinates(t *testing.T) {
 		]
 	}`
 
-	config, refs, errMsg, err := handler.parseAndValidatePipelineConfig(raw, 0, "", 0)
+	config, refs, errMsg, err := handler.parseAndValidatePipelineConfig(raw, 0, "", 0, 0)
 	if err != nil {
 		t.Fatalf("expected parse success, got err=%v, msg=%s", err, errMsg)
 	}
@@ -702,7 +702,7 @@ func TestValidatePipelineCredentialBindings_UnknownSlot(t *testing.T) {
 		},
 	}
 
-	_, err := handler.validatePipelineCredentialBindings(&config, 0, "", 0)
+	_, err := handler.validatePipelineCredentialBindings(&config, 0, "", 0, 0)
 	if err == nil {
 		t.Fatalf("expected unknown slot validation error")
 	}
@@ -721,7 +721,7 @@ func TestParseAndValidatePipelineConfig_NormalizesTaskType(t *testing.T) {
 		"edges":[]
 	}`
 
-	config, refs, errMsg, err := handler.parseAndValidatePipelineConfig(raw, 0, "", 0)
+	config, refs, errMsg, err := handler.parseAndValidatePipelineConfig(raw, 0, "", 0, 0)
 	if err != nil {
 		t.Fatalf("expected parse success, got err=%v, msg=%s", err, errMsg)
 	}
@@ -741,10 +741,11 @@ func TestUpdatePipeline_NullProjectIDRemainsNull(t *testing.T) {
 	db := openHandlerTestDB(t)
 	h := &PipelineHandler{DB: db}
 
-	if err := db.Exec("INSERT INTO pipelines (created_at, updated_at, name, description, config, project_id, owner_id, environment, is_public, is_favorite) VALUES (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, NULL, ?, ?, ?, ?)",
+	if err := db.Exec("INSERT INTO pipelines (created_at, updated_at, name, description, config, workspace_id, project_id, owner_id, environment, is_public, is_favorite) VALUES (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?, NULL, ?, ?, ?, ?)",
 		"null-project-pipeline",
 		"pipeline without project",
 		`{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo build"}}],"edges":[]}`,
+		uint64(1),
 		uint64(1),
 		"test",
 		false,
@@ -766,6 +767,7 @@ func TestUpdatePipeline_NullProjectIDRemainsNull(t *testing.T) {
 	c.Params = gin.Params{{Key: "id", Value: "1"}}
 	c.Set("user_id", uint64(1))
 	c.Set("role", "admin")
+	c.Set("workspace_id", uint64(1))
 
 	h.UpdatePipeline(c)
 

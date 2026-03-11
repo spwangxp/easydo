@@ -120,6 +120,14 @@ func (h *CredentialHandler) CreateCredential(c *gin.Context) {
 	}
 
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
+	if !userCanWriteWorkspaceResource(models.DB, workspaceID, ownerID, role) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "Access denied",
+		})
+		return
+	}
 
 	// 加密凭据数据
 	encryptedData, iv, err := h.encryptionService.EncryptCredentialData(req.SecretData)
@@ -141,6 +149,7 @@ func (h *CredentialHandler) CreateCredential(c *gin.Context) {
 		EncryptionAlgo: "aes-256-gcm",
 		Metadata:       req.Metadata,
 		Scope:          req.Scope,
+		WorkspaceID:    workspaceID,
 		ProjectID:      req.ProjectID,
 		OwnerID:        ownerID,
 		Status:         models.CredentialStatusActive,
@@ -160,10 +169,10 @@ func (h *CredentialHandler) CreateCredential(c *gin.Context) {
 			})
 			return
 		}
-		if !isAdminRole(role) && !userOwnsProject(models.DB, credential.ProjectID, ownerID) {
+		if !projectBelongsToWorkspace(models.DB, credential.ProjectID, workspaceID) {
 			c.JSON(http.StatusForbidden, gin.H{
 				"code":    403,
-				"message": "Access denied for project scope",
+				"message": "Project does not belong to active workspace",
 			})
 			return
 		}
@@ -206,6 +215,7 @@ func (h *CredentialHandler) CreateCredential(c *gin.Context) {
 // @Router /api/v1/credentials [get]
 func (h *CredentialHandler) ListCredentials(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	size, _ := strconv.Atoi(c.DefaultQuery("size", "10"))
@@ -222,7 +232,7 @@ func (h *CredentialHandler) ListCredentials(c *gin.Context) {
 		size = 10
 	}
 
-	query := applyCredentialReadScope(models.DB.Model(&models.Credential{}), ownerID, role)
+	query := applyCredentialReadScope(models.DB.Model(&models.Credential{}), ownerID, role).Where("workspace_id = ?", workspaceID)
 
 	if credentialType != "" {
 		if !models.IsValidType(models.CredentialType(credentialType)) {
@@ -284,6 +294,7 @@ func (h *CredentialHandler) ListCredentials(c *gin.Context) {
 // @Router /api/v1/credentials/{id} [get]
 func (h *CredentialHandler) GetCredential(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -303,7 +314,7 @@ func (h *CredentialHandler) GetCredential(c *gin.Context) {
 		return
 	}
 
-	if !canReadCredential(models.DB, &credential, ownerID, role) {
+	if credential.WorkspaceID != workspaceID || !canReadCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -328,6 +339,7 @@ func (h *CredentialHandler) GetCredential(c *gin.Context) {
 // @Router /api/v1/credentials/{id}/secret-data [get]
 func (h *CredentialHandler) GetCredentialSecretData(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -347,7 +359,7 @@ func (h *CredentialHandler) GetCredentialSecretData(c *gin.Context) {
 		return
 	}
 
-	if !canWriteCredential(models.DB, &credential, ownerID, role) {
+	if credential.WorkspaceID != workspaceID || !canReadCredentialValue(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -387,6 +399,7 @@ func (h *CredentialHandler) GetCredentialSecretData(c *gin.Context) {
 // @Router /api/v1/credentials/{id} [put]
 func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -406,7 +419,7 @@ func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
 		return
 	}
 
-	if !canWriteCredential(models.DB, &credential, ownerID, role) {
+	if credential.WorkspaceID != workspaceID || !canWriteCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -499,6 +512,7 @@ func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
 // @Router /api/v1/credentials/{id} [delete]
 func (h *CredentialHandler) DeleteCredential(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -518,7 +532,7 @@ func (h *CredentialHandler) DeleteCredential(c *gin.Context) {
 		return
 	}
 
-	if !canWriteCredential(models.DB, &credential, ownerID, role) {
+	if credential.WorkspaceID != workspaceID || !canWriteCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -587,6 +601,7 @@ func buildCredentialImpactSummary(db *gorm.DB, credential models.Credential) (Cr
 
 func (h *CredentialHandler) GetCredentialImpact(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -606,7 +621,7 @@ func (h *CredentialHandler) GetCredentialImpact(c *gin.Context) {
 		return
 	}
 
-	if !canReadCredential(models.DB, &credential, ownerID, role) {
+	if credential.WorkspaceID != workspaceID || !canReadCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -635,6 +650,7 @@ type CredentialImpactBatchRequest struct {
 
 func (h *CredentialHandler) BatchCredentialImpact(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	var req CredentialImpactBatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -654,6 +670,7 @@ func (h *CredentialHandler) BatchCredentialImpact(c *gin.Context) {
 
 	var credentials []models.Credential
 	if err := applyCredentialReadScope(models.DB.Model(&models.Credential{}), ownerID, role).
+		Where("workspace_id = ?", workspaceID).
 		Where("id IN ?", req.IDs).
 		Find(&credentials).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -707,6 +724,7 @@ func (h *CredentialHandler) BatchCredentialImpact(c *gin.Context) {
 // @Router /api/v1/credentials/{id}/verify [post]
 func (h *CredentialHandler) VerifyCredential(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -725,7 +743,7 @@ func (h *CredentialHandler) VerifyCredential(c *gin.Context) {
 		})
 		return
 	}
-	if !canReadCredential(models.DB, &credential, ownerID, role) {
+	if credential.WorkspaceID != workspaceID || !canReadCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -840,6 +858,7 @@ func (h *CredentialHandler) GetCredentialCategories(c *gin.Context) {
 // @Router /api/v1/credentials/{id}/rotate [post]
 func (h *CredentialHandler) RotateCredential(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -859,7 +878,7 @@ func (h *CredentialHandler) RotateCredential(c *gin.Context) {
 		return
 	}
 
-	if !canWriteCredential(models.DB, &credential, ownerID, role) {
+	if credential.WorkspaceID != workspaceID || !canWriteCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -929,6 +948,7 @@ func (h *CredentialHandler) RotateCredential(c *gin.Context) {
 // @Router /api/v1/credentials/{id}/usage [get]
 func (h *CredentialHandler) GetCredentialUsage(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -948,7 +968,7 @@ func (h *CredentialHandler) GetCredentialUsage(c *gin.Context) {
 		return
 	}
 
-	if !canReadCredential(models.DB, &credential, ownerID, role) {
+	if credential.WorkspaceID != workspaceID || !canReadCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "Access denied",
@@ -1016,6 +1036,7 @@ type UsageStatsResponse struct {
 // @Router /api/v1/credentials/batch/verify [post]
 func (h *CredentialHandler) BatchVerifyCredentials(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	var req BatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1049,7 +1070,7 @@ func (h *CredentialHandler) BatchVerifyCredentials(c *gin.Context) {
 			failed++
 			continue
 		}
-		if !canReadCredential(models.DB, &credential, ownerID, role) {
+		if credential.WorkspaceID != workspaceID || !canReadCredential(models.DB, &credential, ownerID, role) {
 			results = append(results, gin.H{
 				"id":    id,
 				"valid": false,
@@ -1098,6 +1119,7 @@ func (h *CredentialHandler) BatchVerifyCredentials(c *gin.Context) {
 // @Router /api/v1/credentials/batch/delete [post]
 func (h *CredentialHandler) BatchDeleteCredentials(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	var req BatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1117,7 +1139,7 @@ func (h *CredentialHandler) BatchDeleteCredentials(c *gin.Context) {
 	}
 
 	var credentials []models.Credential
-	if err := models.DB.Where("id IN ?", req.IDs).Find(&credentials).Error; err != nil {
+	if err := models.DB.Where("id IN ? AND workspace_id = ?", req.IDs, workspaceID).Find(&credentials).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "Failed to query credentials: " + err.Error(),
@@ -1132,7 +1154,7 @@ func (h *CredentialHandler) BatchDeleteCredentials(c *gin.Context) {
 		return
 	}
 	for i := range credentials {
-		if !canWriteCredential(models.DB, &credentials[i], ownerID, role) {
+		if credentials[i].WorkspaceID != workspaceID || !canWriteCredential(models.DB, &credentials[i], ownerID, role) {
 			c.JSON(http.StatusForbidden, gin.H{
 				"code":    403,
 				"message": "Some credentials are not writable",
@@ -1190,11 +1212,12 @@ type BatchDeleteResponse struct {
 // @Router /api/v1/credentials/export [get]
 func (h *CredentialHandler) ExportCredentials(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	credentialType := c.Query("type")
 	category := c.Query("category")
 
-	query := applyCredentialReadScope(models.DB.Model(&models.Credential{}), ownerID, role)
+	query := applyCredentialReadScope(models.DB.Model(&models.Credential{}), ownerID, role).Where("workspace_id = ?", workspaceID)
 
 	if credentialType != "" {
 		if !models.IsValidType(models.CredentialType(credentialType)) {

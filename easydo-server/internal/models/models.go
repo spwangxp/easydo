@@ -49,6 +49,9 @@ func InitDB() {
 func autoMigrate() {
 	DB.AutoMigrate(
 		&User{},
+		&Workspace{},
+		&WorkspaceMember{},
+		&WorkspaceInvitation{},
 		&Project{},
 		&Pipeline{},
 		&PipelineRun{},
@@ -78,6 +81,7 @@ func autoMigrate() {
 
 	// 初始化测试用户
 	initTestUsers()
+	initTestWorkspaces()
 	// 初始化测试项目
 	initTestProjects()
 }
@@ -94,7 +98,7 @@ func initTestUsers() {
 			Username: "demo",
 			Nickname: "Demo用户",
 			Email:    "demo@example.com",
-			Role:     "admin",
+			Role:     "user",
 			Status:   "active",
 		},
 		{
@@ -133,29 +137,72 @@ func initTestProjects() {
 	if err := DB.First(&user).Error; err != nil {
 		return
 	}
+	var workspace Workspace
+	if err := DB.Where("created_by = ?", user.ID).Order("id ASC").First(&workspace).Error; err != nil {
+		return
+	}
 
 	testProjects := []Project{
 		{
 			Name:        "默认项目",
 			Description: "系统默认创建的项目",
 			Color:       "#409EFF",
+			WorkspaceID: workspace.ID,
 			OwnerID:     user.ID,
 		},
 		{
 			Name:        "前端项目",
 			Description: "包含所有前端代码的仓库",
 			Color:       "#67C23A",
+			WorkspaceID: workspace.ID,
 			OwnerID:     user.ID,
 		},
 		{
 			Name:        "后端项目",
 			Description: "包含所有后端API和服务的仓库",
 			Color:       "#E6A23C",
+			WorkspaceID: workspace.ID,
 			OwnerID:     user.ID,
 		},
 	}
 
 	for i := range testProjects {
 		DB.Create(&testProjects[i])
+	}
+}
+
+func initTestWorkspaces() {
+	var users []User
+	if err := DB.Find(&users).Error; err != nil {
+		return
+	}
+
+	for i := range users {
+		user := users[i]
+		var memberCount int64
+		DB.Model(&WorkspaceMember{}).Where("user_id = ?", user.ID).Count(&memberCount)
+		if memberCount > 0 {
+			continue
+		}
+
+		workspace := Workspace{
+			Name:       user.Username + " Workspace",
+			Slug:       user.Username + "-" + "workspace",
+			Status:     WorkspaceStatusActive,
+			Visibility: WorkspaceVisibilityPrivate,
+			CreatedBy:  user.ID,
+		}
+		if err := DB.Create(&workspace).Error; err != nil {
+			continue
+		}
+		member := WorkspaceMember{
+			WorkspaceID: workspace.ID,
+			UserID:      user.ID,
+			Role:        WorkspaceRoleOwner,
+			Status:      WorkspaceMemberStatusActive,
+			InvitedBy:   user.ID,
+			JoinedAt:    time.Now().Unix(),
+		}
+		DB.Create(&member)
 	}
 }

@@ -34,6 +34,9 @@ func openHandlerTestDB(t *testing.T) *gorm.DB {
 
 	if err := db.AutoMigrate(
 		&models.User{},
+		&models.Workspace{},
+		&models.WorkspaceMember{},
+		&models.WorkspaceInvitation{},
 		&models.Project{},
 		&models.Pipeline{},
 		&models.PipelineRun{},
@@ -44,6 +47,13 @@ func openHandlerTestDB(t *testing.T) *gorm.DB {
 		&models.AgentHeartbeat{},
 		&models.AgentTaskEvent{},
 		&models.AgentLogChunk{},
+		&models.Secret{},
+		&models.SecretUsage{},
+		&models.SecretAuditLog{},
+		&models.SecretRotation{},
+		&models.Message{},
+		&models.WebhookConfig{},
+		&models.WebhookEvent{},
 		&models.Credential{},
 		&models.CredentialUsage{},
 		&models.PipelineCredentialRef{},

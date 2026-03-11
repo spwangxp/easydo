@@ -70,6 +70,7 @@ type SecretResponse struct {
 
 func (h *SecretHandler) List(c *gin.Context) {
 	userID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
@@ -86,7 +87,7 @@ func (h *SecretHandler) List(c *gin.Context) {
 		pageSize = 20
 	}
 
-	query := applySecretReadScope(h.DB.Model(&models.Secret{}), userID, role)
+	query := applySecretReadScope(h.DB.Model(&models.Secret{}), userID, role).Where("workspace_id = ?", workspaceID)
 
 	if secretType != "" {
 		query = query.Where("type = ?", secretType)
@@ -149,6 +150,7 @@ func (h *SecretHandler) List(c *gin.Context) {
 
 func (h *SecretHandler) Get(c *gin.Context) {
 	userID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -168,7 +170,7 @@ func (h *SecretHandler) Get(c *gin.Context) {
 		return
 	}
 
-	if !canReadSecret(h.DB, &secret, userID, role) {
+	if secret.WorkspaceID != workspaceID || !canReadSecret(h.DB, &secret, userID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "无权限访问该密钥",
@@ -207,6 +209,7 @@ func (h *SecretHandler) Get(c *gin.Context) {
 
 func (h *SecretHandler) Create(c *gin.Context) {
 	userID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	var req CreateSecretRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -220,6 +223,10 @@ func (h *SecretHandler) Create(c *gin.Context) {
 	if req.Scope == "" {
 		req.Scope = string(models.SecretScopeAll)
 	}
+	if !userCanWriteWorkspaceResource(h.DB, workspaceID, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权限在当前工作空间创建密钥"})
+		return
+	}
 	if req.Scope == string(models.SecretScopeProject) {
 		if req.ProjectID == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{
@@ -228,17 +235,17 @@ func (h *SecretHandler) Create(c *gin.Context) {
 			})
 			return
 		}
-		if !isAdminRole(role) && !userOwnsProject(h.DB, req.ProjectID, userID) {
+		if !projectBelongsToWorkspace(h.DB, req.ProjectID, workspaceID) {
 			c.JSON(http.StatusForbidden, gin.H{
 				"code":    403,
-				"message": "无权限在该项目下创建密钥",
+				"message": "项目不属于当前工作空间",
 			})
 			return
 		}
 	}
 
 	var existingCount int64
-	h.DB.Model(&models.Secret{}).Where("name = ? AND scope = ? AND project_id = ?", req.Name, req.Scope, req.ProjectID).Count(&existingCount)
+	h.DB.Model(&models.Secret{}).Where("workspace_id = ? AND name = ? AND scope = ? AND project_id = ?", workspaceID, req.Name, req.Scope, req.ProjectID).Count(&existingCount)
 	if existingCount > 0 {
 		c.JSON(http.StatusConflict, gin.H{
 			"code":    409,
@@ -267,6 +274,7 @@ func (h *SecretHandler) Create(c *gin.Context) {
 		EncryptionAlgo: "aes-256-gcm",
 		Metadata:       string(metadataJSON),
 		Scope:          models.SecretScope(req.Scope),
+		WorkspaceID:    workspaceID,
 		ProjectID:      req.ProjectID,
 		CreatedBy:      userID,
 		Status:         models.SecretStatusActive,
@@ -293,6 +301,7 @@ func (h *SecretHandler) Create(c *gin.Context) {
 
 func (h *SecretHandler) Update(c *gin.Context) {
 	userID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -320,7 +329,7 @@ func (h *SecretHandler) Update(c *gin.Context) {
 		})
 		return
 	}
-	if !canWriteSecret(h.DB, &secret, userID, role) {
+	if secret.WorkspaceID != workspaceID || !canWriteSecret(h.DB, &secret, userID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "无权限修改该密钥",
@@ -345,10 +354,10 @@ func (h *SecretHandler) Update(c *gin.Context) {
 				})
 				return
 			}
-			if !isAdminRole(role) && !userOwnsProject(h.DB, req.ProjectID, userID) {
+			if !projectBelongsToWorkspace(h.DB, req.ProjectID, workspaceID) {
 				c.JSON(http.StatusForbidden, gin.H{
 					"code":    403,
-					"message": "无权限修改为该项目范围",
+					"message": "项目不属于当前工作空间",
 				})
 				return
 			}
@@ -395,6 +404,7 @@ func (h *SecretHandler) Update(c *gin.Context) {
 
 func (h *SecretHandler) Delete(c *gin.Context) {
 	userID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -413,7 +423,7 @@ func (h *SecretHandler) Delete(c *gin.Context) {
 		})
 		return
 	}
-	if !canWriteSecret(h.DB, &secret, userID, role) {
+	if secret.WorkspaceID != workspaceID || !canWriteSecret(h.DB, &secret, userID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "无权限删除该密钥",
@@ -439,6 +449,7 @@ func (h *SecretHandler) Delete(c *gin.Context) {
 
 func (h *SecretHandler) GetValue(c *gin.Context) {
 	userID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -458,7 +469,7 @@ func (h *SecretHandler) GetValue(c *gin.Context) {
 		return
 	}
 
-	if !canReadSecret(h.DB, &secret, userID, role) {
+	if secret.WorkspaceID != workspaceID || !canReadSecretValue(h.DB, &secret, userID, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "无权限访问该密钥",
@@ -584,6 +595,7 @@ func (h *SecretHandler) logAudit(secret *models.Secret, action string, actorID u
 
 func (h *SecretHandler) BatchDelete(c *gin.Context) {
 	userID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
 
 	var ids []uint64
 	if err := c.ShouldBindJSON(&ids); err != nil {
@@ -604,7 +616,7 @@ func (h *SecretHandler) BatchDelete(c *gin.Context) {
 
 	if !isAdminRole(role) {
 		var secrets []models.Secret
-		if err := h.DB.Where("id IN ?", ids).Find(&secrets).Error; err != nil {
+		if err := h.DB.Where("id IN ? AND workspace_id = ?", ids, workspaceID).Find(&secrets).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"code":    500,
 				"message": "查询密钥失败: " + err.Error(),

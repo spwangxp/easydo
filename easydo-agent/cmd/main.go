@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,7 +17,61 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+func shouldShowHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			return true
+		}
+	}
+	return false
+}
+
+func writeHelp(w io.Writer) {
+	_, _ = fmt.Fprintln(w, "EasyDo Agent")
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "Usage:")
+	_, _ = fmt.Fprintln(w, "  easydo-agent [--help|-h]")
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "Configuration file search order:")
+	_, _ = fmt.Fprintln(w, "  1. ./config.yaml")
+	_, _ = fmt.Fprintln(w, "  2. /data/agent/config.yaml")
+	_, _ = fmt.Fprintln(w, "  3. /etc/easydo-agent/config.yaml")
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "Agent config fields:")
+	_, _ = fmt.Fprintln(w, "  agent.name           Optional agent name")
+	_, _ = fmt.Fprintln(w, "  agent.token_file     Token persistence file path")
+	_, _ = fmt.Fprintln(w, "  agent.workspace_id   Optional workspace ID")
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "Registration behavior:")
+	_, _ = fmt.Fprintln(w, "  - Omit workspace_id or set it to 0 to register as 平台型")
+	_, _ = fmt.Fprintln(w, "  - Set workspace_id to register as 工作空间私有 for that workspace")
+	_, _ = fmt.Fprintln(w, "  - Re-registration with an approved token keeps the server-side scope unchanged")
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "Environment overrides:")
+	_, _ = fmt.Fprintln(w, "  EASYDO_SERVER_URL")
+	_, _ = fmt.Fprintln(w, "  AGENT_SERVER_PORT")
+	_, _ = fmt.Fprintln(w, "  AGENT_NAME")
+	_, _ = fmt.Fprintln(w, "  AGENT_TOKEN_FILE")
+	_, _ = fmt.Fprintln(w, "  AGENT_WORKSPACE_ID")
+	_, _ = fmt.Fprintln(w, "  AGENT_HEARTBEAT_INTERVAL")
+	_, _ = fmt.Fprintln(w, "  AGENT_POLL_INTERVAL")
+	_, _ = fmt.Fprintln(w, "  AGENT_LOG_LEVEL")
+}
+
+func loadConfigOrExit(log *logrus.Logger) *config.Config {
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+	return cfg
+}
+
 func main() {
+	if shouldShowHelp(os.Args[1:]) {
+		writeHelp(os.Stdout)
+		return
+	}
+
 	// Initialize logger
 	log := logrus.New()
 	log.SetLevel(logrus.InfoLevel)
@@ -31,15 +86,10 @@ func main() {
 
 	fmt.Println("[DEBUG] Starting EasyDo Agent...")
 
-	// Load configuration
-	cfg, err := config.Load()
-	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
-	}
+	cfg := loadConfigOrExit(log)
 
 	// Debug: log server URL from config and environment
 	fmt.Printf("[DEBUG] Before config load...\n")
-	cfg, err = config.Load()
 	fmt.Printf("[DEBUG] Config loaded: %s, env=%s\n", cfg.ServerURL, os.Getenv("EASYDO_SERVER_URL"))
 
 	// Set log level from config

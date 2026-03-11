@@ -18,7 +18,7 @@
       <nav class="sidebar-nav">
         <div class="nav-section">
           <router-link
-            v-for="item in menuItems"
+            v-for="item in filteredMenuItems"
             :key="item.path"
             :to="item.path"
             class="nav-item"
@@ -33,7 +33,7 @@
 
         <div class="nav-section bottom">
           <router-link
-            v-for="item in bottomMenuItems"
+            v-for="item in filteredBottomMenuItems"
             :key="item.path"
             :to="item.path"
             class="nav-item"
@@ -93,6 +93,21 @@
         </div>
 
         <div class="topbar-right">
+          <el-select
+            v-if="userStore.workspaces?.length"
+            :model-value="userStore.currentWorkspaceId || undefined"
+            class="workspace-select"
+            placeholder="选择工作空间"
+            @change="handleWorkspaceChange"
+          >
+            <el-option
+              v-for="workspace in userStore.workspaces"
+              :key="workspace.id"
+              :label="workspace.name"
+              :value="workspace.id"
+            />
+          </el-select>
+
           <div class="time-chip">
             <el-icon :size="15"><Calendar /></el-icon>
             <span>{{ currentDateLabel }}</span>
@@ -234,21 +249,24 @@ const toggleTheme = () => {
 
 const menuItems = [
   { name: '工作台', path: '/', icon: House },
-  { name: '流水线', path: '/pipeline', icon: Connection },
-  { name: '项目', path: '/project', icon: Box },
-  { name: '执行器', path: '/agent', icon: Monitor },
+  { name: '流水线', path: '/pipeline', icon: Connection, permission: 'pipeline.read' },
+  { name: '项目', path: '/project', icon: Box, permission: 'project.read' },
+  { name: '执行器', path: '/agent', icon: Monitor, permission: 'agent.read' },
   { name: '发布', path: '/deploy', icon: Promotion },
-  { name: '密钥管理', path: '/secrets', icon: Key },
-  { name: '统计', path: '/statistics', icon: DataAnalysis },
-  { name: '设置', path: '/settings', icon: Setting }
+  { name: '密钥管理', path: '/secrets', icon: Key, permission: 'credential.read' },
+  { name: '统计', path: '/statistics', icon: DataAnalysis, permission: 'workspace.read' },
+  { name: '设置', path: '/settings', icon: Setting, permission: 'workspace.read' }
 ]
 
 const bottomMenuItems = [
   { name: '消息', path: '/messages', icon: Bell }
 ]
 
+const filteredMenuItems = computed(() => menuItems.filter(item => !item.permission || userStore.hasPermission(item.permission)))
+const filteredBottomMenuItems = computed(() => bottomMenuItems.filter(item => !item.permission || userStore.hasPermission(item.permission)))
+
 const currentPageTitle = computed(() => {
-  const currentRoute = [...menuItems, ...bottomMenuItems].find(item => {
+  const currentRoute = [...filteredMenuItems.value, ...filteredBottomMenuItems.value].find(item => {
     if (item.path === '/') {
       return route.path === '/'
     }
@@ -275,6 +293,14 @@ const handleCommand = (command) => {
     case 'logout':
       handleLogout()
       break
+  }
+}
+
+const handleWorkspaceChange = async (workspaceId) => {
+  userStore.setCurrentWorkspaceById(workspaceId)
+  await userStore.getUserInfoAction()
+  if (route.meta.permission && !userStore.hasPermission(route.meta.permission)) {
+    router.push('/')
   }
 }
 
@@ -662,6 +688,10 @@ const handleLogout = async () => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.workspace-select {
+  width: 220px;
 }
 
 .time-chip {

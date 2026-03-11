@@ -24,11 +24,13 @@ func (h *MessageHandler) GetMessageList(c *gin.Context) {
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 	msgType := c.Query("type")
 	unreadOnly := c.Query("unread_only") == "true"
+	userID := c.GetUint64("user_id")
+	workspaceID := c.GetUint64("workspace_id")
 
 	var messages []models.Message
 	var total int64
 
-	query := h.DB.Model(&models.Message{})
+	query := h.DB.Model(&models.Message{}).Where("recipient_id = ? AND workspace_id = ?", userID, workspaceID)
 
 	if msgType != "" {
 		query = query.Where("type = ?", msgType)
@@ -56,8 +58,10 @@ func (h *MessageHandler) GetMessageList(c *gin.Context) {
 
 // GetUnreadCount returns count of unread messages
 func (h *MessageHandler) GetUnreadCount(c *gin.Context) {
+	userID := c.GetUint64("user_id")
+	workspaceID := c.GetUint64("workspace_id")
 	var count int64
-	h.DB.Model(&models.Message{}).Where("is_read = ?", false).Count(&count)
+	h.DB.Model(&models.Message{}).Where("recipient_id = ? AND workspace_id = ? AND is_read = ?", userID, workspaceID, false).Count(&count)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -70,11 +74,17 @@ func (h *MessageHandler) GetUnreadCount(c *gin.Context) {
 // MarkAsRead marks a message as read
 func (h *MessageHandler) MarkAsRead(c *gin.Context) {
 	id := c.Param("id")
+	userID := c.GetUint64("user_id")
+	workspaceID := c.GetUint64("workspace_id")
 
-	h.DB.Model(&models.Message{}).Where("id = ?", id).Updates(map[string]interface{}{
+	result := h.DB.Model(&models.Message{}).Where("id = ? AND recipient_id = ? AND workspace_id = ?", id, userID, workspaceID).Updates(map[string]interface{}{
 		"is_read": true,
 		"read_at": time.Now().Unix(),
 	})
+	if result.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "消息不存在"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
@@ -84,7 +94,9 @@ func (h *MessageHandler) MarkAsRead(c *gin.Context) {
 
 // MarkAllAsRead marks all messages as read
 func (h *MessageHandler) MarkAllAsRead(c *gin.Context) {
-	h.DB.Model(&models.Message{}).Where("is_read = ?", false).Updates(map[string]interface{}{
+	userID := c.GetUint64("user_id")
+	workspaceID := c.GetUint64("workspace_id")
+	h.DB.Model(&models.Message{}).Where("recipient_id = ? AND workspace_id = ? AND is_read = ?", userID, workspaceID, false).Updates(map[string]interface{}{
 		"is_read": true,
 		"read_at": time.Now().Unix(),
 	})
@@ -98,13 +110,15 @@ func (h *MessageHandler) MarkAllAsRead(c *gin.Context) {
 // SendMessageToUser sends a message to a specific user
 func (h *MessageHandler) SendMessageToUser(msg *models.Message, userID uint64) error {
 	message := &models.Message{
-		Type:       msg.Type,
-		Title:      msg.Title,
-		Content:    msg.Content,
-		SenderID:   msg.SenderID,
-		SenderType: msg.SenderType,
-		Priority:   msg.Priority,
-		Metadata:   msg.Metadata,
+		WorkspaceID: msg.WorkspaceID,
+		RecipientID: &userID,
+		Type:        msg.Type,
+		Title:       msg.Title,
+		Content:     msg.Content,
+		SenderID:    msg.SenderID,
+		SenderType:  msg.SenderType,
+		Priority:    msg.Priority,
+		Metadata:    msg.Metadata,
 	}
 	return h.DB.Create(message).Error
 }
@@ -116,15 +130,18 @@ func (h *MessageHandler) SendMessageToAllAdmins(msg *models.Message) error {
 		return err
 	}
 
-	for range admins {
+	for _, admin := range admins {
+		adminUserID := admin.ID
 		message := &models.Message{
-			Type:       msg.Type,
-			Title:      msg.Title,
-			Content:    msg.Content,
-			SenderID:   msg.SenderID,
-			SenderType: msg.SenderType,
-			Priority:   msg.Priority,
-			Metadata:   msg.Metadata,
+			WorkspaceID: msg.WorkspaceID,
+			RecipientID: &adminUserID,
+			Type:        msg.Type,
+			Title:       msg.Title,
+			Content:     msg.Content,
+			SenderID:    msg.SenderID,
+			SenderType:  msg.SenderType,
+			Priority:    msg.Priority,
+			Metadata:    msg.Metadata,
 		}
 		if err := h.DB.Create(message).Error; err != nil {
 			return err
