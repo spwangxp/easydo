@@ -79,7 +79,7 @@ func TestGetTaskList_IncludeScheduleFieldsAndFilters(t *testing.T) {
 		NodeID:        "task-3",
 		TaskType:      "shell",
 		Name:          "compile-task",
-		Status:        models.TaskStatusPending,
+		Status:        models.TaskStatusAssigned,
 		Timeout:       60,
 	}
 	otherTask := models.AgentTask{
@@ -88,7 +88,7 @@ func TestGetTaskList_IncludeScheduleFieldsAndFilters(t *testing.T) {
 		NodeID:        "task-4",
 		TaskType:      "shell",
 		Name:          "other-task",
-		Status:        models.TaskStatusPending,
+		Status:        models.TaskStatusAssigned,
 		Timeout:       60,
 	}
 	if err := db.Create(&targetTask).Error; err != nil {
@@ -101,7 +101,7 @@ func TestGetTaskList_IncludeScheduleFieldsAndFilters(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
-	c.Request.URL.RawQuery = "include_schedule=1&agent_id=" + strconv.FormatUint(targetTask.AgentID, 10) + "&status=pending&run_status=running&page=1&page_size=20"
+	c.Request.URL.RawQuery = "include_schedule=1&agent_id=" + strconv.FormatUint(targetTask.AgentID, 10) + "&status=assigned&run_status=running&page=1&page_size=20"
 
 	h.GetTaskList(c)
 

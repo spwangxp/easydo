@@ -10,38 +10,38 @@ func TestIsValidTaskStatusTransition(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "queued to pending",
+			name: "queued to assigned",
 			from: "queued",
-			to:   "pending",
+			to:   "assigned",
 			want: true,
 		},
 		{
-			name: "pending to running",
-			from: "pending",
-			to:   "running",
+			name: "assigned to dispatching",
+			from: "assigned",
+			to:   "dispatching",
 			want: true,
 		},
 		{
-			name: "running to success",
+			name: "running to execute_success",
 			from: "running",
-			to:   "success",
+			to:   "execute_success",
 			want: true,
 		},
 		{
-			name: "running to failed",
+			name: "running to execute_failed",
 			from: "running",
-			to:   "failed",
+			to:   "execute_failed",
 			want: true,
 		},
 		{
-			name: "pending to success is invalid",
-			from: "pending",
-			to:   "success",
+			name: "assigned to execute_success is invalid",
+			from: "assigned",
+			to:   "execute_success",
 			want: false,
 		},
 		{
-			name: "success to running is invalid",
-			from: "success",
+			name: "execute_success to running is invalid",
+			from: "execute_success",
 			to:   "running",
 			want: false,
 		},
@@ -60,7 +60,7 @@ func TestIsValidTaskStatusTransition(t *testing.T) {
 func TestBuildTaskUpdateIdempotencyKey(t *testing.T) {
 	k1 := buildTaskUpdateIdempotencyKey(101, 1, "running", 0)
 	k2 := buildTaskUpdateIdempotencyKey(101, 1, "running", 0)
-	k3 := buildTaskUpdateIdempotencyKey(101, 1, "success", 0)
+	k3 := buildTaskUpdateIdempotencyKey(101, 1, "execute_success", 0)
 
 	if k1 == "" {
 		t.Fatal("idempotency key should not be empty")

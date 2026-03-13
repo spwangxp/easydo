@@ -286,12 +286,23 @@ const formatDateTime = (dateStr) => {
 const getStatusType = (status) => {
   switch (status) {
     case 'success':
+    case 'execute_success':
       return 'success'
     case 'running':
       return 'warning'
     case 'failed':
+    case 'execute_failed':
+    case 'schedule_failed':
+    case 'dispatch_timeout':
+    case 'lease_expired':
       return 'danger'
-    case 'pending':
+    case 'queued':
+    case 'assigned':
+    case 'dispatching':
+    case 'pulling':
+    case 'acked':
+      return 'warning'
+    case 'cancelled':
       return 'info'
     default:
       return 'info'
@@ -301,13 +312,31 @@ const getStatusType = (status) => {
 const getStatusText = (status) => {
   switch (status) {
     case 'success':
+    case 'execute_success':
       return '成功'
     case 'running':
       return '运行中'
     case 'failed':
+    case 'execute_failed':
       return '失败'
-    case 'pending':
-      return '等待中'
+    case 'schedule_failed':
+      return '调度失败'
+    case 'dispatch_timeout':
+      return '派发超时'
+    case 'lease_expired':
+      return '租约失效'
+    case 'queued':
+      return '排队中'
+    case 'assigned':
+      return '已分配'
+    case 'dispatching':
+      return '派发中'
+    case 'pulling':
+      return '等待拉取'
+    case 'acked':
+      return '已确认'
+    case 'cancelled':
+      return '已取消'
     default:
       return status
   }

@@ -37,8 +37,9 @@ func InitDB() {
 	sqlDB.SetMaxIdleConns(config.Config.GetInt("database.max_idle_conns"))
 	sqlDB.SetConnMaxLifetime(config.Config.GetDuration("database.max_life_time"))
 
-	// 自动迁移
-	autoMigrate()
+	if config.ShouldAutoMigrate() {
+		autoMigrate()
+	}
 
 	// 加载或创建主密钥（持久化在数据库）
 	if _, err := LoadOrCreateMasterKey(DB); err != nil {
@@ -63,6 +64,7 @@ func autoMigrate() {
 		&AgentLog{},
 		&AgentTaskEvent{},
 		&AgentLogChunk{},
+		&AgentLogSegment{},
 		&Secret{},
 		&SecretUsage{},
 		&SecretAuditLog{},
@@ -79,11 +81,11 @@ func autoMigrate() {
 		&MasterKey{},
 	)
 
-	// 初始化测试用户
-	initTestUsers()
-	initTestWorkspaces()
-	// 初始化测试项目
-	initTestProjects()
+	if config.ShouldSeedTestData() {
+		initTestUsers()
+		initTestWorkspaces()
+		initTestProjects()
+	}
 }
 
 func initTestUsers() {

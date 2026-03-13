@@ -78,6 +78,8 @@
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
+import { getRunLogs } from '@/api/pipeline'
+import { getTaskLogs } from '@/api/task'
 import {
   Bottom,
   Delete,
@@ -92,6 +94,10 @@ const props = defineProps({
     default: null
   },
   pipelineRunId: {
+    type: Number,
+    default: null
+  },
+  pipelineId: {
     type: Number,
     default: null
   },
@@ -126,26 +132,15 @@ const refreshLogs = async () => {
   
   loading.value = true
   try {
-    let url = ''
-    let params = {}
-    
+    let response = null
     if (props.taskId) {
-      url = `/api/tasks/${props.taskId}/logs`
-    } else if (props.pipelineRunId) {
-      url = `/api/pipelines/1/runs/${props.pipelineRunId}/logs` // TODO: 需要传入pipelineId
-      params = { pipeline_id: props.pipelineRunId }
+      response = await getTaskLogs(props.taskId)
+    } else if (props.pipelineId && props.pipelineRunId) {
+      response = await getRunLogs(props.pipelineId, props.pipelineRunId)
     }
-    
-    const response = await fetch(`${url}?${new URLSearchParams(params).toString()}`, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${localStorage.getItem('token')}`
-      }
-    })
-    
-    const data = await response.json()
-    if (data.code === 200) {
-      logs.value = data.data.list || []
+
+    if (response?.code === 200) {
+      logs.value = response.data.list || []
       await nextTick()
       scrollToBottom()
     }

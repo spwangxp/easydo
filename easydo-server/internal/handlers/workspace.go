@@ -152,6 +152,7 @@ func (h *WorkspaceHandler) CreateWorkspace(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "创建工作空间成员失败: " + err.Error()})
 		return
 	}
+	_ = middleware.BumpWorkspaceAuthVersion(c.Request.Context(), workspace.ID)
 	c.JSON(http.StatusOK, gin.H{"code": 200, "data": workspace})
 }
 
@@ -208,6 +209,7 @@ func (h *WorkspaceHandler) UpdateWorkspace(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "更新工作空间失败"})
 		return
 	}
+	_ = middleware.BumpWorkspaceAuthVersion(c.Request.Context(), workspaceID)
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "更新成功"})
 }
 
@@ -272,6 +274,7 @@ func (h *WorkspaceHandler) UpdateMember(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "更新成员角色失败"})
 		return
 	}
+	_ = middleware.BumpWorkspaceAuthVersion(c.Request.Context(), workspaceID)
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "更新成功"})
 }
 
@@ -296,6 +299,7 @@ func (h *WorkspaceHandler) RemoveMember(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "移除成员失败"})
 		return
 	}
+	_ = middleware.BumpWorkspaceAuthVersion(c.Request.Context(), workspaceID)
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "移除成功"})
 }
 
@@ -425,6 +429,7 @@ func (h *WorkspaceHandler) AcceptInvitation(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "接受邀请失败"})
 		return
 	}
+	_ = middleware.BumpWorkspaceAuthVersion(c.Request.Context(), invitation.WorkspaceID)
 	acceptedByUser := user.ID
 	if err := h.DB.Model(&invitation).Updates(map[string]interface{}{
 		"status":           models.WorkspaceInvitationStatusAccepted,

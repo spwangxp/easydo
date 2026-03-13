@@ -55,27 +55,32 @@ const (
 // AgentTask represents a task assigned to an agent
 type AgentTask struct {
 	BaseModel
-	WorkspaceID   uint64 `gorm:"index" json:"workspace_id"`
-	AgentID       uint64 `gorm:"index;not null" json:"agent_id"`
-	PipelineRunID uint64 `gorm:"index" json:"pipeline_run_id"`      // Associated pipeline run
-	NodeID        string `gorm:"size:128;index" json:"node_id"`     // Node ID in pipeline config
-	TaskType      string `gorm:"size:64;not null" json:"task_type"` // shell, docker, git_clone, email
-	Name          string `gorm:"size:256" json:"name"`
-	Params        string `gorm:"type:longtext" json:"params"`             // 任务参数（执行时的快照）
-	Script        string `gorm:"type:longtext" json:"script"`             // 执行脚本（执行时的快照）
-	WorkDir       string `gorm:"size:512" json:"work_dir"`                // 工作目录
-	EnvVars       string `gorm:"type:text" json:"env_vars"`               // 环境变量
-	Status        string `gorm:"size:32;default:'pending'" json:"status"` // pending, running, success, failed, cancelled
-	Priority      int    `gorm:"default:0" json:"priority"`               // 调度优先级
-	Timeout       int    `gorm:"default:3600" json:"timeout"`             // 超时时间（秒）
-	RetryCount    int    `gorm:"default:0" json:"retry_count"`            // 当前重试次数
-	MaxRetries    int    `gorm:"default:3" json:"max_retries"`            // 最大重试次数
-	ExitCode      int    `gorm:"default:0" json:"exit_code"`              // 退出码
-	ErrorMsg      string `gorm:"type:text" json:"error_msg"`              // 错误信息
-	StartTime     int64  `json:"start_time"`                              // 开始时间
-	EndTime       int64  `json:"end_time"`                                // 结束时间
-	Duration      int    `json:"duration"`                                // 缓存的执行时长（秒）
-	ResultData    string `gorm:"type:longtext" json:"result_data"`        // JSON 结果数据（outputs）
+	WorkspaceID     uint64 `gorm:"index" json:"workspace_id"`
+	AgentID         uint64 `gorm:"index;not null" json:"agent_id"`
+	PipelineRunID   uint64 `gorm:"index;uniqueIndex:idx_task_run_node" json:"pipeline_run_id"`  // Associated pipeline run
+	NodeID          string `gorm:"size:128;index;uniqueIndex:idx_task_run_node" json:"node_id"` // Node ID in pipeline config
+	TaskType        string `gorm:"size:64;not null" json:"task_type"`                           // shell, docker, git_clone, email
+	Name            string `gorm:"size:256" json:"name"`
+	Params          string `gorm:"type:longtext" json:"params"` // 任务参数（执行时的快照）
+	Script          string `gorm:"type:longtext" json:"script"` // 执行脚本（执行时的快照）
+	WorkDir         string `gorm:"size:512" json:"work_dir"`    // 工作目录
+	EnvVars         string `gorm:"type:text" json:"env_vars"`   // 环境变量
+	Status          string `gorm:"size:32;default:'queued';index" json:"status"`
+	DispatchToken   string `gorm:"size:64;index" json:"dispatch_token"`
+	DispatchAttempt int    `gorm:"default:0" json:"dispatch_attempt"`
+	LeaseExpireAt   int64  `gorm:"default:0;index" json:"lease_expire_at"`
+	AgentSessionID  string `gorm:"size:64;index" json:"agent_session_id"`
+	OwnerServerID   string `gorm:"size:128;index" json:"owner_server_id"`
+	Priority        int    `gorm:"default:0" json:"priority"`        // 调度优先级
+	Timeout         int    `gorm:"default:3600" json:"timeout"`      // 超时时间（秒）
+	RetryCount      int    `gorm:"default:0" json:"retry_count"`     // 当前重试次数
+	MaxRetries      int    `gorm:"default:3" json:"max_retries"`     // 最大重试次数
+	ExitCode        int    `gorm:"default:0" json:"exit_code"`       // 退出码
+	ErrorMsg        string `gorm:"type:text" json:"error_msg"`       // 错误信息
+	StartTime       int64  `json:"start_time"`                       // 开始时间
+	EndTime         int64  `json:"end_time"`                         // 结束时间
+	Duration        int    `json:"duration"`                         // 缓存的执行时长（秒）
+	ResultData      string `gorm:"type:longtext" json:"result_data"` // JSON 结果数据（outputs）
 
 	// 代码仓库信息（每个任务可能对应不同仓库）
 	RepoURL    string `gorm:"size:512" json:"repo_url"`    // 仓库地址
@@ -92,20 +97,26 @@ type AgentTask struct {
 
 // TaskStatus constants
 const (
-	TaskStatusQueued    = "queued"
-	TaskStatusPending   = "pending"
-	TaskStatusRunning   = "running"
-	TaskStatusSuccess   = "success"
-	TaskStatusFailed    = "failed"
-	TaskStatusCancelled = "cancelled"
+	TaskStatusQueued          = "queued"
+	TaskStatusAssigned        = "assigned"
+	TaskStatusDispatching     = "dispatching"
+	TaskStatusPulling         = "pulling"
+	TaskStatusAcked           = "acked"
+	TaskStatusRunning         = "running"
+	TaskStatusExecuteSuccess  = "execute_success"
+	TaskStatusExecuteFailed   = "execute_failed"
+	TaskStatusScheduleFailed  = "schedule_failed"
+	TaskStatusDispatchTimeout = "dispatch_timeout"
+	TaskStatusLeaseExpired    = "lease_expired"
+	TaskStatusCancelled       = "cancelled"
 )
 
 // TaskExecution represents a single execution attempt of a task
 type TaskExecution struct {
 	BaseModel
 	TaskID    uint64 `gorm:"index;not null" json:"task_id"`
-	Attempt   int    `gorm:"not null" json:"attempt"`                 // Attempt number (1, 2, 3...)
-	Status    string `gorm:"size:32;default:'pending'" json:"status"` // pending, running, success, failed
+	Attempt   int    `gorm:"not null" json:"attempt"` // Attempt number (1, 2, 3...)
+	Status    string `gorm:"size:32;default:'assigned'" json:"status"`
 	StartTime int64  `json:"start_time"`
 	EndTime   int64  `json:"end_time"`
 	Duration  int    `json:"duration"`                    // Duration in seconds
@@ -150,6 +161,7 @@ type AgentTaskEvent struct {
 	TaskID         uint64 `gorm:"not null;index;uniqueIndex:idx_task_attempt_idem" json:"task_id"`
 	PipelineRunID  uint64 `gorm:"index" json:"pipeline_run_id"`
 	AgentID        uint64 `gorm:"index" json:"agent_id"`
+	AgentSessionID string `gorm:"size:64;index" json:"agent_session_id"`
 	Attempt        int    `gorm:"not null;default:1;uniqueIndex:idx_task_attempt_idem" json:"attempt"`
 	Status         string `gorm:"size:32;not null" json:"status"`
 	IdempotencyKey string `gorm:"size:128;not null;uniqueIndex:idx_task_attempt_idem" json:"idempotency_key"`
@@ -161,13 +173,32 @@ type AgentTaskEvent struct {
 // AgentLogChunk stores ordered log chunks with deduplication key
 type AgentLogChunk struct {
 	BaseModel
-	TaskID        uint64 `gorm:"not null;index" json:"task_id"`
+	TaskID         uint64 `gorm:"not null;index" json:"task_id"`
+	PipelineRunID  uint64 `gorm:"index" json:"pipeline_run_id"`
+	AgentID        uint64 `gorm:"index" json:"agent_id"`
+	AgentSessionID string `gorm:"size:64;index" json:"agent_session_id"`
+	Attempt        int    `gorm:"not null;default:1" json:"attempt"`
+	Seq            int64  `gorm:"not null" json:"seq"`
+	Stream         string `gorm:"size:16;default:'stdout'" json:"stream"`
+	Chunk          string `gorm:"type:longtext" json:"chunk"`
+	Timestamp      int64  `gorm:"not null" json:"timestamp"`
+	UniqueKey      string `gorm:"size:128;not null;uniqueIndex" json:"unique_key"`
+}
+
+type AgentLogSegment struct {
+	BaseModel
+	TaskID        uint64 `gorm:"not null;index;uniqueIndex:idx_task_attempt_segment" json:"task_id"`
 	PipelineRunID uint64 `gorm:"index" json:"pipeline_run_id"`
 	AgentID       uint64 `gorm:"index" json:"agent_id"`
-	Attempt       int    `gorm:"not null;default:1" json:"attempt"`
-	Seq           int64  `gorm:"not null" json:"seq"`
-	Stream        string `gorm:"size:16;default:'stdout'" json:"stream"`
-	Chunk         string `gorm:"type:longtext" json:"chunk"`
-	Timestamp     int64  `gorm:"not null" json:"timestamp"`
-	UniqueKey     string `gorm:"size:128;not null;uniqueIndex" json:"unique_key"`
+	Attempt       int    `gorm:"not null;default:1;uniqueIndex:idx_task_attempt_segment" json:"attempt"`
+	SegmentNo     int    `gorm:"not null;uniqueIndex:idx_task_attempt_segment" json:"segment_no"`
+	StartSeq      int64  `gorm:"not null" json:"start_seq"`
+	EndSeq        int64  `gorm:"not null" json:"end_seq"`
+	LineCount     int    `gorm:"default:0" json:"line_count"`
+	ObjectKey     string `gorm:"size:512;not null;index" json:"object_key"`
+	ObjectBucket  string `gorm:"size:128;not null" json:"object_bucket"`
+	ObjectSize    int64  `gorm:"default:0" json:"object_size"`
+	ContentType   string `gorm:"size:64;default:'application/gzip'" json:"content_type"`
+	Checksum      string `gorm:"size:128" json:"checksum"`
+	Completed     bool   `gorm:"default:false" json:"completed"`
 }

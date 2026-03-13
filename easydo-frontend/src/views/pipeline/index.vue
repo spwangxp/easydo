@@ -124,10 +124,10 @@
             <div v-if="row.last_build" class="last-build">
               <span class="build-time">{{ formatRelativeTime(row.last_build.created_at) }}</span>
               <span class="build-number">#{{ row.last_build.build_number }}</span>
-              <el-icon v-if="row.last_build.status === 'success'" class="status-icon success"><CircleCheck /></el-icon>
+              <el-icon v-if="['success', 'execute_success'].includes(row.last_build.status)" class="status-icon success"><CircleCheck /></el-icon>
               <el-icon v-else-if="row.last_build.status === 'running'" class="status-icon running"><Loading /></el-icon>
-              <el-icon v-else-if="row.last_build.status === 'failed'" class="status-icon failed"><CircleClose /></el-icon>
-              <el-icon v-else-if="row.last_build.status === 'queued' || row.last_build.status === 'pending'" class="status-icon pending"><Clock /></el-icon>
+              <el-icon v-else-if="['failed', 'execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(row.last_build.status)" class="status-icon failed"><CircleClose /></el-icon>
+              <el-icon v-else-if="['queued', 'assigned', 'dispatching', 'pulling', 'acked', 'cancelled'].includes(row.last_build.status)" class="status-icon pending"><Clock /></el-icon>
               <el-icon v-else class="status-icon warning"><Warning /></el-icon>
             </div>
             <span v-else class="no-build">无构建</span>

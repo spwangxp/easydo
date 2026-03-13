@@ -1,18 +1,19 @@
 package handlers
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
+
+	"easydo-server/internal/models"
 )
 
-func TestFileLogStoreAppendAndQuery(t *testing.T) {
-	t.Setenv("EASYDO_LOG_DIR", t.TempDir())
-
-	store := newFileLogStore()
+func TestTaskLogStoreAppendAndQuery(t *testing.T) {
+	models.DB = openHandlerTestDB(t)
+	store := newTaskLogStore()
 	now := time.Now().Unix()
 
 	if err := store.Append(fileLogEntry{
+		AgentID:       1,
 		TaskID:        11,
 		PipelineRunID: 101,
 		Level:         "info",
@@ -20,10 +21,13 @@ func TestFileLogStoreAppendAndQuery(t *testing.T) {
 		Source:        "stdout",
 		Timestamp:     now,
 		LineNumber:    1,
+		Attempt:       1,
+		Seq:           1,
 	}); err != nil {
 		t.Fatalf("append first log failed: %v", err)
 	}
 	if err := store.Append(fileLogEntry{
+		AgentID:       1,
 		TaskID:        12,
 		PipelineRunID: 101,
 		Level:         "error",
@@ -31,6 +35,8 @@ func TestFileLogStoreAppendAndQuery(t *testing.T) {
 		Source:        "stderr",
 		Timestamp:     now + 1,
 		LineNumber:    2,
+		Attempt:       1,
+		Seq:           2,
 	}); err != nil {
 		t.Fatalf("append second log failed: %v", err)
 	}
@@ -71,14 +77,74 @@ func TestFileLogStoreAppendAndQuery(t *testing.T) {
 	}
 }
 
-func TestFileLogStorePath(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("EASYDO_LOG_DIR", dir)
+func TestTaskLogStoreLiveQuery(t *testing.T) {
+	models.DB = openHandlerTestDB(t)
+	store := newTaskLogStore()
+	if err := store.Append(fileLogEntry{AgentID: 2, TaskID: 21, PipelineRunID: 201, Level: "info", Message: "one", Source: "stdout", Timestamp: time.Now().Unix(), Attempt: 1, Seq: 1}); err != nil {
+		t.Fatalf("append log failed: %v", err)
+	}
+	if err := store.Append(fileLogEntry{AgentID: 2, TaskID: 21, PipelineRunID: 201, Level: "info", Message: "two", Source: "stdout", Timestamp: time.Now().Unix(), Attempt: 1, Seq: 2}); err != nil {
+		t.Fatalf("append log failed: %v", err)
+	}
+	entries, err := store.QueryLiveTaskLogs(21, 1, 1)
+	if err != nil {
+		t.Fatalf("query live logs failed: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Message != "two" {
+		t.Fatalf("unexpected live log query result: %+v", entries)
+	}
+}
 
-	store := newFileLogStore()
-	path := store.runLogFilePath(123)
-	want := filepath.Join(dir, "run_123.log")
-	if path != want {
-		t.Fatalf("unexpected path: got %q want %q", path, want)
+func TestTaskLogStoreQueryTaskLogs_IncludesPersistedChunkRowsAfterOwnerCrash(t *testing.T) {
+	models.DB = openHandlerTestDB(t)
+	store := newTaskLogStore()
+	now := time.Now().Unix()
+
+	chunks := []models.AgentLogChunk{
+		{TaskID: 31, PipelineRunID: 301, AgentID: 1, AgentSessionID: "session-a", Attempt: 1, Seq: 1, Stream: "stdout", Chunk: "start", Timestamp: now, UniqueKey: "31:1:1"},
+		{TaskID: 31, PipelineRunID: 301, AgentID: 1, AgentSessionID: "session-a", Attempt: 1, Seq: 2, Stream: "stdout", Chunk: "mid", Timestamp: now + 1, UniqueKey: "31:1:2"},
+		{TaskID: 31, PipelineRunID: 301, AgentID: 1, AgentSessionID: "session-b", Attempt: 1, Seq: 3, Stream: "stdout", Chunk: "done", Timestamp: now + 2, UniqueKey: "31:1:3"},
+	}
+	for _, chunk := range chunks {
+		copy := chunk
+		if err := models.DB.Create(&copy).Error; err != nil {
+			t.Fatalf("create log chunk failed: %v", err)
+		}
+	}
+
+	logs, err := store.QueryTaskLogs(301, 31, "")
+	if err != nil {
+		t.Fatalf("query task logs failed: %v", err)
+	}
+	if len(logs) != 3 {
+		t.Fatalf("expected 3 logs from persisted chunks, got %d: %+v", len(logs), logs)
+	}
+	if logs[0].Message != "start" || logs[1].Message != "mid" || logs[2].Message != "done" {
+		t.Fatalf("unexpected log ordering/messages: %+v", logs)
+	}
+}
+
+func TestTaskLogStoreQueryTaskLogs_DedupesPersistedChunksAndLiveBuffer(t *testing.T) {
+	models.DB = openHandlerTestDB(t)
+	store := newTaskLogStore()
+	now := time.Now().Unix()
+
+	chunk := models.AgentLogChunk{TaskID: 41, PipelineRunID: 401, AgentID: 1, AgentSessionID: "session-a", Attempt: 1, Seq: 1, Stream: "stdout", Chunk: "only-once", Timestamp: now, UniqueKey: "41:1:1"}
+	if err := models.DB.Create(&chunk).Error; err != nil {
+		t.Fatalf("create log chunk failed: %v", err)
+	}
+	if err := store.Append(fileLogEntry{AgentID: 1, TaskID: 41, PipelineRunID: 401, Level: "info", Message: "only-once", Source: "stdout", Timestamp: now, Attempt: 1, Seq: 1}); err != nil {
+		t.Fatalf("append live log failed: %v", err)
+	}
+
+	logs, err := store.QueryTaskLogs(401, 41, "")
+	if err != nil {
+		t.Fatalf("query task logs failed: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected deduped single log, got %d: %+v", len(logs), logs)
+	}
+	if logs[0].Message != "only-once" {
+		t.Fatalf("unexpected log message: %+v", logs)
 	}
 }

@@ -14,7 +14,11 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// TaskHandler handles websocket task assignment and execution
+// TaskHandler orchestrates agent-side execution and reporting.
+//
+// Besides launching work locally, it also preserves the reporting contract the
+// server relies on to converge run/task state. Terminal status/log messages may
+// need to survive temporary WS outages and be replayed after reconnect.
 type TaskHandler struct {
 	httpClient *client.HTTPClient
 	wsClient   *client.WebSocketClient
@@ -29,6 +33,15 @@ type TaskHandler struct {
 	stopChan   chan struct{}
 	runCtx     context.Context
 	inFlight   sync.Map
+	pendingMu  sync.Mutex
+	pendingWS  []pendingWebSocketMessage
+}
+
+// pendingWebSocketMessage stores one outbound WS message that could not be sent
+// immediately and therefore must be replayed after reconnect.
+type pendingWebSocketMessage struct {
+	messageType string
+	payload     map[string]interface{}
 }
 
 // NewTaskHandler creates a new task handler
@@ -46,21 +59,23 @@ func NewTaskHandler(httpClient *client.HTTPClient, wsClient *client.WebSocketCli
 
 // Task represents a task to be executed
 type Task struct {
-	ID            uint64 `json:"id"`
-	AgentID       uint64 `json:"agent_id"`
-	PipelineRunID uint64 `json:"pipeline_run_id"`
-	NodeID        string `json:"node_id"`
-	TaskType      string `json:"task_type"`
-	Name          string `json:"name"`
-	Params        string `json:"params"`
-	Script        string `json:"script"`
-	WorkDir       string `json:"work_dir"`
-	EnvVars       string `json:"env_vars"`
-	Status        string `json:"status"`
-	Priority      int    `json:"priority"`
-	Timeout       int    `json:"timeout"`
-	RetryCount    int    `json:"retry_count"`
-	MaxRetries    int    `json:"max_retries"`
+	ID              uint64 `json:"id"`
+	AgentID         uint64 `json:"agent_id"`
+	PipelineRunID   uint64 `json:"pipeline_run_id"`
+	NodeID          string `json:"node_id"`
+	TaskType        string `json:"task_type"`
+	Name            string `json:"name"`
+	Params          string `json:"params"`
+	Script          string `json:"script"`
+	WorkDir         string `json:"work_dir"`
+	EnvVars         string `json:"env_vars"`
+	Status          string `json:"status"`
+	Priority        int    `json:"priority"`
+	Timeout         int    `json:"timeout"`
+	RetryCount      int    `json:"retry_count"`
+	MaxRetries      int    `json:"max_retries"`
+	DispatchToken   string `json:"dispatch_token"`
+	DispatchAttempt int    `json:"dispatch_attempt"`
 }
 
 // SetToken sets the agent token
@@ -77,11 +92,16 @@ func (th *TaskHandler) SetAgentID(agentID uint64) {
 	th.mu.Unlock()
 }
 
-// SetWebSocketClient sets the WebSocket client
+// SetWebSocketClient swaps the active WS transport and wires reconnect replay.
+// Any successful reconnect should trigger a flush of buffered terminal/log
+// messages so the server can continue state convergence after owner failover.
 func (th *TaskHandler) SetWebSocketClient(wsClient *client.WebSocketClient) {
 	th.mu.Lock()
 	th.wsClient = wsClient
 	th.mu.Unlock()
+	if wsClient != nil {
+		wsClient.SetReconnectHandler(th.flushPendingWebSocketMessages)
+	}
 }
 
 // HandleTaskAssign handles concrete task assignment from server via WebSocket.
@@ -91,27 +111,29 @@ func (th *TaskHandler) HandleTaskAssign(msg *client.TaskAssignMessage) error {
 	}
 
 	t := Task{
-		ID:            msg.Task.ID,
-		AgentID:       msg.Task.AgentID,
-		PipelineRunID: msg.Task.PipelineRunID,
-		NodeID:        msg.Task.NodeID,
-		TaskType:      msg.Task.TaskType,
-		Name:          msg.Task.Name,
-		Params:        msg.Task.Params,
-		Script:        msg.Task.Script,
-		WorkDir:       msg.Task.WorkDir,
-		EnvVars:       msg.Task.EnvVars,
-		Status:        msg.Task.Status,
-		Priority:      msg.Task.Priority,
-		Timeout:       msg.Task.Timeout,
-		RetryCount:    msg.Task.RetryCount,
-		MaxRetries:    msg.Task.MaxRetries,
+		ID:              msg.Task.ID,
+		AgentID:         msg.Task.AgentID,
+		PipelineRunID:   msg.Task.PipelineRunID,
+		NodeID:          msg.Task.NodeID,
+		TaskType:        msg.Task.TaskType,
+		Name:            msg.Task.Name,
+		Params:          msg.Task.Params,
+		Script:          msg.Task.Script,
+		WorkDir:         msg.Task.WorkDir,
+		EnvVars:         msg.Task.EnvVars,
+		Status:          msg.Task.Status,
+		Priority:        msg.Task.Priority,
+		Timeout:         msg.Task.Timeout,
+		RetryCount:      msg.Task.RetryCount,
+		MaxRetries:      msg.Task.MaxRetries,
+		DispatchToken:   msg.Task.DispatchToken,
+		DispatchAttempt: msg.Task.DispatchAttempt,
 	}
 
 	if t.ID == 0 {
 		return fmt.Errorf("invalid task id")
 	}
-	if t.Status != "" && t.Status != "pending" {
+	if t.Status != "" && t.Status != "acked" && t.Status != "running" {
 		th.log.Infof("Skip task assignment %d with status %s", t.ID, t.Status)
 		return nil
 	}
@@ -134,6 +156,24 @@ func (th *TaskHandler) HandleTaskAssign(msg *client.TaskAssignMessage) error {
 	}(t)
 
 	return nil
+}
+
+func (th *TaskHandler) HandlePullTaskNow(taskID uint64, dispatchToken string) error {
+	th.mu.RLock()
+	wsClient := th.wsClient
+	th.mu.RUnlock()
+	if wsClient == nil || !wsClient.IsConnected() {
+		return fmt.Errorf("websocket unavailable")
+	}
+	payload := map[string]interface{}{
+		"task_id":        taskID,
+		"dispatch_token": dispatchToken,
+		"timestamp":      time.Now().Unix(),
+	}
+	if sessionID := wsClient.GetSessionID(); sessionID != "" {
+		payload["agent_session_id"] = sessionID
+	}
+	return wsClient.SendMessage("pull_task", payload)
 }
 
 // HandlePipelineAssign handles pipeline assignment from server via WebSocket
@@ -224,10 +264,10 @@ func (th *TaskHandler) executePipeline(msg *client.PipelineAssignMessage) error 
 			success := nodeSuccess[nodeID]
 			dagEngine.MarkCompleted(nodeID, success, outputs)
 
-			status := "success"
+			status := "execute_success"
 			duration := result.Duration.Seconds()
 			if !success {
-				status = "failed"
+				status = "execute_failed"
 			}
 			th.reportPipelineStatus(msg.RunID, nodeID, status, result.ExitCode, result.Error, duration)
 		}
@@ -326,7 +366,7 @@ func (th *TaskHandler) executeNode(runID uint64, node *task.PipelineNode) (*task
 	}
 
 	// Report final status
-	finalStatus := "success"
+	finalStatus := "execute_success"
 	finalExitCode := 0
 	finalErrorMsg := ""
 	finalDuration := float64(0)
@@ -335,7 +375,7 @@ func (th *TaskHandler) executeNode(runID uint64, node *task.PipelineNode) (*task
 		finalExitCode = lastResult.ExitCode
 		finalDuration = lastResult.Duration.Seconds()
 		if !success {
-			finalStatus = "failed"
+			finalStatus = "execute_failed"
 			finalErrorMsg = lastResult.Error
 			if finalErrorMsg == "" && finalExitCode != 0 {
 				finalErrorMsg = fmt.Sprintf("command exited with code %d", finalExitCode)
@@ -465,9 +505,9 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 	result := th.executor.Execute(ctx, *params)
 
 	// Report task completion with actual duration
-	status := "success"
+	status := "execute_success"
 	if result.Error != "" || result.ExitCode != 0 {
-		status = "failed"
+		status = "execute_failed"
 	}
 
 	finalResult := map[string]interface{}{
@@ -510,13 +550,13 @@ func (t *Task) ParseParams() (*task.TaskParams, error) {
 }
 
 func (th *TaskHandler) reportTaskUpdateV2(t *Task, attempt int, status string, exitCode int, errorMsg string, durationMs int64, result map[string]interface{}) error {
+	// Only terminal execution states are replay-buffered on failure. Non-terminal
+	// progress can be regenerated by a still-running executor, but losing the final
+	// completion/failure event would leave the server-side run stuck forever.
 	th.mu.RLock()
 	wsClient := th.wsClient
 	th.mu.RUnlock()
-
-	if wsClient == nil || !wsClient.IsConnected() {
-		return fmt.Errorf("websocket unavailable")
-	}
+	queueOnFailure := status == "execute_success" || status == "execute_failed"
 
 	payload := map[string]interface{}{
 		"task_id":         t.ID,
@@ -532,17 +572,29 @@ func (th *TaskHandler) reportTaskUpdateV2(t *Task, attempt int, status string, e
 		payload["result"] = result
 	}
 
-	return wsClient.SendMessage("task_update_v2", payload)
+	if wsClient == nil || !wsClient.IsConnected() {
+		if queueOnFailure {
+			th.enqueuePendingWebSocketMessage("task_update_v2", payload)
+		}
+		return fmt.Errorf("websocket unavailable")
+	}
+
+	if err := wsClient.SendMessage("task_update_v2", payload); err != nil {
+		if queueOnFailure {
+			th.enqueuePendingWebSocketMessage("task_update_v2", payload)
+		}
+		return err
+	}
+	return nil
 }
 
 func (th *TaskHandler) reportTaskLogChunkV2(t *Task, attempt int, seq int64, stream, chunk string) error {
+	// Log chunks are safe to replay because the server persists them idempotently
+	// by `(task_id, attempt, seq)`. In reconnect scenarios, duplication is less
+	// harmful than silently dropping lines.
 	th.mu.RLock()
 	wsClient := th.wsClient
 	th.mu.RUnlock()
-
-	if wsClient == nil || !wsClient.IsConnected() {
-		return fmt.Errorf("websocket unavailable")
-	}
 
 	if stream == "" {
 		stream = "stdout"
@@ -557,17 +609,24 @@ func (th *TaskHandler) reportTaskLogChunkV2(t *Task, attempt int, seq int64, str
 		"timestamp": time.Now().Unix(),
 	}
 
-	return wsClient.SendMessage("task_log_chunk_v2", payload)
+	if wsClient == nil || !wsClient.IsConnected() {
+		th.enqueuePendingWebSocketMessage("task_log_chunk_v2", payload)
+		return fmt.Errorf("websocket unavailable")
+	}
+	if err := wsClient.SendMessage("task_log_chunk_v2", payload); err != nil {
+		th.enqueuePendingWebSocketMessage("task_log_chunk_v2", payload)
+		return err
+	}
+	return nil
 }
 
 func (th *TaskHandler) reportTaskLogEndV2(t *Task, attempt int, finalSeq int64) error {
+	// The server uses log_end as the signal that it can seal completed-log history
+	// for the attempt, so this marker must survive disconnect windows just like the
+	// terminal task status event does.
 	th.mu.RLock()
 	wsClient := th.wsClient
 	th.mu.RUnlock()
-
-	if wsClient == nil || !wsClient.IsConnected() {
-		return fmt.Errorf("websocket unavailable")
-	}
 
 	payload := map[string]interface{}{
 		"task_id":   t.ID,
@@ -576,7 +635,69 @@ func (th *TaskHandler) reportTaskLogEndV2(t *Task, attempt int, finalSeq int64) 
 		"timestamp": time.Now().Unix(),
 	}
 
-	return wsClient.SendMessage("task_log_end_v2", payload)
+	if wsClient == nil || !wsClient.IsConnected() {
+		th.enqueuePendingWebSocketMessage("task_log_end_v2", payload)
+		return fmt.Errorf("websocket unavailable")
+	}
+	if err := wsClient.SendMessage("task_log_end_v2", payload); err != nil {
+		th.enqueuePendingWebSocketMessage("task_log_end_v2", payload)
+		return err
+	}
+	return nil
+}
+
+func (th *TaskHandler) enqueuePendingWebSocketMessage(messageType string, payload map[string]interface{}) {
+	// Clone immediately so later mutations by the caller cannot corrupt the replay
+	// queue.
+	if messageType == "" || payload == nil {
+		return
+	}
+	cloned := make(map[string]interface{}, len(payload))
+	for k, v := range payload {
+		cloned[k] = v
+	}
+	th.pendingMu.Lock()
+	defer th.pendingMu.Unlock()
+	th.pendingWS = append(th.pendingWS, pendingWebSocketMessage{messageType: messageType, payload: cloned})
+}
+
+func (th *TaskHandler) flushPendingWebSocketMessages() {
+	th.mu.RLock()
+	wsClient := th.wsClient
+	th.mu.RUnlock()
+	if wsClient == nil || !wsClient.IsConnected() {
+		return
+	}
+	th.flushPendingWebSocketMessagesWithSender(func(messageType string, payload map[string]interface{}) error {
+		return wsClient.SendMessage(messageType, payload)
+	})
+}
+
+func (th *TaskHandler) flushPendingWebSocketMessagesWithSender(sender func(string, map[string]interface{}) error) {
+	// Replay is stop-on-first-failure to preserve FIFO ordering. Skipping ahead
+	// would allow later status/log messages to overtake earlier ones on the server.
+	if sender == nil {
+		return
+	}
+	for {
+		th.pendingMu.Lock()
+		if len(th.pendingWS) == 0 {
+			th.pendingMu.Unlock()
+			return
+		}
+		msg := th.pendingWS[0]
+		th.pendingMu.Unlock()
+
+		if err := sender(msg.messageType, msg.payload); err != nil {
+			return
+		}
+
+		th.pendingMu.Lock()
+		if len(th.pendingWS) > 0 && th.pendingWS[0].messageType == msg.messageType {
+			th.pendingWS = th.pendingWS[1:]
+		}
+		th.pendingMu.Unlock()
+	}
 }
 
 // reportTaskStatus reports task status to the server via WebSocket

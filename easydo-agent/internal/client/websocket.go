@@ -16,6 +16,7 @@ import (
 // TaskHandler interface for handling incoming tasks
 type TaskHandler interface {
 	HandleTaskAssign(msg *TaskAssignMessage) error
+	HandlePullTaskNow(taskID uint64, dispatchToken string) error
 	HandlePipelineAssign(msg *PipelineAssignMessage) error
 	HandleTaskCancel(taskID uint64) error
 }
@@ -35,21 +36,23 @@ type TaskAssignMessage struct {
 
 // TaskAssignPayload mirrors the task fields required by task executor.
 type TaskAssignPayload struct {
-	ID            uint64 `json:"id"`
-	AgentID       uint64 `json:"agent_id"`
-	PipelineRunID uint64 `json:"pipeline_run_id"`
-	NodeID        string `json:"node_id"`
-	TaskType      string `json:"task_type"`
-	Name          string `json:"name"`
-	Params        string `json:"params"`
-	Script        string `json:"script"`
-	WorkDir       string `json:"work_dir"`
-	EnvVars       string `json:"env_vars"`
-	Status        string `json:"status"`
-	Priority      int    `json:"priority"`
-	Timeout       int    `json:"timeout"`
-	RetryCount    int    `json:"retry_count"`
-	MaxRetries    int    `json:"max_retries"`
+	ID              uint64 `json:"id"`
+	AgentID         uint64 `json:"agent_id"`
+	PipelineRunID   uint64 `json:"pipeline_run_id"`
+	NodeID          string `json:"node_id"`
+	TaskType        string `json:"task_type"`
+	Name            string `json:"name"`
+	Params          string `json:"params"`
+	Script          string `json:"script"`
+	WorkDir         string `json:"work_dir"`
+	EnvVars         string `json:"env_vars"`
+	Status          string `json:"status"`
+	Priority        int    `json:"priority"`
+	Timeout         int    `json:"timeout"`
+	RetryCount      int    `json:"retry_count"`
+	MaxRetries      int    `json:"max_retries"`
+	DispatchToken   string `json:"dispatch_token"`
+	DispatchAttempt int    `json:"dispatch_attempt"`
 }
 
 // PipelineConfig represents the pipeline configuration
@@ -91,7 +94,12 @@ type AgentConfig struct {
 	EnvVars   map[string]string `json:"env_vars"`
 }
 
-// WebSocketClient handles WebSocket connections to the server
+// WebSocketClient owns the agent's single live WS session to the current owner
+// server.
+//
+// In the distributed runtime, reconnect is not just a transport concern: a new
+// connection also means a new server-issued session identity, and downstream
+// task/log reporting must switch to that session cleanly.
 type WebSocketClient struct {
 	baseURL     string
 	conn        *websocket.Conn
@@ -100,9 +108,11 @@ type WebSocketClient struct {
 	stopChan    chan struct{}
 	agentID     uint64
 	token       string
+	sessionID   string
 	cfg         *websocketConfig
 	taskHandler TaskHandler
 	executor    *task.Executor
+	onReconnect func()
 }
 
 // websocketConfig holds WebSocket configuration
@@ -146,6 +156,14 @@ func (c *WebSocketClient) SetTaskHandler(handler TaskHandler) {
 func (c *WebSocketClient) SetExecutor(executor *task.Executor) {
 	c.mu.Lock()
 	c.executor = executor
+	c.mu.Unlock()
+}
+
+// SetReconnectHandler registers a callback that should run only after reconnect
+// has actually restored a live socket.
+func (c *WebSocketClient) SetReconnectHandler(handler func()) {
+	c.mu.Lock()
+	c.onReconnect = handler
 	c.mu.Unlock()
 }
 
@@ -272,14 +290,58 @@ func (c *WebSocketClient) handleMessage(message []byte) {
 	switch msg.Type {
 	case "task_assign":
 		c.handleTaskAssign(msg.Payload)
+	case "task_payload":
+		c.handleTaskAssign(msg.Payload)
+	case "pull_task_now":
+		c.handlePullTaskNow(msg.Payload)
 	case "pipeline_assign":
 		c.handlePipelineAssign(msg.Payload)
 	case "task_cancel":
 		c.handleTaskCancel(msg.Payload)
 	case "agent_config":
 		c.handleAgentConfig(msg.Payload)
+	case "heartbeat_ack":
+		c.handleHeartbeatAck(msg.Payload)
 	default:
 		klog.V(4).Infof("Received message of type: %s", msg.Type)
+	}
+}
+
+func (c *WebSocketClient) handlePullTaskNow(payload map[string]interface{}) {
+	c.mu.RLock()
+	handler := c.taskHandler
+	c.mu.RUnlock()
+	if handler == nil {
+		klog.Warning("No task handler configured, cannot process pull_task_now")
+		return
+	}
+	taskID := uint64(0)
+	if id, ok := payload["task_id"].(float64); ok {
+		taskID = uint64(id)
+	}
+	dispatchToken := ""
+	if token, ok := payload["dispatch_token"].(string); ok {
+		dispatchToken = token
+	}
+	if taskID == 0 {
+		klog.Warning("Invalid task ID in pull_task_now")
+		return
+	}
+	go func() {
+		if err := handler.HandlePullTaskNow(taskID, dispatchToken); err != nil {
+			klog.Warningf("Failed to handle pull_task_now for task %d: %v", taskID, err)
+		}
+	}()
+}
+
+// handleHeartbeatAck captures the authoritative session id assigned by the
+// server. The agent mirrors that value back on later control/data messages so
+// the server can fence stale connections after failover.
+func (c *WebSocketClient) handleHeartbeatAck(payload map[string]interface{}) {
+	if sessionID, ok := payload["agent_session_id"].(string); ok && sessionID != "" {
+		c.mu.Lock()
+		c.sessionID = sessionID
+		c.mu.Unlock()
 	}
 }
 
@@ -399,7 +461,9 @@ func (c *WebSocketClient) handleAgentConfig(payload map[string]interface{}) {
 	klog.V(4).Infof("Received agent config update: %+v", payload)
 }
 
-// handleDisconnect handles WebSocket disconnection
+// handleDisconnect tears down the dead socket and performs bounded reconnect
+// attempts. A successful reconnect triggers the registered replay callback so
+// buffered terminal/log messages can be resent on the new session.
 func (c *WebSocketClient) handleDisconnect(ctx context.Context) {
 	c.mu.Lock()
 	if c.conn != nil {
@@ -427,6 +491,12 @@ func (c *WebSocketClient) handleDisconnect(ctx context.Context) {
 				continue
 			}
 			klog.Infof("WebSocket reconnected successfully")
+			c.mu.RLock()
+			handler := c.onReconnect
+			c.mu.RUnlock()
+			if handler != nil {
+				go handler()
+			}
 			return
 		}
 	}
@@ -452,9 +522,10 @@ func (c *WebSocketClient) sendHeartbeat() error {
 	msg := WebSocketMessage{
 		Type: "heartbeat",
 		Payload: map[string]interface{}{
-			"agent_id":  agentID,
-			"token":     token,
-			"timestamp": time.Now().Unix(),
+			"agent_id":         agentID,
+			"token":            token,
+			"timestamp":        time.Now().Unix(),
+			"agent_session_id": c.GetSessionID(),
 		},
 	}
 
@@ -520,6 +591,12 @@ func (c *WebSocketClient) IsConnected() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.conn != nil
+}
+
+func (c *WebSocketClient) GetSessionID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.sessionID
 }
 
 // ReportTaskLog reports a task log entry via WebSocket

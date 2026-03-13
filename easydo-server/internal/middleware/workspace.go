@@ -1,17 +1,29 @@
 package middleware
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"easydo-server/internal/models"
+	"easydo-server/pkg/utils"
 	"github.com/gin-gonic/gin"
 )
 
 const WorkspaceHeaderKey = "X-Workspace-ID"
+
+const workspaceAuthCacheTTL = time.Minute
+
+type cachedWorkspaceResolution struct {
+	Workspace models.Workspace       `json:"workspace"`
+	Member    models.WorkspaceMember `json:"member"`
+	Version   int64                  `json:"version"`
+}
 
 var workspaceRoleOrder = map[string]int{
 	models.WorkspaceRoleViewer:     10,
@@ -84,6 +96,9 @@ func ResolveUserWorkspace(userID uint64, requestedWorkspaceID uint64) (*models.W
 	if models.DB == nil || userID == 0 {
 		return nil, nil, errors.New("invalid workspace lookup context")
 	}
+	if cachedWorkspace, cachedMember, ok := getCachedWorkspaceResolution(context.Background(), userID, requestedWorkspaceID); ok {
+		return cachedWorkspace, cachedMember, nil
+	}
 
 	var memberships []models.WorkspaceMember
 	query := models.DB.Model(&models.WorkspaceMember{}).
@@ -106,6 +121,7 @@ func ResolveUserWorkspace(userID uint64, requestedWorkspaceID uint64) (*models.W
 	if err := models.DB.Where("id = ? AND status = ?", member.WorkspaceID, models.WorkspaceStatusActive).First(&workspace).Error; err != nil {
 		return nil, nil, err
 	}
+	cacheWorkspaceResolution(context.Background(), userID, requestedWorkspaceID, &workspace, &member)
 
 	return &workspace, &member, nil
 }
@@ -119,6 +135,74 @@ func loadActiveWorkspaceByID(workspaceID uint64) (*models.Workspace, error) {
 		return nil, err
 	}
 	return &workspace, nil
+}
+
+func workspaceAuthCacheKey(userID uint64, requestedWorkspaceID uint64) string {
+	return fmt.Sprintf("easydo:workspace:auth:%d:%d", userID, requestedWorkspaceID)
+}
+
+func workspaceAuthVersionKey(workspaceID uint64) string {
+	return fmt.Sprintf("easydo:workspace:auth-version:%d", workspaceID)
+}
+
+func getWorkspaceAuthVersion(ctx context.Context, workspaceID uint64) int64 {
+	if utils.RedisClient == nil || workspaceID == 0 {
+		return 1
+	}
+	version, err := utils.RedisClient.Get(ctx, workspaceAuthVersionKey(workspaceID)).Int64()
+	if err == nil && version > 0 {
+		return version
+	}
+	if err := utils.RedisClient.Set(ctx, workspaceAuthVersionKey(workspaceID), 1, 0).Err(); err != nil {
+		return 1
+	}
+	return 1
+}
+
+func BumpWorkspaceAuthVersion(ctx context.Context, workspaceID uint64) error {
+	if utils.RedisClient == nil || workspaceID == 0 {
+		return nil
+	}
+	_, err := utils.RedisClient.Incr(ctx, workspaceAuthVersionKey(workspaceID)).Result()
+	return err
+}
+
+func getCachedWorkspaceResolution(ctx context.Context, userID uint64, requestedWorkspaceID uint64) (*models.Workspace, *models.WorkspaceMember, bool) {
+	if utils.RedisClient == nil || userID == 0 {
+		return nil, nil, false
+	}
+	raw, err := utils.RedisClient.Get(ctx, workspaceAuthCacheKey(userID, requestedWorkspaceID)).Result()
+	if err != nil || raw == "" {
+		return nil, nil, false
+	}
+	var cached cachedWorkspaceResolution
+	if err := json.Unmarshal([]byte(raw), &cached); err != nil {
+		return nil, nil, false
+	}
+	if cached.Workspace.ID == 0 || cached.Member.WorkspaceID == 0 {
+		return nil, nil, false
+	}
+	if getWorkspaceAuthVersion(ctx, cached.Workspace.ID) != cached.Version {
+		return nil, nil, false
+	}
+	workspace := cached.Workspace
+	member := cached.Member
+	return &workspace, &member, true
+}
+
+func cacheWorkspaceResolution(ctx context.Context, userID uint64, requestedWorkspaceID uint64, workspace *models.Workspace, member *models.WorkspaceMember) {
+	if utils.RedisClient == nil || workspace == nil || member == nil || userID == 0 {
+		return
+	}
+	payload, err := json.Marshal(cachedWorkspaceResolution{
+		Workspace: *workspace,
+		Member:    *member,
+		Version:   getWorkspaceAuthVersion(ctx, workspace.ID),
+	})
+	if err != nil {
+		return
+	}
+	_ = utils.RedisClient.Set(ctx, workspaceAuthCacheKey(userID, requestedWorkspaceID), payload, workspaceAuthCacheTTL).Err()
 }
 
 func WorkspaceContext() gin.HandlerFunc {

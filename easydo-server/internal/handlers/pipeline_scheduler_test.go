@@ -1,11 +1,61 @@
 package handlers
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"easydo-server/internal/config"
 	"easydo-server/internal/models"
+	"easydo-server/pkg/utils"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 )
+
+func setupSchedulerRedis(t *testing.T, serverID string) *miniredis.Miniredis {
+	t.Helper()
+	config.Init()
+	config.Config.Set("server.id", serverID)
+
+	mini, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis failed: %v", err)
+	}
+	previousRedis := utils.RedisClient
+	utils.RedisClient = redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() {
+		if utils.RedisClient != nil {
+			_ = utils.RedisClient.Close()
+		}
+		utils.RedisClient = previousRedis
+		mini.Close()
+	})
+	return mini
+}
+
+func TestTryAcquireSchedulerLeadership_AllowsSingleLeader(t *testing.T) {
+	setupSchedulerRedis(t, "server-a")
+	h := &PipelineHandler{}
+	ctx := context.Background()
+
+	ok, err := h.tryAcquireSchedulerLeadership(ctx)
+	if err != nil {
+		t.Fatalf("leader acquire failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected first leader acquisition to succeed")
+	}
+
+	config.Config.Set("server.id", "server-b")
+	ok, err = h.tryAcquireSchedulerLeadership(ctx)
+	if err != nil {
+		t.Fatalf("follower acquire failed: %v", err)
+	}
+	if ok {
+		t.Fatal("expected second scheduler acquisition to fail while lease is held")
+	}
+}
 
 func TestAssignOneQueuedRun_AssignsOldestQueuedRun(t *testing.T) {
 	db := openHandlerTestDB(t)
@@ -243,8 +293,8 @@ func TestAssignOneQueuedRun_UpdatesExistingQueuedTasksToPendingAndSelectedAgent(
 	if err := db.First(&gotTask, queuedTask.ID).Error; err != nil {
 		t.Fatalf("reload task failed: %v", err)
 	}
-	if gotTask.Status != models.TaskStatusPending {
-		t.Fatalf("task status=%s, want=%s", gotTask.Status, models.TaskStatusPending)
+	if gotTask.Status != models.TaskStatusAssigned {
+		t.Fatalf("task status=%s, want=%s", gotTask.Status, models.TaskStatusAssigned)
 	}
 	if gotTask.AgentID != agentSelected.ID {
 		t.Fatalf("task agent_id=%d, want=%d", gotTask.AgentID, agentSelected.ID)
@@ -252,7 +302,13 @@ func TestAssignOneQueuedRun_UpdatesExistingQueuedTasksToPendingAndSelectedAgent(
 }
 
 func TestScheduleQueuedPipelineRuns_StopsAtCapacity(t *testing.T) {
+	setupSchedulerRedis(t, "server-cap")
 	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = originalDB
+	})
 	h := &PipelineHandler{DB: db}
 
 	agent := models.Agent{
@@ -335,7 +391,13 @@ func TestScheduleQueuedPipelineRuns_StopsAtCapacity(t *testing.T) {
 }
 
 func TestScheduleQueuedPipelineRuns_FailedQueuedRunTriggersNextDispatch(t *testing.T) {
+	setupSchedulerRedis(t, "server-recover")
 	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = originalDB
+	})
 	h := &PipelineHandler{DB: db}
 
 	agent := models.Agent{
@@ -384,6 +446,12 @@ func TestScheduleQueuedPipelineRuns_FailedQueuedRunTriggersNextDispatch(t *testi
 	if err := db.Create(&validRun).Error; err != nil {
 		t.Fatalf("create valid run failed: %v", err)
 	}
+	if err := db.Model(&invalidRun).Update("created_at", time.Now().Add(-time.Minute)).Error; err != nil {
+		t.Fatalf("set invalid run created_at failed: %v", err)
+	}
+	if err := db.Model(&validRun).Update("created_at", time.Now()).Error; err != nil {
+		t.Fatalf("set valid run created_at failed: %v", err)
+	}
 
 	scheduled := h.scheduleQueuedPipelineRuns(db)
 	if scheduled != 1 {
@@ -412,4 +480,46 @@ func TestScheduleQueuedPipelineRuns_FailedQueuedRunTriggersNextDispatch(t *testi
 	_ = db.First(&gotInvalid, invalidRun.ID).Error
 	_ = db.First(&gotValid, validRun.ID).Error
 	t.Fatalf("timeout waiting dispatch recovery, invalid=%s valid=%s", gotInvalid.Status, gotValid.Status)
+}
+
+func TestAssignOneQueuedRun_BreaksCreatedAtTiesByID(t *testing.T) {
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+
+	agent := models.Agent{
+		Name:                   "tie-agent",
+		Host:                   "host",
+		Port:                   1,
+		Token:                  "token",
+		Status:                 models.AgentStatusOnline,
+		RegistrationStatus:     models.AgentRegistrationStatusApproved,
+		MaxConcurrentPipelines: 1,
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+
+	run1 := models.PipelineRun{PipelineID: 1, BuildNumber: 1, Status: models.PipelineRunStatusQueued, Config: `{"version":"2.0","nodes":[],"edges":[]}`}
+	run2 := models.PipelineRun{PipelineID: 2, BuildNumber: 1, Status: models.PipelineRunStatusQueued, Config: `{"version":"2.0","nodes":[],"edges":[]}`}
+	if err := db.Create(&run1).Error; err != nil {
+		t.Fatalf("create run1 failed: %v", err)
+	}
+	if err := db.Create(&run2).Error; err != nil {
+		t.Fatalf("create run2 failed: %v", err)
+	}
+	tieTime := time.Now().Add(-time.Minute)
+	if err := db.Model(&run1).Update("created_at", tieTime).Error; err != nil {
+		t.Fatalf("set run1 created_at failed: %v", err)
+	}
+	if err := db.Model(&run2).Update("created_at", tieTime).Error; err != nil {
+		t.Fatalf("set run2 created_at failed: %v", err)
+	}
+
+	runID, ok := h.assignOneQueuedRun(db)
+	if !ok {
+		t.Fatal("assignOneQueuedRun returned not ok")
+	}
+	if runID != run1.ID {
+		t.Fatalf("assigned run=%d, want lower id run=%d when created_at ties", runID, run1.ID)
+	}
 }

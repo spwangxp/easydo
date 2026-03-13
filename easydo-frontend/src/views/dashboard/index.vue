@@ -405,10 +405,10 @@ const getStatusText = (status) => {
 
 const resolveDispatchStatus = (task) => {
   if (task?.run_status === 'queued') return 'queued'
-  if (task?.status === 'queued' || task?.status === 'pending') return 'pending'
+  if (['queued', 'assigned', 'dispatching', 'pulling', 'acked'].includes(task?.status)) return 'pending'
   if (task?.status === 'running') return 'running'
-  if (task?.status === 'success') return 'success'
-  if (task?.status === 'failed') return 'failed'
+  if (task?.status === 'execute_success') return 'success'
+  if (['execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(task?.status)) return 'failed'
   if (task?.status === 'cancelled') return 'cancelled'
   return 'unknown'
 }
@@ -440,10 +440,16 @@ const getDispatchStatusText = (status) => {
 const getTaskStatusType = (status) => {
   const types = {
     queued: 'info',
-    pending: 'warning',
+    assigned: 'warning',
+    dispatching: 'warning',
+    pulling: 'warning',
+    acked: 'warning',
     running: 'warning',
-    success: 'success',
-    failed: 'danger',
+    execute_success: 'success',
+    execute_failed: 'danger',
+    schedule_failed: 'danger',
+    dispatch_timeout: 'danger',
+    lease_expired: 'danger',
     cancelled: 'info'
   }
   return types[status] || 'info'
@@ -452,10 +458,16 @@ const getTaskStatusType = (status) => {
 const getTaskStatusText = (status) => {
   const texts = {
     queued: '排队中',
-    pending: '待执行',
+    assigned: '已分配',
+    dispatching: '派发中',
+    pulling: '等待拉取',
+    acked: '已确认',
     running: '运行中',
-    success: '成功',
-    failed: '失败',
+    execute_success: '成功',
+    execute_failed: '执行失败',
+    schedule_failed: '调度失败',
+    dispatch_timeout: '派发超时',
+    lease_expired: '租约失效',
     cancelled: '已取消'
   }
   return texts[status] || '未知'

@@ -680,7 +680,7 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 	// Get pending tasks for this agent (only if approved)
 	var pendingTasks []models.AgentTask
 	if agent.RegistrationStatus == models.AgentRegistrationStatusApproved {
-		h.DB.Where("agent_id = ? AND status = ?", agentID, models.TaskStatusPending).Find(&pendingTasks)
+		h.DB.Where("agent_id = ? AND status IN ?", agentID, []string{models.TaskStatusAssigned, models.TaskStatusDispatching, models.TaskStatusPulling}).Find(&pendingTasks)
 	}
 
 	c.JSON(http.StatusOK, gin.H{

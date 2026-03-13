@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"easydo-server/internal/middleware"
 	"easydo-server/internal/models"
 	"fmt"
@@ -164,6 +165,7 @@ func (h *UserHandler) createUserWithWorkspaceBinding(tx *gorm.DB, req CreateUser
 		if err := tx.Create(&member).Error; err != nil {
 			return nil, err
 		}
+		_ = middleware.BumpWorkspaceAuthVersion(context.Background(), targetWorkspaceID)
 	}
 	return user, nil
 }

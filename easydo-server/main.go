@@ -17,6 +17,9 @@ func main() {
 
 	// 初始化配置
 	config.Init()
+	if err := config.ValidateMultiReplicaRequirements(); err != nil {
+		panic(err)
+	}
 
 	// 初始化数据库
 	models.InitDB()

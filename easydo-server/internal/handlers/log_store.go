@@ -1,19 +1,26 @@
 package handlers
 
 import (
-	"bufio"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"easydo-server/internal/config"
 	"easydo-server/internal/models"
+	"easydo-server/pkg/storage"
 )
 
 type fileLogEntry struct {
+	AgentID       uint64 `json:"agent_id,omitempty"`
 	TaskID        uint64 `json:"task_id"`
 	PipelineRunID uint64 `json:"pipeline_run_id"`
 	Level         string `json:"level"`
@@ -25,143 +32,383 @@ type fileLogEntry struct {
 	Seq           int64  `json:"seq,omitempty"`
 }
 
-type fileLogStore struct {
-	baseDir string
-	muMap   sync.Map // runID(string) -> *sync.Mutex
+type liveLogQuery struct {
+	TaskID   uint64
+	RunID    uint64
+	Attempt  int
+	SinceSeq int64
+	Level    string
+	Source   string
 }
 
-func newFileLogStore() *fileLogStore {
-	baseDir := os.Getenv("EASYDO_LOG_DIR")
-	if baseDir == "" {
-		baseDir = "data/agent-logs"
-	}
-	return &fileLogStore{baseDir: baseDir}
+type liveTaskBuffer struct {
+	TaskID        uint64
+	PipelineRunID uint64
+	Attempt       int
+	SegmentNo     int
+	Entries       []fileLogEntry
+	Completed     bool
 }
 
-func (s *fileLogStore) runLogFilePath(runID uint64) string {
-	return filepath.Join(s.baseDir, fmt.Sprintf("run_%d.log", runID))
+type taskLogStore struct {
+	mu          sync.RWMutex
+	buffers     map[string]*liveTaskBuffer
+	objectStore storage.ObjectStore
+	bucket      string
+	storeOnce   sync.Once
 }
 
-func (s *fileLogStore) lockForRun(runID uint64) *sync.Mutex {
-	key := fmt.Sprintf("%d", runID)
-	v, _ := s.muMap.LoadOrStore(key, &sync.Mutex{})
-	return v.(*sync.Mutex)
+func newTaskLogStore() *taskLogStore {
+	return &taskLogStore{buffers: make(map[string]*liveTaskBuffer)}
 }
 
-func (s *fileLogStore) Append(entry fileLogEntry) error {
-	if entry.PipelineRunID == 0 {
-		return fmt.Errorf("pipeline_run_id is required")
+func (s *taskLogStore) bufferKey(taskID uint64, attempt int) string {
+	return fmt.Sprintf("%d:%d", taskID, attempt)
+}
+
+// Append adds one live chunk to the in-process buffer for a `(task, attempt)`.
+//
+// This buffer is only a low-latency serving / batching layer. Durability does
+// not depend on it: the websocket ingest path persists every chunk into
+// `agent_log_chunks` before Append is called. That separation is what lets log
+// reads recover missing lines after owner failover even if the old owner's memory
+// buffer died before a segment flush completed.
+func (s *taskLogStore) Append(entry fileLogEntry) error {
+	if entry.PipelineRunID == 0 || entry.TaskID == 0 || entry.Attempt <= 0 {
+		return fmt.Errorf("invalid log entry")
+	}
+	if entry.Timestamp == 0 {
+		entry.Timestamp = time.Now().Unix()
+	}
+	if entry.Source == "" {
+		entry.Source = "stdout"
+	}
+	if entry.Level == "" {
+		entry.Level = "info"
 	}
 
-	if err := os.MkdirAll(s.baseDir, 0755); err != nil {
-		return fmt.Errorf("create log directory failed: %w", err)
+	key := s.bufferKey(entry.TaskID, entry.Attempt)
+	s.mu.Lock()
+	buffer, ok := s.buffers[key]
+	if !ok {
+		buffer = &liveTaskBuffer{TaskID: entry.TaskID, PipelineRunID: entry.PipelineRunID, Attempt: entry.Attempt, SegmentNo: 1}
+		s.buffers[key] = buffer
 	}
-
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("marshal log entry failed: %w", err)
+	buffer.Entries = append(buffer.Entries, entry)
+	flushNow := len(buffer.Entries) >= logSegmentMaxLines()
+	s.mu.Unlock()
+	if flushNow {
+		return s.flushSegment(context.Background(), entry.TaskID, entry.Attempt, false)
 	}
-
-	mu := s.lockForRun(entry.PipelineRunID)
-	mu.Lock()
-	defer mu.Unlock()
-
-	f, err := os.OpenFile(s.runLogFilePath(entry.PipelineRunID), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("open run log file failed: %w", err)
-	}
-	defer f.Close()
-
-	if _, err := f.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("append run log file failed: %w", err)
-	}
-
 	return nil
 }
 
-func (s *fileLogStore) QueryRunLogs(runID uint64, level, source string) ([]models.AgentLog, error) {
-	entries, err := s.readRunFile(runID)
+func (s *taskLogStore) FinishTask(taskID uint64, attempt int) error {
+	if taskID == 0 || attempt <= 0 {
+		return nil
+	}
+	return s.flushSegment(context.Background(), taskID, attempt, true)
+}
+
+// QueryTaskLogs reconstructs task history from every available storage layer.
+//
+// The merge order is intentional:
+// 1. object-storage segments (best long-term source),
+// 2. durable chunk rows not yet covered by a finished segment,
+// 3. current-process live buffer for in-flight tail reads.
+//
+// This is the key failover recovery behavior for logs: a dead owner may lose its
+// memory buffer, but already-persisted chunk rows remain query-visible.
+func (s *taskLogStore) QueryTaskLogs(runID uint64, taskID uint64, level string) ([]models.AgentLog, error) {
+	entries, err := s.readSegments(context.Background(), taskID, runID, 0)
 	if err != nil {
 		return nil, err
 	}
+	persisted, err := s.readPersistedChunks(taskID, runID, 0)
+	if err != nil {
+		return nil, err
+	}
+	entries = mergeEntries(entries, persisted)
+	entries = append(entries, s.queryLive(liveLogQuery{TaskID: taskID, RunID: runID, Level: level})...)
+	return filterEntries(dedupeEntries(entries), taskID, level, ""), nil
+}
 
+// QueryRunLogs applies the same reconstruction strategy as QueryTaskLogs, but
+// across all tasks that belong to the run.
+func (s *taskLogStore) QueryRunLogs(runID uint64, level, source string) ([]models.AgentLog, error) {
+	var segments []models.AgentLogSegment
+	if err := models.DB.Where("pipeline_run_id = ?", runID).Order("created_at ASC").Find(&segments).Error; err != nil {
+		return nil, err
+	}
+	entries := make([]fileLogEntry, 0, len(segments)*8)
+	for _, segment := range segments {
+		segmentEntries, err := s.readSegmentObject(context.Background(), segment)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, segmentEntries...)
+	}
+	persisted, err := s.readPersistedChunks(0, runID, 0)
+	if err != nil {
+		return nil, err
+	}
+	entries = mergeEntries(entries, persisted)
+	entries = append(entries, s.queryLive(liveLogQuery{RunID: runID, Level: level, Source: source})...)
+	return filterEntries(dedupeEntries(entries), 0, level, source), nil
+}
+
+func (s *taskLogStore) QueryLiveTaskLogs(taskID uint64, attempt int, sinceSeq int64) ([]fileLogEntry, error) {
+	if taskID == 0 || attempt <= 0 {
+		return []fileLogEntry{}, nil
+	}
+	entries := s.queryLive(liveLogQuery{TaskID: taskID, Attempt: attempt, SinceSeq: sinceSeq})
+	sortEntries(entries)
+	return entries, nil
+}
+
+func (s *taskLogStore) readSegments(ctx context.Context, taskID, runID uint64, attempt int) ([]fileLogEntry, error) {
+	query := models.DB.Model(&models.AgentLogSegment{})
+	if taskID > 0 {
+		query = query.Where("task_id = ?", taskID)
+	}
+	if runID > 0 {
+		query = query.Where("pipeline_run_id = ?", runID)
+	}
+	if attempt > 0 {
+		query = query.Where("attempt = ?", attempt)
+	}
+	var segments []models.AgentLogSegment
+	if err := query.Order("created_at ASC").Find(&segments).Error; err != nil {
+		return nil, err
+	}
+	entries := make([]fileLogEntry, 0, len(segments)*8)
+	for _, segment := range segments {
+		segmentEntries, err := s.readSegmentObject(ctx, segment)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, segmentEntries...)
+	}
+	return entries, nil
+}
+
+// readPersistedChunks projects durable `agent_log_chunks` rows into the same
+// entry shape used by segment and live-buffer reads.
+//
+// The chunk table is effectively our write-ahead recovery source for logs: each
+// WS chunk reaches this table before we rely on process-local buffering or later
+// segment compaction.
+func (s *taskLogStore) readPersistedChunks(taskID, runID uint64, attempt int) ([]fileLogEntry, error) {
+	query := models.DB.Model(&models.AgentLogChunk{})
+	if taskID > 0 {
+		query = query.Where("task_id = ?", taskID)
+	}
+	if runID > 0 {
+		query = query.Where("pipeline_run_id = ?", runID)
+	}
+	if attempt > 0 {
+		query = query.Where("attempt = ?", attempt)
+	}
+	var chunks []models.AgentLogChunk
+	if err := query.Order("timestamp ASC, seq ASC").Find(&chunks).Error; err != nil {
+		return nil, err
+	}
+	entries := make([]fileLogEntry, 0, len(chunks))
+	for _, chunk := range chunks {
+		level := "info"
+		if strings.EqualFold(chunk.Stream, "stderr") {
+			level = "error"
+		}
+		entries = append(entries, fileLogEntry{
+			AgentID:       chunk.AgentID,
+			TaskID:        chunk.TaskID,
+			PipelineRunID: chunk.PipelineRunID,
+			Level:         level,
+			Message:       chunk.Chunk,
+			Source:        chunk.Stream,
+			Timestamp:     chunk.Timestamp,
+			LineNumber:    int(chunk.Seq),
+			Attempt:       chunk.Attempt,
+			Seq:           chunk.Seq,
+		})
+	}
+	return entries, nil
+}
+
+func (s *taskLogStore) queryLive(q liveLogQuery) []fileLogEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entries := make([]fileLogEntry, 0, 64)
+	for _, buffer := range s.buffers {
+		if q.TaskID > 0 && buffer.TaskID != q.TaskID {
+			continue
+		}
+		if q.RunID > 0 && buffer.PipelineRunID != q.RunID {
+			continue
+		}
+		if q.Attempt > 0 && buffer.Attempt != q.Attempt {
+			continue
+		}
+		for _, entry := range buffer.Entries {
+			if q.SinceSeq > 0 && entry.Seq <= q.SinceSeq {
+				continue
+			}
+			if q.Level != "" && !strings.EqualFold(entry.Level, q.Level) {
+				continue
+			}
+			if q.Source != "" && !strings.EqualFold(entry.Source, q.Source) {
+				continue
+			}
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+// flushSegment seals the current in-memory slice for one `(task, attempt)` into
+// a compact segment object plus MySQL segment index row.
+//
+// The lock is only held long enough to snapshot and reset the mutable buffer.
+// Compression, object upload, and DB writes happen outside the lock so log
+// producers are not blocked by slower storage work.
+func (s *taskLogStore) flushSegment(ctx context.Context, taskID uint64, attempt int, completed bool) error {
+	key := s.bufferKey(taskID, attempt)
+	s.mu.Lock()
+	buffer, ok := s.buffers[key]
+	if !ok || len(buffer.Entries) == 0 {
+		if ok && completed {
+			buffer.Completed = true
+			delete(s.buffers, key)
+		}
+		s.mu.Unlock()
+		return nil
+	}
+	entries := append([]fileLogEntry(nil), buffer.Entries...)
+	segmentNo := buffer.SegmentNo
+	runID := buffer.PipelineRunID
+	buffer.Entries = nil
+	buffer.SegmentNo++
+	buffer.Completed = completed
+	if completed {
+		defer delete(s.buffers, key)
+	}
+	s.mu.Unlock()
+	sortEntries(entries)
+	body, checksum, err := marshalCompressed(entries)
+	if err != nil {
+		return err
+	}
+	objectKey := buildLogObjectKey(runID, taskID, attempt, segmentNo)
+	objectSize := int64(len(body))
+	s.ensureObjectStore()
+	if s.objectStore != nil {
+		if err := s.objectStore.EnsureBucket(ctx); err != nil {
+			return err
+		}
+		storedSize, err := s.objectStore.PutObject(ctx, objectKey, body, "application/gzip")
+		if err != nil {
+			return err
+		}
+		objectSize = storedSize
+	}
+	segment := &models.AgentLogSegment{
+		TaskID:        taskID,
+		PipelineRunID: runID,
+		AgentID:       entries[0].AgentID,
+		Attempt:       attempt,
+		SegmentNo:     segmentNo,
+		StartSeq:      entries[0].Seq,
+		EndSeq:        entries[len(entries)-1].Seq,
+		LineCount:     len(entries),
+		ObjectKey:     objectKey,
+		ObjectBucket:  s.bucket,
+		ObjectSize:    objectSize,
+		ContentType:   "application/gzip",
+		Checksum:      checksum,
+		Completed:     completed,
+	}
+	return models.DB.Create(segment).Error
+}
+
+func (s *taskLogStore) readSegmentObject(ctx context.Context, segment models.AgentLogSegment) ([]fileLogEntry, error) {
+	s.ensureObjectStore()
+	if s.objectStore == nil {
+		return []fileLogEntry{}, nil
+	}
+	reader, err := s.objectStore.GetObject(ctx, segment.ObjectKey)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	gzReader, err := gzip.NewReader(reader)
+	if err != nil {
+		return nil, err
+	}
+	defer gzReader.Close()
+	data, err := io.ReadAll(gzReader)
+	if err != nil {
+		return nil, err
+	}
+	var entries []fileLogEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func filterEntries(entries []fileLogEntry, taskID uint64, level, source string) []models.AgentLog {
+	sortEntries(entries)
 	result := make([]models.AgentLog, 0, len(entries))
-	for i := range entries {
-		e := entries[i]
+	for _, e := range entries {
+		if taskID > 0 && e.TaskID != taskID {
+			continue
+		}
 		if level != "" && !strings.EqualFold(e.Level, level) {
 			continue
 		}
 		if source != "" && !strings.EqualFold(e.Source, source) {
 			continue
 		}
-		result = append(result, models.AgentLog{
-			TaskID:        e.TaskID,
-			PipelineRunID: e.PipelineRunID,
-			Level:         e.Level,
-			Message:       e.Message,
-			Timestamp:     e.Timestamp,
-			Source:        e.Source,
-		})
+		result = append(result, models.AgentLog{TaskID: e.TaskID, PipelineRunID: e.PipelineRunID, Level: e.Level, Message: e.Message, Timestamp: e.Timestamp, Source: e.Source})
 	}
-	return result, nil
+	return result
 }
 
-func (s *fileLogStore) QueryTaskLogs(runID uint64, taskID uint64, level string) ([]models.AgentLog, error) {
-	entries, err := s.readRunFile(runID)
-	if err != nil {
-		return nil, err
+// mergeEntries concatenates multiple storage layers before we perform global
+// dedupe/order normalization.
+func mergeEntries(entries ...[]fileLogEntry) []fileLogEntry {
+	merged := make([]fileLogEntry, 0)
+	for _, part := range entries {
+		merged = append(merged, part...)
 	}
-
-	result := make([]models.AgentLog, 0, len(entries))
-	for i := range entries {
-		e := entries[i]
-		if e.TaskID != taskID {
-			continue
-		}
-		if level != "" && !strings.EqualFold(e.Level, level) {
-			continue
-		}
-		result = append(result, models.AgentLog{
-			TaskID:        e.TaskID,
-			PipelineRunID: e.PipelineRunID,
-			Level:         e.Level,
-			Message:       e.Message,
-			Timestamp:     e.Timestamp,
-			Source:        e.Source,
-		})
-	}
-	return result, nil
+	return merged
 }
 
-func (s *fileLogStore) readRunFile(runID uint64) ([]fileLogEntry, error) {
-	path := s.runLogFilePath(runID)
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []fileLogEntry{}, nil
-		}
-		return nil, fmt.Errorf("open run log file failed: %w", err)
+// dedupeEntries removes overlapping logical lines produced by multi-layer log
+// reconstruction.
+//
+// Overlap is expected: the same line may exist in a finished segment, in the
+// durable chunk table, and in the current live buffer during flush boundaries or
+// replay windows. We prefer storing extra copies over risking loss, then make
+// reads canonical here.
+func dedupeEntries(entries []fileLogEntry) []fileLogEntry {
+	if len(entries) <= 1 {
+		return entries
 	}
-	defer f.Close()
-
-	entries := make([]fileLogEntry, 0, 256)
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+	seen := make(map[string]struct{}, len(entries))
+	result := make([]fileLogEntry, 0, len(entries))
+	for _, entry := range entries {
+		key := fmt.Sprintf("%d:%d:%d:%s", entry.TaskID, entry.Attempt, entry.Seq, entry.Message)
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		var e fileLogEntry
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			continue
-		}
-		entries = append(entries, e)
+		seen[key] = struct{}{}
+		result = append(result, entry)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan run log file failed: %w", err)
-	}
+	return result
+}
 
+func sortEntries(entries []fileLogEntry) {
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].Timestamp == entries[j].Timestamp {
 			if entries[i].Seq == entries[j].Seq {
@@ -171,8 +418,52 @@ func (s *fileLogStore) readRunFile(runID uint64) ([]fileLogEntry, error) {
 		}
 		return entries[i].Timestamp < entries[j].Timestamp
 	})
-
-	return entries, nil
 }
 
-var agentFileLogs = newFileLogStore()
+func marshalCompressed(entries []fileLogEntry) ([]byte, string, error) {
+	raw, err := json.Marshal(entries)
+	if err != nil {
+		return nil, "", err
+	}
+	hash := sha256.Sum256(raw)
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(raw); err != nil {
+		return nil, "", err
+	}
+	if err := gz.Close(); err != nil {
+		return nil, "", err
+	}
+	return buf.Bytes(), hex.EncodeToString(hash[:]), nil
+}
+
+func buildLogObjectKey(runID, taskID uint64, attempt, segmentNo int) string {
+	return fmt.Sprintf("runs/%d/tasks/%d/attempts/%d/segments/%06d.json.gz", runID, taskID, attempt, segmentNo)
+}
+
+func logSegmentMaxLines() int {
+	if config.Config == nil {
+		return 200
+	}
+	v := config.Config.GetInt("logging.segment_max_lines")
+	if v <= 0 {
+		return 200
+	}
+	return v
+}
+
+func (s *taskLogStore) ensureObjectStore() {
+	s.storeOnce.Do(func() {
+		if config.Config == nil {
+			return
+		}
+		objStore, err := storage.NewObjectStore()
+		if err != nil {
+			return
+		}
+		s.objectStore = objStore
+		s.bucket = objStore.Bucket()
+	})
+}
+
+var agentFileLogs = newTaskLogStore()

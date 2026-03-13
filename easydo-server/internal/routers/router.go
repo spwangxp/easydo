@@ -1,6 +1,7 @@
 package routers
 
 import (
+	"easydo-server/internal/config"
 	"easydo-server/internal/handlers"
 	"easydo-server/internal/middleware"
 
@@ -8,7 +9,7 @@ import (
 )
 
 func InitRouter() *gin.Engine {
-	gin.SetMode("debug")
+	gin.SetMode(config.ServerMode())
 	router := gin.Default()
 
 	// 使用 CORS 中间件
@@ -31,10 +32,13 @@ func InitRouter() *gin.Engine {
 
 		// WebSocket endpoint for agent connections
 		wsHandler := handlers.SharedWebSocketHandler()
-		router.GET("/ws/agent/heartbeat", wsHandler.HandleAgentConnection)
+		router.GET("/ws/agent/heartbeat", middleware.RateLimit(), wsHandler.HandleAgentConnection)
 
 		// WebSocket endpoint for frontend real-time updates
-		router.GET("/ws/frontend/pipeline", wsHandler.HandleFrontendConnection)
+		router.GET("/ws/frontend/pipeline", middleware.RateLimit(), wsHandler.HandleFrontendConnection)
+		internal := router.Group("/internal")
+		internal.Use(middleware.InternalServerAuth())
+		internal.GET("/tasks/:id/live-logs", handlers.NewTaskHandler().GetTaskLiveLogsInternal)
 
 		// Debug endpoint - test raw body reading
 		router.POST("/api/debug/body", func(c *gin.Context) {
@@ -48,8 +52,8 @@ func InitRouter() *gin.Engine {
 		auth := api.Group("/auth")
 		{
 			userHandler := handlers.NewUserHandler()
-			auth.POST("/login", userHandler.Login)
-			auth.POST("/register", userHandler.Register)
+			auth.POST("/login", middleware.RateLimit(), userHandler.Login)
+			auth.POST("/register", middleware.RateLimit(), userHandler.Register)
 			auth.POST("/refresh", middleware.JWTAuth(), userHandler.RefreshToken)
 			auth.GET("/userinfo", middleware.JWTAuth(), middleware.WorkspaceContext(), userHandler.GetUserInfo)
 			auth.PUT("/profile", middleware.JWTAuth(), userHandler.UpdateProfile)
@@ -73,8 +77,8 @@ func InitRouter() *gin.Engine {
 			pipeline.GET("/:id/runs", pipelineHandler.GetPipelineRuns)
 			pipeline.GET("/:id/runs/:run_id", pipelineHandler.GetRunDetail)
 			pipeline.GET("/:id/runs/:run_id/tasks", pipelineHandler.GetRunTasks)
-			pipeline.GET("/:id/runs/:run_id/logs", pipelineHandler.GetRunLogs)
-			pipeline.GET("/:id/statistics", pipelineHandler.GetPipelineStatistics)
+			pipeline.GET("/:id/runs/:run_id/logs", middleware.RateLimit(), pipelineHandler.GetRunLogs)
+			pipeline.GET("/:id/statistics", middleware.RateLimit(), pipelineHandler.GetPipelineStatistics)
 			pipeline.GET("/:id/test-reports", pipelineHandler.GetPipelineTestReports)
 			pipeline.POST("/:id/favorite", pipelineHandler.ToggleFavorite)
 		}
@@ -157,7 +161,7 @@ func InitRouter() *gin.Engine {
 			tasks.POST("", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.CreateTask)
 			tasks.GET("", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.GetTaskList)
 			tasks.GET("/:id", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.GetTaskDetail)
-			tasks.GET("/:id/logs", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.GetTaskLogs)
+			tasks.GET("/:id/logs", middleware.RateLimit(), middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.GetTaskLogs)
 			tasks.POST("/:id/cancel", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.CancelTask)
 			tasks.POST("/:id/retry", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired(), taskHandler.RetryTask)
 			// Agent上报接口（不需要认证，使用token验证）
@@ -174,7 +178,7 @@ func InitRouter() *gin.Engine {
 			secrets.GET("", secretHandler.List)
 			secrets.GET("/types", secretHandler.GetTypes)
 			secrets.POST("/ssh/generate", secretHandler.GenerateSSHKey)
-			secrets.GET("/statistics", secretHandler.Statistics)
+			secrets.GET("/statistics", middleware.RateLimit(), secretHandler.Statistics)
 			secrets.GET("/:id", secretHandler.Get)
 			secrets.POST("", secretHandler.Create)
 			secrets.PUT("/:id", secretHandler.Update)

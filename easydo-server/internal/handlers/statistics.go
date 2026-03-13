@@ -64,50 +64,45 @@ func (h *StatisticsHandler) GetOverview(c *gin.Context) {
 	endDate := c.DefaultQuery("end_date", "")
 	workspaceID := c.GetUint64("workspace_id")
 
-	totalQuery := h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ?", workspaceID)
-	successQuery := h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ?", workspaceID)
-	failedQuery := h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ?", workspaceID)
-	durationQuery := h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ?", workspaceID)
+	query := h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ?", workspaceID)
 
 	if startDate != "" {
 		startTime, err := time.Parse("2006-01-02", startDate)
 		if err == nil {
-			totalQuery = totalQuery.Where("created_at >= ?", startTime)
-			successQuery = successQuery.Where("created_at >= ?", startTime)
-			failedQuery = failedQuery.Where("created_at >= ?", startTime)
-			durationQuery = durationQuery.Where("created_at >= ?", startTime)
+			query = query.Where("created_at >= ?", startTime)
 		}
 	}
 	if endDate != "" {
 		endTime, err := time.Parse("2006-01-02", endDate)
 		if err == nil {
 			endTime = endTime.Add(24 * time.Hour)
-			totalQuery = totalQuery.Where("created_at < ?", endTime)
-			successQuery = successQuery.Where("created_at < ?", endTime)
-			failedQuery = failedQuery.Where("created_at < ?", endTime)
-			durationQuery = durationQuery.Where("created_at < ?", endTime)
+			query = query.Where("created_at < ?", endTime)
 		}
 	}
 
-	var totalRuns int64
-	totalQuery.Count(&totalRuns)
+	type overviewAggregate struct {
+		TotalRuns     int64
+		SuccessRuns   int64
+		FailedRuns    int64
+		TotalDuration int64
+	}
 
-	var successRuns int64
-	successQuery.Where("status = ?", "success").Count(&successRuns)
-
-	var failedRuns int64
-	failedQuery.Where("status = ?", "failed").Count(&failedRuns)
+	var aggregate overviewAggregate
+	query.Select(`
+		COUNT(*) AS total_runs,
+		SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_runs,
+		SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_runs,
+		COALESCE(SUM(CASE WHEN duration > 0 THEN duration ELSE 0 END), 0) AS total_duration
+	`).Scan(&aggregate)
 
 	successRate := float64(0)
-	if totalRuns > 0 {
-		successRate = float64(successRuns) * 100 / float64(totalRuns)
+	if aggregate.TotalRuns > 0 {
+		successRate = float64(aggregate.SuccessRuns) * 100 / float64(aggregate.TotalRuns)
 	}
 
 	var avgDuration float64
-	var totalDuration int64
-	durationQuery.Where("duration > 0").Pluck("COALESCE(SUM(duration), 0)", &totalDuration)
-	if totalRuns > 0 {
-		avgDuration = float64(totalDuration) / float64(totalRuns)
+	if aggregate.TotalRuns > 0 {
+		avgDuration = float64(aggregate.TotalDuration) / float64(aggregate.TotalRuns)
 	}
 
 	avgDurationStr := formatDuration(int(avgDuration))
@@ -126,10 +121,10 @@ func (h *StatisticsHandler) GetOverview(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": OverviewResponse{
-			TotalRuns:     totalRuns,
+			TotalRuns:     aggregate.TotalRuns,
 			SuccessRate:   math.Round(successRate*100) / 100,
 			AvgDuration:   avgDurationStr,
-			FailedCount:   failedRuns,
+			FailedCount:   aggregate.FailedRuns,
 			PipelineCount: pipelineCount,
 			ProjectCount:  projectCount,
 			TodayRuns:     todayRuns,
@@ -150,43 +145,46 @@ func (h *StatisticsHandler) GetTrend(c *gin.Context) {
 
 	today := time.Now()
 	dailyRuns := make([]DailyRun, 0, days)
+	rangeStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location()).AddDate(0, 0, -(days - 1))
+	rangeEnd := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location()).Add(24 * time.Hour)
+
+	type trendRow struct {
+		Date    string
+		Total   int64
+		Success int64
+		Failed  int64
+	}
+
+	var rows []trendRow
+	h.DB.Model(&models.PipelineRun{}).
+		Select(`DATE(created_at) AS date,
+			COUNT(*) AS total,
+			SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
+			SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed`).
+		Where("workspace_id = ? AND created_at >= ? AND created_at < ?", workspaceID, rangeStart, rangeEnd).
+		Group("DATE(created_at)").
+		Order("date ASC").
+		Scan(&rows)
+
+	rowByDate := make(map[string]trendRow, len(rows))
+	for _, row := range rows {
+		rowByDate[row.Date] = row
+	}
 
 	for i := days - 1; i >= 0; i-- {
 		date := today.AddDate(0, 0, -i)
-		dateStart := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
-		dateEnd := dateStart.Add(24 * time.Hour)
-
-		// Get runs for this day
-		var total int64
-		h.DB.Model(&models.PipelineRun{}).
-			Where("workspace_id = ? AND created_at >= ? AND created_at < ?", workspaceID, dateStart, dateEnd).
-			Count(&total)
-
-		var success int64
-		h.DB.Model(&models.PipelineRun{}).
-			Where("workspace_id = ? AND created_at >= ? AND created_at < ? AND status = ?", workspaceID, dateStart, dateEnd, "success").
-			Count(&success)
-
-		var failed int64
-		h.DB.Model(&models.PipelineRun{}).
-			Where("workspace_id = ? AND created_at >= ? AND created_at < ? AND status = ?", workspaceID, dateStart, dateEnd, "failed").
-			Count(&failed)
-
+		dateKey := date.Format("2006-01-02")
+		row := rowByDate[dateKey]
 		successRate := float64(0)
-		if total > 0 {
-			successRate = float64(success) * 100 / float64(total)
+		if row.Total > 0 {
+			successRate = float64(row.Success) * 100 / float64(row.Total)
 		}
-
-		// Format date label (e.g., "周一", "周二")
-		weekday := date.Weekday()
-		dateLabel := getWeekdayLabel(weekday)
-
 		dailyRuns = append(dailyRuns, DailyRun{
-			Date:        date.Format("2006-01-02"),
-			DateLabel:   dateLabel,
-			Total:       total,
-			Success:     success,
-			Failed:      failed,
+			Date:        dateKey,
+			DateLabel:   getWeekdayLabel(date.Weekday()),
+			Total:       row.Total,
+			Success:     row.Success,
+			Failed:      row.Failed,
 			SuccessRate: math.Round(successRate*100) / 100,
 		})
 	}
@@ -213,76 +211,60 @@ func (h *StatisticsHandler) GetTopPipelines(c *gin.Context) {
 	startDate := c.DefaultQuery("start_date", "")
 	endDate := c.DefaultQuery("end_date", "")
 
-	// Get all pipelines with their run statistics
-	var pipelines []models.Pipeline
-	h.DB.Where("workspace_id = ?", workspaceID).Find(&pipelines)
+	type topPipelineRow struct {
+		PipelineID    uint64
+		Name          string
+		RunCount      int64
+		SuccessCount  int64
+		TotalDuration int64
+	}
 
-	pipelineStats := make([]PipelineStats, 0, len(pipelines))
+	query := h.DB.Model(&models.Pipeline{}).
+		Select(`pipelines.id AS pipeline_id,
+			pipelines.name AS name,
+			COUNT(pipeline_runs.id) AS run_count,
+			SUM(CASE WHEN pipeline_runs.status = 'success' THEN 1 ELSE 0 END) AS success_count,
+			COALESCE(SUM(CASE WHEN pipeline_runs.duration > 0 THEN pipeline_runs.duration ELSE 0 END), 0) AS total_duration`).
+		Joins(`LEFT JOIN pipeline_runs ON pipeline_runs.pipeline_id = pipelines.id AND pipeline_runs.workspace_id = pipelines.workspace_id`).
+		Where("pipelines.workspace_id = ?", workspaceID)
 
-	for _, pipeline := range pipelines {
-		// Build query for this pipeline's runs
-		runQuery := h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipeline.ID)
-
-		// Apply date filter if provided
-		if startDate != "" {
-			startTime, err := time.Parse("2006-01-02", startDate)
-			if err == nil {
-				runQuery = runQuery.Where("created_at >= ?", startTime)
-			}
+	if startDate != "" {
+		startTime, err := time.Parse("2006-01-02", startDate)
+		if err == nil {
+			query = query.Where("pipeline_runs.created_at >= ?", startTime)
 		}
-		if endDate != "" {
-			endTime, err := time.Parse("2006-01-02", endDate)
-			if err == nil {
-				endTime = endTime.Add(24 * time.Hour)
-				runQuery = runQuery.Where("created_at < ?", endTime)
-			}
+	}
+	if endDate != "" {
+		endTime, err := time.Parse("2006-01-02", endDate)
+		if err == nil {
+			query = query.Where("pipeline_runs.created_at < ?", endTime.Add(24*time.Hour))
 		}
+	}
 
-		// Get run count
-		var runCount int64
-		runQuery.Count(&runCount)
+	var rows []topPipelineRow
+	query.Group("pipelines.id, pipelines.name").
+		Having("COUNT(pipeline_runs.id) > 0").
+		Order("run_count DESC, pipelines.id ASC").
+		Limit(limit).
+		Scan(&rows)
 
-		if runCount == 0 {
-			continue
+	pipelineStats := make([]PipelineStats, 0, len(rows))
+	for _, row := range rows {
+		successRate := float64(0)
+		if row.RunCount > 0 {
+			successRate = float64(row.SuccessCount) * 100 / float64(row.RunCount)
 		}
-
-		// Get success count
-		var successCount int64
-		runQuery.Where("status = ?", "success").Count(&successCount)
-
-		// Calculate success rate
-		successRate := float64(successCount) * 100 / float64(runCount)
-
-		// Calculate average duration
-		var totalDuration int64
-		h.DB.Model(&models.PipelineRun{}).
-			Where("workspace_id = ? AND pipeline_id = ? AND duration > 0", workspaceID, pipeline.ID).
-			Pluck("COALESCE(SUM(duration), 0)", &totalDuration)
-
-		avgDuration := float64(totalDuration) / float64(runCount)
-		avgDurationStr := formatDuration(int(avgDuration))
-
+		avgDuration := float64(0)
+		if row.RunCount > 0 {
+			avgDuration = float64(row.TotalDuration) / float64(row.RunCount)
+		}
 		pipelineStats = append(pipelineStats, PipelineStats{
-			PipelineID:  pipeline.ID,
-			Name:        pipeline.Name,
-			RunCount:    runCount,
+			PipelineID:  row.PipelineID,
+			Name:        row.Name,
+			RunCount:    row.RunCount,
 			SuccessRate: math.Round(successRate*100) / 100,
-			AvgDuration: avgDurationStr,
+			AvgDuration: formatDuration(int(avgDuration)),
 		})
-	}
-
-	// Sort by run count descending
-	for i := 0; i < len(pipelineStats)-1; i++ {
-		for j := i + 1; j < len(pipelineStats); j++ {
-			if pipelineStats[j].RunCount > pipelineStats[i].RunCount {
-				pipelineStats[i], pipelineStats[j] = pipelineStats[j], pipelineStats[i]
-			}
-		}
-	}
-
-	// Limit results
-	if len(pipelineStats) > limit {
-		pipelineStats = pipelineStats[:limit]
 	}
 
 	c.JSON(http.StatusOK, gin.H{

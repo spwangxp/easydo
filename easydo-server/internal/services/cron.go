@@ -1,11 +1,15 @@
 package services
 
 import (
+	"context"
+	"easydo-server/internal/config"
 	"easydo-server/internal/models"
+	"easydo-server/pkg/utils"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -18,6 +22,16 @@ type Cron struct {
 	DB               *gorm.DB
 	stopChan         chan struct{}
 	agentCheckTicker *time.Ticker
+}
+
+const agentOfflineLeaderLockKey = "easydo:cron:agent-offline:leader"
+
+func agentOfflineLeaderKey() string {
+	return agentOfflineLeaderLockKey
+}
+
+func agentOfflineLeaderTTL() time.Duration {
+	return 30 * time.Second
 }
 
 func GetCronService(db *gorm.DB) *Cron {
@@ -38,12 +52,50 @@ func (c *Cron) StartAgentOfflineChecker() {
 		for {
 			select {
 			case <-c.agentCheckTicker.C:
-				c.checkAgentOffline()
+				ok, err := c.tryAcquireAgentOfflineLeadership(context.Background())
+				if err == nil && ok {
+					c.checkAgentOffline()
+				}
 			case <-c.stopChan:
 				return
 			}
 		}
 	}()
+}
+
+func (c *Cron) tryAcquireAgentOfflineLeadership(ctx context.Context) (bool, error) {
+	if utils.RedisClient == nil {
+		return false, fmt.Errorf("redis client is not initialized")
+	}
+	owner := config.Config.GetString("server.id")
+	if owner == "" {
+		return false, fmt.Errorf("server.id is required for cron leadership")
+	}
+	key := agentOfflineLeaderKey()
+	ttl := agentOfflineLeaderTTL()
+
+	ok, err := utils.RedisClient.SetNX(ctx, key, owner, ttl).Result()
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		return true, nil
+	}
+
+	currentOwner, err := utils.RedisClient.Get(ctx, key).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if currentOwner != owner {
+		return false, nil
+	}
+	if err := utils.RedisClient.Expire(ctx, key, ttl).Err(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (c *Cron) checkAgentOffline() {

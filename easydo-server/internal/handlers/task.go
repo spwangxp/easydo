@@ -2,7 +2,10 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"easydo-server/internal/models"
+	"easydo-server/pkg/utils"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -141,7 +144,7 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 		Script:      req.Script,
 		WorkDir:     req.WorkDir,
 		EnvVars:     req.EnvVars,
-		Status:      models.TaskStatusPending,
+		Status:      models.TaskStatusQueued,
 		Priority:    req.Priority,
 		Timeout:     timeout,
 		MaxRetries:  maxRetries,
@@ -158,6 +161,7 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 
 	// Update agent status to busy if needed
 	h.DB.Model(&agent).Update("status", models.AgentStatusBusy)
+	_ = SharedWebSocketHandler().sendTaskAssign(*task)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -364,6 +368,12 @@ func (h *TaskHandler) GetTaskLogs(c *gin.Context) {
 		})
 		return
 	}
+	if !models.IsTerminalTaskStatus(task.Status) {
+		liveLogs, liveErr := h.fetchCrossServerLiveTaskLogs(c.Request.Context(), task, 0)
+		if liveErr == nil && len(liveLogs) > 0 {
+			logs = append(logs, liveLogs...)
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -372,6 +382,66 @@ func (h *TaskHandler) GetTaskLogs(c *gin.Context) {
 			"total": len(logs),
 		},
 	})
+}
+
+func (h *TaskHandler) GetTaskLiveLogsInternal(c *gin.Context) {
+	id := c.Param("id")
+	sinceSeq, _ := strconv.ParseInt(c.DefaultQuery("since_seq", "0"), 10, 64)
+	var task models.AgentTask
+	if err := h.DB.First(&task, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "任务不存在"})
+		return
+	}
+	attempt := task.RetryCount + 1
+	entries, err := agentFileLogs.QueryLiveTaskLogs(task.ID, attempt, sinceSeq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+		return
+	}
+	logs := make([]models.AgentLog, 0, len(entries))
+	for _, entry := range entries {
+		logs = append(logs, models.AgentLog{TaskID: entry.TaskID, PipelineRunID: entry.PipelineRunID, Level: entry.Level, Message: entry.Message, Timestamp: entry.Timestamp, Source: entry.Source})
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"list": logs, "total": len(logs)}})
+}
+
+func (h *TaskHandler) fetchCrossServerLiveTaskLogs(ctx context.Context, task models.AgentTask, sinceSeq int64) ([]models.AgentLog, error) {
+	if task.AgentID == 0 || task.OwnerServerID == "" || task.OwnerServerID == utils.ServerID() {
+		return nil, nil
+	}
+	presence, err := utils.GetAgentPresence(ctx, task.AgentID)
+	if err != nil || presence == nil || presence.ServerID != task.OwnerServerID || presence.ServerURL == "" {
+		return nil, err
+	}
+	url := fmt.Sprintf("%s/internal/tasks/%d/live-logs?since_seq=%d", strings.TrimRight(presence.ServerURL, "/"), task.ID, sinceSeq)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(utils.InternalTokenHeader, utils.ServerInternalToken())
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("owner live log request failed: %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var data struct {
+		Code int `json:"code"`
+		Data struct {
+			List []models.AgentLog `json:"list"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, err
+	}
+	return data.Data.List, nil
 }
 
 // CancelTask cancels a pending or running task
@@ -388,7 +458,7 @@ func (h *TaskHandler) CancelTask(c *gin.Context) {
 		return
 	}
 
-	if task.Status != models.TaskStatusPending && task.Status != models.TaskStatusRunning {
+	if task.Status != models.TaskStatusAssigned && task.Status != models.TaskStatusDispatching && task.Status != models.TaskStatusPulling && task.Status != models.TaskStatusAcked && task.Status != models.TaskStatusRunning {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
 			"message": "任务已结束，无法取消",
@@ -426,7 +496,7 @@ func (h *TaskHandler) RetryTask(c *gin.Context) {
 		return
 	}
 
-	if task.Status != models.TaskStatusFailed {
+	if task.Status != models.TaskStatusExecuteFailed && task.Status != models.TaskStatusScheduleFailed && task.Status != models.TaskStatusDispatchTimeout && task.Status != models.TaskStatusLeaseExpired {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
 			"message": "只能重试失败的任务",
@@ -443,17 +513,22 @@ func (h *TaskHandler) RetryTask(c *gin.Context) {
 	}
 
 	h.DB.Model(&task).Updates(map[string]interface{}{
-		"status":      models.TaskStatusPending,
-		"retry_count": task.RetryCount + 1,
-		"start_time":  0,
-		"end_time":    0,
-		"duration":    0,
-		"exit_code":   0,
-		"error_msg":   "",
-		"result_data": "",
+		"status":           models.TaskStatusQueued,
+		"retry_count":      task.RetryCount + 1,
+		"start_time":       0,
+		"end_time":         0,
+		"duration":         0,
+		"exit_code":        0,
+		"error_msg":        "",
+		"result_data":      "",
+		"dispatch_token":   "",
+		"dispatch_attempt": 0,
+		"lease_expire_at":  0,
+		"agent_session_id": "",
+		"owner_server_id":  "",
 	})
 
-	task.Status = models.TaskStatusPending
+	task.Status = models.TaskStatusQueued
 	task.RetryCount = task.RetryCount + 1
 	task.StartTime = 0
 	task.EndTime = 0
@@ -461,6 +536,11 @@ func (h *TaskHandler) RetryTask(c *gin.Context) {
 	task.ExitCode = 0
 	task.ErrorMsg = ""
 	task.ResultData = ""
+	task.DispatchToken = ""
+	task.DispatchAttempt = 0
+	task.LeaseExpireAt = 0
+	task.AgentSessionID = ""
+	task.OwnerServerID = ""
 	_ = SharedWebSocketHandler().sendTaskAssign(task)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -540,7 +620,7 @@ func (h *TaskHandler) AgentReportTaskStatus(c *gin.Context) {
 	if req.Status == models.TaskStatusRunning && task.StartTime == 0 {
 		task.StartTime = now
 	}
-	if req.Status == models.TaskStatusSuccess || req.Status == models.TaskStatusFailed || req.Status == models.TaskStatusCancelled {
+	if req.Status == models.TaskStatusExecuteSuccess || req.Status == models.TaskStatusExecuteFailed || req.Status == models.TaskStatusScheduleFailed || req.Status == models.TaskStatusCancelled {
 		task.EndTime = now
 	}
 	// 使用 agent 传递的 duration，如果为0则使用服务器计算的值
@@ -593,7 +673,7 @@ func (h *TaskHandler) AgentReportTaskStatus(c *gin.Context) {
 	wsHandler.BroadcastTaskStatus(task.PipelineRunID, task.ID, task.NodeID, task.Status, req.ExitCode, req.ErrorMsg, agent.Name)
 
 	// Check and update pipeline status if task is completed
-	if req.Status == models.TaskStatusSuccess || req.Status == models.TaskStatusFailed || req.Status == models.TaskStatusCancelled {
+	if req.Status == models.TaskStatusExecuteSuccess || req.Status == models.TaskStatusExecuteFailed || req.Status == models.TaskStatusScheduleFailed || req.Status == models.TaskStatusCancelled {
 		// Trigger downstream tasks first, then update pipeline status
 		var completedTasks []models.AgentTask
 		h.DB.Where("pipeline_run_id = ?", task.PipelineRunID).Find(&completedTasks)
@@ -667,6 +747,7 @@ func (h *TaskHandler) AgentReportLog(c *gin.Context) {
 		req.Source = "stdout"
 	}
 	if err := agentFileLogs.Append(fileLogEntry{
+		AgentID:       req.AgentID,
 		TaskID:        req.TaskID,
 		PipelineRunID: task.PipelineRunID,
 		Level:         req.Level,
@@ -718,7 +799,7 @@ func (h *TaskHandler) GetPendingTasks(c *gin.Context) {
 	}
 
 	var tasks []models.AgentTask
-	h.DB.Where("agent_id = ? AND status = ?", agent.ID, models.TaskStatusPending).Order("priority DESC, created_at ASC").Find(&tasks)
+	h.DB.Where("agent_id = ? AND status IN ?", agent.ID, []string{models.TaskStatusAssigned, models.TaskStatusDispatching, models.TaskStatusPulling}).Order("priority DESC, created_at ASC").Find(&tasks)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -778,6 +859,18 @@ func (h *TaskHandler) GetPipelineRunLogs(c *gin.Context) {
 			"message": "读取日志失败: " + err.Error(),
 		})
 		return
+	}
+	var tasks []models.AgentTask
+	if err := h.DB.Where("workspace_id = ? AND pipeline_run_id = ?", workspaceID, runIDNum).Find(&tasks).Error; err == nil {
+		for _, task := range tasks {
+			if models.IsTerminalTaskStatus(task.Status) {
+				continue
+			}
+			liveLogs, liveErr := h.fetchCrossServerLiveTaskLogs(c.Request.Context(), task, 0)
+			if liveErr == nil && len(liveLogs) > 0 {
+				logs = append(logs, liveLogs...)
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{

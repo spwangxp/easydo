@@ -21,15 +21,22 @@ import (
 )
 
 var (
-	jwtSecret []byte
-	once      sync.Once
+	jwtSecret             []byte
+	once                  sync.Once
+	validatedSessionCache sync.Map
 )
 
 const (
 	defaultAuthTokenTTL        = 4 * time.Hour
 	defaultAuthRefreshInterval = 10 * time.Minute
 	authSessionPrefix          = "auth:sess:"
+	validatedSessionCacheTTL   = 30 * time.Second
 )
+
+type cachedValidatedSession struct {
+	UserID    uint64
+	ExpiresAt time.Time
+}
 
 func getJwtSecret() []byte {
 	once.Do(func() {
@@ -196,9 +203,18 @@ func ValidateTokenSession(ctx context.Context, claims *Claims) error {
 	if claims == nil || claims.SessionID == "" {
 		return errors.New("invalid session")
 	}
+	if cached, ok := getCachedValidatedSession(claims.SessionID); ok {
+		if cached.UserID == claims.UserID {
+			return nil
+		}
+		validatedSessionCache.Delete(claims.SessionID)
+	}
 
 	session, err := loadUserSession(ctx, claims.SessionID)
 	if err != nil {
+		if cached, ok := getCachedValidatedSession(claims.SessionID); ok && cached.UserID == claims.UserID {
+			return nil
+		}
 		return err
 	}
 	if session == nil {
@@ -207,7 +223,35 @@ func ValidateTokenSession(ctx context.Context, claims *Claims) error {
 	if session.UserID != claims.UserID {
 		return errors.New("session mismatch")
 	}
+	cacheValidatedSession(claims.SessionID, claims.UserID)
 	return nil
+}
+
+func cacheValidatedSession(sessionID string, userID uint64) {
+	validatedSessionCache.Store(sessionID, cachedValidatedSession{
+		UserID:    userID,
+		ExpiresAt: time.Now().Add(validatedSessionCacheTTL),
+	})
+}
+
+func getCachedValidatedSession(sessionID string) (cachedValidatedSession, bool) {
+	if sessionID == "" {
+		return cachedValidatedSession{}, false
+	}
+	raw, ok := validatedSessionCache.Load(sessionID)
+	if !ok {
+		return cachedValidatedSession{}, false
+	}
+	cached, ok := raw.(cachedValidatedSession)
+	if !ok {
+		validatedSessionCache.Delete(sessionID)
+		return cachedValidatedSession{}, false
+	}
+	if time.Now().After(cached.ExpiresAt) {
+		validatedSessionCache.Delete(sessionID)
+		return cachedValidatedSession{}, false
+	}
+	return cached, true
 }
 
 func RefreshTokenSession(ctx context.Context, token string) (int64, error) {
@@ -244,6 +288,7 @@ func RevokeTokenSession(ctx context.Context, token string) error {
 	if claims.SessionID == "" {
 		return errors.New("invalid session")
 	}
+	validatedSessionCache.Delete(claims.SessionID)
 	return deleteUserSession(ctx, claims.SessionID)
 }
 
@@ -251,6 +296,7 @@ func RevokeSessionByID(ctx context.Context, sessionID string) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return errors.New("invalid session")
 	}
+	validatedSessionCache.Delete(sessionID)
 	return deleteUserSession(ctx, sessionID)
 }
 

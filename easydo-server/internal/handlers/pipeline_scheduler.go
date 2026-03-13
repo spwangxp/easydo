@@ -1,15 +1,26 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"time"
 
+	"easydo-server/internal/config"
 	"easydo-server/internal/models"
+	"easydo-server/pkg/utils"
+
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
 var pipelineScheduleMu sync.Mutex
+
+const schedulerLeaderLockKey = "easydo:scheduler:leader"
+
+func schedulerLeaderTTL() time.Duration {
+	return 30 * time.Second
+}
 
 func (h *PipelineHandler) scheduleQueuedPipelineRuns(db *gorm.DB) int {
 	if db == nil {
@@ -21,6 +32,10 @@ func (h *PipelineHandler) scheduleQueuedPipelineRuns(db *gorm.DB) int {
 
 	pipelineScheduleMu.Lock()
 	defer pipelineScheduleMu.Unlock()
+	ok, err := h.tryAcquireSchedulerLeadership(context.Background())
+	if err != nil || !ok {
+		return 0
+	}
 
 	scheduled := 0
 	for {
@@ -34,53 +49,109 @@ func (h *PipelineHandler) scheduleQueuedPipelineRuns(db *gorm.DB) int {
 	return scheduled
 }
 
+func (h *PipelineHandler) tryAcquireSchedulerLeadership(ctx context.Context) (bool, error) {
+	if utils.RedisClient == nil {
+		return false, nil
+	}
+	owner := config.Config.GetString("server.id")
+	if owner == "" {
+		return false, nil
+	}
+	ttl := schedulerLeaderTTL()
+	ok, err := utils.RedisClient.SetNX(ctx, schedulerLeaderLockKey, owner, ttl).Result()
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		return true, nil
+	}
+	currentOwner, err := utils.RedisClient.Get(ctx, schedulerLeaderLockKey).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if currentOwner != owner {
+		return false, nil
+	}
+	if err := utils.RedisClient.Expire(ctx, schedulerLeaderLockKey, ttl).Err(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (h *PipelineHandler) assignOneQueuedRun(db *gorm.DB) (uint64, bool) {
-	var queuedRuns []models.PipelineRun
-	if err := db.Where("status = ?", models.PipelineRunStatusQueued).
-		Order("created_at ASC").
-		Limit(64).
-		Find(&queuedRuns).Error; err != nil {
-		return 0, false
-	}
-	if len(queuedRuns) == 0 {
-		return 0, false
-	}
+	var scheduledRunID uint64
+	var scheduledAgentID uint64
 
-	for i := range queuedRuns {
-		run := queuedRuns[i]
-		agentID := selectAgentWithPipelineCapacity(db, run.WorkspaceID)
-		if agentID == 0 {
-			return 0, false
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var queuedRuns []models.PipelineRun
+		if err := tx.Where("status = ?", models.PipelineRunStatusQueued).
+			Order("created_at ASC, id ASC").
+			Limit(64).
+			Find(&queuedRuns).Error; err != nil {
+			return err
+		}
+		if len(queuedRuns) == 0 {
+			return nil
 		}
 
-		now := time.Now().Unix()
-		result := db.Model(&models.PipelineRun{}).
-			Where("id = ? AND status = ?", run.ID, models.PipelineRunStatusQueued).
-			Updates(map[string]interface{}{
-				"status":     models.PipelineRunStatusRunning,
-				"agent_id":   agentID,
-				"start_time": now,
-				"end_time":   int64(0),
-				"duration":   0,
-				"error_msg":  "",
-			})
-		if result.Error != nil || result.RowsAffected == 0 {
-			continue
+		for i := range queuedRuns {
+			run := queuedRuns[i]
+			agentID := selectAgentWithPipelineCapacity(tx, run.WorkspaceID)
+			if agentID == 0 {
+				return nil
+			}
+
+			now := time.Now().Unix()
+			result := tx.Model(&models.PipelineRun{}).
+				Where("id = ? AND status = ?", run.ID, models.PipelineRunStatusQueued).
+				Updates(map[string]interface{}{
+					"status":     models.PipelineRunStatusRunning,
+					"agent_id":   agentID,
+					"start_time": now,
+					"end_time":   int64(0),
+					"duration":   0,
+					"error_msg":  "",
+				})
+			if result.Error != nil || result.RowsAffected == 0 {
+				continue
+			}
+
+			if err := tx.Model(&models.AgentTask{}).
+				Where("pipeline_run_id = ? AND status = ?", run.ID, models.TaskStatusQueued).
+				Updates(map[string]interface{}{
+					"status":   models.TaskStatusAssigned,
+					"agent_id": agentID,
+				}).Error; err != nil {
+				return err
+			}
+
+			scheduledRunID = run.ID
+			scheduledAgentID = agentID
+			return nil
 		}
 
-		_ = db.Model(&models.AgentTask{}).
-			Where("pipeline_run_id = ? AND status = ?", run.ID, models.TaskStatusQueued).
-			Updates(map[string]interface{}{
-				"status":   models.TaskStatusPending,
-				"agent_id": agentID,
-			}).Error
-
-		updateAgentStatusByPipelineConcurrency(db, agentID)
-		SharedWebSocketHandler().BroadcastRunStatus(run.ID, models.PipelineRunStatusRunning, "")
-		return run.ID, true
+		return nil
+	})
+	if err != nil || scheduledRunID == 0 {
+		return 0, false
+	}
+	var run models.PipelineRun
+	if err := db.First(&run, scheduledRunID).Error; err == nil {
+		syncLiveRunStateFromRun(&run)
+	}
+	var tasks []models.AgentTask
+	if err := db.Where("pipeline_run_id = ?", scheduledRunID).Find(&tasks).Error; err == nil {
+		for i := range tasks {
+			syncLiveTaskStateFromTask(&tasks[i], "")
+		}
 	}
 
-	return 0, false
+	updateAgentStatusByPipelineConcurrency(db, scheduledAgentID)
+	SharedWebSocketHandler().BroadcastRunStatus(scheduledRunID, models.PipelineRunStatusRunning, "")
+	return scheduledRunID, true
 }
 
 func (h *PipelineHandler) startQueuedPipelineRun(runID uint64) {

@@ -21,8 +21,10 @@ import (
 
 	"easydo-server/internal/models"
 	"easydo-server/internal/services"
+	"easydo-server/pkg/utils"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type PipelineHandler struct {
@@ -308,6 +310,32 @@ func (h *PipelineHandler) GetPipelineList(c *gin.Context) {
 		ProjectName     string              `json:"project_name"`     // 项目名称
 	}
 
+	pipelineIDs := make([]uint64, 0, len(pipelines))
+	for _, pipeline := range pipelines {
+		pipelineIDs = append(pipelineIDs, pipeline.ID)
+	}
+
+	lastRunByPipeline := make(map[uint64]models.PipelineRun, len(pipelines))
+	if len(pipelineIDs) > 0 {
+		lastRunSubQuery := h.DB.Model(&models.PipelineRun{}).
+			Select("pipeline_id, MAX(build_number) AS max_build_number").
+			Where("pipeline_id IN ?", pipelineIDs).
+			Group("pipeline_id")
+
+		var lastRuns []models.PipelineRun
+		h.DB.Model(&models.PipelineRun{}).
+			Joins("JOIN (?) latest ON latest.pipeline_id = pipeline_runs.pipeline_id AND latest.max_build_number = pipeline_runs.build_number", lastRunSubQuery).
+			Where("pipeline_runs.pipeline_id IN ?", pipelineIDs).
+			Order("pipeline_runs.id DESC").
+			Find(&lastRuns)
+
+		for _, run := range lastRuns {
+			if _, exists := lastRunByPipeline[run.PipelineID]; !exists {
+				lastRunByPipeline[run.PipelineID] = run
+			}
+		}
+	}
+
 	result := make([]PipelineWithLastBuild, 0, len(pipelines))
 	for _, p := range pipelines {
 		pwb := PipelineWithLastBuild{
@@ -323,13 +351,10 @@ func (h *PipelineHandler) GetPipelineList(c *gin.Context) {
 		if p.Project != nil {
 			pwb.ProjectName = p.Project.Name
 		}
-		// 获取最近一次构建记录
-		var lastRun models.PipelineRun
-		h.DB.Where("pipeline_id = ?", p.ID).Order("build_number DESC").First(&lastRun)
-		if lastRun.ID > 0 {
-			lastRun.CreatedAt = time.Now() // 使用当前时间作为模拟
-			pwb.LastBuild = &lastRun
-			pwb.LatestRunner = lastRun.TriggerUser
+		if lastRun, ok := lastRunByPipeline[p.ID]; ok && lastRun.ID > 0 {
+			run := lastRun
+			pwb.LastBuild = &run
+			pwb.LatestRunner = run.TriggerUser
 		}
 		result = append(result, pwb)
 	}
@@ -624,15 +649,6 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 		}
 	}
 
-	// 获取最新的构建号
-	var lastRun models.PipelineRun
-	h.DB.Where("pipeline_id = ?", id).Order("build_number DESC").First(&lastRun)
-
-	buildNumber := 1
-	if lastRun.ID > 0 {
-		buildNumber = lastRun.BuildNumber + 1
-	}
-
 	runStatus := models.PipelineRunStatusRunning
 	startTime := time.Now().Unix()
 	if hasAgentNode {
@@ -644,7 +660,6 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 	run := &models.PipelineRun{
 		WorkspaceID:     pipeline.WorkspaceID,
 		PipelineID:      pipeline.ID,
-		BuildNumber:     buildNumber,
 		Status:          runStatus,
 		TriggerType:     "manual",
 		TriggerUser:     triggerUsername,
@@ -654,30 +669,15 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 		Config:          pipeline.Config, // 保存配置快照
 	}
 
-	// 创建记录
-	if err := h.DB.Create(run).Error; err != nil {
+	buildNumber, err := h.createPipelineRunWithUniqueBuildNumber(run)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code": 500,
 			"msg":  "创建运行记录失败: " + err.Error(),
 		})
 		return
 	}
-
-	// 检查 ID 是否已设置
-	if run.ID == 0 {
-		// 尝试获取刚创建的记录
-		var latestRun models.PipelineRun
-		h.DB.Where("pipeline_id = ? AND build_number = ?", pipeline.ID, buildNumber).Order("id DESC").First(&latestRun)
-		if latestRun.ID > 0 {
-			run.ID = latestRun.ID
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"code": 500,
-				"msg":  "无法获取运行记录 ID",
-			})
-			return
-		}
-	}
+	syncLiveRunStateFromRun(run)
 
 	if hasAgentNode {
 		go h.scheduleQueuedPipelineRuns(h.DB)
@@ -694,6 +694,40 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 			"status":       run.Status,
 		},
 	})
+}
+
+func (h *PipelineHandler) createPipelineRunWithUniqueBuildNumber(run *models.PipelineRun) (int, error) {
+	if h == nil || h.DB == nil || run == nil {
+		return 0, fmt.Errorf("invalid pipeline run create context")
+	}
+
+	for attempt := 0; attempt < 5; attempt++ {
+		buildNumber := 1
+		err := h.DB.Transaction(func(tx *gorm.DB) error {
+			var lastRun models.PipelineRun
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("pipeline_id = ?", run.PipelineID).
+				Order("build_number DESC").
+				First(&lastRun).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			if lastRun.ID > 0 {
+				buildNumber = lastRun.BuildNumber + 1
+			}
+			run.BuildNumber = buildNumber
+			return tx.Create(run).Error
+		})
+		if err == nil {
+			return buildNumber, nil
+		}
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "unique") || strings.Contains(lower, "duplicate") {
+			continue
+		}
+		return 0, err
+	}
+
+	return 0, fmt.Errorf("failed to allocate unique build number after retries")
 }
 
 // PipelineNode represents a node in the pipeline configuration
@@ -982,7 +1016,7 @@ func (h *PipelineHandler) createAllNodeTasks(pipeline models.Pipeline, run *mode
 			Script:        script,
 			WorkDir:       workDir,
 			EnvVars:       envVars,
-			Status:        models.TaskStatusPending,
+			Status:        models.TaskStatusQueued,
 			Timeout:       timeout,
 		}
 
@@ -1219,7 +1253,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 			Script:        script,
 			WorkDir:       workDir,
 			EnvVars:       envVars,
-			Status:        models.TaskStatusPending,
+			Status:        models.TaskStatusQueued,
 			Timeout:       timeout,
 			MaxRetries:    maxRetries,
 			RepoURL:       repoURL,
@@ -1239,7 +1273,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 		task.WorkDir = workDir
 		task.EnvVars = envVars
 		task.Timeout = timeout
-		task.Status = models.TaskStatusPending
+		task.Status = models.TaskStatusQueued
 		task.MaxRetries = maxRetries
 		task.RepoURL = repoURL
 		task.RepoBranch = repoBranch
@@ -1618,14 +1652,23 @@ func (h *PipelineHandler) executeServerTask(db *gorm.DB, run *models.PipelineRun
 	updates := map[string]interface{}{
 		"end_time":  end,
 		"duration":  duration,
-		"status":    models.TaskStatusSuccess,
+		"status":    models.TaskStatusExecuteSuccess,
 		"error_msg": "",
 	}
 	if !success {
-		updates["status"] = models.TaskStatusFailed
+		updates["status"] = models.TaskStatusExecuteFailed
 		updates["error_msg"] = errMsg
 	}
 	db.Model(&task).Updates(updates)
+	task.EndTime = end
+	task.Duration = duration
+	task.ErrorMsg = errMsg
+	if success {
+		task.Status = models.TaskStatusExecuteSuccess
+	} else {
+		task.Status = models.TaskStatusExecuteFailed
+	}
+	syncLiveTaskStateFromTask(&task, "")
 	SharedWebSocketHandler().BroadcastTaskStatus(run.ID, task.ID, task.NodeID, updates["status"].(string), 0, errMsg, "")
 
 	return success, errMsg
@@ -2064,6 +2107,11 @@ func (h *PipelineHandler) updateRunStatus(runID uint64, status, errorMsg string)
 	}
 
 	h.DB.Model(&run).Updates(updates)
+	run.Status = status
+	run.EndTime = now
+	run.Duration = duration
+	run.ErrorMsg = errorMsg
+	syncLiveRunStateFromRun(&run)
 
 	// Broadcast run status to frontend clients
 	wsHandler := SharedWebSocketHandler()
@@ -2228,6 +2276,11 @@ func (h *PipelineHandler) GetRunDetail(c *gin.Context) {
 		})
 		return
 	}
+	if liveRunState, err := utils.GetLiveRunState(c.Request.Context(), run.ID); err == nil && liveRunState != nil {
+		run.Status = liveRunState.Status
+		run.Duration = liveRunState.Duration
+		run.ErrorMsg = liveRunState.ErrorMsg
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -2264,6 +2317,25 @@ func (h *PipelineHandler) GetRunTasks(c *gin.Context) {
 	// 获取所有已执行的任务
 	var tasks []models.AgentTask
 	h.DB.Where("workspace_id = ? AND pipeline_run_id = ?", workspaceID, runID).Preload("Agent").Order("created_at ASC").Find(&tasks)
+	if liveTaskStates, complete, err := utils.GetLiveTaskStatesForRun(c.Request.Context(), run.ID); err == nil && complete && len(liveTaskStates) > 0 {
+		byTaskID := make(map[uint64]utils.LiveTaskState, len(liveTaskStates))
+		for _, state := range liveTaskStates {
+			byTaskID[state.TaskID] = state
+		}
+		for i := range tasks {
+			if state, ok := byTaskID[tasks[i].ID]; ok {
+				tasks[i].Status = state.Status
+				tasks[i].StartTime = state.StartTime
+				tasks[i].EndTime = state.EndTime
+				tasks[i].Duration = state.Duration
+				tasks[i].ExitCode = state.ExitCode
+				tasks[i].ErrorMsg = state.ErrorMsg
+				if tasks[i].Agent == nil && state.AgentName != "" {
+					tasks[i].Agent = &models.Agent{Name: state.AgentName}
+				}
+			}
+		}
+	}
 
 	// 构建 NodeID -> Task 映射
 	taskMap := make(map[string]*models.AgentTask)
@@ -2494,6 +2566,19 @@ func (h *PipelineHandler) GetRunLogs(c *gin.Context) {
 			"message": "读取日志失败: " + err.Error(),
 		})
 		return
+	}
+	var tasks []models.AgentTask
+	if err := h.DB.Where("workspace_id = ? AND pipeline_run_id = ?", workspaceID, runIDNum).Find(&tasks).Error; err == nil {
+		taskHandler := NewTaskHandler()
+		for _, task := range tasks {
+			if models.IsTerminalTaskStatus(task.Status) {
+				continue
+			}
+			liveLogs, liveErr := taskHandler.fetchCrossServerLiveTaskLogs(c.Request.Context(), task, 0)
+			if liveErr == nil && len(liveLogs) > 0 {
+				logs = append(logs, liveLogs...)
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{

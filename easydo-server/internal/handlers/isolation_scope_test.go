@@ -220,7 +220,7 @@ func TestTaskEndpoints_AreScopedToCurrentWorkspace(t *testing.T) {
 	if err := db.Create(&agent).Error; err != nil {
 		t.Fatalf("create agent failed: %v", err)
 	}
-	if err := db.Create(&models.AgentTask{WorkspaceID: 20, AgentID: agent.ID, PipelineRunID: 1, Name: "cross-task", TaskType: "shell", Status: models.TaskStatusPending, Timeout: 60}).Error; err != nil {
+	if err := db.Create(&models.AgentTask{WorkspaceID: 20, AgentID: agent.ID, PipelineRunID: 1, Name: "cross-task", TaskType: "shell", Status: models.TaskStatusAssigned, Timeout: 60}).Error; err != nil {
 		t.Fatalf("create task failed: %v", err)
 	}
 

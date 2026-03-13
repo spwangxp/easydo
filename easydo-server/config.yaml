@@ -5,7 +5,10 @@
 
 server:
   port: 8080
-  mode: debug  # debug / release
+  mode: release
+  id: ""
+  internal_url: ""
+  internal_token: ""
 
 database:
   # 通过环境变量覆盖: DB_HOST, DB_PORT, DB_USERNAME, DB_PASSWORD, DB_NAME
@@ -14,6 +17,8 @@ database:
   username: ""
   password: ""
   name: ""
+  auto_migrate: false
+  seed_test_data: false
   max_open_conns: 100
   max_idle_conns: 10
   max_life_time: 1h
@@ -35,3 +40,21 @@ auth:
   # 通过环境变量覆盖: AUTH_TOKEN_TTL, AUTH_REFRESH_INTERVAL
   token_ttl: 4h
   refresh_interval: 10m
+
+task:
+  lease_ttl: 2m
+  dispatch_timeout: 30s
+
+logging:
+  live_buffer_max_chunks: 1024
+  segment_max_lines: 200
+  segment_flush_interval: 5s
+
+object_storage:
+  provider: s3
+  endpoint: ""
+  bucket: easydo-logs
+  use_ssl: false
+  access_key: ""
+  secret_key: ""
+  region: us-east-1

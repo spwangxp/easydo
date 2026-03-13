@@ -156,3 +156,17 @@ func TestRunPipeline_ServerOnlyNodeStartsImmediately(t *testing.T) {
 		t.Fatalf("run start_time should be set for immediate run")
 	}
 }
+
+func TestPipelineRun_BuildNumberIsUniquePerPipeline(t *testing.T) {
+	db := openHandlerTestDB(t)
+
+	first := models.PipelineRun{PipelineID: 11, BuildNumber: 1, Status: models.PipelineRunStatusQueued}
+	second := models.PipelineRun{PipelineID: 11, BuildNumber: 1, Status: models.PipelineRunStatusQueued}
+
+	if err := db.Create(&first).Error; err != nil {
+		t.Fatalf("create first run failed: %v", err)
+	}
+	if err := db.Create(&second).Error; err == nil {
+		t.Fatal("expected duplicate build number insert to fail")
+	}
+}

@@ -1,12 +1,17 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
 	"easydo-server/internal/models"
+	"easydo-server/pkg/utils"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -23,9 +28,9 @@ func TestWebSocketMessage_Marshal(t *testing.T) {
 	msg := WebSocketMessage{
 		Type: "heartbeat",
 		Payload: map[string]interface{}{
-			"timestamp":   float64(1234567890),
-			"agent_id":    float64(1),
-			"cpu_usage":   45.5,
+			"timestamp":    float64(1234567890),
+			"agent_id":     float64(1),
+			"cpu_usage":    45.5,
 			"memory_usage": 60.0,
 		},
 	}
@@ -48,7 +53,7 @@ func TestWebSocketMessage_Unmarshal(t *testing.T) {
 		"payload": {
 			"task_id": 123,
 			"run_id": 456,
-			"status": "success",
+			"status": "execute_success",
 			"exit_code": 0,
 			"error_msg": ""
 		}
@@ -60,7 +65,7 @@ func TestWebSocketMessage_Unmarshal(t *testing.T) {
 	assert.Equal(t, "task_status", msg.Type)
 	assert.Equal(t, float64(123), msg.Payload["task_id"])
 	assert.Equal(t, float64(456), msg.Payload["run_id"])
-	assert.Equal(t, "success", msg.Payload["status"])
+	assert.Equal(t, "execute_success", msg.Payload["status"])
 }
 
 func TestWebSocketMessage_Unmarshal_EmptyPayload(t *testing.T) {
@@ -250,15 +255,15 @@ func TestFrontendConnectionMap(t *testing.T) {
 
 func TestBroadcastMessageStructure(t *testing.T) {
 	payload := map[string]interface{}{
-		"task_id":     float64(1),
-		"run_id":      float64(100),
-		"status":      models.TaskStatusSuccess,
-		"exit_code":   float64(0),
-		"error_msg":   "",
-		"duration":    float64(120),
-		"agent_id":    float64(5),
-		"agent_name":  "test-agent",
-		"timestamp":   float64(time.Now().Unix()),
+		"task_id":    float64(1),
+		"run_id":     float64(100),
+		"status":     models.TaskStatusExecuteSuccess,
+		"exit_code":  float64(0),
+		"error_msg":  "",
+		"duration":   float64(120),
+		"agent_id":   float64(5),
+		"agent_name": "test-agent",
+		"timestamp":  float64(time.Now().Unix()),
 	}
 
 	msg := WebSocketMessage{
@@ -279,17 +284,116 @@ func TestBroadcastMessageStructure(t *testing.T) {
 	assert.Equal(t, payload["status"], decoded.Payload["status"])
 }
 
+func TestSendTaskAssign_RollsBackTaskWhenStreamPublishFails(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	task := models.AgentTask{
+		AgentID:       9,
+		PipelineRunID: 12,
+		WorkspaceID:   1,
+		NodeID:        "build",
+		Name:          "build",
+		TaskType:      "shell",
+		Status:        models.TaskStatusAssigned,
+		Timeout:       60,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	ok := handler.sendTaskAssign(task)
+	assert.False(t, ok)
+
+	var reloaded models.AgentTask
+	if err := db.First(&reloaded, task.ID).Error; err != nil {
+		t.Fatalf("reload task failed: %v", err)
+	}
+	assert.Equal(t, models.TaskStatusAssigned, reloaded.Status)
+	assert.Empty(t, reloaded.DispatchToken)
+	assert.Equal(t, 0, reloaded.DispatchAttempt)
+	assert.EqualValues(t, 0, reloaded.LeaseExpireAt)
+	assert.Empty(t, reloaded.ErrorMsg)
+}
+
+func TestSendTaskAssign_PublishesAgentStreamEvent(t *testing.T) {
+	db := openHandlerTestDB(t)
+	mini, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis failed: %v", err)
+	}
+	defer mini.Close()
+
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() {
+		if utils.RedisClient != nil {
+			_ = utils.RedisClient.Close()
+		}
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	task := models.AgentTask{
+		AgentID:       7,
+		PipelineRunID: 21,
+		WorkspaceID:   1,
+		NodeID:        "deploy",
+		Name:          "deploy",
+		TaskType:      "shell",
+		Status:        models.TaskStatusAssigned,
+		Timeout:       60,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	ok := handler.sendTaskAssign(task)
+	assert.True(t, ok)
+
+	var reloaded models.AgentTask
+	if err := db.First(&reloaded, task.ID).Error; err != nil {
+		t.Fatalf("reload task failed: %v", err)
+	}
+	assert.Equal(t, models.TaskStatusDispatching, reloaded.Status)
+	assert.NotEmpty(t, reloaded.DispatchToken)
+	assert.Equal(t, 1, reloaded.DispatchAttempt)
+	assert.Greater(t, reloaded.LeaseExpireAt, time.Now().Unix())
+
+	entries, err := utils.RedisClient.XRange(context.Background(), utils.AgentStreamKey(task.AgentID), "-", "+").Result()
+	if err != nil {
+		t.Fatalf("read agent stream failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 stream entry, got %d", len(entries))
+	}
+	assert.Equal(t, reloaded.DispatchToken, entries[0].Values["dispatch_token"])
+	assert.Equal(t, "1", entries[0].Values["dispatch_attempt"])
+	assert.Equal(t, fmt.Sprintf("%d", reloaded.ID), fmt.Sprintf("%v", entries[0].Values["task_id"]))
+}
+
 func TestHeartbeatPayload(t *testing.T) {
 	payload := map[string]interface{}{
-		"timestamp":          float64(time.Now().Unix()),
-		"cpu_usage":          45.5,
-		"memory_usage":       60.0,
-		"disk_usage":         75.5,
-		"load_avg":           "1.5, 1.2, 1.0",
-		"tasks_running":      float64(2),
-		"os":                 "linux",
-		"arch":               "amd64",
-		"version":            "1.0.0",
+		"timestamp":     float64(time.Now().Unix()),
+		"cpu_usage":     45.5,
+		"memory_usage":  60.0,
+		"disk_usage":    75.5,
+		"load_avg":      "1.5, 1.2, 1.0",
+		"tasks_running": float64(2),
+		"os":            "linux",
+		"arch":          "amd64",
+		"version":       "1.0.0",
 	}
 
 	msg := WebSocketMessage{
@@ -337,14 +441,14 @@ func TestHeartbeatAckPayload(t *testing.T) {
 
 func TestTaskLogPayload(t *testing.T) {
 	payload := map[string]interface{}{
-		"log_id":       float64(1),
-		"task_id":      float64(100),
-		"run_id":       float64(1000),
-		"level":        "info",
-		"message":      "Step 1: Building project...",
-		"source":       "stdout",
-		"line_number":  float64(42),
-		"timestamp":    float64(time.Now().Unix()),
+		"log_id":      float64(1),
+		"task_id":     float64(100),
+		"run_id":      float64(1000),
+		"level":       "info",
+		"message":     "Step 1: Building project...",
+		"source":      "stdout",
+		"line_number": float64(42),
+		"timestamp":   float64(time.Now().Unix()),
 	}
 
 	msg := WebSocketMessage{
@@ -449,15 +553,15 @@ func TestFrontendSubscriptionPayload(t *testing.T) {
 
 func TestRunProgressPayload(t *testing.T) {
 	payload := map[string]interface{}{
-		"run_id":           float64(1000),
-		"status":           "running",
-		"progress":         float64(45.5),
-		"current_node_id":  "node-5",
+		"run_id":            float64(1000),
+		"status":            "running",
+		"progress":          float64(45.5),
+		"current_node_id":   "node-5",
 		"current_node_name": "Deploy",
-		"total_nodes":      float64(10),
-		"completed_nodes":  float64(4),
-		"start_time":       float64(time.Now().Unix() - 300),
-		"elapsed_seconds":  float64(300),
+		"total_nodes":       float64(10),
+		"completed_nodes":   float64(4),
+		"start_time":        float64(time.Now().Unix() - 300),
+		"elapsed_seconds":   float64(300),
 	}
 
 	msg := WebSocketMessage{
@@ -577,10 +681,16 @@ func TestStatusConstants(t *testing.T) {
 	assert.Equal(t, "busy", models.AgentStatusBusy)
 	assert.Equal(t, "error", models.AgentStatusError)
 
-	assert.Equal(t, "pending", models.TaskStatusPending)
+	assert.Equal(t, "assigned", models.TaskStatusAssigned)
+	assert.Equal(t, "dispatching", models.TaskStatusDispatching)
+	assert.Equal(t, "pulling", models.TaskStatusPulling)
+	assert.Equal(t, "acked", models.TaskStatusAcked)
 	assert.Equal(t, "running", models.TaskStatusRunning)
-	assert.Equal(t, "success", models.TaskStatusSuccess)
-	assert.Equal(t, "failed", models.TaskStatusFailed)
+	assert.Equal(t, "execute_success", models.TaskStatusExecuteSuccess)
+	assert.Equal(t, "execute_failed", models.TaskStatusExecuteFailed)
+	assert.Equal(t, "schedule_failed", models.TaskStatusScheduleFailed)
+	assert.Equal(t, "dispatch_timeout", models.TaskStatusDispatchTimeout)
+	assert.Equal(t, "lease_expired", models.TaskStatusLeaseExpired)
 	assert.Equal(t, "cancelled", models.TaskStatusCancelled)
 
 	assert.Equal(t, "pending", models.AgentRegistrationStatusPending)
@@ -615,19 +725,19 @@ func TestHeartbeatHistory(t *testing.T) {
 	assert.Equal(t, float64(50.0), heartbeats[0].CPUUsage)
 
 	handler.storeHeartbeat(1, models.AgentHeartbeat{
-		AgentID:      1,
-		Timestamp:    time.Now().Unix(),
-		CPUUsage:     55.0,
-		MemoryUsage:  65.0,
-		DiskUsage:    75.0,
+		AgentID:     1,
+		Timestamp:   time.Now().Unix(),
+		CPUUsage:    55.0,
+		MemoryUsage: 65.0,
+		DiskUsage:   75.0,
 	})
 
 	handler.storeHeartbeat(1, models.AgentHeartbeat{
-		AgentID:      1,
-		Timestamp:    time.Now().Unix(),
-		CPUUsage:     60.0,
-		MemoryUsage:  70.0,
-		DiskUsage:    80.0,
+		AgentID:     1,
+		Timestamp:   time.Now().Unix(),
+		CPUUsage:    60.0,
+		MemoryUsage: 70.0,
+		DiskUsage:   80.0,
 	})
 
 	heartbeats, total = handler.GetHeartbeats(1, 1, 10)
@@ -641,9 +751,9 @@ func TestHeartbeatHistoryPagination(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		handler.storeHeartbeat(1, models.AgentHeartbeat{
-			AgentID:      1,
-			Timestamp:    time.Now().Unix() + int64(i),
-			CPUUsage:     float64(50 + i),
+			AgentID:   1,
+			Timestamp: time.Now().Unix() + int64(i),
+			CPUUsage:  float64(50 + i),
 		})
 	}
 
@@ -742,15 +852,15 @@ func TestClientIDCounter(t *testing.T) {
 
 func TestWebSocketMessageComplexPayload(t *testing.T) {
 	payload := map[string]interface{}{
-		"task_id":      float64(123),
-		"run_id":       float64(456),
-		"status":       "success",
-		"exit_code":    float64(0),
-		"error_msg":    "",
-		"duration":     float64(300),
-		"agent_id":     float64(7),
-		"agent_name":   "prod-agent-01",
-		"timestamp":    float64(time.Now().Unix()),
+		"task_id":    float64(123),
+		"run_id":     float64(456),
+		"status":     "execute_success",
+		"exit_code":  float64(0),
+		"error_msg":  "",
+		"duration":   float64(300),
+		"agent_id":   float64(7),
+		"agent_name": "prod-agent-01",
+		"timestamp":  float64(time.Now().Unix()),
 		"outputs": map[string]interface{}{
 			"artifact_path": "/tmp/artifact",
 			"build_id":      "build_12345",
@@ -780,10 +890,10 @@ func TestLogLevelConstants(t *testing.T) {
 
 	for _, level := range logLevels {
 		payload := map[string]interface{}{
-			"level":    level,
-			"message":  "test message",
-			"task_id":  float64(1),
-			"run_id":   float64(1),
+			"level":   level,
+			"message": "test message",
+			"task_id": float64(1),
+			"run_id":  float64(1),
 		}
 
 		msg := WebSocketMessage{

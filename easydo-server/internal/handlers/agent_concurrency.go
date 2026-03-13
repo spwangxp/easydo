@@ -1,8 +1,6 @@
 package handlers
 
 import (
-	"math"
-
 	"easydo-server/internal/models"
 	"gorm.io/gorm"
 )
@@ -25,35 +23,31 @@ func countAgentRunningPipelines(db *gorm.DB, agentID uint64) int64 {
 }
 
 func selectAgentWithPipelineCapacity(db *gorm.DB, workspaceID uint64) uint64 {
-	var agents []models.Agent
-	query := db.Where("registration_status = ? AND status IN ?",
-		models.AgentRegistrationStatusApproved,
-		[]string{models.AgentStatusOnline, models.AgentStatusBusy},
-	)
-	if workspaceID > 0 {
-		query = query.Where("scope_type = ? OR (scope_type = ? AND workspace_id = ?)", models.AgentScopePlatform, models.AgentScopeWorkspace, workspaceID)
+	type candidateAgent struct {
+		ID           uint64
+		RunningCount int64
 	}
-	query.Find(&agents)
 
-	if len(agents) == 0 {
+	query := db.Model(&models.Agent{}).
+		Select(`agents.id, COALESCE(COUNT(pipeline_runs.id), 0) AS running_count`).
+		Joins(`LEFT JOIN pipeline_runs ON pipeline_runs.agent_id = agents.id AND pipeline_runs.status = ?`, models.PipelineRunStatusRunning).
+		Where("agents.registration_status = ? AND agents.status IN ?",
+			models.AgentRegistrationStatusApproved,
+			[]string{models.AgentStatusOnline, models.AgentStatusBusy},
+		)
+	if workspaceID > 0 {
+		query = query.Where("agents.scope_type = ? OR (agents.scope_type = ? AND agents.workspace_id = ?)", models.AgentScopePlatform, models.AgentScopeWorkspace, workspaceID)
+	}
+	query = query.
+		Group("agents.id, agents.max_concurrent_pipelines").
+		Having(`COALESCE(COUNT(pipeline_runs.id), 0) < CASE WHEN agents.max_concurrent_pipelines <= 0 THEN ? ELSE agents.max_concurrent_pipelines END`, defaultAgentMaxConcurrentPipelines).
+		Order("running_count ASC, agents.id ASC")
+
+	var candidate candidateAgent
+	if err := query.First(&candidate).Error; err != nil {
 		return 0
 	}
-
-	selected := uint64(0)
-	minRunning := int64(math.MaxInt64)
-	for _, agent := range agents {
-		maxConcurrent := normalizeAgentMaxConcurrentPipelines(agent.MaxConcurrentPipelines)
-		running := countAgentRunningPipelines(db, agent.ID)
-		if running >= int64(maxConcurrent) {
-			continue
-		}
-		if running < minRunning {
-			minRunning = running
-			selected = agent.ID
-		}
-	}
-
-	return selected
+	return candidate.ID
 }
 
 func updateAgentStatusByPipelineConcurrency(db *gorm.DB, agentID uint64) {

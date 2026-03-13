@@ -29,6 +29,7 @@ func setupAuthTestRedis(t *testing.T, tokenTTL, refreshInterval time.Duration) *
 
 	once = sync.Once{}
 	jwtSecret = nil
+	validatedSessionCache = sync.Map{}
 
 	mini, err := miniredis.Run()
 	if err != nil {
@@ -36,13 +37,54 @@ func setupAuthTestRedis(t *testing.T, tokenTTL, refreshInterval time.Duration) *
 	}
 	utils.RedisClient = redis.NewClient(&redis.Options{Addr: mini.Addr()})
 	t.Cleanup(func() {
-		_ = utils.RedisClient.Close()
+		if utils.RedisClient != nil {
+			_ = utils.RedisClient.Close()
+		}
 		mini.Close()
 		_ = os.Unsetenv("JWT_SECRET")
 		_ = os.Unsetenv("AUTH_TOKEN_TTL")
 		_ = os.Unsetenv("AUTH_REFRESH_INTERVAL")
 	})
 	return mini
+}
+
+func TestJWTAuthUsesCachedSessionWhenRedisBecomesUnavailable(t *testing.T) {
+	setupAuthTestRedis(t, 4*time.Hour, 10*time.Minute)
+	gin.SetMode(gin.TestMode)
+
+	router := gin.New()
+	router.GET("/protected", JWTAuth(), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"code": 200})
+	})
+
+	user := &models.User{
+		BaseModel: models.BaseModel{ID: 4001},
+		Username:  "cached-user",
+		Role:      "admin",
+	}
+	tokenValue, _, err := IssueTokenSession(context.Background(), user)
+	if err != nil {
+		t.Fatalf("issue token failed: %v", err)
+	}
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	firstReq.Header.Set("Authorization", "Bearer "+tokenValue)
+	firstResp := httptest.NewRecorder()
+	router.ServeHTTP(firstResp, firstReq)
+	if firstResp.Code != http.StatusOK {
+		t.Fatalf("expected initial auth success, got %d body=%s", firstResp.Code, firstResp.Body.String())
+	}
+
+	_ = utils.RedisClient.Close()
+	utils.RedisClient = nil
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	secondReq.Header.Set("Authorization", "Bearer "+tokenValue)
+	secondResp := httptest.NewRecorder()
+	router.ServeHTTP(secondResp, secondReq)
+	if secondResp.Code != http.StatusOK {
+		t.Fatalf("expected cached auth success when redis unavailable, got %d body=%s", secondResp.Code, secondResp.Body.String())
+	}
 }
 
 func TestJWTAuthRejectsLegacyTokenWithoutSessionID(t *testing.T) {

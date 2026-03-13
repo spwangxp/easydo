@@ -148,6 +148,9 @@
                 <el-button type="primary" link size="small" @click="viewExecutionDetail(row)">
                   查看执行
                 </el-button>
+                <el-button type="primary" link size="small" @click="viewRunLogs(row)">
+                  运行日志
+                </el-button>
                 <el-button type="primary" link size="small" @click="viewRunTasks(row)">
                   任务详情
                 </el-button>
@@ -170,6 +173,9 @@
           </div>
           <div class="execution-header-right">
             <el-button :icon="Refresh" circle @click="fetchExecutionDetail" :loading="executionLoading" />
+            <el-button v-if="currentRun?.id" @click="viewRunLogs(currentRun)">
+              运行日志
+            </el-button>
             <el-button v-if="currentRun?.status === 'running'" type="danger" @click="stopExecution">
               停止执行
             </el-button>
@@ -218,15 +224,16 @@
                 class="task-item"
                 :class="{ 
                   'task-running': task.status === 'running', 
-                  'task-failed': task.status === 'failed' || task.display_status === 'blocked',
+                  'task-failed': ['execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(task.status) || task.display_status === 'blocked',
                   'task-not-executed': task.display_status === 'not_executed'
                 }"
               >
                 <div class="task-status-icon">
-                  <el-icon v-if="task.status === 'queued' || task.status === 'pending' || task.display_status === 'not_executed'" :color="'var(--text-muted)'"><Clock /></el-icon>
+                  <el-icon v-if="['queued', 'assigned', 'dispatching', 'pulling', 'acked'].includes(task.status) || task.display_status === 'not_executed'" :color="'var(--text-muted)'"><Clock /></el-icon>
                   <el-icon v-else-if="task.status === 'running'" color="#E6A23C" class="running-icon"><Loading /></el-icon>
-                  <el-icon v-else-if="task.status === 'success'" color="#67C23A"><SuccessFilled /></el-icon>
-                  <el-icon v-else-if="task.status === 'failed' || task.display_status === 'blocked'" color="#F56C6C"><CircleCloseFilled /></el-icon>
+                  <el-icon v-else-if="task.status === 'execute_success'" color="#67C23A"><SuccessFilled /></el-icon>
+                  <el-icon v-else-if="task.status === 'cancelled'" :color="'var(--text-secondary)'"><CircleCloseFilled /></el-icon>
+                  <el-icon v-else-if="['execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(task.status) || task.display_status === 'blocked'" color="#F56C6C"><CircleCloseFilled /></el-icon>
                 </div>
                 <div class="task-info">
                   <div class="task-name">{{ task.name || `任务 #${task.id}` }}</div>
@@ -248,7 +255,7 @@
                     link 
                     size="small" 
                     @click="viewTaskLogs(task)"
-                    :disabled="task.status === 'queued' || task.status === 'pending' || task.display_status === 'not_executed' || task.display_status === 'blocked'"
+                    :disabled="['queued', 'assigned', 'dispatching', 'pulling'].includes(task.status) || task.display_status === 'not_executed' || task.display_status === 'blocked'"
                   >
                     查看日志
                   </el-button>
@@ -264,10 +271,15 @@
             <template #header>
               <div class="card-header">
                 <span>执行日志 - {{ selectedTask?.name || '全部' }}</span>
-                <el-button type="primary" link size="small" @click="showLogPanel = false">
-                  <el-icon><Close /></el-icon>
-                  关闭
-                </el-button>
+                <div>
+                  <el-button type="primary" link size="small" @click="downloadTaskLogs">
+                    下载
+                  </el-button>
+                  <el-button type="primary" link size="small" @click="showLogPanel = false">
+                    <el-icon><Close /></el-icon>
+                    关闭
+                  </el-button>
+                </div>
               </div>
             </template>
             
@@ -545,6 +557,12 @@
         <el-button type="primary" :loading="runLoading" @click="confirmRun">运行</el-button>
       </template>
     </el-dialog>
+    <log-viewer
+      ref="runLogViewerRef"
+      :pipeline-id="pipelineId"
+      :pipeline-run-id="currentRun?.id || null"
+      :title="`构建 #${currentRun?.build_number || ''}`"
+    />
   </div>
 </template>
 
@@ -570,10 +588,11 @@ import {
   Warning,
   Close
 } from '@element-plus/icons-vue'
-import { getPipelineDetail, runPipeline, updatePipeline, getPipelineRuns, getPipelineStatistics, getPipelineTestReports, getRunTasks, getRunLogs } from '@/api/pipeline'
+import { getPipelineDetail, runPipeline, updatePipeline, getPipelineRuns, getPipelineStatistics, getPipelineTestReports, getRunTasks } from '@/api/pipeline'
 import { getTaskLogs as fetchTaskLogsFromApi } from '@/api/task'
 import { getProjectList } from '@/api/project'
 import DesignTab from './designTab.vue'
+import LogViewer from './components/LogViewer.vue'
 import realtime from '@/utils/realtime'
 
 const route = useRoute()
@@ -655,10 +674,13 @@ const executionLoading = ref(false)
 const showLogPanel = ref(false)
 const selectedTask = ref(null)
 const logContentRef = ref(null)
+const realtimeMode = ref('idle')
+const runLogViewerRef = ref(null)
 let executionPollingTimer = null
 const detailContainerRef = ref(null)
 const detailContainerWidth = ref(0)
 let detailResizeObserver = null
+const realtimeHandlers = {}
 
 const parseTaskOrderTime = (value) => {
   if (value === null || value === undefined || value === '' || value === 0) {
@@ -723,7 +745,7 @@ const getTaskNodeID = (task) => {
 // 计算执行进度
 const executionProgress = computed(() => {
   if (!runTasks.value || runTasks.value.length === 0) return 0
-  const completed = runTasks.value.filter(t => t.status === 'success' || t.status === 'failed').length
+  const completed = runTasks.value.filter(t => ['execute_success', 'execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired', 'cancelled'].includes(t.status)).length
   return Math.round((completed / runTasks.value.length) * 100)
 })
 
@@ -929,6 +951,12 @@ const viewRunTasks = async (run) => {
   await fetchExecutionDetail()
 }
 
+const viewRunLogs = async (run) => {
+  currentRun.value = run
+  await nextTick()
+  runLogViewerRef.value?.open()
+}
+
 // 获取执行详情
 const fetchExecutionDetail = async () => {
   if (!currentRun.value) return
@@ -980,12 +1008,27 @@ const fetchTaskLogs = async (task) => {
   }
 }
 
+const isRunActive = (status) => ['queued', 'pending', 'running'].includes(status)
+
+const isRunTerminal = (status) => ['success', 'failed', 'cancelled'].includes(status)
+
 // 查看任务日志
 const viewTaskLogs = async (task) => {
   selectedTask.value = task
   showLogPanel.value = true
   taskLogs.value = []
   await fetchTaskLogs(task)
+}
+
+const downloadTaskLogs = () => {
+  const text = taskLogs.value.map(log => `[${formatLogTime(log.timestamp)}] ${log.message}`).join('\n')
+  const blob = new Blob([text], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${selectedTask.value?.name || 'task'}-logs.txt`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 // 停止执行
@@ -1002,15 +1045,15 @@ const stopExecution = () => {
 // 开始轮询执行状态（备用方案，当 WebSocket 不可用时）
 const startExecutionPolling = () => {
   if (executionPollingTimer) return
-  
+
+  fetchExecutionDetail()
   executionPollingTimer = setInterval(() => {
-    if (activeTab.value === 'execution' && (currentRun.value?.status === 'running' || currentRun.value?.status === 'queued')) {
+    if (activeTab.value === 'execution' && isRunActive(currentRun.value?.status)) {
       fetchExecutionDetail()
-    } else if (currentRun.value?.status !== 'running' && currentRun.value?.status !== 'queued') {
-      // 执行完成，停止轮询
+    } else if (currentRun.value?.status && isRunTerminal(currentRun.value?.status)) {
       stopExecutionPolling()
     }
-  }, 5000) // 5秒轮询
+  }, 5000)
 }
 
 // 停止轮询
@@ -1098,10 +1141,19 @@ const formatDuration = (seconds) => {
 const getStatusType = (status) => {
   const types = {
     success: 'success',
-    running: 'warning',
     failed: 'danger',
-    pending: 'info',
+    execute_success: 'success',
+    running: 'warning',
+    execute_failed: 'danger',
+    schedule_failed: 'danger',
+    dispatch_timeout: 'danger',
+    lease_expired: 'danger',
+    assigned: 'info',
+    dispatching: 'warning',
+    pulling: 'warning',
+    acked: 'warning',
     queued: 'warning',
+    cancelled: 'info',
     not_executed: 'info',
     blocked: 'danger'
   }
@@ -1111,10 +1163,19 @@ const getStatusType = (status) => {
 const getStatusText = (status) => {
   const texts = {
     success: '成功',
-    running: '运行中',
     failed: '失败',
-    pending: '等待',
+    execute_success: '成功',
+    running: '运行中',
+    execute_failed: '执行失败',
+    schedule_failed: '调度失败',
+    dispatch_timeout: '派发超时',
+    lease_expired: '租约失效',
+    assigned: '已分配',
+    dispatching: '派发中',
+    pulling: '等待拉取',
+    acked: '已确认',
     queued: '排队中',
+    cancelled: '已取消',
     not_executed: '暂未执行',
     blocked: '已阻塞'
   }
@@ -1152,8 +1213,7 @@ watch(activeTab, (newTab) => {
 
 // 设置 WebSocket 实时更新
 const setupRealtimeUpdates = () => {
-  // 监听任务状态更新
-  realtime.on('task_status', (payload) => {
+  realtimeHandlers.taskStatus = (payload) => {
     if (!currentRun.value || payload.run_id !== currentRun.value.id) return
     
     // 更新任务状态
@@ -1189,7 +1249,7 @@ const setupRealtimeUpdates = () => {
         task.start_time = payload.start_time
       } else if (payload.status === 'running' && !task.start_time && payload.timestamp) {
         task.start_time = payload.timestamp
-      } else if (payload.status === 'pending' && payload.retrying) {
+      } else if (payload.status === 'queued' && payload.retrying) {
         task.start_time = 0
       }
       if (payload.agent_name) {
@@ -1206,8 +1266,8 @@ const setupRealtimeUpdates = () => {
         id: payload.task_id || 0,
         node_id: payload.node_id,
         name: payload.task_name || payload.node_id,
-        status: payload.status || 'pending',
-        display_status: payload.status || 'pending',
+        status: payload.status || 'queued',
+        display_status: payload.status || 'queued',
         start_time: payload.start_time || 0,
         duration: payload.duration || 0,
         error_msg: payload.error_msg || '',
@@ -1217,13 +1277,12 @@ const setupRealtimeUpdates = () => {
     }
     
     // 如果有选中的任务，显示错误信息
-    if (payload.status === 'failed' && selectedTask.value?.id === payload.task_id) {
+    if ((payload.status === 'execute_failed' || payload.status === 'schedule_failed' || payload.status === 'dispatch_timeout' || payload.status === 'lease_expired') && selectedTask.value?.id === payload.task_id) {
       selectedTask.value.error_msg = payload.error_msg
     }
-  })
-  
-  // 监听任务日志更新
-  realtime.on('task_log', (payload) => {
+  }
+
+  realtimeHandlers.taskLog = (payload) => {
     if (!currentRun.value || payload.run_id !== currentRun.value.id) return
     
     // 如果有选中的任务，显示日志
@@ -1242,10 +1301,9 @@ const setupRealtimeUpdates = () => {
         }
       })
     }
-  })
-  
-  // 监听流水线状态更新
-  realtime.on('run_status', (payload) => {
+  }
+
+  realtimeHandlers.runStatus = (payload) => {
     if (!currentRun.value || payload.run_id !== currentRun.value.id) return
 
     // 更新流水线状态
@@ -1260,27 +1318,66 @@ const setupRealtimeUpdates = () => {
     }
 
     console.log(`Pipeline run ${payload.run_id} status updated to: ${payload.status}`)
-  })
-  
-  // 连接断开时提示
-  realtime.on('disconnected', () => {
+  }
+
+  realtimeHandlers.disconnected = () => {
+    realtimeMode.value = 'reconnecting'
     console.log('实时连接已断开')
-  })
-  
-  // 重连成功提示
-  realtime.on('connected', () => {
+  }
+
+  realtimeHandlers.reconnecting = () => {
+    realtimeMode.value = 'reconnecting'
+    startExecutionPolling()
+  }
+
+  realtimeHandlers.polling = () => {
+    realtimeMode.value = 'polling'
+    startExecutionPolling()
+  }
+
+  realtimeHandlers.connected = () => {
+    realtimeMode.value = 'connected'
     console.log('实时连接已建立')
-  })
+  }
+
+  realtimeHandlers.recovered = async () => {
+    realtimeMode.value = 'recovered'
+    stopExecutionPolling()
+    await fetchExecutionDetail()
+  }
+
+  realtime.on('task_status', realtimeHandlers.taskStatus)
+  realtime.on('task_log', realtimeHandlers.taskLog)
+  realtime.on('run_status', realtimeHandlers.runStatus)
+  realtime.on('disconnected', realtimeHandlers.disconnected)
+  realtime.on('reconnecting', realtimeHandlers.reconnecting)
+  realtime.on('polling', realtimeHandlers.polling)
+  realtime.on('connected', realtimeHandlers.connected)
+  realtime.on('recovered', realtimeHandlers.recovered)
 }
 
 // 开始实时更新
 const startRealtimeUpdates = (runID) => {
+  realtimeMode.value = 'connecting'
   realtime.connect(runID)
 }
 
 // 停止实时更新
 const stopRealtimeUpdates = () => {
+  Object.entries(realtimeHandlers).forEach(([event, handler]) => {
+    if (handler) {
+      const normalized = event === 'taskStatus'
+        ? 'task_status'
+        : event === 'taskLog'
+          ? 'task_log'
+          : event === 'runStatus'
+            ? 'run_status'
+            : event
+      realtime.off(normalized, handler)
+    }
+  })
   realtime.disconnect()
+  realtimeMode.value = 'idle'
 }
 
 const updateDetailContainerWidth = () => {

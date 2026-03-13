@@ -47,6 +47,7 @@ func openHandlerTestDB(t *testing.T) *gorm.DB {
 		&models.AgentHeartbeat{},
 		&models.AgentTaskEvent{},
 		&models.AgentLogChunk{},
+		&models.AgentLogSegment{},
 		&models.Secret{},
 		&models.SecretUsage{},
 		&models.SecretAuditLog{},

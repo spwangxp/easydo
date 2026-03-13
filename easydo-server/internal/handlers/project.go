@@ -69,7 +69,6 @@ func (h *ProjectHandler) GetProjectList(c *gin.Context) {
 		Limit(pageSize).
 		Find(&projects)
 
-	// 为每个项目添加流水线统计信息
 	type ProjectWithStats struct {
 		models.Project
 		PipelineCount   int       `json:"pipeline_count"`    // 流水线条数
@@ -78,35 +77,68 @@ func (h *ProjectHandler) GetProjectList(c *gin.Context) {
 		LatestRunStatus string    `json:"latest_run_status"` // 最新执行结果
 	}
 
+	projectIDs := make([]uint64, 0, len(projects))
+	for _, project := range projects {
+		projectIDs = append(projectIDs, project.ID)
+	}
+
+	type projectPipelineCountRow struct {
+		ProjectID     uint64
+		PipelineCount int64
+	}
+	pipelineCountByProject := make(map[uint64]int64, len(projects))
+	if len(projectIDs) > 0 {
+		var countRows []projectPipelineCountRow
+		h.DB.Model(&models.Pipeline{}).
+			Select("project_id, COUNT(*) AS pipeline_count").
+			Where("workspace_id = ? AND project_id IN ?", workspaceID, projectIDs).
+			Group("project_id").
+			Scan(&countRows)
+		for _, row := range countRows {
+			pipelineCountByProject[row.ProjectID] = row.PipelineCount
+		}
+	}
+
+	type latestProjectRunRow struct {
+		ProjectID   uint64
+		TriggerUser string
+		CreatedAt   time.Time
+		Status      string
+	}
+	latestRunByProject := make(map[uint64]latestProjectRunRow, len(projects))
+	if len(projectIDs) > 0 {
+		var latestRows []latestProjectRunRow
+		latestRunSubQuery := h.DB.Table("pipeline_runs AS pr").
+			Select("p.project_id, MAX(pr.created_at) AS latest_created_at").
+			Joins("JOIN pipelines p ON p.id = pr.pipeline_id").
+			Where("p.workspace_id = ? AND p.project_id IN ?", workspaceID, projectIDs).
+			Group("p.project_id")
+
+		h.DB.Table("pipeline_runs AS pr").
+			Select("p.project_id, pr.trigger_user, pr.created_at, pr.status").
+			Joins("JOIN pipelines p ON p.id = pr.pipeline_id").
+			Joins("JOIN (?) latest ON latest.project_id = p.project_id AND latest.latest_created_at = pr.created_at", latestRunSubQuery).
+			Where("p.workspace_id = ? AND p.project_id IN ?", workspaceID, projectIDs).
+			Order("pr.id DESC").
+			Scan(&latestRows)
+
+		for _, row := range latestRows {
+			if _, exists := latestRunByProject[row.ProjectID]; !exists {
+				latestRunByProject[row.ProjectID] = row
+			}
+		}
+	}
+
 	result := make([]ProjectWithStats, 0, len(projects))
 	for _, p := range projects {
 		pws := ProjectWithStats{
 			Project: p,
 		}
-
-		// 获取项目的流水线数量
-		var pipelineCount int64
-		h.DB.Model(&models.Pipeline{}).Where("project_id = ? AND workspace_id = ?", p.ID, workspaceID).Count(&pipelineCount)
-		pws.PipelineCount = int(pipelineCount)
-
-		// 获取项目下所有流水线中最近一次运行的执行信息
-		// 先获取该项目下所有流水线ID
-		var pipelines []models.Pipeline
-		h.DB.Where("project_id = ? AND workspace_id = ?", p.ID, workspaceID).Find(&pipelines)
-
-		if len(pipelines) > 0 {
-			// 获取项目下所有流水线中最近一次运行的记录
-			var latestRun models.PipelineRun
-			h.DB.Where("pipeline_id IN (?)",
-				h.DB.Model(&models.Pipeline{}).Select("id").Where("project_id = ? AND workspace_id = ?", p.ID, workspaceID)).
-				Order("created_at DESC").
-				First(&latestRun)
-
-			if latestRun.ID > 0 {
-				pws.LatestRunner = latestRun.TriggerUser
-				pws.LatestRunTime = latestRun.CreatedAt
-				pws.LatestRunStatus = latestRun.Status
-			}
+		pws.PipelineCount = int(pipelineCountByProject[p.ID])
+		if latestRun, ok := latestRunByProject[p.ID]; ok {
+			pws.LatestRunner = latestRun.TriggerUser
+			pws.LatestRunTime = latestRun.CreatedAt
+			pws.LatestRunStatus = latestRun.Status
 		}
 
 		result = append(result, pws)
