@@ -81,14 +81,10 @@ const routes = [
         meta: { permission: 'agent.approve' }
       },
       {
-        path: 'secrets',
-        name: 'Secrets',
-        component: () => import('@/views/secrets/index.vue'),
-        meta: { permission: 'credential.read' }
-      },
-      {
         path: 'credentials',
-        redirect: '/secrets'
+        name: 'Credentials',
+        component: () => import('@/views/credentials/index.vue'),
+        meta: { permission: 'credential.read' }
       }
     ]
   },

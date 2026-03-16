@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -540,10 +539,7 @@ func (t *Task) ParseParams() (*task.TaskParams, error) {
 
 	// Parse environment variables
 	if t.EnvVars != "" {
-		var env map[string]string
-		if err := json.Unmarshal([]byte(t.EnvVars), &env); err == nil {
-			params.EnvVars = env
-		}
+		params.EnvVars = task.ParseEnvVarsJSON(t.EnvVars)
 	}
 
 	return params, nil

@@ -78,9 +78,8 @@ func openRouterTestDB(t *testing.T) *gorm.DB {
 		&models.AgentTaskEvent{},
 		&models.AgentLogChunk{},
 		&models.Credential{},
-		&models.CredentialUsage{},
+		&models.CredentialEvent{},
 		&models.PipelineCredentialRef{},
-		&models.SecretPermission{},
 	); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}

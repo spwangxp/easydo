@@ -14,26 +14,26 @@ func NewCredentialEncryptionService() *CredentialEncryptionService {
 	return &CredentialEncryptionService{}
 }
 
-func (s *CredentialEncryptionService) EncryptCredentialData(data map[string]interface{}) (string, string, error) {
+func (s *CredentialEncryptionService) EncryptCredentialData(data map[string]interface{}) (string, error) {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to marshal credential data: %w", err)
+		return "", fmt.Errorf("failed to marshal credential data: %w", err)
 	}
 
-	encrypted, err := models.EncryptSecret(string(jsonData))
+	encrypted, err := models.EncryptCredentialPayload(string(jsonData))
 	if err != nil {
-		return "", "", fmt.Errorf("failed to encrypt credential data: %w", err)
+		return "", fmt.Errorf("failed to encrypt credential data: %w", err)
 	}
 
-	return encrypted, "", nil
+	return encrypted, nil
 }
 
-func (s *CredentialEncryptionService) DecryptCredentialData(encryptedData, iv string) (map[string]interface{}, error) {
+func (s *CredentialEncryptionService) DecryptCredentialData(encryptedData string) (map[string]interface{}, error) {
 	if encryptedData == "" {
 		return nil, errors.New("encrypted data is empty")
 	}
 
-	decrypted, err := models.DecryptSecret(encryptedData)
+	decrypted, err := models.DecryptCredentialPayload(encryptedData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt credential data: %w", err)
 	}

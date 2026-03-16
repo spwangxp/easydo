@@ -88,15 +88,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+easydo_step "准备 Git 检出任务"
+easydo_info "working_dir=$TARGET_DIR branch=$BRANCH depth=$DEPTH"
+
 HTTP_HEADER=""
 if [ "$AUTH_TYPE" = "SSH_KEY" ] && [ -n "${EASYDO_CRED_REPO_AUTH_PRIVATE_KEY:-}" ]; then
   SSH_KEY_FILE="$(mktemp)"
   printf '%s\n' "${EASYDO_CRED_REPO_AUTH_PRIVATE_KEY}" > "$SSH_KEY_FILE"
   chmod 600 "$SSH_KEY_FILE"
   export GIT_SSH_COMMAND="ssh -i $SSH_KEY_FILE -o StrictHostKeyChecking=no"
-elif [ "$AUTH_TYPE" = "TOKEN" ] && [ -n "${EASYDO_CRED_REPO_AUTH_TOKEN:-}" ]; then
+elif [ "$AUTH_TYPE" = "TOKEN" ] && [ -n "${EASYDO_CRED_REPO_AUTH_TOKEN:-${EASYDO_CRED_REPO_AUTH_ACCESS_TOKEN:-}}" ]; then
+  TOKEN_VALUE="${EASYDO_CRED_REPO_AUTH_TOKEN:-${EASYDO_CRED_REPO_AUTH_ACCESS_TOKEN:-}}"
   AUTH_USER="${EASYDO_CRED_REPO_AUTH_USERNAME:-oauth2}"
-  AUTH_HEADER="$(printf '%s:%s' "$AUTH_USER" "${EASYDO_CRED_REPO_AUTH_TOKEN}" | base64 | tr -d '\n')"
+  AUTH_HEADER="$(printf '%s:%s' "$AUTH_USER" "$TOKEN_VALUE" | base64 | tr -d '\n')"
   HTTP_HEADER="Authorization: Basic $AUTH_HEADER"
 elif [ "$AUTH_TYPE" = "PASSWORD" ] && [ -n "${EASYDO_CRED_REPO_AUTH_USERNAME:-}" ] && [ -n "${EASYDO_CRED_REPO_AUTH_PASSWORD:-}" ]; then
   AUTH_HEADER="$(printf '%s:%s' "${EASYDO_CRED_REPO_AUTH_USERNAME}" "${EASYDO_CRED_REPO_AUTH_PASSWORD}" | base64 | tr -d '\n')"
@@ -105,21 +109,27 @@ fi
 
 rm -rf "$TARGET_DIR"
 mkdir -p "$TARGET_DIR"
+REPO_URL_LOG="$(easydo_mask_url "$REPO_URL")"
 if [ "$DEPTH" -gt 0 ]; then
   if [ -n "$HTTP_HEADER" ]; then
-    git -c "http.extraHeader=$HTTP_HEADER" clone --depth "$DEPTH" -b "$BRANCH" "$REPO_URL" "$TARGET_DIR"
+    easydo_cmd "git -c http.extraHeader=Authorization: Basic *** clone --progress --depth $DEPTH -b $BRANCH $REPO_URL_LOG $TARGET_DIR"
+    git -c "http.extraHeader=$HTTP_HEADER" clone --progress --depth "$DEPTH" -b "$BRANCH" "$REPO_URL" "$TARGET_DIR"
   else
-    git clone --depth "$DEPTH" -b "$BRANCH" "$REPO_URL" "$TARGET_DIR"
+    easydo_cmd "git clone --progress --depth $DEPTH -b $BRANCH $REPO_URL_LOG $TARGET_DIR"
+    git clone --progress --depth "$DEPTH" -b "$BRANCH" "$REPO_URL" "$TARGET_DIR"
   fi
 else
   if [ -n "$HTTP_HEADER" ]; then
-    git -c "http.extraHeader=$HTTP_HEADER" clone -b "$BRANCH" "$REPO_URL" "$TARGET_DIR"
+    easydo_cmd "git -c http.extraHeader=Authorization: Basic *** clone --progress -b $BRANCH $REPO_URL_LOG $TARGET_DIR"
+    git -c "http.extraHeader=$HTTP_HEADER" clone --progress -b "$BRANCH" "$REPO_URL" "$TARGET_DIR"
   else
-    git clone -b "$BRANCH" "$REPO_URL" "$TARGET_DIR"
+    easydo_cmd "git clone --progress -b $BRANCH $REPO_URL_LOG $TARGET_DIR"
+    git clone --progress -b "$BRANCH" "$REPO_URL" "$TARGET_DIR"
   fi
 fi
 if [ -n "$COMMIT" ]; then
   cd "$TARGET_DIR"
+  easydo_cmd "git checkout $COMMIT"
   git checkout "$COMMIT"
 fi`,
 		CredentialSlots: []taskCredentialSlot{
@@ -146,6 +156,12 @@ fi`,
 		Category:      "utils",
 		ExecMode:      taskExecModeAgent,
 		ShellTemplate: `set -e
+WORKDIR={{ shq (def "." (dig "working_dir")) }}
+SCRIPT_CONTENT={{ shq (def "" (dig "script")) }}
+SCRIPT_LOG={{ logq (def "" (dig "script")) }}
+easydo_step "执行自定义脚本任务"
+easydo_info "working_dir=$WORKDIR"
+easydo_cmd "$SCRIPT_LOG"
 {{ def "" (dig "script") }}`,
 	},
 	"sleep": {
@@ -153,7 +169,11 @@ fi`,
 		Category:      "utils",
 		ExecMode:      taskExecModeAgent,
 		ShellTemplate: `set -e
-sleep {{ toInt (def 60 (dig "seconds")) }}`,
+SECONDS_TO_SLEEP={{ toInt (def 60 (dig "seconds")) }}
+easydo_step "执行等待任务"
+easydo_cmd "sleep $SECONDS_TO_SLEEP"
+sleep "$SECONDS_TO_SLEEP"
+easydo_info "sleep completed after ${SECONDS_TO_SLEEP}s"`,
 	},
 	"npm": {
 		CanonicalType: "npm",
@@ -161,9 +181,14 @@ sleep {{ toInt (def 60 (dig "seconds")) }}`,
 		ExecMode:      taskExecModeAgent,
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
+CMD={{ shq (def "npm ci && npm run build" (dig "command")) }}
+LOG_CMD={{ logq (def "npm ci && npm run build" (dig "command")) }}
+easydo_step "执行 npm 任务"
+easydo_info "working_dir=$WORKDIR"
+easydo_cmd "$LOG_CMD"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
-{{ def "npm ci && npm run build" (dig "command") }}`,
+eval "$CMD"`,
 	},
 	"maven": {
 		CanonicalType: "maven",
@@ -171,9 +196,14 @@ cd "$WORKDIR"
 		ExecMode:      taskExecModeAgent,
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
+CMD={{ shq (def "mvn -B clean package" (dig "command")) }}
+LOG_CMD={{ logq (def "mvn -B clean package" (dig "command")) }}
+easydo_step "执行 Maven 任务"
+easydo_info "working_dir=$WORKDIR"
+easydo_cmd "$LOG_CMD"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
-{{ def "mvn -B clean package" (dig "command") }}`,
+eval "$CMD"`,
 	},
 	"gradle": {
 		CanonicalType: "gradle",
@@ -181,9 +211,14 @@ cd "$WORKDIR"
 		ExecMode:      taskExecModeAgent,
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
+CMD={{ shq (def "./gradlew build" (dig "command")) }}
+LOG_CMD={{ logq (def "./gradlew build" (dig "command")) }}
+easydo_step "执行 Gradle 任务"
+easydo_info "working_dir=$WORKDIR"
+easydo_cmd "$LOG_CMD"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
-{{ def "./gradlew build" (dig "command") }}`,
+eval "$CMD"`,
 	},
 	"docker": {
 		CanonicalType: "docker",
@@ -200,16 +235,23 @@ DOCKERFILE={{ shq (def "./Dockerfile" (dig "dockerfile")) }}
 CONTEXT={{ shq (def "." (dig "context")) }}
 REGISTRY={{ shq (def "" (dig "registry")) }}
 
+easydo_step "执行 Docker 构建任务"
+easydo_info "image=$IMAGE_NAME:$IMAGE_TAG context=$CONTEXT dockerfile=$DOCKERFILE"
+
 REGISTRY_USER="${EASYDO_CRED_REGISTRY_AUTH_USERNAME:-}"
 REGISTRY_PASSWORD="${EASYDO_CRED_REGISTRY_AUTH_PASSWORD:-${EASYDO_CRED_REGISTRY_AUTH_TOKEN:-}}"
 if [ -n "$REGISTRY" ] && [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then
+  easydo_cmd "docker login $REGISTRY --username $REGISTRY_USER --password-stdin"
   echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
 fi
 
+easydo_cmd "docker build -t $IMAGE_NAME:$IMAGE_TAG -f $DOCKERFILE $CONTEXT"
 docker build -t "$IMAGE_NAME:$IMAGE_TAG" -f "$DOCKERFILE" "$CONTEXT"
 if [ "{{ boolStr (dig "push") }}" = "true" ]; then
   if [ -n "$REGISTRY" ]; then
+    easydo_cmd "docker tag $IMAGE_NAME:$IMAGE_TAG $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
     docker tag "$IMAGE_NAME:$IMAGE_TAG" "$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+    easydo_cmd "docker push $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
     docker push "$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
   fi
 fi`,
@@ -244,8 +286,10 @@ if [ ! -e "$ARTIFACT_PATH" ]; then
   echo "artifact path not found: $ARTIFACT_PATH" >&2
   exit 1
 fi
+easydo_step "发布制品文件"
+easydo_cmd "cp -Rv $ARTIFACT_PATH $TARGET_DIR/"
 mkdir -p "$TARGET_DIR"
-cp -R "$ARTIFACT_PATH" "$TARGET_DIR"/`,
+cp -Rv "$ARTIFACT_PATH" "$TARGET_DIR"/`,
 	},
 	"unit": {
 		CanonicalType: "unit",
@@ -253,9 +297,14 @@ cp -R "$ARTIFACT_PATH" "$TARGET_DIR"/`,
 		ExecMode:      taskExecModeAgent,
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
+CMD={{ shq (def "npm run test:unit" (dig "command")) }}
+LOG_CMD={{ logq (def "npm run test:unit" (dig "command")) }}
+easydo_step "执行单元测试任务"
+easydo_info "working_dir=$WORKDIR"
+easydo_cmd "$LOG_CMD"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
-{{ def "npm run test:unit" (dig "command") }}`,
+eval "$CMD"`,
 	},
 	"integration": {
 		CanonicalType: "integration",
@@ -263,9 +312,14 @@ cd "$WORKDIR"
 		ExecMode:      taskExecModeAgent,
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
+CMD={{ shq (def "npm run test:integration" (dig "command")) }}
+LOG_CMD={{ logq (def "npm run test:integration" (dig "command")) }}
+easydo_step "执行集成测试任务"
+easydo_info "working_dir=$WORKDIR"
+easydo_cmd "$LOG_CMD"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
-{{ def "npm run test:integration" (dig "command") }}`,
+eval "$CMD"`,
 	},
 	"e2e": {
 		CanonicalType: "e2e",
@@ -273,9 +327,14 @@ cd "$WORKDIR"
 		ExecMode:      taskExecModeAgent,
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
+CMD={{ shq (def "npm run test:e2e" (dig "command")) }}
+LOG_CMD={{ logq (def "npm run test:e2e" (dig "command")) }}
+easydo_step "执行端到端测试任务"
+easydo_info "working_dir=$WORKDIR"
+easydo_cmd "$LOG_CMD"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
-{{ def "npm run test:e2e" (dig "command") }}`,
+eval "$CMD"`,
 	},
 	"coverage": {
 		CanonicalType: "coverage",
@@ -283,9 +342,14 @@ cd "$WORKDIR"
 		ExecMode:      taskExecModeAgent,
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
+CMD={{ shq (def "npm run test:coverage" (dig "command")) }}
+LOG_CMD={{ logq (def "npm run test:coverage" (dig "command")) }}
+easydo_step "执行覆盖率任务"
+easydo_info "working_dir=$WORKDIR"
+easydo_cmd "$LOG_CMD"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
-{{ def "npm run test:coverage" (dig "command") }}`,
+eval "$CMD"`,
 	},
 	"lint": {
 		CanonicalType: "lint",
@@ -293,9 +357,14 @@ cd "$WORKDIR"
 		ExecMode:      taskExecModeAgent,
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
+CMD={{ shq (def "npm run lint" (dig "command")) }}
+LOG_CMD={{ logq (def "npm run lint" (dig "command")) }}
+easydo_step "执行代码检查任务"
+easydo_info "working_dir=$WORKDIR"
+easydo_cmd "$LOG_CMD"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
-{{ def "npm run lint" (dig "command") }}`,
+eval "$CMD"`,
 	},
 	"ssh": {
 		CanonicalType: "ssh",
@@ -315,12 +384,18 @@ if [ -z "$REMOTE_SCRIPT" ]; then
   exit 1
 fi
 SSH_KEY_FILE=""
+REMOTE_SCRIPT_LOG={{ logq (def "" (dig "script")) }}
 cleanup() {
   if [ -n "$SSH_KEY_FILE" ] && [ -f "$SSH_KEY_FILE" ]; then
     rm -f "$SSH_KEY_FILE"
   fi
 }
 trap cleanup EXIT
+
+easydo_step "执行 SSH 远程任务"
+easydo_info "target=$USER_NAME@$HOST port=$PORT"
+easydo_cmd "ssh -p $PORT $USER_NAME@$HOST <remote-script>"
+easydo_cmd "$REMOTE_SCRIPT_LOG"
 
 if [ -n "${EASYDO_CRED_SSH_AUTH_PRIVATE_KEY:-}" ]; then
   SSH_KEY_FILE="$(mktemp)"
@@ -372,16 +447,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+easydo_step "执行 Kubernetes 任务"
+
 if [ -n "${EASYDO_CRED_CLUSTER_AUTH_KUBECONFIG:-}" ]; then
   KUBE_CONFIG_FILE="$(mktemp)"
   printf '%s\n' "${EASYDO_CRED_CLUSTER_AUTH_KUBECONFIG}" > "$KUBE_CONFIG_FILE"
   export KUBECONFIG="$KUBE_CONFIG_FILE"
+  easydo_info "auth_mode=kubeconfig"
 else
   API_SERVER="${EASYDO_CRED_CLUSTER_AUTH_SERVER:-${EASYDO_CRED_CLUSTER_AUTH_API_SERVER:-}}"
   TOKEN_VALUE="${EASYDO_CRED_CLUSTER_AUTH_TOKEN:-${EASYDO_CRED_CLUSTER_AUTH_ACCESS_TOKEN:-}}"
   NAMESPACE_VALUE="${EASYDO_CRED_CLUSTER_AUTH_NAMESPACE:-default}"
 
   if [ -n "$API_SERVER" ] && [ -n "$TOKEN_VALUE" ]; then
+    easydo_info "auth_mode=api_server server=$(easydo_mask_url "$API_SERVER") namespace=$NAMESPACE_VALUE"
     KUBE_CONFIG_FILE="$(mktemp)"
     kubectl --kubeconfig="$KUBE_CONFIG_FILE" config set-cluster easydo --server="$API_SERVER" >/dev/null
 
@@ -408,13 +487,17 @@ else
 fi
 
 if [ -n "{{ def "" (dig "command") }}" ]; then
-  {{ dig "command" }}
+  CMD={{ shq (def "" (dig "command")) }}
+  LOG_CMD={{ logq (def "" (dig "command")) }}
+  easydo_cmd "$LOG_CMD"
+  eval "$CMD"
 else
   MANIFEST={{ shq (def "" (dig "manifest")) }}
   if [ -z "$MANIFEST" ]; then
     echo "manifest or command is required" >&2
     exit 1
   fi
+  easydo_cmd "kubectl apply -f $MANIFEST"
   kubectl apply -f "$MANIFEST"
 fi`,
 		CredentialSlots: []taskCredentialSlot{
@@ -425,13 +508,9 @@ fi`,
 				AllowedTypes: []models.CredentialType{
 					models.TypeToken,
 					models.TypeCert,
-					models.TypeIAM,
 				},
 				AllowedCategories: []models.CredentialCategory{
 					models.CategoryKubernetes,
-					models.CategoryAWS,
-					models.CategoryGCP,
-					models.CategoryAzure,
 					models.CategoryCustom,
 				},
 			},
@@ -451,6 +530,9 @@ if [ -z "$IMAGE_NAME" ]; then
   echo "image_name is required" >&2
   exit 1
 fi
+
+RUN_ARGS_LOG={{ logq (def "" (dig "run_args")) }}
+easydo_step "执行 Docker 运行任务"
 
 if [ -z "$REGISTRY" ]; then
   FIRST_PART="${IMAGE_NAME%%/*}"
@@ -472,13 +554,17 @@ fi
 REGISTRY_USER="${EASYDO_CRED_REGISTRY_AUTH_USERNAME:-}"
 REGISTRY_PASSWORD="${EASYDO_CRED_REGISTRY_AUTH_PASSWORD:-${EASYDO_CRED_REGISTRY_AUTH_TOKEN:-}}"
 if [ -n "$REGISTRY" ] && [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then
+  easydo_cmd "docker login $REGISTRY --username $REGISTRY_USER --password-stdin"
   echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
 fi
 
 if [ -n "$CONTAINER_NAME" ]; then
+  easydo_cmd "docker rm -f $CONTAINER_NAME"
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  easydo_cmd "docker run -d --name $CONTAINER_NAME $RUN_ARGS_LOG $IMAGE_REF"
   docker run -d --name "$CONTAINER_NAME" $RUN_ARGS "$IMAGE_REF"
 else
+  easydo_cmd "docker run --rm $RUN_ARGS_LOG $IMAGE_REF"
   docker run --rm $RUN_ARGS "$IMAGE_REF"
 fi`,
 		CredentialSlots: []taskCredentialSlot{
@@ -669,10 +755,47 @@ func renderPipelineAgentScript(taskType string, nodeConfig map[string]interface{
 	if err != nil {
 		return canonical, "", err
 	}
+	script = taskShellLogPrelude() + "\n\n" + strings.TrimSpace(script)
 	if strings.TrimSpace(script) == "" {
 		return canonical, "", fmt.Errorf("rendered script is empty for task type: %s", canonical)
 	}
 	return canonical, script, nil
+}
+
+func taskShellLogPrelude() string {
+	return strings.TrimSpace(`easydo_mask_text() {
+  printf '%s' "$1" | sed -E \
+    -e 's#(https?://)[^/@[:space:]:]+:[^/@[:space:]]+@#\1***:***@#g' \
+    -e 's#([Aa]uthorization[[:space:]]*[:=][[:space:]]*(Basic|Bearer)[[:space:]]+)[^[:space:]"'\'';]+#\1***#g' \
+    -e 's#((access_token|token|password|secret|client_secret|api_key|private_key|cert_pem|key_pem|tls_client_key|tls_client_cert|tls_ca_cert|authorization)[[:space:]]*[:=][[:space:]]*)[^[:space:],"'\'';]+#\1***#g' \
+    -e 's#(--(password|token|access-token|secret|client-secret|api-key|authorization)(=|[[:space:]]+))[^[:space:]"'\'';]+#\1***#g'
+}
+
+easydo_step() {
+  printf '[easydo][step] %s\n' "$*"
+}
+
+easydo_info() {
+  printf '[easydo][info] %s\n' "$(easydo_mask_text "$*")"
+}
+
+easydo_warn() {
+  printf '[easydo][warn] %s\n' "$(easydo_mask_text "$*")"
+}
+
+easydo_error() {
+  printf '[easydo][error] %s\n' "$(easydo_mask_text "$*")" >&2
+}
+
+easydo_cmd() {
+  printf '%s\n' "$1" | while IFS= read -r easydo_line; do
+    printf '[easydo][cmd] %s\n' "$(easydo_mask_text "$easydo_line")"
+  done
+}
+
+easydo_mask_url() {
+  easydo_mask_text "$1"
+}`)
 }
 
 func renderTaskTemplate(shellTemplate string, params map[string]interface{}) (string, error) {
@@ -685,6 +808,9 @@ func renderTaskTemplate(shellTemplate string, params map[string]interface{}) (st
 		"toInt":   toInt,
 		"boolStr": boolString,
 		"shq":     shellQuote,
+		"logq": func(v interface{}) string {
+			return shellQuote(sanitizeTaskLogPreview(toString(v), 2400))
+		},
 	}
 
 	tpl, err := template.New("task-shell").Funcs(funcMap).Parse(shellTemplate)

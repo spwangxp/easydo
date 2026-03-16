@@ -214,6 +214,24 @@ func TestTaskCredentialSlots(t *testing.T) {
 	if !mtlsSlot.allowsType(models.TypeCert) {
 		t.Fatalf("webhook_mtls should allow certificate type")
 	}
+
+	_, kubeDef, ok := getPipelineTaskDefinition("kubernetes")
+	if !ok {
+		t.Fatalf("expected kubernetes definition")
+	}
+	clusterSlot, slotOK := kubeDef.findCredentialSlot("cluster_auth")
+	if !slotOK {
+		t.Fatalf("expected cluster_auth slot")
+	}
+	if !clusterSlot.allowsType(models.TypeToken) || !clusterSlot.allowsType(models.TypeCert) {
+		t.Fatalf("cluster_auth should allow TOKEN and CERTIFICATE")
+	}
+	if clusterSlot.allowsType(models.TypeIAM) {
+		t.Fatalf("cluster_auth should not allow IAM_ROLE without runtime support")
+	}
+	if clusterSlot.allowsCategory(models.CategoryAWS) || clusterSlot.allowsCategory(models.CategoryGCP) || clusterSlot.allowsCategory(models.CategoryAzure) {
+		t.Fatalf("cluster_auth should not allow cloud-provider categories without runtime support")
+	}
 }
 
 func TestRenderPipelineAgentScript_KubernetesCredentialIntegration(t *testing.T) {
@@ -244,5 +262,49 @@ func TestRenderPipelineAgentScript_DockerRunCredentialIntegration(t *testing.T) 
 	}
 	if !strings.Contains(script, "docker login") {
 		t.Fatalf("expected docker-run script to contain docker login")
+	}
+}
+
+func TestRenderPipelineAgentScript_GitCloneCredentialIntegration(t *testing.T) {
+	_, script, err := renderPipelineAgentScript("git_clone", map[string]interface{}{
+		"repository": map[string]interface{}{
+			"url": "https://example.com/repo.git",
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected git_clone script render success, got err: %v", err)
+	}
+	if !strings.Contains(script, "EASYDO_CRED_REPO_AUTH_ACCESS_TOKEN") {
+		t.Fatalf("expected git_clone script to support access_token fallback")
+	}
+	if !strings.Contains(script, "EASYDO_CRED_REPO_AUTH_PASSWORD") {
+		t.Fatalf("expected git_clone script to support password auth env")
+	}
+	if !strings.Contains(script, "EASYDO_CRED_REPO_AUTH_USERNAME") {
+		t.Fatalf("expected git_clone script to support username env")
+	}
+	if !strings.Contains(script, "--progress") {
+		t.Fatalf("expected git_clone script to force visible progress output")
+	}
+	if !strings.Contains(script, "[easydo][cmd]") {
+		t.Fatalf("expected git_clone script to emit structured command logs")
+	}
+}
+
+func TestRenderPipelineAgentScript_CustomShellLogsSanitizedPreview(t *testing.T) {
+	_, script, err := renderPipelineAgentScript("shell", map[string]interface{}{
+		"script": "curl -H 'Authorization: Bearer super-secret-token' https://example.com && echo password=hunter2",
+	})
+	if err != nil {
+		t.Fatalf("expected shell script render success, got err: %v", err)
+	}
+	if !strings.Contains(script, "[easydo][cmd]") {
+		t.Fatalf("expected shell script preview log to be rendered")
+	}
+	if !strings.Contains(script, "Authorization: Bearer ***") {
+		t.Fatalf("expected authorization header to be masked in script preview")
+	}
+	if !strings.Contains(script, "password=***") {
+		t.Fatalf("expected password assignment to be masked in script preview")
 	}
 }

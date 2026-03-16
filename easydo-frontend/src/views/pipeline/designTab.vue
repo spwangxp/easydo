@@ -344,6 +344,7 @@
                   v-model="selectedNode.params[param.key]"
                   :credential-type="param.credential_type"
                   :credential-category="param.credential_category"
+                  @invalid-selection="handleInvalidCredentialSelection(param.label, $event)"
                   @change="updateNode(selectedNode)"
                 />
               </el-form-item>
@@ -363,12 +364,13 @@
                 v-model="selectedNode.params[`credentials.${slot.slot}.credential_id`]"
                 :credential-types="slot.allowed_types || []"
                 :credential-categories="slot.allowed_categories || []"
+                @invalid-selection="handleInvalidCredentialSelection(slot.label || slot.slot, $event)"
                 @change="updateNode(selectedNode)"
               />
             </el-form-item>
           </el-form>
           <div class="config-tip">
-            修改凭据绑定可能影响当前流水线后续运行，以及所有引用该密钥的任务认证行为。
+                    修改凭据绑定可能影响当前流水线后续运行，以及所有引用该凭据的任务认证行为。
           </div>
         </div>
 
@@ -1814,7 +1816,7 @@ const savePipeline = async () => {
 
       const warningText = [
         `检测到 ${credentialDiff.total} 处凭据绑定变更。`,
-        '这可能影响该流水线后续运行认证，以及相关密钥的影响范围统计。',
+      '这可能影响该流水线后续运行认证，以及相关凭据的影响范围统计。',
         ...previewLines
       ].join('\n')
 
@@ -1849,6 +1851,12 @@ const savePipeline = async () => {
 // 保存配置
 const saveNodeConfig = () => {
   ElMessage.success('配置已保存')
+}
+
+const handleInvalidCredentialSelection = (slotLabel, credential) => {
+  const label = slotLabel || '凭据槽位'
+  const credentialName = credential?.name || `#${credential?.id || ''}`
+  ElMessage.warning(`${label} 已清除不符合当前任务类型限制的凭据：${credentialName}`)
 }
 
 const loadTaskTypeDefinitions = async () => {

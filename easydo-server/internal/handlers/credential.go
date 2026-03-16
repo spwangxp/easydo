@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -11,51 +13,34 @@ import (
 	"gorm.io/gorm"
 )
 
-// CredentialHandler - 凭据管理处理器
-// 提供凭据的 CRUD 操作和生命周期管理
 type CredentialHandler struct {
 	encryptionService *services.CredentialEncryptionService
 }
 
-// NewCredentialHandler - 创建凭据处理器实例
 func NewCredentialHandler() *CredentialHandler {
-	return &CredentialHandler{
-		encryptionService: services.NewCredentialEncryptionService(),
-	}
+	return &CredentialHandler{encryptionService: services.NewCredentialEncryptionService()}
 }
 
-// CreateCredentialRequest - 创建凭据的请求结构
 type CreateCredentialRequest struct {
-	Name         string                    `json:"name" binding:"required,min=1,max=128"`
-	Description  string                    `json:"description" binding:"max=512"`
-	Type         models.CredentialType     `json:"type" binding:"required"`
-	Category     models.CredentialCategory `json:"category"`
-	SecretData   map[string]interface{}    `json:"secret_data" binding:"required"`
-	Scope        models.CredentialScope    `json:"scope"`
-	ProjectID    uint64                    `json:"project_id"`
-	ExpiresAt    *int64                    `json:"expires_at"`
-	AutoRotate   bool                      `json:"auto_rotate"`
-	RotatePeriod int                       `json:"rotate_period"`
-	Metadata     string                    `json:"metadata"`
+	Name        string                    `json:"name" binding:"required,min=1,max=128"`
+	Description string                    `json:"description" binding:"max=512"`
+	Type        models.CredentialType     `json:"type" binding:"required"`
+	Category    models.CredentialCategory `json:"category"`
+	Payload     map[string]interface{}    `json:"payload" binding:"required"`
+	Scope       models.CredentialScope    `json:"scope"`
+	ProjectID   uint64                    `json:"project_id"`
+	ExpiresAt   *int64                    `json:"expires_at"`
 }
 
-// UpdateCredentialRequest - 更新凭据的请求结构
 type UpdateCredentialRequest struct {
-	Name         string                    `json:"name" binding:"min=1,max=128"`
-	Description  string                    `json:"description" binding:"max=512"`
-	Category     models.CredentialCategory `json:"category"`
-	SecretData   map[string]interface{}    `json:"secret_data"`
-	Status       models.CredentialStatus   `json:"status"`
-	ExpiresAt    *int64                    `json:"expires_at"`
-	AutoRotate   bool                      `json:"auto_rotate"`
-	RotatePeriod int                       `json:"rotate_period"`
-	Metadata     string                    `json:"metadata"`
-}
-
-// RotateCredentialRequest - 轮换凭据请求结构
-type RotateCredentialRequest struct {
-	SecretData map[string]interface{} `json:"secret_data" binding:"required"`
-	Reason     string                 `json:"reason"`
+	Name        string                    `json:"name"`
+	Description string                    `json:"description"`
+	Category    models.CredentialCategory `json:"category"`
+	Payload     map[string]interface{}    `json:"payload"`
+	Scope       models.CredentialScope    `json:"scope"`
+	ProjectID   uint64                    `json:"project_id"`
+	Status      models.CredentialStatus   `json:"status"`
+	ExpiresAt   *int64                    `json:"expires_at"`
 }
 
 type CredentialImpactReference struct {
@@ -75,148 +60,78 @@ type CredentialImpactSummary struct {
 	References     []CredentialImpactReference `json:"references"`
 }
 
-// CreateCredential - 创建新凭据
-// @Summary 创建凭据
-// @Description 创建一个新的凭据，敏感数据会被加密存储
-// @Tags credentials
-// @Accept json
-// @Produce json
-// @Param request body CreateCredentialRequest true "凭据信息"
-// @Success 200 {object} Response{data=models.CredentialResponse}
-// @Failure 400 {object} Response
-// @Failure 500 {object} Response
-// @Router /api/v1/credentials [post]
+type CredentialImpactBatchRequest struct {
+	IDs []uint64 `json:"ids" binding:"required,min=1"`
+}
+
+type BatchRequest struct {
+	IDs []uint64 `json:"ids" binding:"required,min=1"`
+}
+
+type VerifyResponse struct {
+	Valid   bool   `json:"valid"`
+	Message string `json:"message"`
+}
+
 func (h *CredentialHandler) CreateCredential(c *gin.Context) {
 	var req CreateCredentialRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid request: " + err.Error(),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Invalid request: " + err.Error()})
 		return
 	}
-
-	// 验证凭据类型
+	if len(req.Payload) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "payload is required"})
+		return
+	}
 	if !models.IsValidType(req.Type) {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid credential type: " + string(req.Type),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Invalid credential type: " + string(req.Type)})
 		return
 	}
-
-	// 标准化类型（中文转英文，确保存储一致性）
 	req.Type = models.NormalizeType(req.Type)
-
-	// 验证过期时间
-	if req.ExpiresAt != nil && *req.ExpiresAt > 0 {
-		if *req.ExpiresAt <= time.Now().Unix() {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"code":    400,
-				"message": "Expiration time must be in the future",
-			})
-			return
-		}
+	if !validateExpiry(req.ExpiresAt) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Expiration time must be in the future"})
+		return
 	}
-
 	ownerID, role := getRequestUser(c)
 	workspaceID, _ := getRequestWorkspace(c)
 	if !userCanWriteWorkspaceResource(models.DB, workspaceID, ownerID, role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "Access denied",
-		})
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "Access denied"})
 		return
 	}
-
-	// 加密凭据数据
-	encryptedData, iv, err := h.encryptionService.EncryptCredentialData(req.SecretData)
+	scope, projectID, err := normalizeCredentialScope(models.DB, req.Scope, req.ProjectID, workspaceID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to encrypt credential data",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 		return
 	}
-
+	encryptedPayload, err := h.encryptionService.EncryptCredentialData(req.Payload)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Failed to encrypt credential data"})
+		return
+	}
 	credential := models.Credential{
-		Name:           req.Name,
-		Description:    req.Description,
-		Type:           req.Type,
-		Category:       req.Category,
-		EncryptedData:  encryptedData,
-		EncryptionIV:   iv,
-		EncryptionAlgo: "aes-256-gcm",
-		Metadata:       req.Metadata,
-		Scope:          req.Scope,
-		WorkspaceID:    workspaceID,
-		ProjectID:      req.ProjectID,
-		OwnerID:        ownerID,
-		Status:         models.CredentialStatusActive,
-		ExpiresAt:      req.ExpiresAt,
-		AutoRotate:     req.AutoRotate,
-		RotatePeriod:   req.RotatePeriod,
+		Name:             req.Name,
+		Description:      req.Description,
+		Type:             req.Type,
+		Category:         req.Category,
+		Scope:            scope,
+		WorkspaceID:      workspaceID,
+		ProjectID:        projectID,
+		OwnerID:          ownerID,
+		EncryptedPayload: encryptedPayload,
+		Status:           models.CredentialStatusActive,
+		ExpiresAt:        req.ExpiresAt,
 	}
-
-	if credential.Scope == "" {
-		credential.Scope = models.ScopeUser
-	}
-	if credential.Scope == models.ScopeProject {
-		if credential.ProjectID == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"code":    400,
-				"message": "Project scope requires project_id",
-			})
-			return
-		}
-		if !projectBelongsToWorkspace(models.DB, credential.ProjectID, workspaceID) {
-			c.JSON(http.StatusForbidden, gin.H{
-				"code":    403,
-				"message": "Project does not belong to active workspace",
-			})
-			return
-		}
-	}
-	if credential.Scope == models.ScopeGlobal && !isAdminRole(role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "Only admin can create global credentials",
-		})
-		return
-	}
-
 	if err := models.DB.Create(&credential).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to create credential: " + err.Error(),
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Failed to create credential: " + err.Error()})
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": credential.ToResponse(),
-	})
+	h.writeCredentialEvent(credential.ID, models.CredentialEventCreated, "user", ownerID, "success", gin.H{"scope": scope, "project_id": projectID})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": credential.ToResponse()})
 }
 
-// ListCredentials - 获取凭据列表
-// @Summary 获取凭据列表
-// @Description 分页获取凭据列表，支持类型、分类、状态筛选
-// @Tags credentials
-// @Produce json
-// @Param page query int false "页码" default(1)
-// @Param size query int false "每页数量" default(10)
-// @Param type query string false "凭据类型筛选"
-// @Param category query string false "分类筛选"
-// @Param scope query string false "范围筛选"
-// @Param status query string false "状态筛选"
-// @Param keyword query string false "关键词搜索"
-// @Success 200 {object} Response{data=ListResponse}
-// @Router /api/v1/credentials [get]
 func (h *CredentialHandler) ListCredentials(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
 	workspaceID, _ := getRequestWorkspace(c)
-
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	size, _ := strconv.Atoi(c.DefaultQuery("size", "10"))
 	credentialType := c.Query("type")
@@ -224,27 +139,19 @@ func (h *CredentialHandler) ListCredentials(c *gin.Context) {
 	scope := c.Query("scope")
 	status := c.Query("status")
 	keyword := c.Query("keyword")
-
 	if page < 1 {
 		page = 1
 	}
 	if size < 1 || size > 100 {
 		size = 10
 	}
-
 	query := applyCredentialReadScope(models.DB.Model(&models.Credential{}), ownerID, role).Where("workspace_id = ?", workspaceID)
-
 	if credentialType != "" {
 		if !models.IsValidType(models.CredentialType(credentialType)) {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"code":    400,
-				"message": "Invalid credential type",
-			})
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Invalid credential type"})
 			return
 		}
-		// 标准化类型（中文转英文，确保查询匹配存储的英文值）
-		normalizedType := models.NormalizeType(models.CredentialType(credentialType))
-		query = query.Where("type = ?", normalizedType)
+		query = query.Where("type = ?", models.NormalizeType(models.CredentialType(credentialType)))
 	}
 	if category != "" {
 		query = query.Where("category = ?", category)
@@ -252,203 +159,83 @@ func (h *CredentialHandler) ListCredentials(c *gin.Context) {
 	if scope != "" {
 		query = query.Where("scope = ?", scope)
 	}
-	if status != "" {
-		query = query.Where("status = ?", status)
-	}
 	if keyword != "" {
 		query = query.Where("name LIKE ? OR description LIKE ?", "%"+keyword+"%", "%"+keyword+"%")
 	}
-
+	now := time.Now().Unix()
+	if status == string(models.CredentialStatusExpired) {
+		query = query.Where("status = ?", models.CredentialStatusActive).Where("expires_at IS NOT NULL AND expires_at > 0 AND expires_at <= ?", now)
+	} else if status != "" {
+		query = query.Where("status = ?", status)
+	}
 	var total int64
 	query.Count(&total)
-
 	var credentials []models.Credential
 	offset := (page - 1) * size
 	query.Order("created_at DESC").Offset(offset).Limit(size).Find(&credentials)
-
-	// 转换为响应结构
 	responses := make([]models.CredentialResponse, len(credentials))
-	for i, cred := range credentials {
-		responses[i] = cred.ToResponse()
+	for i := range credentials {
+		responses[i] = credentials[i].ToResponse()
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": gin.H{
-			"list":  responses,
-			"total": total,
-			"page":  page,
-			"size":  size,
-		},
-	})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"list": responses, "total": total, "page": page, "size": size}})
 }
 
-// GetCredential - 获取单个凭据详情
-// @Summary 获取凭据详情
-// @Description 获取凭据的详细信息（不包含敏感数据）
-// @Tags credentials
-// @Produce json
-// @Param id path int true "凭据ID"
-// @Success 200 {object} Response{data=models.CredentialResponse}
-// @Failure 404 {object} Response
-// @Router /api/v1/credentials/{id} [get]
 func (h *CredentialHandler) GetCredential(c *gin.Context) {
-	ownerID, role := getRequestUser(c)
-	workspaceID, _ := getRequestWorkspace(c)
-
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid credential ID",
-		})
+	credential, ok := h.authorizedCredential(c, false)
+	if !ok {
 		return
 	}
-
-	var credential models.Credential
-	if err := models.DB.First(&credential, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "Credential not found",
-		})
-		return
-	}
-
-	if credential.WorkspaceID != workspaceID || !canReadCredential(models.DB, &credential, ownerID, role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "Access denied",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": credential.ToResponse(),
-	})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": credential.ToResponse()})
 }
 
-// GetCredentialSecretData - 获取凭据敏感数据（编辑回填）
-// @Summary 获取凭据敏感数据
-// @Description 仅用于有权限用户在编辑场景回填 secret_data
-// @Tags credentials
-// @Produce json
-// @Param id path int true "凭据ID"
-// @Success 200 {object} Response
-// @Failure 404 {object} Response
-// @Router /api/v1/credentials/{id}/secret-data [get]
-func (h *CredentialHandler) GetCredentialSecretData(c *gin.Context) {
-	ownerID, role := getRequestUser(c)
-	workspaceID, _ := getRequestWorkspace(c)
-
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+func (h *CredentialHandler) GetCredentialPayload(c *gin.Context) {
+	credential, ok := h.authorizedCredential(c, true)
+	if !ok {
+		return
+	}
+	payload, err := h.encryptionService.DecryptCredentialData(credential.EncryptedPayload)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid credential ID",
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Failed to decrypt credential data"})
 		return
 	}
-
-	var credential models.Credential
-	if err := models.DB.First(&credential, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "Credential not found",
-		})
-		return
-	}
-
-	if credential.WorkspaceID != workspaceID || !canReadCredentialValue(models.DB, &credential, ownerID, role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "Access denied",
-		})
-		return
-	}
-
-	secretData, err := h.encryptionService.DecryptCredentialData(credential.EncryptedData, credential.EncryptionIV)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to decrypt credential data",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": gin.H{
-			"id":          credential.ID,
-			"secret_data": secretData,
-		},
-	})
+	ownerID, _ := getRequestUser(c)
+	h.writeCredentialEvent(credential.ID, models.CredentialEventRevealed, "user", ownerID, "success", nil)
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"id": credential.ID, "payload": payload}})
 }
 
-// UpdateCredential - 更新凭据
-// @Summary 更新凭据
-// @Description 更新凭据的元数据或重新加密敏感数据
-// @Tags credentials
-// @Accept json
-// @Produce json
-// @Param id path int true "凭据ID"
-// @Param request body UpdateCredentialRequest true "更新信息"
-// @Success 200 {object} Response{data=models.CredentialResponse}
-// @Failure 400 {object} Response
-// @Failure 404 {object} Response
-// @Router /api/v1/credentials/{id} [put]
 func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
-	ownerID, role := getRequestUser(c)
-	workspaceID, _ := getRequestWorkspace(c)
-
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid credential ID",
-		})
+	credential, ok := h.authorizedWritableCredential(c)
+	if !ok {
 		return
 	}
-
-	var credential models.Credential
-	if err := models.DB.First(&credential, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "Credential not found",
-		})
-		return
-	}
-
-	if credential.WorkspaceID != workspaceID || !canWriteCredential(models.DB, &credential, ownerID, role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "Access denied",
-		})
-		return
-	}
-
 	var req UpdateCredentialRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid request: " + err.Error(),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Invalid request: " + err.Error()})
 		return
 	}
-
-	// 验证过期时间
-	if req.ExpiresAt != nil && *req.ExpiresAt > 0 {
-		if *req.ExpiresAt <= time.Now().Unix() {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"code":    400,
-				"message": "Expiration time must be in the future",
-			})
+	if !validateExpiry(req.ExpiresAt) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Expiration time must be in the future"})
+		return
+	}
+	if req.Name != "" && len(req.Name) > 128 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Credential name must be 1-128 characters"})
+		return
+	}
+	if len(req.Description) > 512 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Description must be 0-512 characters"})
+		return
+	}
+	updates := map[string]interface{}{}
+	if req.Scope != "" || req.ProjectID > 0 {
+		workspaceID, _ := getRequestWorkspace(c)
+		scope, projectID, err := normalizeCredentialScope(models.DB, req.Scope, req.ProjectID, workspaceID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
 		}
+		updates["scope"] = scope
+		updates["project_id"] = projectID
 	}
-
-	updates := make(map[string]interface{})
-
 	if req.Name != "" {
 		updates["name"] = req.Name
 	}
@@ -459,371 +246,181 @@ func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
 		updates["category"] = req.Category
 	}
 	if req.Status != "" {
+		if req.Status != models.CredentialStatusActive && req.Status != models.CredentialStatusInactive && req.Status != models.CredentialStatusRevoked {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Invalid credential status"})
+			return
+		}
 		updates["status"] = req.Status
 	}
 	if req.ExpiresAt != nil {
 		updates["expires_at"] = req.ExpiresAt
 	}
-	if req.Metadata != "" {
-		updates["metadata"] = req.Metadata
-	}
-	updates["auto_rotate"] = req.AutoRotate
-	updates["rotate_period"] = req.RotatePeriod
-	updates["version"] = credential.Version + 1
-
-	if req.SecretData != nil && len(req.SecretData) > 0 {
-		encryptedData, iv, err := h.encryptionService.EncryptCredentialData(req.SecretData)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"code":    500,
-				"message": "Failed to encrypt credential data",
-			})
+	if req.Payload != nil {
+		if len(req.Payload) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "payload cannot be empty"})
 			return
 		}
-		updates["encrypted_data"] = encryptedData
-		updates["encryption_iv"] = iv
+		encryptedPayload, err := h.encryptionService.EncryptCredentialData(req.Payload)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Failed to encrypt credential data"})
+			return
+		}
+		updates["encrypted_payload"] = encryptedPayload
 	}
-
-	if err := models.DB.Model(&credential).Updates(updates).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to update credential: " + err.Error(),
-		})
+	if len(updates) == 0 {
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": credential.ToResponse()})
 		return
 	}
-
-	// 重新加载凭据
-	models.DB.First(&credential, id)
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": credential.ToResponse(),
-	})
+	if err := models.DB.Model(&credential).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Failed to update credential: " + err.Error()})
+		return
+	}
+	models.DB.First(&credential, credential.ID)
+	ownerID, _ := getRequestUser(c)
+	eventAction := models.CredentialEventUpdated
+	if credential.Status == models.CredentialStatusInactive {
+		eventAction = models.CredentialEventDisabled
+	} else if credential.Status == models.CredentialStatusRevoked {
+		eventAction = models.CredentialEventRevoked
+	}
+	h.writeCredentialEvent(credential.ID, eventAction, "user", ownerID, "success", updates)
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": credential.ToResponse()})
 }
 
-// DeleteCredential - 删除凭据
-// @Summary 删除凭据
-// @Description 永久删除凭据及其所有关联数据
-// @Tags credentials
-// @Produce json
-// @Param id path int true "凭据ID"
-// @Success 200 {object} Response
-// @Failure 404 {object} Response
-// @Router /api/v1/credentials/{id} [delete]
 func (h *CredentialHandler) DeleteCredential(c *gin.Context) {
-	ownerID, role := getRequestUser(c)
-	workspaceID, _ := getRequestWorkspace(c)
-
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid credential ID",
-		})
+	credential, ok := h.authorizedWritableCredential(c)
+	if !ok {
 		return
 	}
-
-	var credential models.Credential
-	if err := models.DB.First(&credential, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "Credential not found",
-		})
+	if err := deleteCredentialWithRelations(models.DB, credential.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Failed to delete credential: " + err.Error()})
 		return
 	}
-
-	if credential.WorkspaceID != workspaceID || !canWriteCredential(models.DB, &credential, ownerID, role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "Access denied",
-		})
-		return
-	}
-
-	models.DB.Where("credential_id = ?", credential.ID).Delete(&models.PipelineCredentialRef{})
-
-	if err := models.DB.Delete(&credential).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to delete credential: " + err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code":    200,
-		"message": "Credential deleted successfully",
-	})
+	ownerID, _ := getRequestUser(c)
+	h.writeCredentialEvent(credential.ID, models.CredentialEventDeleted, "user", ownerID, "success", nil)
+	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "Credential deleted successfully"})
 }
 
 func buildCredentialImpactSummary(db *gorm.DB, credential models.Credential) (CredentialImpactSummary, error) {
 	refs := make([]CredentialImpactReference, 0)
-
 	type refRow struct {
-		PipelineID     uint64 `gorm:"column:pipeline_id"`
-		PipelineName   string `gorm:"column:pipeline_name"`
-		NodeID         string `gorm:"column:node_id"`
-		TaskType       string `gorm:"column:task_type"`
-		CredentialSlot string `gorm:"column:credential_slot"`
-		UpdatedAt      int64  `gorm:"column:updated_at"`
+		PipelineID     uint64    `gorm:"column:pipeline_id"`
+		PipelineName   string    `gorm:"column:pipeline_name"`
+		NodeID         string    `gorm:"column:node_id"`
+		TaskType       string    `gorm:"column:task_type"`
+		CredentialSlot string    `gorm:"column:credential_slot"`
+		UpdatedAt      time.Time `gorm:"column:updated_at"`
 	}
 	rows := make([]refRow, 0)
 	if err := db.Table("pipeline_credential_refs AS r").
-		Select("r.pipeline_id, p.name AS pipeline_name, r.node_id, r.task_type, r.credential_slot, CAST(UNIX_TIMESTAMP(r.updated_at) AS SIGNED) AS updated_at").
+		Select("r.pipeline_id, p.name AS pipeline_name, r.node_id, r.task_type, r.credential_slot, r.updated_at").
 		Joins("LEFT JOIN pipelines p ON p.id = r.pipeline_id").
 		Where("r.credential_id = ?", credential.ID).
 		Order("r.updated_at DESC").
 		Scan(&rows).Error; err != nil {
 		return CredentialImpactSummary{}, err
 	}
-
 	uniquePipelines := make(map[uint64]struct{})
 	for _, row := range rows {
-		refs = append(refs, CredentialImpactReference{
-			PipelineID:     row.PipelineID,
-			PipelineName:   row.PipelineName,
-			NodeID:         row.NodeID,
-			TaskType:       row.TaskType,
-			CredentialSlot: row.CredentialSlot,
-			UpdatedAt:      row.UpdatedAt,
-		})
+		refs = append(refs, CredentialImpactReference{PipelineID: row.PipelineID, PipelineName: row.PipelineName, NodeID: row.NodeID, TaskType: row.TaskType, CredentialSlot: row.CredentialSlot, UpdatedAt: row.UpdatedAt.Unix()})
 		uniquePipelines[row.PipelineID] = struct{}{}
 	}
-
-	return CredentialImpactSummary{
-		CredentialID:   credential.ID,
-		CredentialName: credential.Name,
-		ReferenceCount: int64(len(refs)),
-		PipelineCount:  int64(len(uniquePipelines)),
-		References:     refs,
-	}, nil
+	return CredentialImpactSummary{CredentialID: credential.ID, CredentialName: credential.Name, ReferenceCount: int64(len(refs)), PipelineCount: int64(len(uniquePipelines)), References: refs}, nil
 }
 
 func (h *CredentialHandler) GetCredentialImpact(c *gin.Context) {
-	ownerID, role := getRequestUser(c)
-	workspaceID, _ := getRequestWorkspace(c)
-
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	credential, ok := h.authorizedCredential(c, false)
+	if !ok {
+		return
+	}
+	summary, err := buildCredentialImpactSummary(models.DB, *credential)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid credential ID",
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Failed to query credential impact: " + err.Error()})
 		return
 	}
-
-	var credential models.Credential
-	if err := models.DB.First(&credential, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "Credential not found",
-		})
-		return
-	}
-
-	if credential.WorkspaceID != workspaceID || !canReadCredential(models.DB, &credential, ownerID, role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "Access denied",
-		})
-		return
-	}
-
-	summary, err := buildCredentialImpactSummary(models.DB, credential)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to query credential impact: " + err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": summary,
-	})
-}
-
-type CredentialImpactBatchRequest struct {
-	IDs []uint64 `json:"ids" binding:"required,min=1"`
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": summary})
 }
 
 func (h *CredentialHandler) BatchCredentialImpact(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
 	workspaceID, _ := getRequestWorkspace(c)
-
 	var req CredentialImpactBatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid request: " + err.Error(),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Invalid request: " + err.Error()})
 		return
 	}
-	if len(req.IDs) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "IDs cannot be empty",
-		})
-		return
-	}
-
 	var credentials []models.Credential
 	if err := applyCredentialReadScope(models.DB.Model(&models.Credential{}), ownerID, role).
 		Where("workspace_id = ?", workspaceID).
 		Where("id IN ?", req.IDs).
 		Find(&credentials).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to query credentials: " + err.Error(),
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Failed to query credentials: " + err.Error()})
 		return
 	}
-
 	summaries := make([]CredentialImpactSummary, 0, len(credentials))
 	var totalReferences int64
 	for _, credential := range credentials {
 		summary, err := buildCredentialImpactSummary(models.DB, credential)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"code":    500,
-				"message": "Failed to query credential impact: " + err.Error(),
-			})
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Failed to query credential impact: " + err.Error()})
 			return
 		}
 		totalReferences += summary.ReferenceCount
 		summaries = append(summaries, summary)
 	}
-
 	impactedCredentials := 0
 	for _, summary := range summaries {
 		if summary.ReferenceCount > 0 {
 			impactedCredentials++
 		}
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": gin.H{
-			"total_credentials":    len(summaries),
-			"impacted_credentials": impactedCredentials,
-			"total_references":     totalReferences,
-			"items":                summaries,
-		},
-	})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"total_credentials": len(summaries), "impacted_credentials": impactedCredentials, "total_references": totalReferences, "items": summaries}})
 }
 
-// VerifyCredential - 验证凭据有效性
-// @Summary 验证凭据
-// @Description 验证凭据是否可以正常解密（不实际使用凭据）
-// @Tags credentials
-// @Produce json
-// @Param id path int true "凭据ID"
-// @Success 200 {object} Response{data=VerifyResponse}
-// @Failure 404 {object} Response
-// @Router /api/v1/credentials/{id}/verify [post]
 func (h *CredentialHandler) VerifyCredential(c *gin.Context) {
-	ownerID, role := getRequestUser(c)
-	workspaceID, _ := getRequestWorkspace(c)
-
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	credential, ok := h.authorizedCredential(c, false)
+	if !ok {
+		return
+	}
+	ownerID, _ := getRequestUser(c)
+	_, err := h.encryptionService.DecryptCredentialData(credential.EncryptedPayload)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid credential ID",
-		})
+		h.writeCredentialEvent(credential.ID, models.CredentialEventVerified, "user", ownerID, "failed", gin.H{"error": err.Error()})
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": VerifyResponse{Valid: false, Message: "Failed to decrypt credential data"}})
 		return
 	}
-
-	var credential models.Credential
-	if err := models.DB.First(&credential, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "Credential not found",
-		})
+	if !credential.IsUsable() {
+		h.writeCredentialEvent(credential.ID, models.CredentialEventVerified, "user", ownerID, "failed", gin.H{"status": credential.EffectiveStatus()})
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": VerifyResponse{Valid: false, Message: "Credential is not active"}})
 		return
 	}
-	if credential.WorkspaceID != workspaceID || !canReadCredential(models.DB, &credential, ownerID, role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "Access denied",
-		})
-		return
-	}
-
-	// 尝试解密
-	_, err = h.encryptionService.DecryptCredentialData(credential.EncryptedData, credential.EncryptionIV)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"code": 200,
-			"data": gin.H{
-				"valid":   false,
-				"message": "Failed to decrypt credential data",
-			},
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": gin.H{
-			"valid":   true,
-			"message": "Credential is valid",
-		},
-	})
+	h.writeCredentialEvent(credential.ID, models.CredentialEventVerified, "user", ownerID, "success", nil)
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": VerifyResponse{Valid: true, Message: "Credential is valid"}})
 }
 
-// VerifyResponse - 验证响应结构
-type VerifyResponse struct {
-	Valid   bool   `json:"valid"`
-	Message string `json:"message"`
-}
-
-// GetCredentialTypes - 获取所有凭据类型
-// @Summary 获取凭据类型列表
-// @Description 返回系统支持的所有凭据类型及其详细信息
-// @Tags credentials
-// @Produce json
-// @Success 200 {object} Response{data=[]models.TypeInfo}
-// @Router /api/v1/credentials/types [get]
 func (h *CredentialHandler) GetCredentialTypes(c *gin.Context) {
 	type typeDef struct {
 		Value models.CredentialType `json:"value"`
 		Label string                `json:"label"`
 		models.TypeInfo
 	}
-
 	types := []typeDef{
 		{Value: models.TypePassword, Label: models.TypePassword.GetTypeLabel(), TypeInfo: models.TypePassword.GetTypeInfo()},
 		{Value: models.TypeSSHKey, Label: models.TypeSSHKey.GetTypeLabel(), TypeInfo: models.TypeSSHKey.GetTypeInfo()},
 		{Value: models.TypeToken, Label: models.TypeToken.GetTypeLabel(), TypeInfo: models.TypeToken.GetTypeInfo()},
 		{Value: models.TypeOAuth2, Label: models.TypeOAuth2.GetTypeLabel(), TypeInfo: models.TypeOAuth2.GetTypeInfo()},
 		{Value: models.TypeCert, Label: models.TypeCert.GetTypeLabel(), TypeInfo: models.TypeCert.GetTypeInfo()},
-		{Value: models.TypePasskey, Label: models.TypePasskey.GetTypeLabel(), TypeInfo: models.TypePasskey.GetTypeInfo()},
-		{Value: models.TypeMFA, Label: models.TypeMFA.GetTypeLabel(), TypeInfo: models.TypeMFA.GetTypeInfo()},
 		{Value: models.TypeIAM, Label: models.TypeIAM.GetTypeLabel(), TypeInfo: models.TypeIAM.GetTypeInfo()},
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": types,
-	})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": types})
 }
 
-// GetCredentialCategories - 获取所有凭据分类
-// @Summary 获取凭据分类列表
-// @Description 返回系统支持的所有凭据分类及其详细信息
-// @Tags credentials
-// @Produce json
-// @Success 200 {object} Response{data=[]models.CategoryInfo}
-// @Router /api/v1/credentials/categories [get]
 func (h *CredentialHandler) GetCredentialCategories(c *gin.Context) {
 	type categoryDef struct {
 		Value models.CredentialCategory `json:"value"`
 		Label string                    `json:"label"`
 		models.CategoryInfo
 	}
-
 	categories := []categoryDef{
 		{Value: models.CategoryGitHub, Label: models.CategoryGitHub.GetCategoryLabel(), CategoryInfo: models.CategoryGitHub.GetCategoryInfo()},
 		{Value: models.CategoryGitLab, Label: models.CategoryGitLab.GetCategoryLabel(), CategoryInfo: models.CategoryGitLab.GetCategoryInfo()},
@@ -838,424 +435,158 @@ func (h *CredentialHandler) GetCredentialCategories(c *gin.Context) {
 		{Value: models.CategoryAzure, Label: models.CategoryAzure.GetCategoryLabel(), CategoryInfo: models.CategoryAzure.GetCategoryInfo()},
 		{Value: models.CategoryCustom, Label: models.CategoryCustom.GetCategoryLabel(), CategoryInfo: models.CategoryCustom.GetCategoryInfo()},
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": categories,
-	})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": categories})
 }
 
-// RotateCredential - 轮换凭据
-// @Summary 轮换凭据
-// @Description 更新凭据的敏感数据并记录轮换历史
-// @Tags credentials
-// @Accept json
-// @Produce json
-// @Param id path int true "凭据ID"
-// @Param request body RotateCredentialRequest true "新的凭据数据"
-// @Success 200 {object} Response
-// @Failure 400 {object} Response
-// @Router /api/v1/credentials/{id}/rotate [post]
-func (h *CredentialHandler) RotateCredential(c *gin.Context) {
-	ownerID, role := getRequestUser(c)
-	workspaceID, _ := getRequestWorkspace(c)
-
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid credential ID",
-		})
-		return
-	}
-
-	var credential models.Credential
-	if err := models.DB.First(&credential, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "Credential not found",
-		})
-		return
-	}
-
-	if credential.WorkspaceID != workspaceID || !canWriteCredential(models.DB, &credential, ownerID, role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "Access denied",
-		})
-		return
-	}
-
-	var req RotateCredentialRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid request: " + err.Error(),
-		})
-		return
-	}
-
-	// 加密新的凭据数据
-	encryptedData, iv, err := h.encryptionService.EncryptCredentialData(req.SecretData)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to encrypt credential data",
-		})
-		return
-	}
-
-	oldVersion := credential.Version
-
-	updates := map[string]interface{}{
-		"encrypted_data": encryptedData,
-		"encryption_iv":  iv,
-		"version":        credential.Version + 1,
-		"status":         models.CredentialStatusActive,
-	}
-
-	if err := models.DB.Model(&credential).Updates(updates).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to rotate credential: " + err.Error(),
-		})
-		return
-	}
-
-	// 记录轮换日志
-	rotationLog := models.CredentialRotationLog{
-		CredentialID: credential.ID,
-		RotatedBy:    ownerID,
-		OldVersion:   oldVersion,
-		NewVersion:   credential.Version + 1,
-		Reason:       req.Reason,
-	}
-	models.DB.Create(&rotationLog)
-
-	c.JSON(http.StatusOK, gin.H{
-		"code":    200,
-		"message": "Credential rotated successfully",
-	})
-}
-
-// GetCredentialUsage - 获取凭据使用统计
-// @Summary 获取凭据使用统计
-// @Description 返回凭据的使用次数、最后使用时间等信息
-// @Tags credentials
-// @Produce json
-// @Param id path int true "凭据ID"
-// @Success 200 {object} Response{data=UsageStatsResponse}
-// @Router /api/v1/credentials/{id}/usage [get]
 func (h *CredentialHandler) GetCredentialUsage(c *gin.Context) {
-	ownerID, role := getRequestUser(c)
-	workspaceID, _ := getRequestWorkspace(c)
-
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid credential ID",
-		})
+	credential, ok := h.authorizedCredential(c, false)
+	if !ok {
 		return
 	}
-
-	var credential models.Credential
-	if err := models.DB.First(&credential, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "Credential not found",
-		})
-		return
-	}
-
-	if credential.WorkspaceID != workspaceID || !canReadCredential(models.DB, &credential, ownerID, role) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "Access denied",
-		})
-		return
-	}
-
-	// 查询使用统计
 	var usageCount int64
-	var lastUsed int64
 	var successCount int64
 	var failedCount int64
-
-	models.DB.Model(&models.CredentialUsage{}).
-		Where("credential_id = ?", id).
-		Count(&usageCount)
-
-	models.DB.Model(&models.CredentialUsage{}).
-		Where("credential_id = ?", id).
-		Order("used_at DESC").
-		Limit(1).
-		Pluck("used_at", &lastUsed)
-
-	models.DB.Model(&models.CredentialUsage{}).
-		Where("credential_id = ? AND result = ?", id, "success").
-		Count(&successCount)
-
-	models.DB.Model(&models.CredentialUsage{}).
-		Where("credential_id = ? AND result = ?", id, "failed").
-		Count(&failedCount)
-
-	response := gin.H{
-		"used_count":    usageCount,
-		"last_used_at":  lastUsed,
-		"success_count": successCount,
-		"failed_count":  failedCount,
-		"success_rate":  0.0,
-	}
-
+	models.DB.Model(&models.CredentialEvent{}).Where("credential_id = ? AND action = ?", credential.ID, models.CredentialEventUsed).Count(&usageCount)
+	models.DB.Model(&models.CredentialEvent{}).Where("credential_id = ? AND action = ? AND result = ?", credential.ID, models.CredentialEventUsed, "success").Count(&successCount)
+	models.DB.Model(&models.CredentialEvent{}).Where("credential_id = ? AND action = ? AND result = ?", credential.ID, models.CredentialEventUsed, "failed").Count(&failedCount)
+	response := gin.H{"used_count": usageCount, "last_used_at": credential.LastUsedAt, "success_count": successCount, "failed_count": failedCount, "success_rate": 0.0}
 	if usageCount > 0 {
 		response["success_rate"] = float64(successCount) / float64(usageCount) * 100
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": response,
-	})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": response})
 }
 
-// UsageStatsResponse - 使用统计响应
-type UsageStatsResponse struct {
-	UsedCount   int64   `json:"used_count"`
-	LastUsedAt  int64   `json:"last_used_at"`
-	SuccessRate float64 `json:"success_rate"`
-}
-
-// BatchVerifyCredentials - 批量验证凭据
-// @Summary 批量验证凭据
-// @Description 批量验证多个凭据的有效性
-// @Tags credentials
-// @Accept json
-// @Produce json
-// @Param request body BatchRequest true "凭据ID列表"
-// @Success 200 {object} Response{data=BatchVerifyResponse}
-// @Router /api/v1/credentials/batch/verify [post]
-func (h *CredentialHandler) BatchVerifyCredentials(c *gin.Context) {
-	ownerID, role := getRequestUser(c)
-	workspaceID, _ := getRequestWorkspace(c)
-
-	var req BatchRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid request: " + err.Error(),
-		})
-		return
-	}
-
-	if len(req.IDs) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "IDs cannot be empty",
-		})
-		return
-	}
-
-	success := 0
-	failed := 0
-	results := make([]gin.H, 0, len(req.IDs))
-
-	for _, id := range req.IDs {
-		var credential models.Credential
-		if err := models.DB.First(&credential, id).Error; err != nil {
-			results = append(results, gin.H{
-				"id":    id,
-				"valid": false,
-				"error": "Credential not found",
-			})
-			failed++
-			continue
-		}
-		if credential.WorkspaceID != workspaceID || !canReadCredential(models.DB, &credential, ownerID, role) {
-			results = append(results, gin.H{
-				"id":    id,
-				"valid": false,
-				"error": "Access denied",
-			})
-			failed++
-			continue
-		}
-
-		_, err := h.encryptionService.DecryptCredentialData(credential.EncryptedData, credential.EncryptionIV)
-		if err != nil {
-			results = append(results, gin.H{
-				"id":    id,
-				"valid": false,
-				"error": "Failed to decrypt",
-			})
-			failed++
-		} else {
-			results = append(results, gin.H{
-				"id":    id,
-				"valid": true,
-			})
-			success++
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": gin.H{
-			"success": success,
-			"failed":  failed,
-			"total":   len(req.IDs),
-			"results": results,
-		},
-	})
-}
-
-// BatchDeleteCredentials - 批量删除凭据
-// @Summary 批量删除凭据
-// @Description 批量删除多个凭据
-// @Tags credentials
-// @Accept json
-// @Produce json
-// @Param request body BatchRequest true "凭据ID列表"
-// @Success 200 {object} Response{data=BatchDeleteResponse}
-// @Router /api/v1/credentials/batch/delete [post]
 func (h *CredentialHandler) BatchDeleteCredentials(c *gin.Context) {
 	ownerID, role := getRequestUser(c)
 	workspaceID, _ := getRequestWorkspace(c)
-
 	var req BatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "Invalid request: " + err.Error(),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Invalid request: " + err.Error()})
 		return
 	}
-
-	if len(req.IDs) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "IDs cannot be empty",
-		})
-		return
-	}
-
 	var credentials []models.Credential
 	if err := models.DB.Where("id IN ? AND workspace_id = ?", req.IDs, workspaceID).Find(&credentials).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to query credentials: " + err.Error(),
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Failed to query credentials: " + err.Error()})
 		return
 	}
 	if len(credentials) != len(req.IDs) {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "Some credentials not found",
-		})
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "Some credentials not found"})
 		return
 	}
 	for i := range credentials {
-		if credentials[i].WorkspaceID != workspaceID || !canWriteCredential(models.DB, &credentials[i], ownerID, role) {
-			c.JSON(http.StatusForbidden, gin.H{
-				"code":    403,
-				"message": "Some credentials are not writable",
-			})
+		if !canWriteCredential(models.DB, &credentials[i], ownerID, role) {
+			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "Some credentials are not writable"})
 			return
 		}
 	}
-	models.DB.Where("credential_id IN ?", req.IDs).Delete(&models.PipelineCredentialRef{})
-
-	// 删除凭据
-	if err := models.DB.Where("id IN ?", req.IDs).Delete(&models.Credential{}).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "Failed to delete credentials: " + err.Error(),
-		})
-		return
+	for _, credential := range credentials {
+		if err := deleteCredentialWithRelations(models.DB, credential.ID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Failed to delete credentials: " + err.Error()})
+			return
+		}
+		h.writeCredentialEvent(credential.ID, models.CredentialEventDeleted, "user", ownerID, "success", gin.H{"batch": true})
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": gin.H{
-			"deleted": len(req.IDs),
-		},
-		"message": "Credentials deleted successfully",
-	})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"deleted": len(req.IDs)}, "message": "Credentials deleted successfully"})
 }
 
-// BatchRequest - 批量请求结构
-type BatchRequest struct {
-	IDs []uint64 `json:"ids" binding:"required,min=1"`
-}
-
-// BatchVerifyResponse - 批量验证响应
-type BatchVerifyResponse struct {
-	Success int     `json:"success"`
-	Failed  int     `json:"failed"`
-	Total   int     `json:"total"`
-	Results []gin.H `json:"results"`
-}
-
-// BatchDeleteResponse - 批量删除响应
-type BatchDeleteResponse struct {
-	Deleted int    `json:"deleted"`
-	Message string `json:"message"`
-}
-
-// ExportCredentials - 导出凭据
-// @Summary 导出凭据
-// @Description 导出凭据列表（不包含敏感数据）
-// @Tags credentials
-// @Produce json
-// @Param type query string false "凭据类型筛选"
-// @Param category query string false "分类筛选"
-// @Success 200 {object} Response{data=[]models.CredentialResponse}
-// @Router /api/v1/credentials/export [get]
-func (h *CredentialHandler) ExportCredentials(c *gin.Context) {
+func (h *CredentialHandler) authorizedCredential(c *gin.Context, includeValue bool) (*models.Credential, bool) {
 	ownerID, role := getRequestUser(c)
 	workspaceID, _ := getRequestWorkspace(c)
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Invalid credential ID"})
+		return nil, false
+	}
+	var credential models.Credential
+	if err := models.DB.First(&credential, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "Credential not found"})
+		return nil, false
+	}
+	if credential.WorkspaceID != workspaceID {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "Access denied"})
+		return nil, false
+	}
+	allowed := canReadCredential(models.DB, &credential, ownerID, role)
+	if includeValue {
+		allowed = canReadCredentialValue(models.DB, &credential, ownerID, role)
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "Access denied"})
+		return nil, false
+	}
+	return &credential, true
+}
 
-	credentialType := c.Query("type")
-	category := c.Query("category")
+func (h *CredentialHandler) authorizedWritableCredential(c *gin.Context) (*models.Credential, bool) {
+	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Invalid credential ID"})
+		return nil, false
+	}
+	var credential models.Credential
+	if err := models.DB.First(&credential, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "Credential not found"})
+		return nil, false
+	}
+	if credential.WorkspaceID != workspaceID || !canWriteCredential(models.DB, &credential, ownerID, role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "Access denied"})
+		return nil, false
+	}
+	return &credential, true
+}
 
-	query := applyCredentialReadScope(models.DB.Model(&models.Credential{}), ownerID, role).Where("workspace_id = ?", workspaceID)
+func validateExpiry(expiresAt *int64) bool {
+	if expiresAt == nil || *expiresAt <= 0 {
+		return true
+	}
+	return *expiresAt > time.Now().Unix()
+}
 
-	if credentialType != "" {
-		if !models.IsValidType(models.CredentialType(credentialType)) {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"code":    400,
-				"message": "Invalid credential type",
-			})
-			return
+func normalizeCredentialScope(db *gorm.DB, scope models.CredentialScope, projectID, workspaceID uint64) (models.CredentialScope, uint64, error) {
+	if scope == "" {
+		scope = models.ScopeUser
+	}
+	switch scope {
+	case models.ScopeUser, models.ScopeWorkspace:
+		return scope, 0, nil
+	case models.ScopeProject:
+		if projectID == 0 {
+			return "", 0, errors.New("Project scope requires project_id")
 		}
-		// 标准化类型（中文转英文，确保查询匹配存储的英文值）
-		normalizedType := models.NormalizeType(models.CredentialType(credentialType))
-		query = query.Where("type = ?", normalizedType)
+		if !projectBelongsToWorkspace(db, projectID, workspaceID) {
+			return "", 0, errors.New("Project does not belong to active workspace")
+		}
+		return scope, projectID, nil
+	default:
+		return "", 0, errors.New("Invalid credential scope")
 	}
-	if category != "" {
-		query = query.Where("category = ?", category)
+}
+
+func deleteCredentialWithRelations(db *gorm.DB, credentialID uint64) error {
+	if err := db.Where("credential_id = ?", credentialID).Delete(&models.PipelineCredentialRef{}).Error; err != nil {
+		return err
 	}
+	if err := db.Where("credential_id = ?", credentialID).Delete(&models.CredentialEvent{}).Error; err != nil {
+		return err
+	}
+	return db.Delete(&models.Credential{}, credentialID).Error
+}
 
-	var credentials []models.Credential
-	query.Order("created_at DESC").Find(&credentials)
-
-	// 转换为导出格式（不包含敏感数据）
-	responses := make([]gin.H, len(credentials))
-	for i, cred := range credentials {
-		responses[i] = gin.H{
-			"name":        cred.Name,
-			"type":        cred.Type,
-			"category":    cred.Category,
-			"description": cred.Description,
-			"scope":       cred.Scope,
-			"status":      cred.Status,
-			"version":     cred.Version,
-			"created_at":  cred.CreatedAt,
-			"updated_at":  cred.UpdatedAt,
+func (h *CredentialHandler) writeCredentialEvent(credentialID uint64, action, actorType string, actorID uint64, result string, detail interface{}) {
+	detailJSON := ""
+	if detail != nil {
+		if payload, err := json.Marshal(detail); err == nil {
+			detailJSON = string(payload)
 		}
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": responses,
-	})
+	_ = models.DB.Create(&models.CredentialEvent{
+		CredentialID: credentialID,
+		Action:       action,
+		ActorType:    actorType,
+		ActorID:      actorID,
+		Result:       result,
+		DetailJSON:   detailJSON,
+	}).Error
 }

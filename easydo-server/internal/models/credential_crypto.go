@@ -14,7 +14,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func EncryptSecret(plaintext string) (string, error) {
+func EncryptCredentialPayload(plaintext string) (string, error) {
 	if len(plaintext) == 0 {
 		return "", errors.New("plaintext cannot be empty")
 	}
@@ -43,7 +43,7 @@ func EncryptSecret(plaintext string) (string, error) {
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-func DecryptSecret(encryptedValue string) ([]byte, error) {
+func DecryptCredentialPayload(encryptedValue string) ([]byte, error) {
 	if len(encryptedValue) == 0 {
 		return nil, errors.New("encrypted value cannot be empty")
 	}

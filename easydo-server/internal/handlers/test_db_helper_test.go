@@ -48,19 +48,18 @@ func openHandlerTestDB(t *testing.T) *gorm.DB {
 		&models.AgentTaskEvent{},
 		&models.AgentLogChunk{},
 		&models.AgentLogSegment{},
-		&models.Secret{},
-		&models.SecretUsage{},
-		&models.SecretAuditLog{},
-		&models.SecretRotation{},
 		&models.Message{},
 		&models.WebhookConfig{},
 		&models.WebhookEvent{},
 		&models.Credential{},
-		&models.CredentialUsage{},
+		&models.CredentialEvent{},
 		&models.PipelineCredentialRef{},
-		&models.SecretPermission{},
+		&models.MasterKey{},
 	); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
+	}
+	if _, err := models.LoadOrCreateMasterKey(db); err != nil {
+		t.Fatalf("load master key failed: %v", err)
 	}
 
 	return db

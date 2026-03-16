@@ -114,9 +114,9 @@ const (
 type CredentialScope string
 
 const (
-	ScopeUser    CredentialScope = "user"    // 仅创建者可用
-	ScopeProject CredentialScope = "project" // 项目成员可用
-	ScopeGlobal  CredentialScope = "global"  // 全局共享（管理员控制）
+	ScopeUser      CredentialScope = "personal" // 仅创建者可用
+	ScopeProject   CredentialScope = "project"  // 项目成员可用
+	ScopeWorkspace CredentialScope = "workspace"
 )
 
 // =============================================================================
@@ -135,28 +135,19 @@ const (
 
 type Credential struct {
 	BaseModel
-	Name           string             `gorm:"size:128;not null;index" json:"name"`
-	Description    string             `gorm:"size:512" json:"description"`
-	Type           CredentialType     `gorm:"size:32;not null;index" json:"type"`
-	Category       CredentialCategory `gorm:"size:32;index" json:"category"`
-	EncryptedData  string             `gorm:"type:longtext;not null" json:"-"`
-	EncryptionIV   string             `gorm:"size:32" json:"-"`
-	EncryptionAlgo string             `gorm:"size:16;default:'aes-256-gcm'" json:"-"`
-	Metadata       string             `gorm:"type:text" json:"metadata"`
-	Scope          CredentialScope    `gorm:"size:32;default:'user'" json:"scope"`
-	WorkspaceID    uint64             `gorm:"not null;index" json:"workspace_id"`
-	ProjectID      uint64             `gorm:"index" json:"project_id"`
-	IsShared       bool               `gorm:"default:false" json:"is_shared"`
-	SharedWith     string             `gorm:"type:text" json:"shared_with"`
-	OwnerID        uint64             `gorm:"not null;index" json:"owner_id"`
-	LastUsedAt     int64              `json:"last_used_at"`
-	UsedCount      int64              `gorm:"default:0" json:"used_count"`
-	Version        int                `gorm:"default:1" json:"version"`
-	Status         CredentialStatus   `gorm:"size:32;default:'active';index" json:"status"`
-	ExpiresAt      *int64             `json:"expires_at"`
-	ExpiryWarning  int                `gorm:"default:7" json:"expiry_warning"`
-	AutoRotate     bool               `gorm:"default:false" json:"auto_rotate"`
-	RotatePeriod   int                `gorm:"default:0" json:"rotate_period"`
+	Name             string             `gorm:"size:128;not null;index" json:"name"`
+	Description      string             `gorm:"size:512" json:"description"`
+	Type             CredentialType     `gorm:"size:32;not null;index" json:"type"`
+	Category         CredentialCategory `gorm:"size:32;index" json:"category"`
+	Scope            CredentialScope    `gorm:"size:32;default:'personal'" json:"scope"`
+	WorkspaceID      uint64             `gorm:"not null;index" json:"workspace_id"`
+	ProjectID        uint64             `gorm:"index" json:"project_id"`
+	OwnerID          uint64             `gorm:"not null;index" json:"owner_id"`
+	EncryptedPayload string             `gorm:"column:encrypted_payload;type:longtext;not null" json:"-"`
+	Status           CredentialStatus   `gorm:"size:32;default:'active';index" json:"status"`
+	ExpiresAt        *int64             `json:"expires_at"`
+	UsedCount        int64              `gorm:"default:0" json:"used_count"`
+	LastUsedAt       int64              `json:"last_used_at"`
 }
 
 func (Credential) TableName() string {
@@ -181,7 +172,6 @@ type CredentialResponse struct {
 	ExpiresAt    *int64             `json:"expires_at"`
 	UsedCount    int64              `json:"used_count"`
 	LastUsedAt   int64              `json:"last_used_at"`
-	Version      int                `json:"version"`
 	CreatedAt    time.Time          `json:"created_at"`
 	UpdatedAt    time.Time          `json:"updated_at"`
 }
@@ -198,46 +188,16 @@ func (c *Credential) ToResponse() CredentialResponse {
 		WorkspaceID:  c.WorkspaceID,
 		ProjectID:    c.ProjectID,
 		OwnerID:      c.OwnerID,
-		Status:       c.Status,
+		Status:       c.EffectiveStatus(),
 		TypeInfo:     c.Type.GetTypeInfo(),
 		CategoryInfo: c.Category.GetCategoryInfo(),
-		StatusInfo:   c.Status.GetStatusInfo(),
+		StatusInfo:   c.EffectiveStatus().GetStatusInfo(),
 		ExpiresAt:    c.ExpiresAt,
 		UsedCount:    c.UsedCount,
 		LastUsedAt:   c.LastUsedAt,
-		Version:      c.Version,
 		CreatedAt:    c.CreatedAt,
 		UpdatedAt:    c.UpdatedAt,
 	}
-}
-
-type CredentialUsage struct {
-	BaseModel
-	CredentialID uint64 `gorm:"index;not null" json:"credential_id"`
-	UsedByType   string `gorm:"size:32;index" json:"used_by_type"`
-	UsedByID     uint64 `gorm:"index" json:"used_by_id"`
-	UsedByName   string `gorm:"size:256" json:"used_by_name"`
-	UsedAt       int64  `gorm:"not null;index" json:"used_at"`
-	Result       string `gorm:"size:32" json:"result"`
-	ErrorMsg     string `gorm:"type:text" json:"error_msg"`
-}
-
-func (CredentialUsage) TableName() string {
-	return "credential_usages"
-}
-
-type CredentialAuditLog struct {
-	BaseModel
-	CredentialID uint64 `gorm:"index;not null" json:"credential_id"`
-	Action       string `gorm:"size:64;not null;index" json:"action"`
-	ActorID      uint64 `gorm:"index" json:"actor_id"`
-	ActorIP      string `gorm:"size:45" json:"actor_ip"`
-	ActorUA      string `gorm:"size:512" json:"actor_ua"`
-	Metadata     string `gorm:"type:text" json:"metadata"`
-}
-
-func (CredentialAuditLog) TableName() string {
-	return "credential_audit_logs"
 }
 
 // =============================================================================
@@ -245,10 +205,16 @@ func (CredentialAuditLog) TableName() string {
 // =============================================================================
 
 const (
-	AuditActionShare   = "share"   // 分享凭据
-	AuditActionUnshare = "unshare" // 取消分享
-	AuditActionVerify  = "verify"  // 验证凭据
-	AuditActionRotate  = "rotate"  // 轮换凭据
+	CredentialEventCreated  = "created"
+	CredentialEventUpdated  = "updated"
+	CredentialEventRevealed = "revealed"
+	CredentialEventVerified = "verified"
+	CredentialEventUsed     = "used"
+	CredentialEventDeleted  = "deleted"
+	CredentialEventDisabled = "disabled"
+	CredentialEventRevoked  = "revoked"
+	CredentialEventBound    = "bound"
+	CredentialEventUnbound  = "unbound"
 )
 
 // =============================================================================
@@ -505,7 +471,7 @@ func IsValidType(t CredentialType) bool {
 	// 标准化类型（中文转英文）
 	normalized := NormalizeType(t)
 	switch normalized {
-	case TypePassword, TypeSSHKey, TypeToken, TypeOAuth2, TypeCert, TypePasskey, TypeMFA, TypeIAM:
+	case TypePassword, TypeSSHKey, TypeToken, TypeOAuth2, TypeCert, TypeIAM:
 		return true
 	default:
 		return false
@@ -784,7 +750,7 @@ func (s CredentialStatus) GetLabel() string {
 // ParsePayload - 根据凭据类型解析 SecretData 为对应的 Payload 结构
 // 返回解析后的 Payload 和可能的错误
 func (c *Credential) ParsePayload() (interface{}, error) {
-	if c.EncryptedData == "" {
+	if c.EncryptedPayload == "" {
 		return nil, nil
 	}
 
@@ -830,6 +796,23 @@ func (c *Credential) IsExpired() bool {
 	return time.Now().Unix() > *c.ExpiresAt
 }
 
+func (c *Credential) EffectiveStatus() CredentialStatus {
+	if c == nil {
+		return CredentialStatusInactive
+	}
+	if c.Status == CredentialStatusActive && c.IsExpired() {
+		return CredentialStatusExpired
+	}
+	return c.Status
+}
+
+func (c *Credential) IsUsable() bool {
+	if c == nil {
+		return false
+	}
+	return c.Status == CredentialStatusActive && !c.IsExpired()
+}
+
 // =============================================================================
 // Pipeline Credential - 流水线凭据引用
 // =============================================================================
@@ -852,30 +835,16 @@ func (PipelineCredentialRef) TableName() string {
 	return "pipeline_credential_refs"
 }
 
-// =============================================================================
-// 凭据使用统计和审计
-// =============================================================================
-
-// CredentialUsageStat - 凭据使用统计
-type CredentialUsageStat struct {
-	CredentialID uint64 `json:"credential_id" gorm:"primaryKey"`
-	UsedCount    int64  `json:"used_count"`
-	LastUsedAt   int64  `json:"last_used_at"`
-	SuccessCount int64  `json:"success_count"`
-	FailedCount  int64  `json:"failed_count"`
-}
-
-// CredentialRotationLog - 凭据轮换日志
-type CredentialRotationLog struct {
+type CredentialEvent struct {
 	BaseModel
 	CredentialID uint64 `json:"credential_id" gorm:"index;not null"`
-	RotatedBy    uint64 `json:"rotated_by" gorm:"index"`
-	OldVersion   int    `json:"old_version"`
-	NewVersion   int    `json:"new_version"`
-	Reason       string `json:"reason" gorm:"size:512"`
-	Metadata     string `json:"metadata" gorm:"type:text"`
+	Action       string `json:"action" gorm:"size:64;index;not null"`
+	ActorType    string `json:"actor_type" gorm:"size:32;not null"`
+	ActorID      uint64 `json:"actor_id" gorm:"index"`
+	Result       string `json:"result" gorm:"size:32;not null"`
+	DetailJSON   string `json:"detail_json" gorm:"type:text"`
 }
 
-func (CredentialRotationLog) TableName() string {
-	return "credential_rotation_logs"
+func (CredentialEvent) TableName() string {
+	return "credential_events"
 }

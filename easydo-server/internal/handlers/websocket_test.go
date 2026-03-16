@@ -383,6 +383,93 @@ func TestSendTaskAssign_PublishesAgentStreamEvent(t *testing.T) {
 	assert.Equal(t, fmt.Sprintf("%d", reloaded.ID), fmt.Sprintf("%v", entries[0].Values["task_id"]))
 }
 
+func TestTriggerDownstreamTasks_InjectsCredentialEnvForGitClone(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "downstream-user", models.WorkspaceRoleDeveloper)
+	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{
+		"access_token": "gho_downstream_only",
+		"username":     "oauth2",
+	})
+	if err != nil {
+		t.Fatalf("encrypt payload failed: %v", err)
+	}
+	credential := models.Credential{
+		Name:             "downstream-repo-auth",
+		Type:             models.TypeToken,
+		Category:         models.CategoryGitHub,
+		Scope:            models.ScopeWorkspace,
+		WorkspaceID:      workspace.ID,
+		OwnerID:          user.ID,
+		EncryptedPayload: encrypted,
+		Status:           models.CredentialStatusActive,
+	}
+	if err := db.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential failed: %v", err)
+	}
+
+	runConfig, err := json.Marshal(PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{ID: "1", Type: "shell", Name: "Build", Config: map[string]interface{}{"script": "echo ok"}},
+			{ID: "2", Type: "git_clone", Name: "Clone", Config: map[string]interface{}{
+				"repository": map[string]interface{}{"url": "https://example.com/repo.git"},
+				"credentials": map[string]interface{}{
+					"repo_auth": map[string]interface{}{"credential_id": credential.ID},
+				},
+			}},
+		},
+		Edges: []PipelineEdge{{From: "1", To: "2"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal run config failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID:     workspace.ID,
+		PipelineID:      1,
+		BuildNumber:     1,
+		Status:          models.PipelineRunStatusRunning,
+		Config:          string(runConfig),
+		AgentID:         1,
+		TriggerUserID:   user.ID,
+		TriggerUserRole: "user",
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	handler.triggerDownstreamTasks(run.ID, []models.AgentTask{{NodeID: "1", Status: models.TaskStatusExecuteSuccess}})
+
+	var downstream models.AgentTask
+	if err := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, "2").First(&downstream).Error; err != nil {
+		t.Fatalf("expected downstream task to be created: %v", err)
+	}
+	if downstream.EnvVars == "" {
+		t.Fatalf("expected downstream task env vars to be injected")
+	}
+
+	var envMap map[string]interface{}
+	if err := json.Unmarshal([]byte(downstream.EnvVars), &envMap); err != nil {
+		t.Fatalf("unmarshal downstream env vars failed: %v", err)
+	}
+	if envMap["EASYDO_CRED_REPO_AUTH_ACCESS_TOKEN"] != "gho_downstream_only" {
+		t.Fatalf("expected downstream access_token env, got %#v", envMap["EASYDO_CRED_REPO_AUTH_ACCESS_TOKEN"])
+	}
+	if envMap["EASYDO_CRED_REPO_AUTH_TYPE"] != string(models.TypeToken) {
+		t.Fatalf("expected downstream type env, got %#v", envMap["EASYDO_CRED_REPO_AUTH_TYPE"])
+	}
+}
+
 func TestHeartbeatPayload(t *testing.T) {
 	payload := map[string]interface{}{
 		"timestamp":     float64(time.Now().Unix()),

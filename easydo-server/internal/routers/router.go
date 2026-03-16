@@ -170,25 +170,6 @@ func InitRouter() *gin.Engine {
 			tasks.GET("/agent/:agent_id/pending", taskHandler.GetPendingTasks)
 		}
 
-		// 密钥管理
-		secrets := api.Group("/secrets")
-		secrets.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
-		{
-			secretHandler := handlers.NewSecretHandler()
-			secrets.GET("", secretHandler.List)
-			secrets.GET("/types", secretHandler.GetTypes)
-			secrets.POST("/ssh/generate", secretHandler.GenerateSSHKey)
-			secrets.GET("/statistics", middleware.RateLimit(), secretHandler.Statistics)
-			secrets.GET("/:id", secretHandler.Get)
-			secrets.POST("", secretHandler.Create)
-			secrets.PUT("/:id", secretHandler.Update)
-			secrets.DELETE("/:id", secretHandler.Delete)
-			secrets.GET("/:id/value", secretHandler.GetValue)
-			secrets.POST("/:id/verify", secretHandler.Verify)
-			secrets.POST("/:id/rotate", secretHandler.Rotate)
-			secrets.POST("/batch-delete", secretHandler.BatchDelete)
-		}
-
 		// 凭据管理 (Credentials)
 		credentials := api.Group("/v1/credentials")
 		credentials.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
@@ -198,18 +179,15 @@ func InitRouter() *gin.Engine {
 			credentials.POST("", credentialHandler.CreateCredential)
 			credentials.GET("/types", credentialHandler.GetCredentialTypes)
 			credentials.GET("/categories", credentialHandler.GetCredentialCategories)
-			credentials.GET("/export", credentialHandler.ExportCredentials)
 			credentials.POST("/impact", credentialHandler.BatchCredentialImpact)
+			credentials.POST("/batch/delete", credentialHandler.BatchDeleteCredentials)
 			credentials.GET("/:id", credentialHandler.GetCredential)
 			credentials.GET("/:id/impact", credentialHandler.GetCredentialImpact)
-			credentials.GET("/:id/secret-data", credentialHandler.GetCredentialSecretData)
+			credentials.GET("/:id/payload", credentialHandler.GetCredentialPayload)
 			credentials.PUT("/:id", credentialHandler.UpdateCredential)
 			credentials.DELETE("/:id", credentialHandler.DeleteCredential)
 			credentials.POST("/:id/verify", credentialHandler.VerifyCredential)
-			credentials.POST("/:id/rotate", credentialHandler.RotateCredential)
 			credentials.GET("/:id/usage", credentialHandler.GetCredentialUsage)
-			credentials.POST("/batch/verify", credentialHandler.BatchVerifyCredentials)
-			credentials.POST("/batch/delete", credentialHandler.BatchDeleteCredentials)
 		}
 
 		// Webhook管理

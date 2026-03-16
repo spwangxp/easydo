@@ -55,7 +55,7 @@
         v-for="(log, index) in filteredLogs"
         :key="index"
         class="log-line"
-        :class="`log-${log.level}`"
+        :class="[`log-${log.level}`, getLogSemanticClass(log.message)]"
       >
         <span class="log-timestamp">{{ formatTimestamp(log.timestamp) }}</span>
         <span class="log-source" v-if="log.source">[{{ log.source }}]</span>
@@ -167,6 +167,14 @@ const filteredLogs = computed(() => {
     return true
   })
 })
+
+const getLogSemanticClass = (message) => {
+  if (!message) return ''
+  if (message.startsWith('[easydo][cmd]')) return 'log-command'
+  if (message.startsWith('[easydo][step]')) return 'log-step'
+  if (message.startsWith('[easydo][warn]')) return 'log-warning-line'
+  return ''
+}
 
 // 格式化时间戳
 const formatTimestamp = (timestamp) => {
@@ -312,6 +320,19 @@ defineExpose({
     
     &.log-debug .log-message {
       color: #6a9955;
+    }
+
+    &.log-command .log-message {
+      color: #4fc1ff;
+    }
+
+    &.log-step .log-message {
+      color: #ffd866;
+      font-weight: 600;
+    }
+
+    &.log-warning-line .log-message {
+      color: #ffb454;
     }
   }
 }

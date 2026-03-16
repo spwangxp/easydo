@@ -36,7 +36,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh, Plus, Lock, Key, Ticket, Connection, Document } from '@element-plus/icons-vue'
@@ -65,7 +65,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['update:modelValue', 'change'])
+const emit = defineEmits(['update:modelValue', 'change', 'invalid-selection'])
 
 const router = useRouter()
 const credentials = ref([])
@@ -118,10 +118,29 @@ onMounted(() => {
   loadCredentials()
 })
 
+watch(
+  () => [props.modelValue, props.credentialType, JSON.stringify(props.credentialTypes || []), props.credentialCategory, JSON.stringify(props.credentialCategories || []), credentials.value.length],
+  () => {
+    if (!props.modelValue) {
+      return
+    }
+    const current = credentials.value.find(item => String(item.id) === String(props.modelValue))
+    if (!current) {
+      return
+    }
+    const stillAllowed = filteredCredentials.value.some(item => String(item.id) === String(props.modelValue))
+    if (!stillAllowed) {
+      emit('invalid-selection', current)
+      emit('update:modelValue', null)
+    }
+  },
+  { deep: true }
+)
+
 async function loadCredentials() {
   loading.value = true
   try {
-    const res = await getCredentialList({ page: 1, size: 100 })
+      const res = await getCredentialList({ page: 1, size: 500 })
     if (res.code === 200) {
       credentials.value = res.data.list
     }
@@ -142,7 +161,7 @@ function refreshCredentials() {
 }
 
 function goToCredentials() {
-  router.push('/secrets')
+  router.push('/credentials')
 }
 
 function getTypeIcon(type) {

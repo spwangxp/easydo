@@ -289,7 +289,7 @@
                   v-for="(log, index) in taskLogs" 
                   :key="index"
                   class="log-line"
-                  :class="`log-${log.level}`"
+                  :class="[`log-${log.level}`, getLogSemanticClass(log.message)]"
                 >
                   <span class="log-time">{{ formatLogTime(log.timestamp) }}</span>
                   <span class="log-message">{{ log.message }}</span>
@@ -1074,6 +1074,14 @@ const stopAllUpdates = () => {
 const formatLogTime = (timestamp) => {
   if (!timestamp) return ''
   return new Date(timestamp * 1000).toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+const getLogSemanticClass = (message) => {
+  if (!message) return ''
+  if (message.startsWith('[easydo][cmd]')) return 'log-command'
+  if (message.startsWith('[easydo][step]')) return 'log-step'
+  if (message.startsWith('[easydo][warn]')) return 'log-warning-line'
+  return ''
 }
 
 // 获取任务日志API
@@ -1879,12 +1887,25 @@ onUnmounted(() => {
                   color: #f14c4c;
                 }
                 
-                &.log-debug .log-message {
-                  color: #6a9955;
+                 &.log-debug .log-message {
+                   color: #6a9955;
+                 }
+
+                  &.log-command .log-message {
+                    color: #4fc1ff;
+                  }
+
+                  &.log-step .log-message {
+                    color: #ffd866;
+                    font-weight: 600;
+                  }
+
+                  &.log-warning-line .log-message {
+                    color: #ffb454;
+                  }
                 }
               }
             }
-          }
         }
       }
       

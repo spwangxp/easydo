@@ -253,7 +253,7 @@ const menuItems = [
   { name: '项目', path: '/project', icon: Box, permission: 'project.read' },
   { name: '执行器', path: '/agent', icon: Monitor, permission: 'agent.read' },
   { name: '发布', path: '/deploy', icon: Promotion },
-  { name: '密钥管理', path: '/secrets', icon: Key, permission: 'credential.read' },
+      { name: '凭据管理', path: '/credentials', icon: Key, permission: 'credential.read' },
   { name: '统计', path: '/statistics', icon: DataAnalysis, permission: 'workspace.read' },
   { name: '设置', path: '/settings', icon: Setting, permission: 'workspace.read' }
 ]

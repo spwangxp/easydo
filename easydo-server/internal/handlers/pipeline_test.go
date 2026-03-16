@@ -711,6 +711,106 @@ func TestValidatePipelineCredentialBindings_UnknownSlot(t *testing.T) {
 	}
 }
 
+func TestValidatePipelineCredentialBindings_CategoryMismatch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "binding-user", models.WorkspaceRoleDeveloper)
+	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{"token": "docker-only-token"})
+	if err != nil {
+		t.Fatalf("encrypt payload failed: %v", err)
+	}
+	credential := models.Credential{
+		Name:             "docker-token",
+		Type:             models.TypeToken,
+		Category:         models.CategoryDocker,
+		Scope:            models.ScopeWorkspace,
+		WorkspaceID:      workspace.ID,
+		OwnerID:          user.ID,
+		EncryptedPayload: encrypted,
+		Status:           models.CredentialStatusActive,
+	}
+	if err := db.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential failed: %v", err)
+	}
+
+	handler := &PipelineHandler{DB: db}
+	config := PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{{
+			ID:   "1",
+			Type: "git_clone",
+			Name: "Clone",
+			Config: map[string]interface{}{
+				"repository": map[string]interface{}{"url": "https://example.com/repo.git"},
+				"credentials": map[string]interface{}{
+					"repo_auth": map[string]interface{}{"credential_id": credential.ID},
+				},
+			},
+		}},
+	}
+	_, err = handler.validatePipelineCredentialBindings(&config, user.ID, "user", 0, workspace.ID)
+	if err == nil {
+		t.Fatalf("expected category mismatch validation error")
+	}
+	if !strings.Contains(err.Error(), "不支持凭据分类") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidatePipelineCredentialBindings_RejectsMissingPayloadForType(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "binding-payload-user", models.WorkspaceRoleDeveloper)
+	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{"username": "oauth2"})
+	if err != nil {
+		t.Fatalf("encrypt payload failed: %v", err)
+	}
+	credential := models.Credential{
+		Name:             "broken-token",
+		Type:             models.TypeToken,
+		Category:         models.CategoryGitHub,
+		Scope:            models.ScopeWorkspace,
+		WorkspaceID:      workspace.ID,
+		OwnerID:          user.ID,
+		EncryptedPayload: encrypted,
+		Status:           models.CredentialStatusActive,
+	}
+	if err := db.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential failed: %v", err)
+	}
+
+	handler := &PipelineHandler{DB: db}
+	config := PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{{
+			ID:   "1",
+			Type: "git_clone",
+			Name: "Clone",
+			Config: map[string]interface{}{
+				"repository": map[string]interface{}{"url": "https://example.com/repo.git"},
+				"credentials": map[string]interface{}{
+					"repo_auth": map[string]interface{}{"credential_id": credential.ID},
+				},
+			},
+		}},
+	}
+	_, err = handler.validatePipelineCredentialBindings(&config, user.ID, "user", 0, workspace.ID)
+	if err == nil {
+		t.Fatalf("expected missing payload validation error")
+	}
+	if !strings.Contains(err.Error(), "missing required payload") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestParseAndValidatePipelineConfig_NormalizesTaskType(t *testing.T) {
 	handler := &PipelineHandler{}
 	raw := `{

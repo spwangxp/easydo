@@ -29,7 +29,7 @@ export function getCredentialList(params) {
  * @param {string} data.name - 凭据名称
  * @param {string} data.type - 凭据类型
  * @param {string} data.category - 分类
- * @param {Object} data.secret_data - 敏感数据（加密存储）
+ * @param {Object} data.payload - 敏感载荷（加密存储）
  * @param {string} data.description - 描述
  * @param {string} data.scope - 使用范围
  * @param {number} data.project_id - 项目ID
@@ -55,12 +55,12 @@ export function getCredential(id) {
 }
 
 /**
- * 获取凭据敏感数据（用于编辑回填）
+ * 获取凭据敏感载荷（用于编辑回填）
  * @param {number} id - 凭据ID
  */
-export function getCredentialSecretData(id) {
+export function getCredentialPayload(id) {
   return request({
-    url: `/v1/credentials/${id}/secret-data`,
+    url: `/v1/credentials/${id}/payload`,
     method: 'get'
   })
 }
@@ -122,25 +122,6 @@ export function getCredentialCategories() {
   })
 }
 
-// =============================================================================
-// 凭据轮换和管理 API
-// =============================================================================
-
-/**
- * 轮换凭据
- * @param {number} id - 凭据ID
- * @param {Object} data - 轮换数据
- * @param {Object} data.secret_data - 新的敏感数据
- * @param {string} data.reason - 轮换原因
- */
-export function rotateCredential(id, data) {
-  return request({
-    url: `/v1/credentials/${id}/rotate`,
-    method: 'post',
-    data
-  })
-}
-
 /**
  * 获取凭据使用统计
  * @param {number} id - 凭据ID
@@ -176,18 +157,6 @@ export function batchCredentialImpact(ids) {
 }
 
 /**
- * 批量验证凭据
- * @param {Array<number>} ids - 凭据ID列表
- */
-export function batchVerifyCredentials(ids) {
-  return request({
-    url: '/v1/credentials/batch/verify',
-    method: 'post',
-    data: { ids }
-  })
-}
-
-/**
  * 批量删除凭据
  * @param {Array<number>} ids - 凭据ID列表
  */
@@ -196,20 +165,5 @@ export function batchDeleteCredentials(ids) {
     url: '/v1/credentials/batch/delete',
     method: 'post',
     data: { ids }
-  })
-}
-
-/**
- * 导出凭据
- * @param {Object} params - 导出参数
- * @param {string} params.type - 凭据类型
- * @param {string} params.category - 分类
- */
-export function exportCredentials(params) {
-  return request({
-    url: '/v1/credentials/export',
-    method: 'get',
-    params,
-    responseType: 'blob'
   })
 }

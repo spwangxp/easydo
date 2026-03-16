@@ -1037,71 +1037,18 @@ func (h *WebSocketHandler) handleTaskLogChunkV2(client *wsClient, agent *models.
 	if logChunk.Timestamp == 0 {
 		logChunk.Timestamp = time.Now().Unix()
 	}
-	normalizedTimestamp := normalizeUnixTimestamp(logChunk.Timestamp)
-
-	uniqueKey := buildTaskLogChunkUniqueKey(logChunk.TaskID, logChunk.Attempt, logChunk.Seq)
-	chunkModel := &models.AgentLogChunk{
-		TaskID:         logChunk.TaskID,
-		PipelineRunID:  task.PipelineRunID,
-		AgentID:        client.agentID,
-		AgentSessionID: client.sessionID,
-		Attempt:        logChunk.Attempt,
-		Seq:            logChunk.Seq,
-		Stream:         logChunk.Stream,
-		Chunk:          logChunk.Chunk,
-		Timestamp:      normalizedTimestamp,
-		UniqueKey:      uniqueKey,
-	}
-	result := models.DB.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "unique_key"}},
-		DoNothing: true,
-	}).Create(chunkModel)
-	if result.Error != nil {
+	created, err := appendTaskLogChunk(h, task, logChunk, client.agentID, client.sessionID)
+	if err != nil {
 		h.sendAgentAck(client, "task_log_chunk_v2", logChunk.TaskID, logChunk.Attempt, false, "failed to persist task log chunk", nil)
 		return
 	}
-	if result.RowsAffected == 0 {
+	if !created {
 		h.sendAgentAck(client, "task_log_chunk_v2", logChunk.TaskID, logChunk.Attempt, true, "", map[string]interface{}{
 			"seq":       logChunk.Seq,
 			"duplicate": true,
 		})
 		return
 	}
-
-	if err := agentFileLogs.Append(fileLogEntry{
-		AgentID:       client.agentID,
-		TaskID:        logChunk.TaskID,
-		PipelineRunID: task.PipelineRunID,
-		Level:         logChunk.Level,
-		Message:       logChunk.Chunk,
-		Source:        logChunk.Stream,
-		Timestamp:     normalizedTimestamp,
-		LineNumber:    int(logChunk.Seq),
-		Attempt:       logChunk.Attempt,
-		Seq:           logChunk.Seq,
-	}); err != nil {
-		h.sendAgentAck(client, "task_log_chunk_v2", logChunk.TaskID, logChunk.Attempt, false, "failed to persist task log chunk", nil)
-		return
-	}
-
-	h.broadcastToFrontend(task.PipelineRunID, "task_log_stream", map[string]interface{}{
-		"task_id":   logChunk.TaskID,
-		"run_id":    task.PipelineRunID,
-		"attempt":   logChunk.Attempt,
-		"seq":       logChunk.Seq,
-		"stream":    logChunk.Stream,
-		"chunk":     logChunk.Chunk,
-		"timestamp": normalizedTimestamp,
-	})
-	h.broadcastToFrontend(task.PipelineRunID, "task_log", map[string]interface{}{
-		"task_id":     logChunk.TaskID,
-		"run_id":      task.PipelineRunID,
-		"level":       logChunk.Level,
-		"message":     logChunk.Chunk,
-		"source":      logChunk.Stream,
-		"line_number": logChunk.Seq,
-		"timestamp":   normalizedTimestamp,
-	})
 
 	h.sendAgentAck(client, "task_log_chunk_v2", logChunk.TaskID, logChunk.Attempt, true, "", map[string]interface{}{
 		"seq":       logChunk.Seq,
@@ -1901,8 +1848,28 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 				timeout = 3600
 			}
 
+			pipelineHandler := NewPipelineHandler()
+			if err := pipelineHandler.injectCredentialEnv(models.DB, canonicalType, def, nodeConfig, &run, run.TriggerUserID, run.TriggerUserRole); err != nil {
+				fmt.Printf("[ERROR] Failed to inject credential for downstream node %s: %v\n", downstreamID, err)
+				failedTask := &models.AgentTask{
+					WorkspaceID:   run.WorkspaceID,
+					AgentID:       run.AgentID,
+					PipelineRunID: runID,
+					NodeID:        downstreamID,
+					TaskType:      canonicalType,
+					Name:          node.Name,
+					Status:        models.TaskStatusScheduleFailed,
+					ErrorMsg:      "凭据注入失败: " + err.Error(),
+					StartTime:     time.Now().Unix(),
+					EndTime:       time.Now().Unix(),
+					Timeout:       timeout,
+				}
+				_ = models.DB.Create(failedTask).Error
+				h.BroadcastTaskStatus(runID, failedTask.ID, failedTask.NodeID, failedTask.Status, 0, failedTask.ErrorMsg, "")
+				continue
+			}
+
 			if def.ExecMode == taskExecModeServer {
-				pipelineHandler := NewPipelineHandler()
 				success, errMsg := pipelineHandler.executeServerTask(models.DB, &run, node, canonicalType, nodeConfig, timeout)
 				if success {
 					fmt.Printf("[SUCCESS] Executed server downstream task: node=%s type=%s\n", downstreamID, canonicalType)

@@ -149,9 +149,9 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 
 ![Agent](./screenshots/10-agent.png)
 
-### 11. 密钥管理 / Secrets Management
+### 11. 凭据管理 / Credential Management
 
-![Secrets](./screenshots/11-secrets.png)
+![Credentials](./screenshots/11-credentials.png)
 
 ---
 

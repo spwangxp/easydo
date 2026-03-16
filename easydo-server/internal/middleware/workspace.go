@@ -49,7 +49,6 @@ func ExpandWorkspaceCapabilities(role string) []string {
 		"pipeline.read":         {},
 		"pipeline.run.read":     {},
 		"agent.read":            {},
-		"secret.read":           {},
 		"credential.read":       {},
 	}
 
@@ -58,8 +57,6 @@ func ExpandWorkspaceCapabilities(role string) []string {
 			"project.write",
 			"pipeline.write",
 			"pipeline.run",
-			"secret.write",
-			"secret.value.read",
 			"credential.write",
 			"credential.value.read",
 		} {

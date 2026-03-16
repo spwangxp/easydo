@@ -58,3 +58,27 @@ func TestFlushPendingWebSocketMessagesWithSender_FlushesInOrderAndStopsOnFailure
 		t.Fatalf("pending queue len after failure=%d, want=2", len(h.pendingWS))
 	}
 }
+
+func TestTaskParseParams_PreservesEnvVarsWhenJSONContainsNonStringValues(t *testing.T) {
+	task := &Task{
+		ID:      12,
+		EnvVars: `{"EASYDO_CRED_REPO_AUTH_ACCESS_TOKEN":"gho_test","CI":true,"DEPTH":3}`,
+	}
+
+	params, err := task.ParseParams()
+	if err != nil {
+		t.Fatalf("parse params failed: %v", err)
+	}
+	if params.EnvVars["EASYDO_CRED_REPO_AUTH_ACCESS_TOKEN"] != "gho_test" {
+		t.Fatalf("expected credential env to be preserved, got %#v", params.EnvVars)
+	}
+	if params.EnvVars["CI"] != "true" {
+		t.Fatalf("expected bool env to stringify, got %#v", params.EnvVars["CI"])
+	}
+	if params.EnvVars["DEPTH"] != "3" {
+		t.Fatalf("expected numeric env to stringify, got %#v", params.EnvVars["DEPTH"])
+	}
+	if len(params.EnvVars) != 3 {
+		t.Fatalf("expected all env vars to survive parsing, got %#v", params.EnvVars)
+	}
+}

@@ -200,14 +200,21 @@ func (h *PipelineHandler) validatePipelineCredentialBindings(config *PipelineCon
 		if !exists {
 			return nil, fmt.Errorf("节点 '%s' 绑定的凭据 #%d 不存在或无权限访问", binding.NodeID, binding.CredentialID)
 		}
-		if credential.Status != models.CredentialStatusActive {
-			return nil, fmt.Errorf("节点 '%s' 绑定的凭据 '%s' 不是活跃状态", binding.NodeID, credential.Name)
+		if !credential.IsUsable() {
+			return nil, fmt.Errorf("节点 '%s' 绑定的凭据 '%s' 不是可用状态", binding.NodeID, credential.Name)
 		}
 		if !binding.Slot.allowsType(credential.Type) {
 			return nil, fmt.Errorf("节点 '%s' 的槽位 '%s' 不支持凭据类型 '%s'", binding.NodeID, binding.Slot.Slot, credential.Type)
 		}
 		if !binding.Slot.allowsCategory(credential.Category) {
 			return nil, fmt.Errorf("节点 '%s' 的槽位 '%s' 不支持凭据分类 '%s'", binding.NodeID, binding.Slot.Slot, credential.Category)
+		}
+		decrypted, err := services.NewCredentialEncryptionService().DecryptCredentialData(credential.EncryptedPayload)
+		if err != nil {
+			return nil, fmt.Errorf("节点 '%s' 的槽位 '%s' 凭据解密失败: %w", binding.NodeID, binding.Slot.Slot, err)
+		}
+		if err := validateTaskCredentialPayload(binding.TaskType, binding.Slot, credential, decrypted); err != nil {
+			return nil, fmt.Errorf("节点 '%s' 的槽位 '%s' %w", binding.NodeID, binding.Slot.Slot, err)
 		}
 	}
 
@@ -1383,7 +1390,11 @@ func mergeNodeEnv(nodeConfig map[string]interface{}) map[string]interface{} {
 
 func pickCredentialSecretValue(secrets map[string]interface{}, keys ...string) string {
 	for _, key := range keys {
-		if val := strings.TrimSpace(convertToString(secrets[key])); val != "" {
+		value, exists := secrets[key]
+		if !exists || value == nil {
+			continue
+		}
+		if val := strings.TrimSpace(convertToString(value)); val != "" && val != "null" {
 			return val
 		}
 	}
@@ -1504,6 +1515,116 @@ func applyServerCredentialConfig(taskType string, slot taskCredentialSlot, crede
 	}
 }
 
+func validateTaskCredentialPayload(taskType string, slot taskCredentialSlot, credential models.Credential, decrypted map[string]interface{}) error {
+	missing := func(fields ...string) error {
+		return fmt.Errorf("missing required payload for credential type '%s': %s", credential.Type, strings.Join(fields, ", "))
+	}
+	hasAny := func(keys ...string) bool {
+		return pickCredentialSecretValue(decrypted, keys...) != ""
+	}
+	requireAll := func(keys ...string) error {
+		missingKeys := make([]string, 0)
+		for _, key := range keys {
+			if !hasAny(key) {
+				missingKeys = append(missingKeys, key)
+			}
+		}
+		if len(missingKeys) > 0 {
+			return missing(missingKeys...)
+		}
+		return nil
+	}
+
+	switch taskType {
+	case "git_clone":
+		if slot.Slot != "repo_auth" {
+			return nil
+		}
+		switch credential.Type {
+		case models.TypeSSHKey:
+			return requireAll("private_key")
+		case models.TypeToken:
+			if !hasAny("token", "access_token") {
+				return missing("token")
+			}
+		case models.TypePassword:
+			return requireAll("username", "password")
+		}
+
+	case "docker", "docker-run":
+		if slot.Slot != "registry_auth" {
+			return nil
+		}
+		switch credential.Type {
+		case models.TypeToken:
+			if !hasAny("token", "access_token") {
+				return missing("token")
+			}
+		case models.TypePassword:
+			return requireAll("username", "password")
+		}
+
+	case "ssh":
+		if slot.Slot == "ssh_auth" && credential.Type == models.TypeSSHKey {
+			return requireAll("private_key")
+		}
+
+	case "kubernetes":
+		if slot.Slot != "cluster_auth" {
+			return nil
+		}
+		if hasAny("kubeconfig") {
+			return nil
+		}
+		switch credential.Type {
+		case models.TypeToken:
+			if !hasAny("server", "api_server") || !hasAny("token", "access_token") {
+				return missing("server", "token")
+			}
+		case models.TypeCert:
+			if !hasAny("server", "api_server") || !hasAny("cert_pem") || !hasAny("key_pem") {
+				return missing("server", "cert_pem", "key_pem")
+			}
+		}
+
+	case "email":
+		if slot.Slot != "smtp_auth" {
+			return nil
+		}
+		switch credential.Type {
+		case models.TypePassword:
+			return requireAll("username", "password")
+		case models.TypeToken:
+			if !hasAny("username", "client_id") || !hasAny("token", "access_token", "client_secret") {
+				return missing("username", "token")
+			}
+		}
+
+	case "webhook":
+		switch slot.Slot {
+		case "webhook_auth":
+			switch credential.Type {
+			case models.TypeToken:
+				if !hasAny("token", "access_token") {
+					return missing("token")
+				}
+			case models.TypePassword:
+				return requireAll("username", "password")
+			case models.TypeOAuth2:
+				if !hasAny("access_token") {
+					return missing("access_token")
+				}
+			}
+		case "webhook_mtls":
+			if credential.Type == models.TypeCert {
+				return requireAll("cert_pem", "key_pem")
+			}
+		}
+	}
+
+	return nil
+}
+
 func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, canonicalType string, def pipelineTaskDefinition, nodeConfig map[string]interface{}, run *models.PipelineRun, userID uint64, role string) error {
 	if nodeConfig == nil || len(def.CredentialSlots) == 0 {
 		return nil
@@ -1537,7 +1658,7 @@ func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, canonicalType string,
 		if !canReadCredential(db, &credential, userID, role) {
 			return fmt.Errorf("access denied for credential slot '%s'", slot.Slot)
 		}
-		if credential.Status != models.CredentialStatusActive {
+		if !credential.IsUsable() {
 			return fmt.Errorf("credential in slot '%s' is not active", slot.Slot)
 		}
 
@@ -1549,9 +1670,12 @@ func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, canonicalType string,
 		}
 
 		decrypted, err := services.NewCredentialEncryptionService().
-			DecryptCredentialData(credential.EncryptedData, credential.EncryptionIV)
+			DecryptCredentialData(credential.EncryptedPayload)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt credential in slot '%s': %w", slot.Slot, err)
+		}
+		if err := validateTaskCredentialPayload(canonicalType, slot, credential, decrypted); err != nil {
+			return fmt.Errorf("slot '%s' %w", slot.Slot, err)
 		}
 
 		if injectEnv {
@@ -1578,13 +1702,18 @@ func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, canonicalType string,
 			"last_used_at": now,
 			"used_count":   credential.UsedCount + 1,
 		})
-		db.Create(&models.CredentialUsage{
+		detailJSON, _ := json.Marshal(map[string]interface{}{
+			"task_type": slot.Slot,
+			"run_id":    run.ID,
+			"node_slot": slot.Slot,
+		})
+		db.Create(&models.CredentialEvent{
 			CredentialID: credential.ID,
-			UsedByType:   "pipeline_run",
-			UsedByID:     run.ID,
-			UsedByName:   fmt.Sprintf("pipeline_run_%d:%s", run.ID, slot.Slot),
-			UsedAt:       now,
+			Action:       models.CredentialEventUsed,
+			ActorType:    "pipeline_run",
+			ActorID:      run.ID,
 			Result:       "success",
+			DetailJSON:   string(detailJSON),
 		})
 	}
 
@@ -1633,16 +1762,20 @@ func (h *PipelineHandler) executeServerTask(db *gorm.DB, run *models.PipelineRun
 			return false, "更新服务端任务失败: " + err.Error()
 		}
 	}
+	syncLiveTaskStateFromTask(&task, "")
+	SharedWebSocketHandler().BroadcastTaskStatus(run.ID, task.ID, task.NodeID, models.TaskStatusRunning, 0, "", "")
+	logger := newTaskProcessLogger(task)
+	logger.Step(fmt.Sprintf("开始执行 %s 任务", canonicalType))
 
 	success := false
 	errMsg := ""
 	switch canonicalType {
 	case "email":
-		success, errMsg = h.executeEmailTask(nodeConfig)
+		success, errMsg = h.executeEmailTask(logger, nodeConfig)
 	case "webhook":
-		success, errMsg = h.executeWebhookTask(nodeConfig)
+		success, errMsg = h.executeWebhookTask(logger, nodeConfig)
 	case "in_app":
-		success, errMsg = h.executeInAppTask(db, run, node, nodeConfig)
+		success, errMsg = h.executeInAppTask(logger, db, run, node, nodeConfig)
 	default:
 		errMsg = "不支持的服务端任务类型"
 	}
@@ -1658,6 +1791,9 @@ func (h *PipelineHandler) executeServerTask(db *gorm.DB, run *models.PipelineRun
 	if !success {
 		updates["status"] = models.TaskStatusExecuteFailed
 		updates["error_msg"] = errMsg
+		logger.Error(errMsg)
+	} else {
+		logger.Info(fmt.Sprintf("任务执行完成 duration=%ds", duration))
 	}
 	db.Model(&task).Updates(updates)
 	task.EndTime = end
@@ -1669,6 +1805,7 @@ func (h *PipelineHandler) executeServerTask(db *gorm.DB, run *models.PipelineRun
 		task.Status = models.TaskStatusExecuteFailed
 	}
 	syncLiveTaskStateFromTask(&task, "")
+	_ = agentFileLogs.FinishTask(task.ID, task.RetryCount+1)
 	SharedWebSocketHandler().BroadcastTaskStatus(run.ID, task.ID, task.NodeID, updates["status"].(string), 0, errMsg, "")
 
 	return success, errMsg
@@ -1702,7 +1839,7 @@ func (h *PipelineHandler) resolveServerTaskAgentID(db *gorm.DB, run *models.Pipe
 }
 
 // executeEmailTask executes email notification task (Server side)
-func (h *PipelineHandler) executeEmailTask(config map[string]interface{}) (bool, string) {
+func (h *PipelineHandler) executeEmailTask(logger *taskProcessLogger, config map[string]interface{}) (bool, string) {
 	toList := parseCommaSeparatedList(toString(config["to"]))
 	ccList := parseCommaSeparatedList(toString(config["cc"]))
 	recipients := append([]string{}, toList...)
@@ -1738,6 +1875,7 @@ func (h *PipelineHandler) executeEmailTask(config map[string]interface{}) (bool,
 	if from == "" {
 		return false, "from 不能为空"
 	}
+	logger.Command(fmt.Sprintf("smtp send host=%s port=%d recipients=%d from=%s subject=%s", smtpHost, smtpPort, len(recipients), from, subject))
 
 	contentType := "text/plain; charset=UTF-8"
 	if bodyType == "html" {
@@ -1764,10 +1902,11 @@ func (h *PipelineHandler) executeEmailTask(config map[string]interface{}) (bool,
 	if err := smtp.SendMail(addr, auth, from, recipients, msg.Bytes()); err != nil {
 		return false, "邮件发送失败: " + err.Error()
 	}
+	logger.Info(fmt.Sprintf("邮件发送成功 recipients=%d", len(recipients)))
 	return true, ""
 }
 
-func (h *PipelineHandler) executeWebhookTask(config map[string]interface{}) (bool, string) {
+func (h *PipelineHandler) executeWebhookTask(logger *taskProcessLogger, config map[string]interface{}) (bool, string) {
 	url := strings.TrimSpace(toString(config["url"]))
 	if url == "" {
 		return false, "webhook.url 不能为空"
@@ -1782,6 +1921,7 @@ func (h *PipelineHandler) executeWebhookTask(config map[string]interface{}) (boo
 	if timeout <= 0 {
 		timeout = 10
 	}
+	logger.Command(fmt.Sprintf("webhook %s %s timeout=%ds", method, sanitizeTaskLogPreview(url, 400), timeout))
 
 	var payload []byte
 	bodyVal := config["body"]
@@ -1800,6 +1940,7 @@ func (h *PipelineHandler) executeWebhookTask(config map[string]interface{}) (boo
 	default:
 		payload = []byte(`{}`)
 	}
+	logger.Info("request_body=" + sanitizeTaskLogPreview(string(payload), 600))
 
 	req, err := http.NewRequest(method, url, bytes.NewReader(payload))
 	if err != nil {
@@ -1827,6 +1968,7 @@ func (h *PipelineHandler) executeWebhookTask(config map[string]interface{}) (boo
 			}
 		}
 	}
+	logger.Info("request_headers=" + sanitizeTaskLogPreview(fmt.Sprintf("%v", req.Header), 600))
 
 	tlsConfig, err := buildWebhookTLSConfig(config)
 	if err != nil {
@@ -1849,6 +1991,8 @@ func (h *PipelineHandler) executeWebhookTask(config map[string]interface{}) (boo
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+	logger.Info(fmt.Sprintf("response_status=%d", resp.StatusCode))
+	logger.Info("response_body=" + sanitizeTaskLogPreview(string(respBody), 600))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return false, fmt.Sprintf("webhook 响应失败: status=%d body=%s", resp.StatusCode, string(respBody))
 	}
@@ -1920,7 +2064,7 @@ func buildWebhookTLSConfig(config map[string]interface{}) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
-func (h *PipelineHandler) executeInAppTask(db *gorm.DB, run *models.PipelineRun, node *PipelineNode, config map[string]interface{}) (bool, string) {
+func (h *PipelineHandler) executeInAppTask(logger *taskProcessLogger, db *gorm.DB, run *models.PipelineRun, node *PipelineNode, config map[string]interface{}) (bool, string) {
 	title := strings.TrimSpace(toString(config["title"]))
 	if title == "" {
 		title = "流水线站内信通知"
@@ -1949,6 +2093,8 @@ func (h *PipelineHandler) executeInAppTask(db *gorm.DB, run *models.PipelineRun,
 		}
 	}
 	metadataJSON, _ := json.Marshal(metadata)
+	logger.Command(fmt.Sprintf("in_app notify recipient=%d title=%s", run.TriggerUserID, title))
+	logger.Info("message_preview=" + sanitizeTaskLogPreview(content, 400))
 
 	message := &models.Message{
 		WorkspaceID: run.WorkspaceID,
@@ -1966,6 +2112,7 @@ func (h *PipelineHandler) executeInAppTask(db *gorm.DB, run *models.PipelineRun,
 	if err := db.Create(message).Error; err != nil {
 		return false, "站内信创建失败: " + err.Error()
 	}
+	logger.Info(fmt.Sprintf("站内信创建成功 message_id=%d", message.ID))
 	return true, ""
 }
 

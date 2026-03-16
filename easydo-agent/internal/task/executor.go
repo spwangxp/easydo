@@ -47,6 +47,42 @@ type Executor struct {
 	mu          sync.RWMutex
 }
 
+func stringifyEnvValue(value interface{}) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	case bool, float64, float32, int, int32, int64, uint, uint32, uint64:
+		return fmt.Sprint(v)
+	default:
+		if data, err := json.Marshal(v); err == nil {
+			return string(data)
+		}
+		return fmt.Sprint(v)
+	}
+}
+
+func ParseEnvVarsJSON(raw string) map[string]string {
+	if raw == "" {
+		return nil
+	}
+
+	var env map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
+		return nil
+	}
+	if len(env) == 0 {
+		return nil
+	}
+
+	envVars := make(map[string]string, len(env))
+	for key, value := range env {
+		envVars[key] = stringifyEnvValue(value)
+	}
+	return envVars
+}
+
 // NewExecutor creates a new task executor
 func NewExecutor(log *logrus.Logger, basePath string) *Executor {
 	return &Executor{
@@ -238,10 +274,7 @@ func ParseParams(task interface{}) (*TaskParams, error) {
 		params.WorkDir = workDir
 	}
 	if envVars, ok := taskMap["env_vars"].(string); ok && envVars != "" {
-		var env map[string]string
-		if err := json.Unmarshal([]byte(envVars), &env); err == nil {
-			params.EnvVars = env
-		}
+		params.EnvVars = ParseEnvVarsJSON(envVars)
 	}
 	if timeout, ok := taskMap["timeout"].(float64); ok {
 		params.Timeout = int(timeout)

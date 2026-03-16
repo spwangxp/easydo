@@ -183,42 +183,39 @@ func canReadCredential(db *gorm.DB, credential *models.Credential, userID uint64
 	if credential == nil {
 		return false
 	}
-	return userCanAccessWorkspace(db, credential.WorkspaceID, userID, role)
+	if !userCanAccessWorkspace(db, credential.WorkspaceID, userID, role) {
+		return false
+	}
+	if credential.Scope == models.ScopeUser {
+		return credential.OwnerID == userID || userCanManageWorkspace(db, credential.WorkspaceID, userID, role)
+	}
+	return true
 }
 
 func canWriteCredential(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
 	if credential == nil {
 		return false
 	}
-	return userCanWriteWorkspaceResource(db, credential.WorkspaceID, userID, role)
+	if !userCanWriteWorkspaceResource(db, credential.WorkspaceID, userID, role) {
+		return false
+	}
+	if credential.Scope == models.ScopeUser {
+		return credential.OwnerID == userID || userCanManageWorkspace(db, credential.WorkspaceID, userID, role)
+	}
+	return true
 }
 
 func canReadCredentialValue(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
 	if credential == nil {
 		return false
 	}
-	return userCanWriteWorkspaceResource(db, credential.WorkspaceID, userID, role)
-}
-
-func canReadSecret(db *gorm.DB, secret *models.Secret, userID uint64, role string) bool {
-	if secret == nil {
+	if !userCanWriteWorkspaceResource(db, credential.WorkspaceID, userID, role) {
 		return false
 	}
-	return userCanAccessWorkspace(db, secret.WorkspaceID, userID, role)
-}
-
-func canWriteSecret(db *gorm.DB, secret *models.Secret, userID uint64, role string) bool {
-	if secret == nil {
-		return false
+	if credential.Scope == models.ScopeUser {
+		return credential.OwnerID == userID || userCanManageWorkspace(db, credential.WorkspaceID, userID, role)
 	}
-	return userCanWriteWorkspaceResource(db, secret.WorkspaceID, userID, role)
-}
-
-func canReadSecretValue(db *gorm.DB, secret *models.Secret, userID uint64, role string) bool {
-	if secret == nil {
-		return false
-	}
-	return userCanWriteWorkspaceResource(db, secret.WorkspaceID, userID, role)
+	return true
 }
 
 func applyCredentialReadScope(db *gorm.DB, userID uint64, role string) *gorm.DB {
@@ -231,34 +228,6 @@ func applyCredentialReadScope(db *gorm.DB, userID uint64, role string) *gorm.DB 
 		Where("user_id = ? AND status = ?", userID, models.WorkspaceMemberStatusActive)
 
 	return db.Where("workspace_id IN (?)", workspaceSubQuery)
-}
-
-func applySecretReadScope(db *gorm.DB, userID uint64, role string) *gorm.DB {
-	if isAdminRole(role) {
-		return db
-	}
-	workspaceSubQuery := db.Session(&gorm.Session{}).
-		Model(&models.WorkspaceMember{}).
-		Select("workspace_id").
-		Where("user_id = ? AND status = ?", userID, models.WorkspaceMemberStatusActive)
-
-	return db.Where("workspace_id IN (?)", workspaceSubQuery)
-}
-
-func accessibleSecretIDsSubQuery(db *gorm.DB, userID uint64, role string) *gorm.DB {
-	return applySecretReadScope(
-		db.Session(&gorm.Session{}).Model(&models.Secret{}).Select("id"),
-		userID,
-		role,
-	)
-}
-
-func accessibleSecretIDsInWorkspaceSubQuery(db *gorm.DB, workspaceID, userID uint64, role string) *gorm.DB {
-	return applySecretReadScope(
-		db.Session(&gorm.Session{}).Model(&models.Secret{}).Select("id").Where("workspace_id = ?", workspaceID),
-		userID,
-		role,
-	)
 }
 
 func accessibleCredentialIDsSubQuery(db *gorm.DB, userID uint64, role string) *gorm.DB {
