@@ -122,6 +122,7 @@ type WebSocketMessage struct {
 func (h *WebSocketHandler) HandleAgentConnection(c *gin.Context) {
 	agentIDStr := c.Query("agent_id")
 	token := c.Query("token")
+	registerKey := c.Query("register_key")
 
 	if agentIDStr == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -149,15 +150,40 @@ func (h *WebSocketHandler) HandleAgentConnection(c *gin.Context) {
 		return
 	}
 
-	// Verify token for approved agents
-	if agent.RegistrationStatus == models.AgentRegistrationStatusApproved {
-		if token == "" || agent.Token != token {
+	switch agent.RegistrationStatus {
+	case models.AgentRegistrationStatusApproved:
+		if token != "" && agent.Token == token {
+			break
+		}
+		if registerKey != "" && agent.RegisterKey != "" && agent.RegisterKey == registerKey {
+			break
+		}
+		if token == "" && registerKey == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"code":    401,
-				"message": "invalid token",
+				"message": "missing recovery credential",
 			})
 			return
 		}
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"code":    401,
+			"message": "invalid token",
+		})
+		return
+	case models.AgentRegistrationStatusPending:
+		if registerKey == "" || agent.RegisterKey == "" || agent.RegisterKey != registerKey {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"code":    401,
+				"message": "invalid register_key",
+			})
+			return
+		}
+	default:
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "agent registration status not allowed",
+		})
+		return
 	}
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -288,23 +314,7 @@ func (h *WebSocketHandler) HandleFrontendConnection(c *gin.Context) {
 // handleAgentMessages handles incoming messages from an agent
 func (h *WebSocketHandler) handleAgentMessages(client *wsClient, agent *models.Agent) {
 	defer func() {
-		if client.cancel != nil {
-			client.cancel()
-		}
-		h.agentsMu.Lock()
-		delete(h.agents, client.agentID)
-		h.agentsMu.Unlock()
-
-		models.DB.Model(agent).Updates(map[string]interface{}{
-			"status": models.AgentStatusOffline,
-		})
-		_ = utils.DeleteAgentPresence(context.Background(), client.agentID, client.sessionID)
-
-		client.mu.Lock()
-		client.conn.Close()
-		client.mu.Unlock()
-
-		fmt.Printf("Agent %d disconnected\n", client.agentID)
+		h.cleanupAgentConnection(client, agent)
 	}()
 
 	for {
@@ -597,6 +607,11 @@ func (h *WebSocketHandler) pollRunWatcherState(watcher *runWatcher) {
 
 // handleAgentHeartbeat processes a heartbeat message from an agent
 func (h *WebSocketHandler) handleAgentHeartbeat(client *wsClient, agent *models.Agent, payload map[string]interface{}) {
+	var latest models.Agent
+	if err := models.DB.Where("id = ?", client.agentID).First(&latest).Error; err != nil {
+		return
+	}
+
 	agentTimestamp := getInt64(payload, "timestamp")
 	if agentTimestamp == 0 {
 		agentTimestamp = time.Now().Unix()
@@ -604,7 +619,7 @@ func (h *WebSocketHandler) handleAgentHeartbeat(client *wsClient, agent *models.
 
 	client.lastHeartAt = agentTimestamp
 
-	newSuccessCount := agent.ConsecutiveSuccess + 1
+	newSuccessCount := latest.ConsecutiveSuccess + 1
 	if newSuccessCount > 3 {
 		newSuccessCount = 3
 	}
@@ -615,21 +630,29 @@ func (h *WebSocketHandler) handleAgentHeartbeat(client *wsClient, agent *models.
 		"consecutive_failures": 0,
 	}
 
-	if agent.Status != models.AgentStatusOnline && newSuccessCount >= 3 {
+	if latest.Status != models.AgentStatusOnline && newSuccessCount >= 3 {
 		updates["status"] = models.AgentStatusOnline
 		fmt.Printf("Agent %d status updated to online\n", client.agentID)
 	}
 
-	models.DB.Model(agent).Updates(updates)
+	models.DB.Model(&latest).Updates(updates)
+	if status, ok := updates["status"].(string); ok {
+		latest.Status = status
+	}
+	latest.ConsecutiveSuccess = newSuccessCount
+	latest.LastHeartAt = agentTimestamp
+	if agent != nil {
+		*agent = latest
+	}
 	_, _ = h.reconcileDispatchTimeouts(models.DB, time.Now().Unix())
 	_ = utils.PutAgentPresence(context.Background(), utils.AgentPresence{
 		AgentID:           client.agentID,
 		AgentSessionID:    client.sessionID,
 		ServerID:          client.serverID,
 		ServerURL:         utils.ServerInternalURL(),
-		Status:            agent.Status,
+		Status:            latest.Status,
 		LastHeartbeatAt:   agentTimestamp,
-		HeartbeatInterval: agent.HeartbeatInterval,
+		HeartbeatInterval: latest.HeartbeatInterval,
 		CPUUsage:          getFloat64(payload, "cpu_usage"),
 		MemoryUsage:       getFloat64(payload, "memory_usage"),
 		DiskUsage:         getFloat64(payload, "disk_usage"),
@@ -649,21 +672,11 @@ func (h *WebSocketHandler) handleAgentHeartbeat(client *wsClient, agent *models.
 
 	// Get pending tasks
 	var pendingTasks []models.AgentTask
-	if agent.RegistrationStatus == models.AgentRegistrationStatusApproved {
+	if latest.RegistrationStatus == models.AgentRegistrationStatusApproved {
 		models.DB.Where("agent_id = ? AND status IN ?", client.agentID, []string{models.TaskStatusAssigned, models.TaskStatusDispatching, models.TaskStatusPulling}).Find(&pendingTasks)
 	}
 
-	response := WebSocketMessage{
-		Type: "heartbeat_ack",
-		Payload: map[string]interface{}{
-			"status":             "ok",
-			"server_time":        time.Now().Unix(),
-			"pending_tasks":      len(pendingTasks),
-			"heartbeat_interval": agent.HeartbeatInterval,
-			"agent_session_id":   client.sessionID,
-			"server_id":          client.serverID,
-		},
-	}
+	response := WebSocketMessage{Type: "heartbeat_ack", Payload: h.buildHeartbeatAckPayload(client, &latest, len(pendingTasks))}
 
 	responseData, _ := json.Marshal(response)
 	client.mu.Lock()
@@ -672,6 +685,66 @@ func (h *WebSocketHandler) handleAgentHeartbeat(client *wsClient, agent *models.
 
 	h.redrivePendingTasksForConnectedAgent(client)
 	go NewPipelineHandler().scheduleQueuedPipelineRuns(models.DB)
+}
+
+func (h *WebSocketHandler) buildHeartbeatAckPayload(client *wsClient, agent *models.Agent, pendingTasks int) map[string]interface{} {
+	payload := map[string]interface{}{
+		"status":              "ok",
+		"server_time":         time.Now().Unix(),
+		"pending_tasks":       pendingTasks,
+		"heartbeat_interval":  agent.HeartbeatInterval,
+		"agent_session_id":    client.sessionID,
+		"server_id":           client.serverID,
+		"registration_status": agent.RegistrationStatus,
+	}
+	if agent.RegistrationStatus == models.AgentRegistrationStatusApproved && agent.Token != "" {
+		payload["token"] = agent.Token
+	}
+	return payload
+}
+
+func (h *WebSocketHandler) cleanupAgentConnection(client *wsClient, agent *models.Agent) {
+	if client == nil {
+		return
+	}
+	if client.cancel != nil {
+		client.cancel()
+	}
+
+	isCurrentSession := false
+	h.agentsMu.Lock()
+	if existing, ok := h.agents[client.agentID]; ok && existing != nil && existing.sessionID == client.sessionID {
+		delete(h.agents, client.agentID)
+		isCurrentSession = true
+	}
+	h.agentsMu.Unlock()
+
+	_ = utils.DeleteAgentPresence(context.Background(), client.agentID, client.sessionID)
+
+	shouldOffline := isCurrentSession
+	if presence, err := utils.GetAgentPresence(context.Background(), client.agentID); err == nil {
+		shouldOffline = presence.AgentSessionID == client.sessionID
+	} else if err == redis.Nil {
+		shouldOffline = isCurrentSession
+	}
+
+	if shouldOffline {
+		agentRef := &models.Agent{}
+		if agent != nil && agent.ID != 0 {
+			agentRef = agent
+		}
+		models.DB.Model(agentRef).Where("id = ?", client.agentID).Updates(map[string]interface{}{
+			"status": models.AgentStatusOffline,
+		})
+	}
+
+	client.mu.Lock()
+	if client.conn != nil {
+		_ = client.conn.Close()
+	}
+	client.mu.Unlock()
+
+	fmt.Printf("Agent %d disconnected\n", client.agentID)
 }
 
 // handleTaskStatus processes a task status message from an agent

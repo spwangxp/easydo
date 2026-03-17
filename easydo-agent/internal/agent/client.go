@@ -26,10 +26,11 @@ type Client struct {
 	heartbeat   *Heartbeat
 	taskHandler *TaskHandler
 
-	mu      sync.RWMutex
-	agentID uint64
-	token   string
-	running bool
+	mu          sync.RWMutex
+	agentID     uint64
+	token       string
+	registerKey string
+	running     bool
 }
 
 // NewClient creates a new agent client
@@ -59,11 +60,17 @@ func (c *Client) initWebSocket(ctx context.Context) error {
 	c.mu.RUnlock()
 
 	if agentID == 0 || token == "" {
-		return fmt.Errorf("agent not registered")
+		c.mu.RLock()
+		registerKey := c.registerKey
+		c.mu.RUnlock()
+		if registerKey == "" {
+			return fmt.Errorf("agent not registered")
+		}
 	}
 
 	// Create WebSocket client
-	c.wsClient = client.NewWebSocketClient(c.cfg.ServerURL, agentID, token)
+	c.wsClient = client.NewWebSocketClient(c.cfg.ServerURL, agentID, token, c.register.GetRegisterKey())
+	c.wsClient.SetHeartbeatAckHandler(c.handleWebSocketHeartbeatAck)
 
 	// Set task handler for WebSocket messages
 	c.wsClient.SetTaskHandler(c.taskHandler)
@@ -91,7 +98,7 @@ func (c *Client) Start(ctx context.Context) error {
 	c.mu.Unlock()
 
 	fmt.Println("[DEBUG] Starting registration...")
-	agentID, _, status, err := c.register.Execute(ctx)
+	agentID, registerKey, status, err := c.register.Execute(ctx)
 	fmt.Printf("[DEBUG] Registration completed: id=%d, status=%s, err=%v\n", agentID, status, err)
 	if err != nil {
 		return fmt.Errorf("registration failed: %w", err)
@@ -99,51 +106,23 @@ func (c *Client) Start(ctx context.Context) error {
 
 	c.mu.Lock()
 	c.agentID = agentID
+	c.registerKey = registerKey
 	c.mu.Unlock()
 
 	c.heartbeat.SetAgentID(agentID)
 	c.taskHandler.SetAgentID(agentID)
 
-	if status == StatusApproved {
-		tokenFromFile, hasToken, _ := c.tokenMgr.GetToken()
-		if hasToken && tokenFromFile != "" {
-			c.mu.Lock()
-			c.token = tokenFromFile
-			c.mu.Unlock()
-			c.heartbeat.SetToken(tokenFromFile)
-			c.taskHandler.SetToken(tokenFromFile)
-		}
+	tokenFromFile, hasToken, _ := c.tokenMgr.GetToken()
+	if hasToken && tokenFromFile != "" {
+		c.mu.Lock()
+		c.token = tokenFromFile
+		c.mu.Unlock()
+		c.heartbeat.SetToken(tokenFromFile)
+		c.taskHandler.SetToken(tokenFromFile)
 	}
-
-	c.heartbeat.Start(ctx)
 
 	if status == StatusPending {
-		c.log.Info("Agent is pending approval, waiting...")
-
-		if err := c.register.WaitForApproval(ctx, 10*time.Second); err != nil {
-			return fmt.Errorf("waiting for approval failed: %w", err)
-		}
-
-		newStatus := c.register.GetStatus()
-		if newStatus == StatusApproved {
-			tokenFromFile, hasToken, _ := c.tokenMgr.GetToken()
-			if !hasToken || tokenFromFile == "" {
-				c.log.Error("Agent approved but no token available")
-				return fmt.Errorf("agent approved but no token available")
-			}
-
-			c.mu.Lock()
-			c.token = tokenFromFile
-			c.mu.Unlock()
-
-			c.heartbeat.SetToken(tokenFromFile)
-			c.taskHandler.SetToken(tokenFromFile)
-			c.log.Infof("Agent approved and token configured: len=%d", len(tokenFromFile))
-		}
-	}
-
-	if _, _, err := c.heartbeat.SendOneShot(ctx); err != nil {
-		c.log.Warnf("Initial heartbeat failed: %v", err)
+		c.log.Info("Agent is pending approval, entering websocket bootstrap mode")
 	}
 
 	// Initialize WebSocket for real-time task handling
@@ -152,13 +131,39 @@ func (c *Client) Start(ctx context.Context) error {
 	}
 
 	// Runtime communication (task exchange/status/log/heartbeat) is websocket-only.
-	// Keep HTTP heartbeat for registration/approval stage only, then stop it.
-	c.heartbeat.Stop()
 
 	c.taskHandler.Start(ctx)
 
 	c.log.Infof("Agent started successfully: id=%d, name=%s", c.agentID, c.agentName)
 	return nil
+}
+
+func (c *Client) handleWebSocketHeartbeatAck(payload map[string]interface{}) {
+	regStatus, _ := payload["registration_status"].(string)
+	token, _ := payload["token"].(string)
+	if regStatus != string(StatusApproved) || token == "" {
+		return
+	}
+
+	if err := c.tokenMgr.SaveToken(token); err != nil {
+		c.log.Warnf("failed to persist token from websocket ack: %v", err)
+	}
+	if err := c.tokenMgr.DeleteRegisterKey(); err != nil {
+		c.log.Warnf("failed to delete register key after websocket approval: %v", err)
+	}
+
+	c.mu.Lock()
+	c.token = token
+	c.registerKey = ""
+	c.mu.Unlock()
+
+	c.register.SetStatus(StatusApproved)
+	c.heartbeat.SetToken(token)
+	c.taskHandler.SetToken(token)
+	if c.wsClient != nil {
+		c.wsClient.SetToken(token)
+		c.wsClient.SetRegisterKey("")
+	}
 }
 
 // Shutdown stops the agent

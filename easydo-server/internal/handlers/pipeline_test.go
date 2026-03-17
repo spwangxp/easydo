@@ -884,6 +884,41 @@ func TestUpdatePipeline_NullProjectIDRemainsNull(t *testing.T) {
 	}
 }
 
+func TestCreatePipeline_WithoutProjectIDStoresNullProject(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "create-null-project", models.WorkspaceRoleDeveloper)
+
+	body := bytes.NewBufferString(`{"name":"pipeline-without-project","environment":"development","config":"{\"version\":\"2.0\",\"nodes\":[{\"id\":\"1\",\"type\":\"in_app\",\"name\":\"Notify\",\"config\":{\"title\":\"done\"}}],\"edges\":[]}"}`)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/pipelines", body)
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+	c.Set("workspace_id", workspace.ID)
+
+	h.CreatePipeline(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var pipeline models.Pipeline
+	if err := db.Where("name = ?", "pipeline-without-project").First(&pipeline).Error; err != nil {
+		t.Fatalf("load pipeline failed: %v", err)
+	}
+
+	var projectID sql.NullInt64
+	if err := db.Raw("SELECT project_id FROM pipelines WHERE id = ?", pipeline.ID).Scan(&projectID).Error; err != nil {
+		t.Fatalf("query project_id failed: %v", err)
+	}
+	if projectID.Valid {
+		t.Fatalf("expected project_id to be NULL, got %d", projectID.Int64)
+	}
+}
+
 func TestGetPipelineTaskTypes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := &PipelineHandler{}

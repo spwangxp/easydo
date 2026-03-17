@@ -101,18 +101,20 @@ type AgentConfig struct {
 // connection also means a new server-issued session identity, and downstream
 // task/log reporting must switch to that session cleanly.
 type WebSocketClient struct {
-	baseURL     string
-	conn        *websocket.Conn
-	mu          sync.RWMutex
-	running     bool
-	stopChan    chan struct{}
-	agentID     uint64
-	token       string
-	sessionID   string
-	cfg         *websocketConfig
-	taskHandler TaskHandler
-	executor    *task.Executor
-	onReconnect func()
+	baseURL        string
+	conn           *websocket.Conn
+	mu             sync.RWMutex
+	running        bool
+	stopChan       chan struct{}
+	agentID        uint64
+	token          string
+	registerKey    string
+	sessionID      string
+	cfg            *websocketConfig
+	taskHandler    TaskHandler
+	executor       *task.Executor
+	onReconnect    func()
+	onHeartbeatAck func(map[string]interface{})
 }
 
 // websocketConfig holds WebSocket configuration
@@ -135,13 +137,14 @@ type WebSocketMessage struct {
 }
 
 // NewWebSocketClient creates a new WebSocket client
-func NewWebSocketClient(baseURL string, agentID uint64, token string) *WebSocketClient {
+func NewWebSocketClient(baseURL string, agentID uint64, token, registerKey string) *WebSocketClient {
 	return &WebSocketClient{
-		baseURL:  baseURL,
-		agentID:  agentID,
-		token:    token,
-		stopChan: make(chan struct{}),
-		cfg:      defaultConfig,
+		baseURL:     baseURL,
+		agentID:     agentID,
+		token:       token,
+		registerKey: registerKey,
+		stopChan:    make(chan struct{}),
+		cfg:         defaultConfig,
 	}
 }
 
@@ -164,6 +167,12 @@ func (c *WebSocketClient) SetExecutor(executor *task.Executor) {
 func (c *WebSocketClient) SetReconnectHandler(handler func()) {
 	c.mu.Lock()
 	c.onReconnect = handler
+	c.mu.Unlock()
+}
+
+func (c *WebSocketClient) SetHeartbeatAckHandler(handler func(map[string]interface{})) {
+	c.mu.Lock()
+	c.onHeartbeatAck = handler
 	c.mu.Unlock()
 }
 
@@ -195,7 +204,13 @@ func (c *WebSocketClient) Connect(ctx context.Context) error {
 
 	// Add query parameters
 	if c.agentID > 0 {
-		wsURL += fmt.Sprintf("?agent_id=%d&token=%s", c.agentID, c.token)
+		if c.token != "" {
+			wsURL += fmt.Sprintf("?agent_id=%d&token=%s", c.agentID, c.token)
+		} else if c.registerKey != "" {
+			wsURL += fmt.Sprintf("?agent_id=%d&register_key=%s", c.agentID, c.registerKey)
+		} else {
+			wsURL += fmt.Sprintf("?agent_id=%d", c.agentID)
+		}
 	}
 
 	// Create dialer with timeout
@@ -342,6 +357,12 @@ func (c *WebSocketClient) handleHeartbeatAck(payload map[string]interface{}) {
 		c.mu.Lock()
 		c.sessionID = sessionID
 		c.mu.Unlock()
+	}
+	c.mu.RLock()
+	handler := c.onHeartbeatAck
+	c.mu.RUnlock()
+	if handler != nil {
+		handler(payload)
 	}
 }
 
@@ -583,6 +604,12 @@ func (c *WebSocketClient) SetAgentID(agentID uint64) {
 func (c *WebSocketClient) SetToken(token string) {
 	c.mu.Lock()
 	c.token = token
+	c.mu.Unlock()
+}
+
+func (c *WebSocketClient) SetRegisterKey(registerKey string) {
+	c.mu.Lock()
+	c.registerKey = registerKey
 	c.mu.Unlock()
 }
 

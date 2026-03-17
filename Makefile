@@ -17,9 +17,11 @@ FRONTEND_DIR   = easydo-frontend
 SERVER_DIR     = easydo-server
 AGENT_DIR      = easydo-agent
 COMPOSE_FILE   = docker-compose.yml
+MULTI_COMPOSE_FILE = docker-compose.multireplica.yml
 
 # Docker Compose 配置
 DC             = docker-compose -f $(COMPOSE_FILE)
+DC_MULTI       = docker-compose -f $(COMPOSE_FILE) -f $(MULTI_COMPOSE_FILE)
 
 # ════════════════════════════════════════════════════════════════
 # 一键操作 (所有模块)
@@ -28,6 +30,8 @@ DC             = docker-compose -f $(COMPOSE_FILE)
 .PHONY: all help build run stop down restart logs status ports
 .PHONY: build-all run-all down-all restart-all logs-all status-all
 .PHONY: clean-all prune-all rebuild-all debug-all
+.PHONY: multi-up multi-down multi-status multi-logs multi-rebuild
+.PHONY: scale-server scale-server-up scale-server-down scale-agent scale-agent-up scale-agent-down
 
 all help:
 	@echo ""
@@ -42,6 +46,18 @@ all help:
 	@echo "   make restart     - 重启所有服务"
 	@echo "   make logs        - 查看所有日志"
 	@echo "   make status      - 查看服务状态"
+	@echo ""
+	@echo "$(YELLOW)🚀 多副本快捷命令:$(NC)"
+	@echo "   make multi-up       - 启动多副本栈 (server/server2 + agent/agent2 + LB)"
+	@echo "   make multi-down     - 停止多副本栈"
+	@echo "   make multi-status   - 查看多副本栈状态"
+	@echo "   make multi-logs     - 查看多副本栈日志"
+	@echo "   make scale-server-up   - 扩容后端到 2 副本"
+	@echo "   make scale-server-down - 缩容后端到 1 副本 (保留 LB)"
+	@echo "   make scale-agent-up    - 扩容 Agent 到 2 副本"
+	@echo "   make scale-agent-down  - 缩容 Agent 到 1 副本"
+	@echo "   make scale-server N=1|2 - 设置后端副本数"
+	@echo "   make scale-agent N=1|2  - 设置 Agent 副本数"
 	@echo ""
 	@echo "$(YELLOW)🔧 运维操作:$(NC)"
 	@echo "   make clean        - 清理构建产物"
@@ -153,9 +169,98 @@ ports:
 	@echo ""
 	@echo "$(YELLOW)📡 端口占用:$(NC)"
 	@echo "   前端 (HTTP):    :80"
+	@echo "   前端多副本:     :8088"
 	@echo "   后端 (API):     :8080"
 	@echo "   MySQL:          :3306"
 	@echo "   Redis:          :6379"
+
+# ════════════════════════════════════════════════════════════════
+# 多副本操作
+# ════════════════════════════════════════════════════════════════
+
+multi-up:
+	@echo ""
+	@echo "$(GREEN)🚀 启动多副本服务栈...$(NC)"
+	@$(DC_MULTI) up -d
+	@sleep 2
+	@make multi-status
+	@echo ""
+	@echo "$(GREEN)✅ 多副本服务已启动!$(NC)"
+
+multi-down:
+	@echo ""
+	@echo "$(YELLOW)🛑 停止多副本服务栈...$(NC)"
+	@$(DC_MULTI) down --remove-orphans
+	@echo "$(GREEN)✅ 多副本服务已停止!$(NC)"
+
+multi-status:
+	@echo ""
+	@echo "$(BLUE)📊 多副本服务状态:$(NC)"
+	@$(DC_MULTI) ps
+	@echo ""
+	@echo "$(YELLOW)📡 多副本访问地址:$(NC)"
+	@echo "   前端(LB):       http://localhost:8088"
+	@echo "   后端(API):      http://localhost:8080"
+
+multi-logs:
+	@$(DC_MULTI) logs -f
+
+multi-rebuild:
+	@echo ""
+	@echo "$(CYAN)🔄 重建多副本服务栈...$(NC)"
+	@$(DC_MULTI) down --remove-orphans
+	@$(DC_MULTI) up --build -d
+	@echo "$(GREEN)✅ 多副本服务已重建!$(NC)"
+
+scale-server:
+	@if [ "$(N)" = "2" ]; then \
+		$(MAKE) scale-server-up; \
+	elif [ "$(N)" = "1" ]; then \
+		$(MAKE) scale-server-down; \
+	else \
+		echo "$(RED)❌ 用法: make scale-server N=1 或 make scale-server N=2$(NC)"; \
+		exit 1; \
+	fi
+
+scale-server-up:
+	@echo ""
+	@echo "$(GREEN)📈 扩容后端到 2 副本...$(NC)"
+	@$(DC_MULTI) up -d server server2 server-lb frontend
+	@$(DC_MULTI) ps server server2 server-lb frontend
+	@echo "$(GREEN)✅ 后端已扩容到 2 副本!$(NC)"
+
+scale-server-down:
+	@echo ""
+	@echo "$(YELLOW)📉 缩容后端到 1 副本...$(NC)"
+	@$(DC_MULTI) stop server2
+	@$(DC_MULTI) rm -f server2 >/dev/null 2>&1 || true
+	@$(DC_MULTI) ps server server2 server-lb frontend
+	@echo "$(GREEN)✅ 后端已缩容到 1 副本!$(NC)"
+
+scale-agent:
+	@if [ "$(N)" = "2" ]; then \
+		$(MAKE) scale-agent-up; \
+	elif [ "$(N)" = "1" ]; then \
+		$(MAKE) scale-agent-down; \
+	else \
+		echo "$(RED)❌ 用法: make scale-agent N=1 或 make scale-agent N=2$(NC)"; \
+		exit 1; \
+	fi
+
+scale-agent-up:
+	@echo ""
+	@echo "$(GREEN)📈 扩容 Agent 到 2 副本...$(NC)"
+	@$(DC_MULTI) up -d agent agent2
+	@$(DC_MULTI) ps agent agent2
+	@echo "$(GREEN)✅ Agent 已扩容到 2 副本!$(NC)"
+
+scale-agent-down:
+	@echo ""
+	@echo "$(YELLOW)📉 缩容 Agent 到 1 副本...$(NC)"
+	@$(DC_MULTI) stop agent2
+	@$(DC_MULTI) rm -f agent2 >/dev/null 2>&1 || true
+	@$(DC_MULTI) ps agent agent2
+	@echo "$(GREEN)✅ Agent 已缩容到 1 副本!$(NC)"
 
 # ════════════════════════════════════════════════════════════════
 # 编译操作

@@ -81,6 +81,10 @@ func (r *Register) Execute(ctx context.Context) (agentID uint64, registerKey str
 
 	// Get register key if we have one (agent was approved but restarted)
 	if agentID, registerKey, hasKey, _ := r.tokenMgr.GetRegisterKey(); hasKey {
+		r.mu.Lock()
+		r.agentID = agentID
+		r.registerKey = registerKey
+		r.mu.Unlock()
 		r.log.Info("Register key found, attempting to get token...")
 		return r.getToken(ctx, agentID, registerKey)
 	}
@@ -328,6 +332,12 @@ func (r *Register) GetStatus() RegistrationStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.status
+}
+
+func (r *Register) GetRegisterKey() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.registerKey
 }
 
 // SetStatus sets the registration status

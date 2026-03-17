@@ -455,7 +455,11 @@ func (h *PipelineHandler) CreatePipeline(c *gin.Context) {
 		OwnerID:     userID,
 	}
 
-	if err := h.DB.Create(pipeline).Error; err != nil {
+	createQuery := h.DB
+	if req.ProjectID == 0 {
+		createQuery = createQuery.Omit("ProjectID")
+	}
+	if err := createQuery.Create(pipeline).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
 			"message": "创建流水线失败",
