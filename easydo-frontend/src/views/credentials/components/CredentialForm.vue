@@ -19,7 +19,7 @@
       <el-row :gutter="16">
         <el-col :span="12">
           <el-form-item label="分类" prop="category">
-            <el-select v-model="form.category" placeholder="选择分类" style="width: 100%">
+            <el-select v-model="form.category" placeholder="选择分类" style="width: 100%" @change="handleCategoryChange">
               <el-option v-for="category in categories" :key="category.value" :label="category.label" :value="category.value" />
             </el-select>
           </el-form-item>
@@ -35,9 +35,26 @@
         </el-col>
       </el-row>
 
+      <el-alert
+        v-if="form.type === 'SSH_KEY'"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 16px"
+      >
+        SSH 密钥可直接用于 VM / 主机资源接入。建议补全私钥与密钥类型，保存后即可在资源管理页直接选择并绑定。
+      </el-alert>
+
       <el-form-item v-if="form.scope === 'project'" label="项目" prop="project_id">
         <el-select v-model="form.project_id" placeholder="选择项目" style="width: 100%">
           <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+        </el-select>
+      </el-form-item>
+
+      <el-form-item label="锁定状态" prop="lock_state">
+        <el-select v-model="form.lock_state" placeholder="选择锁定状态" style="width: 100%" :disabled="!canToggleLock">
+          <el-option label="已锁定" value="locked" />
+          <el-option label="已解锁" value="unlocked" />
         </el-select>
       </el-form-item>
 
@@ -88,24 +105,59 @@
       </div>
 
       <div v-else-if="form.type === 'TOKEN'">
-        <el-form-item label="令牌值" prop="payload.token">
-          <el-input v-model="form.payload.token" type="password" show-password placeholder="请输入令牌" />
-        </el-form-item>
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="令牌类型" prop="payload.token_type">
-              <el-select v-model="form.payload.token_type" style="width: 100%">
-                <el-option label="Bearer" value="bearer" />
-                <el-option label="Basic" value="basic" />
-              </el-select>
+        <template v-if="isKubernetesCredential">
+          <el-form-item label="认证模式" prop="payload.auth_mode">
+            <el-select v-model="form.payload.auth_mode" style="width: 100%">
+              <el-option v-for="mode in kubernetesSupportedModes" :key="mode.code" :label="mode.label" :value="mode.code" />
+            </el-select>
+          </el-form-item>
+          <el-alert type="info" :closable="false" show-icon>
+            Kubernetes 凭据沿用现有 TOKEN / CERTIFICATE 类型，但认证模式可选择 kubeconfig 或 server + token。
+          </el-alert>
+          <el-form-item v-if="form.payload.auth_mode === 'kubeconfig'" label="Kubeconfig" prop="payload.kubeconfig">
+            <el-input v-model="form.payload.kubeconfig" type="textarea" :rows="8" placeholder="请输入 kubeconfig 内容" />
+          </el-form-item>
+          <template v-else>
+            <el-form-item label="API Server" prop="payload.server">
+              <el-input v-model="form.payload.server" placeholder="https://kubernetes.example.com" />
             </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="用户名" prop="payload.username">
-              <el-input v-model="form.payload.username" placeholder="可选：Basic 认证用户名" />
+            <el-form-item label="令牌值" prop="payload.token">
+              <el-input v-model="form.payload.token" type="password" show-password placeholder="请输入 Bearer Token" />
             </el-form-item>
-          </el-col>
-        </el-row>
+            <el-row :gutter="16">
+              <el-col :span="12">
+                <el-form-item label="命名空间" prop="payload.namespace">
+                  <el-input v-model="form.payload.namespace" placeholder="可选：default" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="CA 证书" prop="payload.ca_cert">
+                  <el-input v-model="form.payload.ca_cert" type="textarea" :rows="3" placeholder="可选：集群 CA 证书" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+          </template>
+        </template>
+        <template v-else>
+          <el-form-item label="令牌值" prop="payload.token">
+            <el-input v-model="form.payload.token" type="password" show-password placeholder="请输入令牌" />
+          </el-form-item>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="令牌类型" prop="payload.token_type">
+                <el-select v-model="form.payload.token_type" style="width: 100%">
+                  <el-option label="Bearer" value="bearer" />
+                  <el-option label="Basic" value="basic" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="用户名" prop="payload.username">
+                <el-input v-model="form.payload.username" placeholder="可选：Basic 认证用户名" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </template>
       </div>
 
       <div v-else-if="form.type === 'OAUTH2'">
@@ -130,15 +182,53 @@
       </div>
 
       <div v-else-if="form.type === 'CERTIFICATE'">
-        <el-form-item label="证书 PEM" prop="payload.cert_pem">
-          <el-input v-model="form.payload.cert_pem" type="textarea" :rows="5" placeholder="请输入证书 PEM" />
-        </el-form-item>
-        <el-form-item label="私钥 PEM" prop="payload.key_pem">
-          <el-input v-model="form.payload.key_pem" type="textarea" :rows="5" placeholder="请输入私钥 PEM" />
-        </el-form-item>
-        <el-form-item label="CA 证书" prop="payload.ca_cert">
-          <el-input v-model="form.payload.ca_cert" type="textarea" :rows="3" placeholder="可选：请输入 CA 证书" />
-        </el-form-item>
+        <template v-if="isKubernetesCredential">
+          <el-form-item label="认证模式" prop="payload.auth_mode">
+            <el-select v-model="form.payload.auth_mode" style="width: 100%">
+              <el-option v-for="mode in kubernetesSupportedModes" :key="mode.code" :label="mode.label" :value="mode.code" />
+            </el-select>
+          </el-form-item>
+          <el-alert type="info" :closable="false" show-icon>
+            Kubernetes 证书模式可直接提供 kubeconfig，或提供 API Server + 客户端证书/私钥。
+          </el-alert>
+          <el-form-item v-if="form.payload.auth_mode === 'kubeconfig'" label="Kubeconfig" prop="payload.kubeconfig">
+            <el-input v-model="form.payload.kubeconfig" type="textarea" :rows="8" placeholder="请输入 kubeconfig 内容" />
+          </el-form-item>
+          <template v-else>
+            <el-form-item label="API Server" prop="payload.server">
+              <el-input v-model="form.payload.server" placeholder="https://kubernetes.example.com" />
+            </el-form-item>
+            <el-form-item label="证书 PEM" prop="payload.cert_pem">
+              <el-input v-model="form.payload.cert_pem" type="textarea" :rows="5" placeholder="请输入证书 PEM" />
+            </el-form-item>
+            <el-form-item label="私钥 PEM" prop="payload.key_pem">
+              <el-input v-model="form.payload.key_pem" type="textarea" :rows="5" placeholder="请输入私钥 PEM" />
+            </el-form-item>
+            <el-row :gutter="16">
+              <el-col :span="12">
+                <el-form-item label="命名空间" prop="payload.namespace">
+                  <el-input v-model="form.payload.namespace" placeholder="可选：default" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="CA 证书" prop="payload.ca_cert">
+                  <el-input v-model="form.payload.ca_cert" type="textarea" :rows="3" placeholder="可选：集群 CA 证书" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+          </template>
+        </template>
+        <template v-else>
+          <el-form-item label="证书 PEM" prop="payload.cert_pem">
+            <el-input v-model="form.payload.cert_pem" type="textarea" :rows="5" placeholder="请输入证书 PEM" />
+          </el-form-item>
+          <el-form-item label="私钥 PEM" prop="payload.key_pem">
+            <el-input v-model="form.payload.key_pem" type="textarea" :rows="5" placeholder="请输入私钥 PEM" />
+          </el-form-item>
+          <el-form-item label="CA 证书" prop="payload.ca_cert">
+            <el-input v-model="form.payload.ca_cert" type="textarea" :rows="3" placeholder="可选：请输入 CA 证书" />
+          </el-form-item>
+        </template>
       </div>
 
       <div v-else-if="form.type === 'IAM_ROLE'">
@@ -213,21 +303,30 @@ const form = reactive({
   type: '',
   category: '',
   scope: 'workspace',
+  lock_state: 'locked',
   project_id: null,
   expires_at: null,
   payload: {}
 })
 
 const isEdit = computed(() => !!props.initialData?.id)
+const canToggleLock = computed(() => !isEdit.value || props.initialData?.can_toggle_lock !== false)
+const selectedCategory = computed(() => props.categories.find(item => item.value === form.category) || null)
+const isKubernetesCredential = computed(() => form.category === 'kubernetes' && (form.type === 'TOKEN' || form.type === 'CERTIFICATE'))
+const kubernetesSupportedModes = computed(() => {
+  const modes = selectedCategory.value?.supported_modes || []
+  return modes.filter(mode => Array.isArray(mode.allowed_types) ? mode.allowed_types.includes(form.type) : true)
+})
 
 const rules = computed(() => {
-  const base = {
-    name: [{ required: true, message: '请输入凭据名称', trigger: 'blur' }],
-    type: [{ required: true, message: '请选择凭据类型', trigger: 'change' }],
-    category: [{ required: true, message: '请选择分类', trigger: 'change' }],
-    scope: [{ required: true, message: '请选择范围', trigger: 'change' }],
-    project_id: form.scope === 'project' ? [{ required: true, message: '请选择项目', trigger: 'change' }] : []
-  }
+    const base = {
+      name: [{ required: true, message: '请输入凭据名称', trigger: 'blur' }],
+      type: [{ required: true, message: '请选择凭据类型', trigger: 'change' }],
+      category: [{ required: true, message: '请选择分类', trigger: 'change' }],
+      scope: [{ required: true, message: '请选择范围', trigger: 'change' }],
+      lock_state: [{ required: true, message: '请选择锁定状态', trigger: 'change' }],
+      project_id: form.scope === 'project' ? [{ required: true, message: '请选择项目', trigger: 'change' }] : []
+    }
 
   if (form.type === 'PASSWORD') {
     base['payload.username'] = [{ required: true, message: '请输入用户名', trigger: 'blur' }]
@@ -237,7 +336,17 @@ const rules = computed(() => {
     base['payload.private_key'] = [{ required: true, message: '请输入私钥', trigger: 'blur' }]
   }
   if (form.type === 'TOKEN') {
-    base['payload.token'] = [{ required: true, message: '请输入令牌值', trigger: 'blur' }]
+    if (isKubernetesCredential.value) {
+      base['payload.auth_mode'] = [{ required: true, message: '请选择 Kubernetes 认证模式', trigger: 'change' }]
+      if (form.payload.auth_mode === 'kubeconfig') {
+        base['payload.kubeconfig'] = [{ required: true, message: '请输入 kubeconfig', trigger: 'blur' }]
+      } else {
+        base['payload.server'] = [{ required: true, message: '请输入 API Server', trigger: 'blur' }]
+        base['payload.token'] = [{ required: true, message: '请输入 Bearer Token', trigger: 'blur' }]
+      }
+    } else {
+      base['payload.token'] = [{ required: true, message: '请输入令牌值', trigger: 'blur' }]
+    }
   }
   if (form.type === 'OAUTH2') {
     base['payload.client_id'] = [{ required: true, message: '请输入 Client ID', trigger: 'blur' }]
@@ -245,8 +354,19 @@ const rules = computed(() => {
     base['payload.provider_url'] = [{ required: true, message: '请输入 Provider URL', trigger: 'blur' }]
   }
   if (form.type === 'CERTIFICATE') {
-    base['payload.cert_pem'] = [{ required: true, message: '请输入证书 PEM', trigger: 'blur' }]
-    base['payload.key_pem'] = [{ required: true, message: '请输入私钥 PEM', trigger: 'blur' }]
+    if (isKubernetesCredential.value) {
+      base['payload.auth_mode'] = [{ required: true, message: '请选择 Kubernetes 认证模式', trigger: 'change' }]
+      if (form.payload.auth_mode === 'kubeconfig') {
+        base['payload.kubeconfig'] = [{ required: true, message: '请输入 kubeconfig', trigger: 'blur' }]
+      } else {
+        base['payload.server'] = [{ required: true, message: '请输入 API Server', trigger: 'blur' }]
+        base['payload.cert_pem'] = [{ required: true, message: '请输入证书 PEM', trigger: 'blur' }]
+        base['payload.key_pem'] = [{ required: true, message: '请输入私钥 PEM', trigger: 'blur' }]
+      }
+    } else {
+      base['payload.cert_pem'] = [{ required: true, message: '请输入证书 PEM', trigger: 'blur' }]
+      base['payload.key_pem'] = [{ required: true, message: '请输入私钥 PEM', trigger: 'blur' }]
+    }
   }
   if (form.type === 'IAM_ROLE') {
     base['payload.provider'] = [{ required: true, message: '请选择云平台', trigger: 'change' }]
@@ -256,21 +376,31 @@ const rules = computed(() => {
   return base
 })
 
-function defaultPayloadByType(type) {
+function defaultPayloadByType(type, category = '') {
   if (type === 'PASSWORD') return { username: '', password: '' }
   if (type === 'SSH_KEY') return { private_key: '', public_key: '', key_type: 'rsa', passphrase: '' }
-  if (type === 'TOKEN') return { token: '', token_type: 'bearer', username: '' }
+  if (type === 'TOKEN') {
+    if (category === 'kubernetes') return { auth_mode: 'kubeconfig', kubeconfig: '', server: '', token: '', namespace: '', ca_cert: '' }
+    return { token: '', token_type: 'bearer', username: '' }
+  }
   if (type === 'OAUTH2') return { client_id: '', client_secret: '', provider_url: '', access_token: '' }
-  if (type === 'CERTIFICATE') return { cert_pem: '', key_pem: '', ca_cert: '' }
+  if (type === 'CERTIFICATE') {
+    if (category === 'kubernetes') return { auth_mode: 'server_cert', kubeconfig: '', server: '', cert_pem: '', key_pem: '', namespace: '', ca_cert: '' }
+    return { cert_pem: '', key_pem: '', ca_cert: '' }
+  }
   if (type === 'IAM_ROLE') return { provider: 'aws', role_arn: '', region: '', access_key_id: '', secret_access_key: '' }
   return {}
 }
 
 function handleTypeChange(value) {
-  form.payload = defaultPayloadByType(value)
+  form.payload = defaultPayloadByType(value, form.category)
   if (!props.initialData) {
     form.category = ''
   }
+}
+
+function handleCategoryChange(value) {
+  form.payload = defaultPayloadByType(form.type, value)
 }
 
 function disabledDate(date) {
@@ -295,8 +425,9 @@ watch(
     form.type = value?.type || ''
     form.category = value?.category || ''
     form.scope = value?.scope || 'workspace'
+    form.lock_state = value?.lock_state || value?.lockState || 'locked'
     form.project_id = value?.project_id || null
-    form.payload = { ...defaultPayloadByType(value?.type || ''), ...(value?.payload || {}) }
+    form.payload = { ...defaultPayloadByType(value?.type || '', value?.category || ''), ...(value?.payload || {}) }
     expiresAt.value = value?.expires_at ? new Date(value.expires_at * 1000) : null
   },
   { immediate: true }
@@ -315,6 +446,7 @@ async function handleSubmit() {
       type: form.type,
       category: form.category,
       scope: form.scope,
+      lock_state: form.lock_state,
       project_id: form.scope === 'project' ? form.project_id : 0,
       expires_at: expiresAt.value ? Math.floor(expiresAt.value.getTime() / 1000) : null,
       payload: form.payload

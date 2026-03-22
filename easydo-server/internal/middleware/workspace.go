@@ -50,6 +50,9 @@ func ExpandWorkspaceCapabilities(role string) []string {
 		"pipeline.run.read":     {},
 		"agent.read":            {},
 		"credential.read":       {},
+		"resource.read":         {},
+		"resource.monitor.read": {},
+		"store.template.read":   {},
 	}
 
 	if WorkspaceRoleAtLeast(role, models.WorkspaceRoleDeveloper) {
@@ -59,6 +62,8 @@ func ExpandWorkspaceCapabilities(role string) []string {
 			"pipeline.run",
 			"credential.write",
 			"credential.value.read",
+			"resource.use",
+			"store.template.use",
 		} {
 			capSet[capability] = struct{}{}
 		}
@@ -71,6 +76,10 @@ func ExpandWorkspaceCapabilities(role string) []string {
 			"agent.write",
 			"agent.approve",
 			"agent.token.rotate",
+			"resource.write",
+			"resource.operate",
+			"resource.monitor.write",
+			"store.template.manage",
 		} {
 			capSet[capability] = struct{}{}
 		}

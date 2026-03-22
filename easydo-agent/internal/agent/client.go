@@ -19,12 +19,13 @@ type Client struct {
 	agentName string
 	log       *logrus.Logger
 
-	httpClient  *client.HTTPClient
-	wsClient    *client.WebSocketClient
-	tokenMgr    *TokenManager
-	register    *Register
-	heartbeat   *Heartbeat
-	taskHandler *TaskHandler
+	httpClient      *client.HTTPClient
+	wsClient        *client.WebSocketClient
+	tokenMgr        *TokenManager
+	register        *Register
+	heartbeat       *Heartbeat
+	taskHandler     *TaskHandler
+	terminalHandler *TerminalHandler
 
 	mu          sync.RWMutex
 	agentID     uint64
@@ -44,11 +45,12 @@ func NewClient(cfg *config.Config, sysInfo *system.Info, agentName string, log *
 		agentName: agentName,
 		log:       log,
 
-		httpClient:  httpClient,
-		tokenMgr:    tokenMgr,
-		register:    NewRegister(httpClient, tokenMgr, cfg, sysInfo, agentName, log),
-		heartbeat:   NewHeartbeat(httpClient, cfg, tokenMgr, 0, log),
-		taskHandler: NewTaskHandler(httpClient, nil, cfg, tokenMgr, log),
+		httpClient:      httpClient,
+		tokenMgr:        tokenMgr,
+		register:        NewRegister(httpClient, tokenMgr, cfg, sysInfo, agentName, log),
+		heartbeat:       NewHeartbeat(httpClient, cfg, tokenMgr, 0, log),
+		taskHandler:     NewTaskHandler(httpClient, nil, cfg, tokenMgr, sysInfo.Runtime, log),
+		terminalHandler: NewTerminalHandler(log),
 	}
 }
 
@@ -74,6 +76,8 @@ func (c *Client) initWebSocket(ctx context.Context) error {
 
 	// Set task handler for WebSocket messages
 	c.wsClient.SetTaskHandler(c.taskHandler)
+	c.wsClient.SetTerminalHandler(c.terminalHandler)
+	c.terminalHandler.SetWebSocketClient(c.wsClient)
 
 	// Connect to WebSocket
 	if err := c.wsClient.Connect(ctx); err != nil {
@@ -175,6 +179,9 @@ func (c *Client) Shutdown(ctx context.Context) error {
 
 	// Close WebSocket connection
 	if c.wsClient != nil {
+		if c.terminalHandler != nil {
+			c.terminalHandler.CloseAll("agent_shutdown")
+		}
 		if err := c.wsClient.Close(); err != nil {
 			c.log.Warnf("Error closing WebSocket: %v", err)
 		}

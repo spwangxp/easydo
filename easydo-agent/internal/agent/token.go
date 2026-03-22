@@ -32,9 +32,9 @@ func (tm *TokenManager) GetToken() (string, bool, error) {
 		fmt.Printf("[DEBUG] TokenManager: readTokenFile error: %v\n", err)
 		return "", false, nil // No token found
 	}
-	
+
 	fmt.Printf("[DEBUG] TokenManager: readTokenFile returned: [%s], len=%d\n", token, len(token))
-	
+
 	if token == "" {
 		return "", false, nil // Empty token
 	}
@@ -86,8 +86,8 @@ func (tm *TokenManager) readTokenFile() (string, error) {
 
 // RegisterKey represents the registration key received during initial registration
 type RegisterKey struct {
-	Key        string
-	AgentID    uint64
+	Key     string
+	AgentID uint64
 }
 
 // SaveRegisterKey saves the register key

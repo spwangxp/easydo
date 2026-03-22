@@ -55,12 +55,12 @@
 
     <div v-if="selectedIds.length > 0" class="batch-bar">
       <span>已选择 {{ selectedIds.length }} 项</span>
-      <el-button v-if="canWriteCredentials" type="danger" link @click="batchDelete">批量删除</el-button>
+      <el-button type="danger" link @click="batchDelete">批量删除</el-button>
       <el-button link @click="selectedIds = []">取消</el-button>
     </div>
 
     <el-table v-loading="loading" :data="credentials" @selection-change="handleSelectionChange">
-      <el-table-column type="selection" width="48" />
+      <el-table-column v-if="hasDeletableCredentials" type="selection" width="48" :selectable="isRowDeletable" />
       <el-table-column prop="name" label="名称" min-width="180" />
       <el-table-column prop="type" label="类型" width="130">
         <template #default="{ row }">
@@ -78,6 +78,11 @@
           <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusLabel(row.status) }}</el-tag>
         </template>
       </el-table-column>
+      <el-table-column prop="lock_state" label="锁定状态" width="120">
+        <template #default="{ row }">
+          <el-tag :type="getLockStateType(row.lock_state)" size="small">{{ getLockStateLabel(row.lock_state) }}</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column prop="used_count" label="使用次数" width="100" align="center" />
       <el-table-column prop="last_used_at" label="最后使用" width="180">
         <template #default="{ row }">{{ formatDateTime(row.last_used_at ? row.last_used_at * 1000 : null) }}</template>
@@ -87,12 +92,12 @@
       </el-table-column>
       <el-table-column label="操作" min-width="360" fixed="right">
         <template #default="{ row }">
-          <el-button type="primary" link @click="handleViewPayload(row)">查看敏感载荷</el-button>
-          <el-button type="success" link @click="handleVerify(row)">验证</el-button>
+          <el-button v-if="row.can_view_secret" type="primary" link @click="handleViewPayload(row)">查看敏感载荷</el-button>
+          <el-button v-if="row.can_verify" type="success" link @click="handleVerify(row)">验证</el-button>
           <el-button type="info" link @click="showUsage(row)">使用统计</el-button>
           <el-button type="warning" link @click="showImpact(row)">影响分析</el-button>
-          <el-button v-if="canWriteCredentials" type="primary" link @click="handleEdit(row)">编辑</el-button>
-          <el-button v-if="canWriteCredentials" type="danger" link @click="handleDelete(row)">删除</el-button>
+          <el-button v-if="row.can_edit" type="primary" link @click="handleEdit(row)">编辑</el-button>
+          <el-button v-if="row.can_delete" type="danger" link @click="handleDelete(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -121,7 +126,7 @@
     </el-dialog>
 
     <el-dialog v-model="payloadVisible" title="敏感载荷" width="720px">
-      <el-alert type="warning" :closable="false" show-icon>敏感载荷仅对具备凭据写权限的成员可见。</el-alert>
+      <el-alert type="warning" :closable="false" show-icon>敏感载荷仅会在显式敏感查看操作中返回，且仅对具备查看权限的成员可见。</el-alert>
       <pre class="payload-preview">{{ JSON.stringify(credentialPayload, null, 2) }}</pre>
     </el-dialog>
 
@@ -167,6 +172,7 @@
 
 <script setup>
 import { computed, h, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Key, Plus, Search } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
@@ -187,6 +193,8 @@ import {
 import CredentialForm from './components/CredentialForm.vue'
 
 const userStore = useUserStore()
+const route = useRoute()
+const router = useRouter()
 const loading = ref(false)
 const credentials = ref([])
 const credentialTypes = ref([])
@@ -202,6 +210,7 @@ const usageData = ref(null)
 const impactDialogVisible = ref(false)
 const impactData = ref(null)
 const canWriteCredentials = computed(() => userStore.hasPermission('credential.write'))
+const hasDeletableCredentials = computed(() => credentials.value.some(item => item.can_delete))
 
 const pagination = reactive({ page: 1, size: 10, total: 0 })
 const filters = reactive({ keyword: '', type: '', category: '', status: '' })
@@ -246,7 +255,11 @@ async function loadTypesAndCategories() {
     credentialTypes.value = typesRes.data.map(item => ({ value: item.value, label: item.label || item.name }))
   }
   if (categoriesRes.code === 200) {
-    credentialCategories.value = categoriesRes.data.map(item => ({ value: item.value, label: item.label || item.name || item.value }))
+    credentialCategories.value = categoriesRes.data.map(item => ({
+      value: item.value,
+      label: item.label || item.name || item.value,
+      supported_modes: item.supported_modes || []
+    }))
   }
 }
 
@@ -254,17 +267,55 @@ function handleSelectionChange(rows) {
   selectedIds.value = rows.map(row => row.id)
 }
 
-function showCreateDialog() {
-  currentCredential.value = null
+function isRowDeletable(row) {
+  return !!row?.can_delete
+}
+
+function showCreateDialog(preset = null) {
+  currentCredential.value = preset ? { ...preset } : null
   isEdit.value = false
   dialogVisible.value = true
 }
 
+function buildCreatePresetFromRoute() {
+  const { type, category, source } = route.query || {}
+  if (!type && !category) return null
+  const description = source === 'resource-vm'
+    ? '用于 VM / 主机资源接入的用户名密码或 SSH 密钥。'
+    : source === 'resource-k8s'
+      ? '用于 Kubernetes 资源接入的集群认证凭据。'
+      : ''
+  return {
+    name: '',
+    description,
+    type: type || '',
+    category: category || '',
+    scope: 'workspace',
+    lock_state: 'locked',
+    payload: {}
+  }
+}
+
+async function openCreateDialogFromRoute() {
+  if (route.query.create !== '1' || !canWriteCredentials.value) return
+  showCreateDialog(buildCreatePresetFromRoute())
+  const nextQuery = { ...route.query }
+  delete nextQuery.create
+  delete nextQuery.type
+  delete nextQuery.category
+  delete nextQuery.source
+  await router.replace({ path: route.path, query: nextQuery })
+}
+
 async function handleEdit(credential) {
+  if (!credential?.can_edit) {
+    ElMessage.warning('当前凭据不允许编辑')
+    return
+  }
   isEdit.value = true
   try {
     const res = await getCredentialPayload(credential.id)
-    currentCredential.value = { ...credential, payload: res.data.payload }
+    currentCredential.value = { ...credential, payload: res?.data?.payload || {} }
   } catch (error) {
     currentCredential.value = { ...credential, payload: {} }
     ElMessage.warning('敏感字段获取失败，请手动补充后保存')
@@ -273,6 +324,10 @@ async function handleEdit(credential) {
 }
 
 async function handleViewPayload(credential) {
+  if (!credential?.can_view_secret) {
+    ElMessage.warning('当前凭据不允许查看敏感载荷')
+    return
+  }
   try {
     const res = await getCredentialPayload(credential.id)
     credentialPayload.value = res.data.payload || {}
@@ -283,6 +338,10 @@ async function handleViewPayload(credential) {
 }
 
 async function handleVerify(credential) {
+  if (!credential?.can_verify) {
+    ElMessage.warning('当前凭据不允许验证')
+    return
+  }
   try {
     const res = await verifyCredential(credential.id)
     if (res.code === 200 && res.data.valid) {
@@ -316,6 +375,10 @@ async function showImpact(credential) {
 }
 
 async function handleDelete(credential) {
+  if (!credential?.can_delete) {
+    ElMessage.warning('当前凭据不允许删除')
+    return
+  }
   try {
     const impactRes = await getCredentialImpact(credential.id)
     const impact = impactRes?.data || null
@@ -431,6 +494,16 @@ function getStatusLabel(status) {
   return status
 }
 
+function getLockStateType(lockState) {
+  if (lockState === 'unlocked') return 'success'
+  return 'warning'
+}
+
+function getLockStateLabel(lockState) {
+  if (lockState === 'unlocked') return '已解锁'
+  return '已锁定'
+}
+
 function formatDateTime(value) {
   if (!value) return '从未使用'
   return new Date(value).toLocaleString()
@@ -438,9 +511,15 @@ function formatDateTime(value) {
 
 watch(() => ({ ...filters }), reloadList, { deep: true })
 
+watch(() => userStore.currentWorkspaceId, () => {
+  selectedIds.value = []
+  reloadList()
+})
+
 onMounted(async () => {
   await loadTypesAndCategories()
   await loadCredentials()
+  await openCreateDialogFromRoute()
 })
 </script>
 

@@ -377,6 +377,7 @@ const fetchPipelines = async () => {
       page_size: 100,
       tab: activeTab.value,
       keyword: searchKeyword.value,
+      exclude_publish_owned: true,
       project_id: filterProject.value || undefined,
       environment: filterEnvironment.value || undefined
     }

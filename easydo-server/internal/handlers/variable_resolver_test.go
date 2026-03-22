@@ -10,9 +10,9 @@ func TestVariableResolver_ResolveVariables(t *testing.T) {
 
 	// Set up test data
 	resolver.SetTaskOutput("node1", map[string]interface{}{
-		"commit_id":      "abc123",
+		"commit_id":       "abc123",
 		"short_commit_id": "abc123d",
-		"branch":         "main",
+		"branch":          "main",
 	})
 
 	resolver.SetEnvVars(map[string]string{
@@ -100,7 +100,7 @@ func TestVariableResolver_ResolveNodeConfig(t *testing.T) {
 		"image_name": "myapp",
 		"image_tag":  "${outputs.git_clone.short_commit_id}",
 		"build_args": map[string]interface{}{
-			"COMMIT_ID":   "${outputs.git_clone.commit_id}",
+			"COMMIT_ID":    "${outputs.git_clone.commit_id}",
 			"BUILD_NUMBER": "${env.BUILD_NUMBER}",
 		},
 	}
@@ -128,14 +128,43 @@ func TestVariableResolver_ResolveNodeConfig(t *testing.T) {
 	}
 }
 
+func TestVariableResolver_ResolveNodeConfigPreservesIntegerLikeNumericInputs(t *testing.T) {
+	resolver := NewVariableResolver()
+	resolver.SetInputs(map[string]interface{}{
+		"port":         float64(8000),
+		"max_num_seqs": float64(2),
+		"gpu_memory":   float64(0.9),
+	})
+
+	config := map[string]interface{}{
+		"port":       "${inputs.port}",
+		"max_num":    "${inputs.max_num_seqs}",
+		"gpu_memory": "${inputs.gpu_memory}",
+	}
+
+	resolved, err := resolver.ResolveNodeConfig(config)
+	if err != nil {
+		t.Fatalf("ResolveNodeConfig() error = %v", err)
+	}
+	if got := resolved["port"]; got != "8000" {
+		t.Fatalf("port = %v, expected 8000", got)
+	}
+	if got := resolved["max_num"]; got != "2" {
+		t.Fatalf("max_num = %v, expected 2", got)
+	}
+	if got := resolved["gpu_memory"]; got != "0.9" {
+		t.Fatalf("gpu_memory = %v, expected 0.9", got)
+	}
+}
+
 func TestOutputExtractor_ExtractOutputs(t *testing.T) {
 	tests := []struct {
-		name       string
-		stdout     string
-		stderr     string
+		name        string
+		stdout      string
+		stderr      string
 		extractions []OutputExtractionConfig
-		expected   map[string]interface{}
-		expectErr  bool
+		expected    map[string]interface{}
+		expectErr   bool
 	}{
 		{
 			name:   "extract version from stdout",
@@ -168,7 +197,7 @@ func TestOutputExtractor_ExtractOutputs(t *testing.T) {
 				},
 			},
 			expected: map[string]interface{}{
-				"version":      "1.0.0",
+				"version":     "1.0.0",
 				"test_passed": "100",
 			},
 			expectErr: false,
@@ -231,7 +260,8 @@ func TestConvertToString(t *testing.T) {
 		{"hello", "hello"},
 		{42, "42"},
 		{int64(123), "123"},
-		{3.14, "3.140000"},
+		{float64(8000), "8000"},
+		{3.14, "3.14"},
 		{true, "true"},
 		{[]int{1, 2, 3}, "[1 2 3]"},
 	}

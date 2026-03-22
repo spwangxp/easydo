@@ -5,7 +5,7 @@
         <h1 class="page-title">消息</h1>
         <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
       </div>
-      <el-button type="text" @click="handleMarkAllRead">全部已读</el-button>
+      <el-button type="text" :disabled="notificationStore.unreadCount === 0 || loading" @click="handleMarkAllRead">全部已读</el-button>
     </div>
     
     <div class="messages-layout">
@@ -23,7 +23,7 @@
         </div>
       </aside>
       
-      <main class="messages-list">
+      <main v-loading="loading" class="messages-list">
         <div v-if="filteredMessages.length === 0" class="empty-state">
           <el-icon :size="64"><Bell /></el-icon>
           <p>暂无消息</p>
@@ -36,15 +36,16 @@
           :class="{ unread: !msg.is_read }"
           @click="handleRead(msg)"
         >
-          <div class="message-icon" :class="msg.type">
-            <el-icon v-if="msg.type === 'alert'" :size="20"><Warning /></el-icon>
-            <el-icon v-else-if="msg.type === 'system'" :size="20"><InfoFilled /></el-icon>
-            <el-icon v-else :size="20"><Bell /></el-icon>
+          <div class="message-icon" :class="getMessageFamilyMeta(msg.family).className">
+            <el-icon :size="20"><component :is="getMessageFamilyMeta(msg.family).icon" /></el-icon>
           </div>
           
           <div class="message-content">
             <div class="message-header">
-              <span class="message-title">{{ msg.title }}</span>
+              <div class="message-heading">
+                <span class="message-title">{{ msg.title }}</span>
+                <span class="message-family">{{ getMessageFamilyMeta(msg.family).label }}</span>
+              </div>
               <span class="message-time">{{ formatTime(msg.created_at) }}</span>
             </div>
             <p class="message-body">{{ msg.content }}</p>
@@ -56,44 +57,133 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { 
   Bell, 
   CircleCheck, 
   Warning, 
-  CircleClose,
   InfoFilled,
-  Connection
+  Connection,
+  Promotion,
+  User,
+  Monitor
 } from '@element-plus/icons-vue'
-import { getMessageList, getUnreadCount, markAsRead, markAllAsRead } from '@/api/message'
+import { getNotificationInbox, markAllNotificationsRead, markNotificationRead } from '@/api/notification'
+import { useNotificationStore } from '@/stores/notification'
 import { useUserStore } from '@/stores/user'
 
 const userStore = useUserStore()
+const notificationStore = useNotificationStore()
 const activeTab = ref('all')
 const loading = ref(false)
-const messageList = ref([])
-const unreadCount = ref(0)
+const allMessages = ref([])
+const unreadMessages = ref([])
+const totalCount = ref(0)
+
+const inboxQuery = {
+  page: 1,
+  page_size: 100
+}
+
+let inboxPollTimer = null
+
+const stopInboxPolling = () => {
+  if (inboxPollTimer) {
+    clearInterval(inboxPollTimer)
+    inboxPollTimer = null
+  }
+}
+
+const startInboxPolling = () => {
+  stopInboxPolling()
+  inboxPollTimer = setInterval(() => {
+    if (document.hidden) {
+      return
+    }
+    loadInboxData()
+  }, 15000)
+}
+
+const messageFamilyMetaMap = {
+  'pipeline.run': {
+    label: '流水线运行',
+    icon: Connection,
+    className: 'pipeline'
+  },
+  'deployment.request': {
+    label: '发布申请',
+    icon: Promotion,
+    className: 'deployment'
+  },
+  'agent.lifecycle': {
+    label: '执行器状态',
+    icon: Monitor,
+    className: 'agent'
+  },
+  'workspace.member': {
+    label: '成员变更',
+    icon: User,
+    className: 'workspace'
+  },
+  'workspace.invitation': {
+    label: '工作空间邀请',
+    icon: InfoFilled,
+    className: 'workspace'
+  }
+}
 
 const tabs = computed(() => [
-  { key: 'all', name: '全部消息', icon: Bell, count: unreadCount.value },
-  { key: 'alert', name: '告警通知', icon: Warning, count: 0 },
-  { key: 'system', name: '系统通知', icon: InfoFilled, count: 0 }
+  { key: 'all', name: '全部消息', icon: Bell, count: totalCount.value },
+  { key: 'unread', name: '未读消息', icon: Warning, count: notificationStore.unreadCount },
+  { key: 'read', name: '已读消息', icon: CircleCheck, count: Math.max(0, totalCount.value - notificationStore.unreadCount) }
 ])
 
 const filteredMessages = computed(() => {
-  if (activeTab.value === 'all') {
-    return messageList.value
-  } else if (activeTab.value === 'alert') {
-    return messageList.value.filter(m => m.type === 'alert')
-  } else {
-    return messageList.value.filter(m => m.type === 'system')
+  if (activeTab.value === 'unread') {
+    return unreadMessages.value
   }
+  if (activeTab.value === 'read') {
+    return allMessages.value.filter(message => message.is_read)
+  }
+  return allMessages.value
 })
 
+const getMessageFamilyMeta = (family) => {
+  return messageFamilyMetaMap[family] || {
+    label: '通知',
+    icon: Bell,
+    className: 'general'
+  }
+}
+
+const parseDateValue = (value) => {
+  if (!value) {
+    return null
+  }
+  if (value instanceof Date) {
+    return value
+  }
+  if (typeof value === 'number') {
+    return new Date(value > 9999999999 ? value : value * 1000)
+  }
+
+  const parsedDate = new Date(value)
+  if (!Number.isNaN(parsedDate.getTime())) {
+    return parsedDate
+  }
+
+  const numericValue = Number(value)
+  if (!Number.isNaN(numericValue) && numericValue > 0) {
+    return new Date(numericValue > 9999999999 ? numericValue : numericValue * 1000)
+  }
+
+  return null
+}
+
 const formatTime = (timestamp) => {
-  if (!timestamp) return '-'
-  const date = new Date(timestamp * 1000)
+  const date = parseDateValue(timestamp)
+  if (!date) return '-'
   const now = new Date()
   const diff = now - date
   const hours = Math.floor(diff / (1000 * 60 * 60))
@@ -112,28 +202,27 @@ const formatTime = (timestamp) => {
   return '刚刚'
 }
 
-const fetchMessages = async () => {
+const loadInboxData = async () => {
   loading.value = true
   try {
-    const res = await getMessageList({ page: 1, page_size: 50 })
-    if (res.code === 200) {
-      messageList.value = res.data.list || []
+    const [allRes, unreadRes] = await Promise.all([
+      getNotificationInbox(inboxQuery),
+      getNotificationInbox({ ...inboxQuery, unread_only: true }),
+      notificationStore.refreshUnreadCount()
+    ])
+
+    if (allRes.code === 200) {
+      allMessages.value = allRes.data?.list || []
+      totalCount.value = allRes.data?.total || 0
+    }
+    if (unreadRes.code === 200) {
+      unreadMessages.value = unreadRes.data?.list || []
     }
   } catch (error) {
     console.error('获取消息列表失败:', error)
+    ElMessage.error('获取消息失败')
   } finally {
     loading.value = false
-  }
-}
-
-const fetchUnreadCount = async () => {
-  try {
-    const res = await getUnreadCount()
-    if (res.code === 200) {
-      unreadCount.value = res.data.unread_count || 0
-    }
-  } catch (error) {
-    console.error('获取未读数量失败:', error)
   }
 }
 
@@ -141,29 +230,45 @@ const handleRead = async (msg) => {
   if (msg.is_read) return
   
   try {
-    await markAsRead(msg.id)
-    msg.is_read = true
-    unreadCount.value = Math.max(0, unreadCount.value - 1)
+    const res = await markNotificationRead(msg.id)
+    if (res.code === 200) {
+      await loadInboxData()
+      return
+    }
+    ElMessage.error(res.message || '标记已读失败')
   } catch (error) {
     console.error('标记已读失败:', error)
+    ElMessage.error('标记已读失败')
   }
 }
 
 const handleMarkAllRead = async () => {
   try {
-    await markAllAsRead()
-    messageList.value.forEach(m => m.is_read = true)
-    unreadCount.value = 0
-    ElMessage.success('全部已读')
+    const res = await markAllNotificationsRead()
+    if (res.code === 200) {
+      ElMessage.success('全部已读')
+      await loadInboxData()
+      return
+    }
+    ElMessage.error(res.message || '操作失败')
   } catch (error) {
     console.error('全部已读失败:', error)
     ElMessage.error('操作失败')
   }
 }
 
+watch(() => userStore.currentWorkspaceId, async () => {
+  await loadInboxData()
+}, { immediate: true })
+
 onMounted(() => {
-  fetchMessages()
-  fetchUnreadCount()
+  startInboxPolling()
+  document.addEventListener('visibilitychange', loadInboxData)
+})
+
+onUnmounted(() => {
+  stopInboxPolling()
+  document.removeEventListener('visibilitychange', loadInboxData)
 })
 </script>
 
@@ -295,19 +400,29 @@ onMounted(() => {
     flex-shrink: 0;
     box-shadow: var(--shadow-sm);
 
-    &.alert {
-      background: var(--danger-light);
-      color: var(--danger-color);
-    }
-
-    &.system {
+    &.pipeline {
       background: var(--primary-lighter);
       color: var(--primary-color);
     }
 
-    &:not(.alert):not(.system) {
+    &.deployment {
       background: var(--warning-light);
       color: var(--warning-color);
+    }
+
+    &.agent {
+      background: var(--danger-light);
+      color: var(--danger-color);
+    }
+
+    &.workspace {
+      background: var(--info-light);
+      color: var(--info-color);
+    }
+
+    &.general {
+      background: var(--success-light);
+      color: var(--success-color);
     }
   }
 
@@ -323,10 +438,22 @@ onMounted(() => {
     margin-bottom: 6px;
   }
 
+  .message-heading {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+
   .message-title {
     font-size: 14px;
     font-weight: 650;
     color: var(--text-primary);
+  }
+
+  .message-family {
+    font-size: 12px;
+    color: var(--text-muted);
   }
 
   .message-time {

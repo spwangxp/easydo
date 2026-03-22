@@ -23,7 +23,13 @@ services:
   server:
     environment:
       - SERVER_ID=server-1
+      - SERVER_PUBLIC_URL=http://localhost:8088
       - SERVER_INTERNAL_URL=http://server:8080
+      - NOTIFICATION_SMTP_ENABLED=${NOTIFICATION_SMTP_ENABLED:-true}
+      - NOTIFICATION_SMTP_HOST=${NOTIFICATION_SMTP_HOST:-127.0.0.1}
+      - NOTIFICATION_SMTP_PORT=${NOTIFICATION_SMTP_PORT:-25}
+      - NOTIFICATION_SMTP_FROM_ADDRESS=${NOTIFICATION_SMTP_FROM_ADDRESS:-noreply@easydo.local}
+      - NOTIFICATION_SMTP_FROM_NAME=${NOTIFICATION_SMTP_FROM_NAME:-EasyDo}
 
   server2:
     build:
@@ -37,6 +43,7 @@ services:
       - SERVER_PORT=8080
       - SERVER_MODE=release
       - SERVER_ID=server-2
+      - SERVER_PUBLIC_URL=http://localhost:8088
       - SERVER_INTERNAL_URL=http://server2:8080
       - SERVER_INTERNAL_TOKEN=easydo-internal-token
       - DB_HOST=db
@@ -44,8 +51,6 @@ services:
       - DB_USERNAME=root
       - DB_PASSWORD=password
       - DB_NAME=easydo
-      - DB_AUTO_MIGRATE=false
-      - DB_SEED_TEST_DATA=false
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=
@@ -60,21 +65,36 @@ services:
       - OBJECT_STORAGE_ACCESS_KEY=minioadmin
       - OBJECT_STORAGE_SECRET_KEY=minioadmin
       - OBJECT_STORAGE_REGION=us-east-1
+      - NOTIFICATION_SMTP_ENABLED=${NOTIFICATION_SMTP_ENABLED:-true}
+      - NOTIFICATION_SMTP_HOST=${NOTIFICATION_SMTP_HOST:-127.0.0.1}
+      - NOTIFICATION_SMTP_PORT=${NOTIFICATION_SMTP_PORT:-25}
+      - NOTIFICATION_SMTP_FROM_ADDRESS=${NOTIFICATION_SMTP_FROM_ADDRESS:-noreply@easydo.local}
+      - NOTIFICATION_SMTP_FROM_NAME=${NOTIFICATION_SMTP_FROM_NAME:-EasyDo}
     depends_on:
-      - db
-      - redis
-      - minio
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
     networks:
       - easydo-network
     restart: unless-stopped
 
   agent:
+    depends_on:
+      server-lb:
+        condition: service_started
     environment:
       - EASYDO_SERVER_URL=http://server-lb:8080
       - AGENT_NAME=easydo-agent-1
     volumes:
       - agent1_data:/data/agent
       - /var/run/docker.sock:/var/run/docker.sock
+    privileged: true
+    networks:
+      - easydo-network
+    restart: unless-stopped
 
   agent2:
     build:
@@ -84,12 +104,16 @@ services:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
         GIT_COMMIT_SHORT: ${GIT_COMMIT_SHORT:-unknown}
         GIT_DATE: ${GIT_DATE:-unknown}
+    depends_on:
+      server-lb:
+        condition: service_started
     environment:
       - EASYDO_SERVER_URL=http://server-lb:8080
       - AGENT_NAME=easydo-agent-2
     volumes:
       - agent2_data:/data/agent
       - /var/run/docker.sock:/var/run/docker.sock
+    privileged: true
     networks:
       - easydo-network
     restart: unless-stopped

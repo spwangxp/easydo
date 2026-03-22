@@ -232,6 +232,43 @@ func TestTaskCredentialSlots(t *testing.T) {
 	if clusterSlot.allowsCategory(models.CategoryAWS) || clusterSlot.allowsCategory(models.CategoryGCP) || clusterSlot.allowsCategory(models.CategoryAzure) {
 		t.Fatalf("cluster_auth should not allow cloud-provider categories without runtime support")
 	}
+
+	_, sshDef, ok := getPipelineTaskDefinition("ssh")
+	if !ok {
+		t.Fatalf("expected ssh definition")
+	}
+	sshSlot, slotOK := sshDef.findCredentialSlot("ssh_auth")
+	if !slotOK {
+		t.Fatalf("expected ssh_auth slot")
+	}
+	if !sshSlot.allowsType(models.TypeSSHKey) {
+		t.Fatalf("ssh_auth should allow SSH_KEY")
+	}
+	if !sshSlot.allowsType(models.TypePassword) {
+		t.Fatalf("ssh_auth should allow PASSWORD")
+	}
+	if !sshSlot.allowsCategory(models.CategoryGitHub) || !sshSlot.allowsCategory(models.CategoryCustom) {
+		t.Fatalf("ssh_auth should not restrict SSH credentials by category")
+	}
+}
+
+func TestRenderPipelineAgentScript_SSHPasswordCredentialIntegration(t *testing.T) {
+	_, script, err := renderPipelineAgentScript("ssh", map[string]interface{}{
+		"host":   "10.0.0.8",
+		"script": "echo ok",
+	})
+	if err != nil {
+		t.Fatalf("expected ssh script render success, got err: %v", err)
+	}
+	if !strings.Contains(script, "EASYDO_CRED_SSH_AUTH_PASSWORD") {
+		t.Fatalf("expected ssh script to support password auth env")
+	}
+	if !strings.Contains(script, "EASYDO_CRED_SSH_AUTH_USERNAME") {
+		t.Fatalf("expected ssh script to support username auth env")
+	}
+	if !strings.Contains(script, "sshpass -e ssh") {
+		t.Fatalf("expected ssh script to use sshpass for password auth")
+	}
 }
 
 func TestRenderPipelineAgentScript_KubernetesCredentialIntegration(t *testing.T) {
@@ -251,6 +288,8 @@ func TestRenderPipelineAgentScript_KubernetesCredentialIntegration(t *testing.T)
 
 func TestRenderPipelineAgentScript_DockerRunCredentialIntegration(t *testing.T) {
 	_, script, err := renderPipelineAgentScript("docker-run", map[string]interface{}{
+		"host":       "10.0.0.8",
+		"user":       "root",
 		"image_name": "app",
 		"image_tag":  "latest",
 	})
@@ -260,8 +299,88 @@ func TestRenderPipelineAgentScript_DockerRunCredentialIntegration(t *testing.T) 
 	if !strings.Contains(script, "EASYDO_CRED_REGISTRY_AUTH_USERNAME") {
 		t.Fatalf("expected docker-run script to use registry auth username env")
 	}
-	if !strings.Contains(script, "docker login") {
-		t.Fatalf("expected docker-run script to contain docker login")
+	if !strings.Contains(script, "EASYDO_CRED_SSH_AUTH_PASSWORD") {
+		t.Fatalf("expected docker-run script to use ssh auth password env")
+	}
+	if !strings.Contains(script, "sshpass -e ssh") {
+		t.Fatalf("expected docker-run script to execute over ssh")
+	}
+	if !strings.Contains(script, "for candidate in docker podman nerdctl") {
+		t.Fatalf("expected docker-run script to auto-detect remote runtime")
+	}
+	if !strings.Contains(script, "RUN_ARGS='-d -p 18080:80'") && strings.Contains(script, "-d -p 18080:80") {
+		t.Fatalf("expected docker-run run_args assignment to be shell-quoted, got script=%s", script)
+	}
+}
+
+func TestRenderPipelineAgentScript_DockerRunEncodesRemoteArguments(t *testing.T) {
+	_, script, err := renderPipelineAgentScript("docker-run", map[string]interface{}{
+		"host":       "10.0.0.8",
+		"user":       "root",
+		"image_name": "nginx",
+		"image_tag":  "alpine",
+		"run_args":   "-d -p 18080:80",
+	})
+	if err != nil {
+		t.Fatalf("expected docker-run script render success, got err: %v", err)
+	}
+	if strings.Contains(script, "sh -s -- \"$RUNTIME_HINT\" \"$IMAGE_REF\" \"$CONTAINER_NAME\" \"$RUN_ARGS\"") {
+		t.Fatalf("expected docker-run script to avoid positional ssh args for run_args, got script=%s", script)
+	}
+	if !strings.Contains(script, "EASYDO_REMOTE_RUN_ARGS_B64=") {
+		t.Fatalf("expected docker-run script to encode run_args before ssh transport")
+	}
+	if !strings.Contains(script, "decode_easydo_b64()") {
+		t.Fatalf("expected docker-run script to decode remote arguments from base64 payload")
+	}
+}
+
+func TestRenderPipelineAgentScript_DockerRunDetachesAndChecksStability(t *testing.T) {
+	_, script, err := renderPipelineAgentScript("docker-run", map[string]interface{}{
+		"host":       "10.0.0.8",
+		"user":       "root",
+		"image_name": "nginx",
+		"image_tag":  "alpine",
+	})
+	if err != nil {
+		t.Fatalf("expected docker-run script render success, got err: %v", err)
+	}
+	if strings.Contains(script, `run --rm "$IMAGE_REF"`) || strings.Contains(script, `run --rm $RUN_ARGS`) {
+		t.Fatalf("expected docker-run script to avoid foreground --rm execution, got script=%s", script)
+	}
+	if !strings.Contains(script, `run -d`) {
+		t.Fatalf("expected docker-run script to start container in detached mode, got script=%s", script)
+	}
+	if !strings.Contains(script, `sleep 10`) {
+		t.Fatalf("expected docker-run script to wait 10 seconds before success, got script=%s", script)
+	}
+	if !strings.Contains(script, `RestartCount`) {
+		t.Fatalf("expected docker-run script to inspect restart count, got script=%s", script)
+	}
+	if !strings.Contains(script, `docker-run container did not stay running for 10s`) {
+		t.Fatalf("expected docker-run script to fail on early exit/restart, got script=%s", script)
+	}
+}
+
+func TestRenderPipelineAgentScript_DockerRunFailsOnDuplicateContainerName(t *testing.T) {
+	_, script, err := renderPipelineAgentScript("docker-run", map[string]interface{}{
+		"host":           "10.0.0.8",
+		"user":           "root",
+		"image_name":     "nginx",
+		"image_tag":      "alpine",
+		"container_name": "existing-nginx",
+	})
+	if err != nil {
+		t.Fatalf("expected docker-run script render success, got err: %v", err)
+	}
+	if strings.Contains(script, `rm -f "$CONTAINER_NAME"`) {
+		t.Fatalf("expected docker-run script to preserve existing same-name containers, got script=%s", script)
+	}
+	if !strings.Contains(script, `inspect "$CONTAINER_NAME" >/dev/null 2>&1`) {
+		t.Fatalf("expected docker-run script to check for duplicate container names before start, got script=%s", script)
+	}
+	if !strings.Contains(script, `container name already exists: $CONTAINER_NAME`) {
+		t.Fatalf("expected docker-run script to emit duplicate container-name error, got script=%s", script)
 	}
 }
 

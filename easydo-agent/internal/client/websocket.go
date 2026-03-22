@@ -21,6 +21,14 @@ type TaskHandler interface {
 	HandleTaskCancel(taskID uint64) error
 }
 
+type TerminalHandler interface {
+	HandleTerminalSessionOpen(msg *TerminalSessionOpenMessage) error
+	HandleTerminalSessionInput(sessionID, data string) error
+	HandleTerminalSessionResize(sessionID string, cols, rows int) error
+	HandleTerminalSessionClose(sessionID, reason string) error
+	HandleTerminalSessionRootSwitch(sessionID string) error
+}
+
 // PipelineAssignMessage represents a pipeline assignment message from server
 type PipelineAssignMessage struct {
 	RunID       uint64         `json:"run_id"`
@@ -94,6 +102,27 @@ type AgentConfig struct {
 	EnvVars   map[string]string `json:"env_vars"`
 }
 
+type TerminalSessionOpenMessage struct {
+	SessionID     string             `json:"session_id"`
+	WorkspaceID   uint64             `json:"workspace_id"`
+	ResourceID    uint64             `json:"resource_id"`
+	ResourceType  string             `json:"resource_type"`
+	CredentialID  uint64             `json:"credential_id"`
+	Credential    TerminalCredential `json:"credential"`
+	Endpoint      string             `json:"endpoint"`
+	OwnerServerID string             `json:"owner_server_id"`
+	CreatedBy     uint64             `json:"created_by"`
+	Cols          int                `json:"cols"`
+	Rows          int                `json:"rows"`
+}
+
+type TerminalCredential struct {
+	ID       uint64                 `json:"id"`
+	Type     string                 `json:"type"`
+	Category string                 `json:"category"`
+	Payload  map[string]interface{} `json:"payload"`
+}
+
 // WebSocketClient owns the agent's single live WS session to the current owner
 // server.
 //
@@ -101,20 +130,21 @@ type AgentConfig struct {
 // connection also means a new server-issued session identity, and downstream
 // task/log reporting must switch to that session cleanly.
 type WebSocketClient struct {
-	baseURL        string
-	conn           *websocket.Conn
-	mu             sync.RWMutex
-	running        bool
-	stopChan       chan struct{}
-	agentID        uint64
-	token          string
-	registerKey    string
-	sessionID      string
-	cfg            *websocketConfig
-	taskHandler    TaskHandler
-	executor       *task.Executor
-	onReconnect    func()
-	onHeartbeatAck func(map[string]interface{})
+	baseURL         string
+	conn            *websocket.Conn
+	mu              sync.RWMutex
+	running         bool
+	stopChan        chan struct{}
+	agentID         uint64
+	token           string
+	registerKey     string
+	sessionID       string
+	cfg             *websocketConfig
+	taskHandler     TaskHandler
+	terminalHandler TerminalHandler
+	executor        *task.Executor
+	onReconnect     func()
+	onHeartbeatAck  func(map[string]interface{})
 }
 
 // websocketConfig holds WebSocket configuration
@@ -152,6 +182,12 @@ func NewWebSocketClient(baseURL string, agentID uint64, token, registerKey strin
 func (c *WebSocketClient) SetTaskHandler(handler TaskHandler) {
 	c.mu.Lock()
 	c.taskHandler = handler
+	c.mu.Unlock()
+}
+
+func (c *WebSocketClient) SetTerminalHandler(handler TerminalHandler) {
+	c.mu.Lock()
+	c.terminalHandler = handler
 	c.mu.Unlock()
 }
 
@@ -276,6 +312,10 @@ func (c *WebSocketClient) readLoop(ctx context.Context) {
 
 // writeLoop handles sending messages and heartbeats
 func (c *WebSocketClient) writeLoop(ctx context.Context) {
+	if err := c.sendHeartbeat(); err != nil {
+		klog.Warningf("Failed to send initial heartbeat: %v", err)
+	}
+
 	ticker := time.NewTicker(time.Duration(c.cfg.heartbeatInterval) * time.Second)
 	defer ticker.Stop()
 
@@ -313,6 +353,16 @@ func (c *WebSocketClient) handleMessage(message []byte) {
 		c.handlePipelineAssign(msg.Payload)
 	case "task_cancel":
 		c.handleTaskCancel(msg.Payload)
+	case "terminal_session_open":
+		c.handleTerminalSessionOpen(msg.Payload)
+	case "terminal_session_input":
+		c.handleTerminalSessionInput(msg.Payload)
+	case "terminal_session_resize":
+		c.handleTerminalSessionResize(msg.Payload)
+	case "terminal_session_close":
+		c.handleTerminalSessionClose(msg.Payload)
+	case "terminal_session_root_switch":
+		c.handleTerminalSessionRootSwitch(msg.Payload)
 	case "agent_config":
 		c.handleAgentConfig(msg.Payload)
 	case "heartbeat_ack":
@@ -480,6 +530,126 @@ func (c *WebSocketClient) handleTaskCancel(payload map[string]interface{}) {
 // handleAgentConfig handles agent configuration update from server
 func (c *WebSocketClient) handleAgentConfig(payload map[string]interface{}) {
 	klog.V(4).Infof("Received agent config update: %+v", payload)
+}
+
+func (c *WebSocketClient) handleTerminalSessionOpen(payload map[string]interface{}) {
+	c.mu.RLock()
+	handler := c.terminalHandler
+	c.mu.RUnlock()
+	if handler == nil {
+		klog.Warning("No terminal handler configured, cannot process terminal_session_open")
+		return
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		klog.Warningf("Failed to marshal terminal open payload: %v", err)
+		return
+	}
+	var msg TerminalSessionOpenMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		klog.Warningf("Failed to parse terminal open payload: %v", err)
+		return
+	}
+	if msg.SessionID == "" {
+		klog.Warning("Invalid terminal open payload, missing session id")
+		return
+	}
+	if err := handler.HandleTerminalSessionOpen(&msg); err != nil {
+		klog.Warningf("Failed to handle terminal session open: %v", err)
+	}
+}
+
+func (c *WebSocketClient) handleTerminalSessionInput(payload map[string]interface{}) {
+	c.mu.RLock()
+	handler := c.terminalHandler
+	c.mu.RUnlock()
+	if handler == nil {
+		klog.Warning("No terminal handler configured, cannot process terminal_session_input")
+		return
+	}
+	sessionID, _ := payload["session_id"].(string)
+	data, _ := payload["data"].(string)
+	if sessionID == "" {
+		klog.Warning("Invalid terminal input payload, missing session id")
+		return
+	}
+	if err := handler.HandleTerminalSessionInput(sessionID, data); err != nil {
+		klog.Warningf("Failed to handle terminal session input: %v", err)
+	}
+}
+
+func (c *WebSocketClient) handleTerminalSessionResize(payload map[string]interface{}) {
+	c.mu.RLock()
+	handler := c.terminalHandler
+	c.mu.RUnlock()
+	if handler == nil {
+		klog.Warning("No terminal handler configured, cannot process terminal_session_resize")
+		return
+	}
+	sessionID, _ := payload["session_id"].(string)
+	if sessionID == "" {
+		klog.Warning("Invalid terminal resize payload, missing session id")
+		return
+	}
+	cols := int(numberValue(payload["cols"]))
+	rows := int(numberValue(payload["rows"]))
+	if err := handler.HandleTerminalSessionResize(sessionID, cols, rows); err != nil {
+		klog.Warningf("Failed to handle terminal session resize: %v", err)
+	}
+}
+
+func (c *WebSocketClient) handleTerminalSessionClose(payload map[string]interface{}) {
+	c.mu.RLock()
+	handler := c.terminalHandler
+	c.mu.RUnlock()
+	if handler == nil {
+		klog.Warning("No terminal handler configured, cannot process terminal_session_close")
+		return
+	}
+	sessionID, _ := payload["session_id"].(string)
+	reason, _ := payload["reason"].(string)
+	if sessionID == "" {
+		klog.Warning("Invalid terminal close payload, missing session id")
+		return
+	}
+	if err := handler.HandleTerminalSessionClose(sessionID, reason); err != nil {
+		klog.Warningf("Failed to handle terminal session close: %v", err)
+	}
+}
+
+func (c *WebSocketClient) handleTerminalSessionRootSwitch(payload map[string]interface{}) {
+	c.mu.RLock()
+	handler := c.terminalHandler
+	c.mu.RUnlock()
+	if handler == nil {
+		klog.Warning("No terminal handler configured, cannot process terminal_session_root_switch")
+		return
+	}
+	sessionID, _ := payload["session_id"].(string)
+	if sessionID == "" {
+		klog.Warning("Invalid terminal root switch payload, missing session id")
+		return
+	}
+	if err := handler.HandleTerminalSessionRootSwitch(sessionID); err != nil {
+		klog.Warningf("Failed to handle terminal session root switch: %v", err)
+	}
+}
+
+func numberValue(value interface{}) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case uint64:
+		return float64(typed)
+	default:
+		return 0
+	}
 }
 
 // handleDisconnect tears down the dead socket and performs bounded reconnect

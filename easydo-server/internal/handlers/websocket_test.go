@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -470,6 +471,59 @@ func TestTriggerDownstreamTasks_InjectsCredentialEnvForGitClone(t *testing.T) {
 	}
 }
 
+func TestTriggerDownstreamTasks_PreservesDockerTaskType(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	runConfig, err := json.Marshal(PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{ID: "prep", Type: "shell", Name: "Prepare", Config: map[string]interface{}{"script": "echo ok"}},
+			{ID: "build", Type: "docker", Name: "Build Image", Config: map[string]interface{}{
+				"image_name": "demo/app",
+				"image_tag":  "latest",
+			}},
+		},
+		Edges: []PipelineEdge{{From: "prep", To: "build"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal run config failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID: 1,
+		PipelineID:  1,
+		BuildNumber: 1,
+		Status:      models.PipelineRunStatusRunning,
+		Config:      string(runConfig),
+		AgentID:     1,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	handler.triggerDownstreamTasks(run.ID, []models.AgentTask{{NodeID: "prep", Status: models.TaskStatusExecuteSuccess}})
+
+	var downstream models.AgentTask
+	if err := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, "build").First(&downstream).Error; err != nil {
+		t.Fatalf("expected downstream task to be created: %v", err)
+	}
+	if downstream.TaskType != "docker" {
+		t.Fatalf("downstream task type=%s, want docker", downstream.TaskType)
+	}
+	if !strings.Contains(downstream.Script, "执行 Docker 构建任务") {
+		t.Fatalf("expected downstream docker task to keep rendered docker build script")
+	}
+}
+
 func TestHeartbeatPayload(t *testing.T) {
 	payload := map[string]interface{}{
 		"timestamp":     float64(time.Now().Unix()),
@@ -499,6 +553,86 @@ func TestHeartbeatPayload(t *testing.T) {
 	assert.Equal(t, payload["cpu_usage"], decoded.Payload["cpu_usage"])
 	assert.Equal(t, payload["memory_usage"], decoded.Payload["memory_usage"])
 	assert.Equal(t, payload["load_avg"], decoded.Payload["load_avg"])
+}
+
+func TestHandleTaskUpdateV2_PersistsResourceBaseInfoFromCollectionTask(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	resource := models.Resource{
+		WorkspaceID: 1,
+		Name:        "inventory-vm",
+		Type:        models.ResourceTypeVM,
+		Environment: "production",
+		Status:      models.ResourceStatusOnline,
+		Endpoint:    "10.0.0.88:22",
+		CreatedBy:   1,
+	}
+	if err := db.Create(&resource).Error; err != nil {
+		t.Fatalf("create resource failed: %v", err)
+	}
+	payload := resourceBaseInfoTaskPayload{
+		Collection: resourceBaseInfoCollectionSnapshot{
+			Kind:         "resource_base_info_refresh",
+			ResourceID:   resource.ID,
+			ResourceType: models.ResourceTypeVM,
+		},
+	}
+	rawParams, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal params failed: %v", err)
+	}
+	task := models.AgentTask{
+		AgentID:     9,
+		Status:      models.TaskStatusRunning,
+		TaskType:    "ssh",
+		Name:        "采集资源基础信息",
+		NodeID:      "resource-base-info",
+		WorkspaceID: 1,
+		Params:      string(rawParams),
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	client := &wsClient{agentID: 9, sessionID: "session-1"}
+	handler.handleTaskUpdateV2(client, &models.Agent{BaseModel: models.BaseModel{ID: 9}, Name: "collector-1"}, map[string]interface{}{
+		"task_id":         float64(task.ID),
+		"attempt":         float64(1),
+		"status":          models.TaskStatusExecuteSuccess,
+		"exit_code":       float64(0),
+		"duration_ms":     float64(1200),
+		"idempotency_key": "resource-base-info-success",
+		"result": map[string]interface{}{
+			"stdout": "EASYDO_BASE_INFO_BEGIN\nEASYDO_HOSTNAME=vm-prod-01\nEASYDO_CPU_LOGICAL_CORES=8\nEASYDO_MEMORY_TOTAL_BYTES=34359738368\nEASYDO_TOTAL_DISK_BYTES=536870912000\nEASYDO_GPU_COUNT=1\nEASYDO_DISK_ROWS_BEGIN\nNAME=\"sda\" SIZE=\"536870912000\" TYPE=\"disk\" FSTYPE=\"ext4\" MOUNTPOINT=\"/\"\nEASYDO_DISK_ROWS_END\nEASYDO_GPU_CSV_BEGIN\n0, NVIDIA L40, 46068\nEASYDO_GPU_CSV_END\nEASYDO_BASE_INFO_END\n",
+			"stderr": "",
+		},
+	})
+
+	var stored models.Resource
+	if err := db.First(&stored, resource.ID).Error; err != nil {
+		t.Fatalf("reload resource failed: %v", err)
+	}
+	if stored.BaseInfoStatus != "success" {
+		t.Fatalf("base_info_status=%s, want success", stored.BaseInfoStatus)
+	}
+	if stored.BaseInfoCollectedAt == 0 {
+		t.Fatal("expected base_info_collected_at to be set")
+	}
+	if !strings.Contains(stored.BaseInfo, `"logicalCores":8`) {
+		t.Fatalf("expected logicalCores in stored base_info, got=%s", stored.BaseInfo)
+	}
+	if !strings.Contains(stored.BaseInfo, `"count":1`) {
+		t.Fatalf("expected gpu count in stored base_info, got=%s", stored.BaseInfo)
+	}
 }
 
 func TestHeartbeatAckPayload(t *testing.T) {

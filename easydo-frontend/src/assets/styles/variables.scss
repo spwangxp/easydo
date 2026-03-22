@@ -34,6 +34,11 @@ $bg-tertiary: #f8fbff;
 $bg-sidebar: rgba(255, 255, 255, 0.74);
 $bg-card: rgba(255, 255, 255, 0.82);
 $bg-elevated: rgba(255, 255, 255, 0.92);
+$terminal-bg: #0b1220;
+$terminal-bg-alt: #121c2d;
+$terminal-fg: #e8f1ff;
+$terminal-muted: #8fa4c4;
+$terminal-selection: rgba(120, 162, 255, 0.22);
 
 // Borders
 $border-color: rgba(17, 55, 96, 0.12);
@@ -184,6 +189,11 @@ $dark-bg-tertiary: #1d2b40;
 $dark-bg-sidebar: rgba(13, 22, 36, 0.8);
 $dark-bg-card: rgba(25, 38, 57, 0.82);
 $dark-bg-elevated: rgba(31, 47, 70, 0.9);
+$dark-terminal-bg: #08111d;
+$dark-terminal-bg-alt: #101a2b;
+$dark-terminal-fg: #edf4ff;
+$dark-terminal-muted: #8ea4c7;
+$dark-terminal-selection: rgba(154, 188, 255, 0.2);
 
 $dark-border-color: rgba(160, 187, 224, 0.18);
 $dark-border-color-light: rgba(160, 187, 224, 0.12);

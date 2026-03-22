@@ -6,7 +6,7 @@ GORM模型定义 + 全局DB初始化。
 
 | File | Purpose |
 |------|---------|
-| `models.go` | DB初始化、autoMigrate、测试数据 |
+| `models.go` | DB初始化、迁移后 schema 校验 |
 | `user.go` | 用户模型 |
 | `project.go` | 项目模型 |
 | `pipeline.go` | 流水线模型 |
@@ -23,24 +23,13 @@ type BaseModel struct {
 }
 ```
 
-## SEEDING (首次启动时)
+## SCHEMA BOOTSTRAP
 
-测试数据在 `autoMigrate()` 中调用，通过 `count > 0` 检查确保只初始化一次：
-
-```go
-func initTestUsers() {
-    var count int64
-    DB.Model(&User{}).Count(&count)
-    if count > 0 {
-        return // 已存在用户，跳过初始化
-    }
-    // 插入 demo/admin/test 用户...
-}
-```
+数据库结构和初始化数据由 server 内置的 Flyway 风格 SQL 迁移负责，`models.go` 不再承担运行时建表或测试数据初始化职责。
 
 ## GOTCHAS
 
-- `autoMigrate()` 在 `InitDB()` 中调用，开发环境每次启动都会执行
-- 测试数据 seeding 在 `autoMigrate()` 中，首次启动后跳过
+- `InitDB()` 只负责连接数据库、校验迁移后的 schema，并初始化运行时所需的 `master_keys`
+- 结构变更和初始化数据必须通过 server 内置的版本化 SQL 迁移维护，不能回退到运行时自动建表/写种子数据
 - 全局变量: `var DB *gorm.DB`
 - 密码加密: `user.SetPassword()`

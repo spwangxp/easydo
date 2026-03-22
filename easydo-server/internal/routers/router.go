@@ -36,6 +36,8 @@ func InitRouter() *gin.Engine {
 
 		// WebSocket endpoint for frontend real-time updates
 		router.GET("/ws/frontend/pipeline", middleware.RateLimit(), wsHandler.HandleFrontendConnection)
+		router.GET("/ws/frontend/terminal", middleware.RateLimit(), wsHandler.HandleTerminalFrontendConnection)
+		router.POST("/api/pipeline/run/webhook/:token", middleware.RateLimit(), handlers.NewPipelineHandler().HandleGitLabWebhook)
 		internal := router.Group("/internal")
 		internal.Use(middleware.InternalServerAuth())
 		internal.GET("/tasks/:id/live-logs", handlers.NewTaskHandler().GetTaskLiveLogsInternal)
@@ -73,6 +75,8 @@ func InitRouter() *gin.Engine {
 			pipeline.PUT("/:id", pipelineHandler.UpdatePipeline)
 			pipeline.DELETE("/:id", pipelineHandler.DeletePipeline)
 			pipeline.POST("/:id/run", pipelineHandler.RunPipeline)
+			pipeline.GET("/:id/triggers", pipelineHandler.GetPipelineTriggers)
+			pipeline.PUT("/:id/triggers", pipelineHandler.UpdatePipelineTriggers)
 			pipeline.GET("/:id/history", pipelineHandler.GetPipelineRuns)
 			pipeline.GET("/:id/runs", pipelineHandler.GetPipelineRuns)
 			pipeline.GET("/:id/runs/:run_id", pipelineHandler.GetRunDetail)
@@ -143,15 +147,26 @@ func InitRouter() *gin.Engine {
 			agents.POST("/:id/remove", middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceRoleRequired("maintainer"), agentHandler.RemoveAgent)
 		}
 
-		// 消息相关路由
 		messages := api.Group("/messages")
-		messages.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		messages.Use(middleware.JWTAuth())
 		{
-			messageHandler := handlers.NewMessageHandler()
-			messages.GET("", messageHandler.GetMessageList)
-			messages.GET("/unread-count", messageHandler.GetUnreadCount)
-			messages.POST("/:id/read", messageHandler.MarkAsRead)
-			messages.POST("/read-all", messageHandler.MarkAllAsRead)
+			notificationHandler := handlers.NewNotificationHandler()
+			messages.GET("", notificationHandler.GetInbox)
+			messages.GET("/unread-count", notificationHandler.GetUnreadInboxCount)
+			messages.POST("/:id/read", notificationHandler.MarkInboxMessageRead)
+			messages.POST("/read-all", notificationHandler.MarkAllInboxMessagesRead)
+		}
+
+		notifications := api.Group("/notifications")
+		notifications.Use(middleware.JWTAuth())
+		{
+			notificationHandler := handlers.NewNotificationHandler()
+			notifications.GET("/inbox", notificationHandler.GetInbox)
+			notifications.GET("/inbox/unread-count", notificationHandler.GetUnreadInboxCount)
+			notifications.POST("/inbox/:id/read", notificationHandler.MarkInboxMessageRead)
+			notifications.POST("/inbox/read-all", notificationHandler.MarkAllInboxMessagesRead)
+			notifications.GET("/preferences", notificationHandler.ListPreferences)
+			notifications.PUT("/preferences", notificationHandler.UpsertPreference)
 		}
 
 		// Task管理
@@ -188,6 +203,63 @@ func InitRouter() *gin.Engine {
 			credentials.DELETE("/:id", credentialHandler.DeleteCredential)
 			credentials.POST("/:id/verify", credentialHandler.VerifyCredential)
 			credentials.GET("/:id/usage", credentialHandler.GetCredentialUsage)
+		}
+
+		resources := api.Group("/resources")
+		resources.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		{
+			resourceHandler := handlers.NewResourceHandler()
+			terminalHandler := handlers.NewTerminalSessionHandler()
+			terminalHandler.WS = wsHandler
+			resources.GET("", resourceHandler.ListResources)
+			resources.POST("/verify", resourceHandler.VerifyResourceConnection)
+			resources.POST("", resourceHandler.CreateResource)
+			resources.GET("/:id", resourceHandler.GetResource)
+			resources.GET("/:id/k8s/overview", resourceHandler.GetK8sOverview)
+			resources.POST("/:id/k8s/namespaces/query", resourceHandler.QueryK8sNamespaces)
+			resources.POST("/:id/k8s/resources/query", resourceHandler.QueryK8sResources)
+			resources.POST("/:id/k8s/actions", resourceHandler.CreateK8sAction)
+			resources.GET("/:id/actions", resourceHandler.ListResourceOperationAudits)
+			resources.POST("/:id/terminal-sessions", terminalHandler.CreateResourceTerminalSession)
+			resources.GET("/:id/terminal-sessions", terminalHandler.ListResourceTerminalSessions)
+			resources.GET("/:id/terminal-sessions/:session_id", terminalHandler.GetResourceTerminalSession)
+			resources.POST("/:id/terminal-sessions/:session_id/close", terminalHandler.CloseResourceTerminalSession)
+			resources.POST("/:id/base-info/refresh", resourceHandler.RefreshResourceBaseInfo)
+			resources.GET("/:id/credentials", resourceHandler.ListResourceCredentialBindings)
+			resources.POST("/:id/credentials/bind", resourceHandler.BindResourceCredential)
+			resources.DELETE("/:id/credentials/:binding_id", resourceHandler.UnbindResourceCredential)
+			resources.PUT("/:id", resourceHandler.UpdateResource)
+			resources.DELETE("/:id", resourceHandler.DeleteResource)
+		}
+
+		storeTemplates := api.Group("/store/templates")
+		storeTemplates.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		{
+			storeTemplateHandler := handlers.NewStoreTemplateHandler()
+			storeTemplates.GET("", storeTemplateHandler.ListTemplates)
+			storeTemplates.POST("", storeTemplateHandler.CreateTemplate)
+			storeTemplates.GET("/:id", storeTemplateHandler.GetTemplate)
+			storeTemplates.PUT("/:id", storeTemplateHandler.UpdateTemplate)
+			storeTemplates.DELETE("/:id", storeTemplateHandler.DeleteTemplate)
+			storeTemplates.GET("/:id/versions", storeTemplateHandler.ListTemplateVersions)
+			storeTemplates.POST("/:id/versions", storeTemplateHandler.CreateTemplateVersion)
+		}
+
+		llmModels := api.Group("/store/llm-models")
+		llmModels.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		{
+			llmModelHandler := handlers.NewLLMModelHandler()
+			llmModels.GET("", llmModelHandler.ListModels)
+			llmModels.POST("/import", llmModelHandler.ImportModel)
+		}
+
+		deployments := api.Group("/deployments")
+		deployments.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		{
+			deploymentHandler := handlers.NewDeploymentHandler()
+			deployments.GET("/requests", deploymentHandler.ListDeploymentRequests)
+			deployments.POST("/requests", deploymentHandler.CreateDeploymentRequest)
+			deployments.GET("/requests/:id", deploymentHandler.GetDeploymentRequest)
 		}
 
 		// Webhook管理

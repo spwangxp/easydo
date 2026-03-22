@@ -17,6 +17,66 @@ import (
 var pipelineScheduleMu sync.Mutex
 
 const schedulerLeaderLockKey = "easydo:scheduler:leader"
+const defaultQueuedRunSchedulerInterval = 5 * time.Second
+
+type QueuedRunScheduler struct {
+	db       *gorm.DB
+	interval time.Duration
+	ticker   *time.Ticker
+	stopChan chan struct{}
+	stopOnce sync.Once
+}
+
+func NewQueuedRunScheduler(db *gorm.DB, interval time.Duration) *QueuedRunScheduler {
+	if interval <= 0 {
+		interval = defaultQueuedRunSchedulerInterval
+	}
+	return &QueuedRunScheduler{
+		db:       db,
+		interval: interval,
+		stopChan: make(chan struct{}),
+	}
+}
+
+func (s *QueuedRunScheduler) Start() {
+	if s == nil || s.db == nil {
+		return
+	}
+	if s.ticker != nil {
+		return
+	}
+
+	s.ticker = time.NewTicker(s.interval)
+	go func() {
+		for {
+			select {
+			case <-s.ticker.C:
+				runQueuedPipelineSchedulerTick(s.db)
+			case <-s.stopChan:
+				return
+			}
+		}
+	}()
+}
+
+func (s *QueuedRunScheduler) Stop() {
+	if s == nil {
+		return
+	}
+	s.stopOnce.Do(func() {
+		if s.ticker != nil {
+			s.ticker.Stop()
+		}
+		close(s.stopChan)
+	})
+}
+
+func runQueuedPipelineSchedulerTick(db *gorm.DB) int {
+	if db == nil {
+		db = models.DB
+	}
+	return NewPipelineHandler().scheduleQueuedPipelineRuns(db)
+}
 
 func schedulerLeaderTTL() time.Duration {
 	return 30 * time.Second
@@ -141,6 +201,7 @@ func (h *PipelineHandler) assignOneQueuedRun(db *gorm.DB) (uint64, bool) {
 	var run models.PipelineRun
 	if err := db.First(&run, scheduledRunID).Error; err == nil {
 		syncLiveRunStateFromRun(&run)
+		syncDeploymentStateFromRun(db, &run)
 	}
 	var tasks []models.AgentTask
 	if err := db.Where("pipeline_run_id = ?", scheduledRunID).Find(&tasks).Error; err == nil {

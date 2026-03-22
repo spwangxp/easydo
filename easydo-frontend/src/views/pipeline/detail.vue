@@ -488,28 +488,217 @@
               </el-form>
             </el-tab-pane>
             <el-tab-pane label="触发设置" name="trigger">
-              <el-form label-width="120px" class="settings-form">
-                <el-form-item label="代码变更触发">
-                  <el-switch v-model="triggerSettings.on_push" />
-                  <span class="form-tip">当代码推送到仓库时自动触发</span>
-                </el-form-item>
-                <el-form-item label="标签触发">
-                  <el-switch v-model="triggerSettings.on_tag" />
-                  <span class="form-tip">当创建或更新标签时自动触发</span>
-                </el-form-item>
-                <el-form-item label="定时触发">
-                  <el-switch v-model="triggerSettings.on_cron" />
-                </el-form-item>
-                <el-form-item v-if="triggerSettings.on_cron" label="Cron 表达式">
-                  <el-input v-model="triggerSettings.cron_expression" placeholder="0 0 * * *" />
-                </el-form-item>
-                <el-form-item label="手动触发">
-                  <el-switch v-model="triggerSettings.manual" disabled />
-                  <span class="form-tip">始终允许手动触发</span>
-                </el-form-item>
-                <el-form-item>
-                  <el-button type="primary" @click="handleSaveTriggers">保存触发设置</el-button>
-                </el-form-item>
+              <el-form label-width="120px" class="settings-form trigger-settings-form" v-loading="triggerSettingsLoading">
+                <div class="trigger-sections">
+                  <section class="trigger-section">
+                    <div class="trigger-section__header">
+                      <div class="trigger-section__heading">
+                        <div class="trigger-section__title-row">
+                          <h4>定时触发</h4>
+                          <el-tag size="small" :type="triggerSettings.schedule_enabled ? 'success' : 'info'">
+                            {{ triggerSettings.schedule_enabled ? '已启用' : '未启用' }}
+                          </el-tag>
+                        </div>
+                        <p>优先使用常用预设安排执行计划，只有复杂场景时才切换到 Cron 高级模式。</p>
+                      </div>
+                      <el-switch v-model="triggerSettings.schedule_enabled" />
+                    </div>
+
+                    <div v-if="triggerSettings.schedule_enabled" class="trigger-section__body">
+                      <el-form-item label="执行方式">
+                        <el-radio-group v-model="scheduleBuilder.mode" class="schedule-mode-group" @change="handleScheduleModeChange">
+                          <el-radio-button label="every_minutes">每隔 N 分钟</el-radio-button>
+                          <el-radio-button label="daily">每天</el-radio-button>
+                          <el-radio-button label="weekly">每周</el-radio-button>
+                          <el-radio-button label="custom">自定义 Cron</el-radio-button>
+                        </el-radio-group>
+                      </el-form-item>
+
+                      <el-form-item v-if="scheduleBuilder.mode === 'every_minutes'" label="执行间隔">
+                        <div class="trigger-inline-field trigger-inline-field--compact">
+                          <el-input-number
+                            v-model="scheduleBuilder.everyMinutes"
+                            :min="1"
+                            :max="1440"
+                            controls-position="right"
+                          />
+                          <span class="form-tip form-tip--inline">分钟</span>
+                        </div>
+                      </el-form-item>
+
+                      <el-form-item v-else-if="scheduleBuilder.mode === 'daily'" label="执行时间">
+                        <el-time-picker
+                          v-model="scheduleBuilder.dailyTime"
+                          format="HH:mm"
+                          value-format="HH:mm"
+                          placeholder="请选择每天执行时间"
+                        />
+                      </el-form-item>
+
+                      <el-form-item v-else-if="scheduleBuilder.mode === 'weekly'" label="执行时间">
+                        <div class="trigger-inline-field trigger-inline-field--wrap">
+                          <el-select v-model="scheduleBuilder.weeklyDay" placeholder="请选择星期" style="width: 160px">
+                            <el-option
+                              v-for="item in scheduleWeekdayOptions"
+                              :key="item.value"
+                              :label="item.label"
+                              :value="item.value"
+                            />
+                          </el-select>
+                          <el-time-picker
+                            v-model="scheduleBuilder.weeklyTime"
+                            format="HH:mm"
+                            value-format="HH:mm"
+                            placeholder="请选择每周执行时间"
+                          />
+                        </div>
+                      </el-form-item>
+
+                      <el-form-item v-else label="Cron 表达式">
+                        <div class="trigger-advanced-box trigger-advanced-box--visible">
+                          <el-input v-model="scheduleBuilder.customCron" placeholder="0 0 * * *" />
+                          <span class="form-tip form-tip--block">无法识别为常用预设的规则会保留在高级模式中。</span>
+                        </div>
+                      </el-form-item>
+
+                      <el-form-item label="时区">
+                        <el-input v-model="triggerSettings.timezone" placeholder="Asia/Shanghai" />
+                      </el-form-item>
+
+                      <el-form-item v-if="scheduleBuilder.mode !== 'custom'" label="Cron 预览">
+                        <div class="trigger-advanced-box">
+                          <div class="trigger-advanced-box__header">
+                            <span>当前预设会自动生成对应的 Cron 表达式。</span>
+                            <el-button link type="primary" @click="scheduleBuilder.advancedMode = !scheduleBuilder.advancedMode">
+                              {{ scheduleBuilder.advancedMode ? '隐藏 Cron' : '查看 Cron' }}
+                            </el-button>
+                          </div>
+                          <el-input v-if="scheduleBuilder.advancedMode" :model-value="scheduleCronPreview || '-'" readonly />
+                        </div>
+                      </el-form-item>
+                    </div>
+
+                    <div class="trigger-meta-grid">
+                      <div class="trigger-meta-card">
+                        <span class="trigger-meta-label">下次运行</span>
+                        <span class="trigger-meta-value">{{ formatDateTime(triggerSettings.next_run_at) }}</span>
+                      </div>
+                      <div class="trigger-meta-card">
+                        <span class="trigger-meta-label">最近运行</span>
+                        <span class="trigger-meta-value">{{ formatDateTime(triggerSettings.last_run_at) }}</span>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="trigger-section">
+                    <div class="trigger-section__header">
+                      <div class="trigger-section__heading">
+                        <div class="trigger-section__title-row">
+                          <h4>Webhook 触发</h4>
+                          <el-tag size="small" :type="webhookSectionEnabled ? 'success' : 'info'">
+                            {{ webhookSectionEnabled ? '已启用' : '未启用' }}
+                          </el-tag>
+                        </div>
+                        <p>按事件类型控制自动触发，并为 Push、Tag、Merge Request 配置对应的过滤条件。</p>
+                      </div>
+                    </div>
+
+                    <div class="trigger-section__body">
+                      <div class="webhook-event-list">
+                        <div class="webhook-event-card">
+                          <div class="webhook-event-card__header">
+                            <div>
+                              <div class="webhook-event-card__title">Push 事件</div>
+                              <p>当代码推送到仓库时自动触发流水线。</p>
+                            </div>
+                            <el-switch v-model="triggerSettings.push_enabled" />
+                          </div>
+                          <el-form-item label="分支过滤" class="trigger-nested-item">
+                            <el-input
+                              v-model="triggerSettings.push_branch_filters"
+                              type="textarea"
+                              :rows="2"
+                              placeholder="示例：main, release/*，支持换行或逗号分隔"
+                            />
+                          </el-form-item>
+                        </div>
+
+                        <div class="webhook-event-card">
+                          <div class="webhook-event-card__header">
+                            <div>
+                              <div class="webhook-event-card__title">Tag 事件</div>
+                              <p>当创建或更新标签时自动触发流水线。</p>
+                            </div>
+                            <el-switch v-model="triggerSettings.tag_enabled" />
+                          </div>
+                          <el-form-item label="标签过滤" class="trigger-nested-item">
+                            <el-input
+                              v-model="triggerSettings.tag_filters"
+                              type="textarea"
+                              :rows="2"
+                              placeholder="示例：v*，支持换行或逗号分隔"
+                            />
+                          </el-form-item>
+                        </div>
+
+                        <div class="webhook-event-card">
+                          <div class="webhook-event-card__header">
+                            <div>
+                              <div class="webhook-event-card__title">Merge Request 事件</div>
+                              <p>当 Merge Request 发生变化时自动触发流水线。</p>
+                            </div>
+                            <el-switch v-model="triggerSettings.merge_request_enabled" />
+                          </div>
+                          <el-form-item label="源分支过滤" class="trigger-nested-item">
+                            <el-input
+                              v-model="triggerSettings.merge_request_source_branch_filters"
+                              type="textarea"
+                              :rows="2"
+                              placeholder="示例：feature/*，支持换行或逗号分隔"
+                            />
+                          </el-form-item>
+                          <el-form-item label="目标分支过滤" class="trigger-nested-item">
+                            <el-input
+                              v-model="triggerSettings.merge_request_target_branch_filters"
+                              type="textarea"
+                              :rows="2"
+                              placeholder="示例：main, release/*，支持换行或逗号分隔"
+                            />
+                          </el-form-item>
+                        </div>
+                      </div>
+
+                      <el-form-item label="Webhook URL">
+                        <el-input :model-value="triggerSettings.webhook_url || '-'" readonly />
+                      </el-form-item>
+                      <el-form-item label="Secret Token">
+                        <div class="trigger-inline-field">
+                          <el-input :model-value="displaySecretToken" readonly />
+                          <el-button :loading="triggerSettingsSaving" @click="handleRotateTriggerSecret">
+                            轮换
+                          </el-button>
+                        </div>
+                      </el-form-item>
+
+                      <div class="trigger-meta-grid">
+                        <div class="trigger-meta-card">
+                          <span class="trigger-meta-label">最近触发</span>
+                          <span class="trigger-meta-value">{{ formatDateTime(triggerSettings.last_triggered_at) }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="trigger-section trigger-section--compact">
+                    <el-form-item label="手动触发">
+                      <el-switch v-model="triggerSettings.manual" disabled />
+                      <span class="form-tip">始终允许手动触发</span>
+                    </el-form-item>
+                    <el-form-item>
+                      <el-button type="primary" :loading="triggerSettingsSaving" @click="handleSaveTriggers">保存触发设置</el-button>
+                    </el-form-item>
+                  </section>
+                </div>
               </el-form>
             </el-tab-pane>
             <el-tab-pane label="通知设置" name="notification">
@@ -588,7 +777,7 @@ import {
   Warning,
   Close
 } from '@element-plus/icons-vue'
-import { getPipelineDetail, runPipeline, updatePipeline, getPipelineRuns, getPipelineStatistics, getPipelineTestReports, getRunTasks } from '@/api/pipeline'
+import { getPipelineDetail, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineStatistics, getPipelineTestReports, getRunTasks } from '@/api/pipeline'
 import { getTaskLogs as fetchTaskLogsFromApi } from '@/api/task'
 import { getProjectList } from '@/api/project'
 import DesignTab from './designTab.vue'
@@ -607,6 +796,8 @@ const historyLoading = ref(false)
 const runDialogVisible = ref(false)
 const runLoading = ref(false)
 const settingsActiveTab = ref('basic')
+const triggerSettingsLoading = ref(false)
+const triggerSettingsSaving = ref(false)
 
 // 数据
 const pipeline = ref(null)
@@ -632,12 +823,48 @@ const settingsForm = reactive({
 
 // 触发设置
 const triggerSettings = reactive({
-  on_push: true,
-  on_tag: false,
-  on_cron: false,
+  provider: '',
+  webhook_enabled: false,
+  push_enabled: false,
+  tag_enabled: false,
+  merge_request_enabled: false,
+  push_branch_filters: '',
+  tag_filters: '',
+  merge_request_source_branch_filters: '',
+  merge_request_target_branch_filters: '',
+  schedule_enabled: false,
   cron_expression: '',
+  timezone: '',
+  secret_token: '',
+  webhook_token: '',
+  webhook_url: '',
+  next_run_at: '',
+  last_run_at: '',
+  last_triggered_at: '',
   manual: true
 })
+
+const scheduleWeekdayOptions = [
+  { label: '周日', value: '0' },
+  { label: '周一', value: '1' },
+  { label: '周二', value: '2' },
+  { label: '周三', value: '3' },
+  { label: '周四', value: '4' },
+  { label: '周五', value: '5' },
+  { label: '周六', value: '6' }
+]
+
+const createDefaultScheduleBuilder = () => ({
+  mode: 'every_minutes',
+  everyMinutes: 15,
+  dailyTime: '09:00',
+  weeklyDay: '1',
+  weeklyTime: '09:00',
+  customCron: '',
+  advancedMode: false
+})
+
+const scheduleBuilder = reactive(createDefaultScheduleBuilder())
 
 // 通知设置
 const notificationSettings = reactive({
@@ -766,6 +993,172 @@ const runDialogWidth = computed(() => {
   return `${clamped}px`
 })
 
+const displaySecretToken = computed(() => triggerSettings.secret_token || triggerSettings.webhook_token || '-')
+const webhookSectionEnabled = computed(() => Boolean(
+  triggerSettings.push_enabled
+  || triggerSettings.tag_enabled
+  || triggerSettings.merge_request_enabled
+))
+
+const normalizeCronExpression = (expression = '') => String(expression || '').trim().replace(/\s+/g, ' ')
+
+const padTimeUnit = (value) => String(value).padStart(2, '0')
+
+const normalizeTimeValue = (value, fallback = '09:00') => {
+  if (typeof value !== 'string') return fallback
+
+  const matched = value.trim().match(/^(\d{1,2}):(\d{2})/)
+  if (!matched) return fallback
+
+  const hour = Number.parseInt(matched[1], 10)
+  const minute = Number.parseInt(matched[2], 10)
+  if (Number.isNaN(hour) || Number.isNaN(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return fallback
+  }
+
+  return `${padTimeUnit(hour)}:${padTimeUnit(minute)}`
+}
+
+const normalizeScheduleInterval = (value) => {
+  const parsed = Number.parseInt(value, 10)
+  if (Number.isNaN(parsed)) return 15
+  return Math.min(Math.max(parsed, 1), 1440)
+}
+
+const buildScheduleCronExpression = (mode = scheduleBuilder.mode) => {
+  if (mode === 'every_minutes') {
+    const interval = normalizeScheduleInterval(scheduleBuilder.everyMinutes)
+    return interval <= 1 ? '* * * * *' : `*/${interval} * * * *`
+  }
+
+  if (mode === 'daily') {
+    const [hour, minute] = normalizeTimeValue(scheduleBuilder.dailyTime).split(':')
+    return `${Number.parseInt(minute, 10)} ${Number.parseInt(hour, 10)} * * *`
+  }
+
+  if (mode === 'weekly') {
+    const [hour, minute] = normalizeTimeValue(scheduleBuilder.weeklyTime).split(':')
+    const weekday = scheduleWeekdayOptions.some(item => item.value === String(scheduleBuilder.weeklyDay))
+      ? String(scheduleBuilder.weeklyDay)
+      : '1'
+    return `${Number.parseInt(minute, 10)} ${Number.parseInt(hour, 10)} * * ${weekday}`
+  }
+
+  return normalizeCronExpression(scheduleBuilder.customCron)
+}
+
+const scheduleCronPreview = computed(() => buildScheduleCronExpression())
+
+const applyScheduleBuilderState = (state = {}) => {
+  scheduleBuilder.mode = state.mode || 'every_minutes'
+  scheduleBuilder.everyMinutes = normalizeScheduleInterval(state.everyMinutes)
+  scheduleBuilder.dailyTime = normalizeTimeValue(state.dailyTime)
+  scheduleBuilder.weeklyDay = scheduleWeekdayOptions.some(item => item.value === String(state.weeklyDay))
+    ? String(state.weeklyDay)
+    : '1'
+  scheduleBuilder.weeklyTime = normalizeTimeValue(state.weeklyTime)
+  scheduleBuilder.customCron = normalizeCronExpression(state.customCron)
+  scheduleBuilder.advancedMode = Boolean(state.advancedMode)
+}
+
+const deriveScheduleBuilderFromCron = (expression = '') => {
+  const normalized = normalizeCronExpression(expression)
+  if (!normalized) {
+    return createDefaultScheduleBuilder()
+  }
+
+  const everyMinutesMatch = normalized.match(/^(\*|\*\/(\d+)|0\/(\d+)) \* \* \* \*$/)
+  if (everyMinutesMatch) {
+    const interval = everyMinutesMatch[1] === '*'
+      ? 1
+      : Number.parseInt(everyMinutesMatch[2] || everyMinutesMatch[3], 10)
+
+    return {
+      mode: 'every_minutes',
+      everyMinutes: normalizeScheduleInterval(interval),
+      dailyTime: '09:00',
+      weeklyDay: '1',
+      weeklyTime: '09:00',
+      customCron: normalized,
+      advancedMode: false
+    }
+  }
+
+  const dailyMatch = normalized.match(/^([0-5]?\d) ([01]?\d|2[0-3]) \* \* \*$/)
+  if (dailyMatch) {
+    return {
+      mode: 'daily',
+      everyMinutes: 15,
+      dailyTime: `${padTimeUnit(dailyMatch[2])}:${padTimeUnit(dailyMatch[1])}`,
+      weeklyDay: '1',
+      weeklyTime: '09:00',
+      customCron: normalized,
+      advancedMode: false
+    }
+  }
+
+  const weeklyMatch = normalized.match(/^([0-5]?\d) ([01]?\d|2[0-3]) \* \* ([0-7])$/)
+  if (weeklyMatch) {
+    return {
+      mode: 'weekly',
+      everyMinutes: 15,
+      dailyTime: '09:00',
+      weeklyDay: weeklyMatch[3] === '7' ? '0' : weeklyMatch[3],
+      weeklyTime: `${padTimeUnit(weeklyMatch[2])}:${padTimeUnit(weeklyMatch[1])}`,
+      customCron: normalized,
+      advancedMode: false
+    }
+  }
+
+  return {
+    mode: 'custom',
+    everyMinutes: 15,
+    dailyTime: '09:00',
+    weeklyDay: '1',
+    weeklyTime: '09:00',
+    customCron: normalized,
+    advancedMode: true
+  }
+}
+
+const handleScheduleModeChange = (mode) => {
+  scheduleBuilder.advancedMode = mode === 'custom'
+}
+
+watch(
+  () => [scheduleBuilder.mode, scheduleBuilder.everyMinutes, scheduleBuilder.dailyTime, scheduleBuilder.weeklyDay, scheduleBuilder.weeklyTime],
+  () => {
+    if (scheduleBuilder.mode !== 'custom') {
+      scheduleBuilder.customCron = buildScheduleCronExpression(scheduleBuilder.mode)
+    }
+  },
+  { immediate: true }
+)
+
+const applyTriggerSettings = (data = {}) => {
+  triggerSettings.provider = data.provider || ''
+  triggerSettings.webhook_enabled = Boolean(data.webhook_enabled)
+  triggerSettings.push_enabled = Boolean(data.push_enabled)
+  triggerSettings.tag_enabled = Boolean(data.tag_enabled)
+  triggerSettings.merge_request_enabled = Boolean(data.merge_request_enabled)
+  triggerSettings.push_branch_filters = data.push_branch_filters || ''
+  triggerSettings.tag_filters = data.tag_filters || ''
+  triggerSettings.merge_request_source_branch_filters = data.merge_request_source_branch_filters || ''
+  triggerSettings.merge_request_target_branch_filters = data.merge_request_target_branch_filters || ''
+  triggerSettings.schedule_enabled = Boolean(data.schedule_enabled)
+  triggerSettings.cron_expression = normalizeCronExpression(data.cron_expression)
+  triggerSettings.timezone = data.timezone || ''
+  triggerSettings.secret_token = data.secret_token || ''
+  triggerSettings.webhook_token = data.webhook_token || ''
+  triggerSettings.webhook_url = data.webhook_url || ''
+  triggerSettings.next_run_at = data.next_run_at || ''
+  triggerSettings.last_run_at = data.last_run_at || ''
+  triggerSettings.last_triggered_at = data.last_triggered_at || ''
+  triggerSettings.manual = data.manual !== undefined ? Boolean(data.manual) : true
+
+  applyScheduleBuilderState(deriveScheduleBuilderFromCron(triggerSettings.cron_expression))
+}
+
 // 获取流水线详情
 const fetchPipelineDetail = async () => {
   try {
@@ -781,6 +1174,21 @@ const fetchPipelineDetail = async () => {
   } catch (error) {
     console.error('获取流水线详情失败:', error)
     ElMessage.error('获取流水线详情失败')
+  }
+}
+
+const fetchTriggerSettings = async () => {
+  triggerSettingsLoading.value = true
+  try {
+    const response = await getPipelineTriggers(pipelineId.value)
+    if (response.code === 200) {
+      applyTriggerSettings(response.data || {})
+    }
+  } catch (error) {
+    console.error('获取触发设置失败:', error)
+    ElMessage.error('获取触发设置失败')
+  } finally {
+    triggerSettingsLoading.value = false
   }
 }
 
@@ -1108,8 +1516,54 @@ const handleSaveSettings = async () => {
 }
 
 // 保存触发设置
-const handleSaveTriggers = () => {
-  ElMessage.success('触发设置已保存')
+const saveTriggerSettings = async (rotateSecret = false) => {
+  triggerSettingsSaving.value = true
+  const cronExpression = triggerSettings.schedule_enabled ? buildScheduleCronExpression() : ''
+  triggerSettings.cron_expression = cronExpression
+
+  const payload = {
+    manual: true,
+    webhook_enabled: webhookSectionEnabled.value,
+    push_enabled: Boolean(triggerSettings.push_enabled),
+    tag_enabled: Boolean(triggerSettings.tag_enabled),
+    merge_request_enabled: Boolean(triggerSettings.merge_request_enabled),
+    push_branch_filters: triggerSettings.push_branch_filters?.trim() || '',
+    tag_filters: triggerSettings.tag_filters?.trim() || '',
+    merge_request_source_branch_filters: triggerSettings.merge_request_source_branch_filters?.trim() || '',
+    merge_request_target_branch_filters: triggerSettings.merge_request_target_branch_filters?.trim() || '',
+    schedule_enabled: Boolean(triggerSettings.schedule_enabled),
+    cron_expression: cronExpression,
+    timezone: triggerSettings.timezone?.trim() || '',
+    rotate_secret: rotateSecret
+  }
+
+  if (triggerSettings.provider) {
+    payload.provider = triggerSettings.provider
+  }
+
+  try {
+    const response = await updatePipelineTriggers(pipelineId.value, payload)
+    if (response.code === 200) {
+      ElMessage.success(rotateSecret ? 'Secret Token 已轮换' : '触发设置已保存')
+      await fetchTriggerSettings()
+      return
+    }
+
+    ElMessage.error(response.message || '保存触发设置失败')
+  } catch (error) {
+    console.error('保存触发设置失败:', error)
+    ElMessage.error('保存触发设置失败')
+  } finally {
+    triggerSettingsSaving.value = false
+  }
+}
+
+const handleSaveTriggers = async () => {
+  await saveTriggerSettings(false)
+}
+
+const handleRotateTriggerSecret = async () => {
+  await saveTriggerSettings(true)
 }
 
 // 保存通知设置
@@ -1405,6 +1859,7 @@ onMounted(() => {
   })
   window.addEventListener('resize', updateDetailContainerWidth)
   fetchPipelineDetail()
+  fetchTriggerSettings()
   fetchProjects()
   fetchRunHistory()
   setupRealtimeUpdates()
@@ -1695,11 +2150,191 @@ onUnmounted(() => {
         
         .settings-form {
           max-width: 600px;
-          
+
+          &.trigger-settings-form {
+            max-width: 920px;
+
+            .trigger-sections {
+              display: flex;
+              flex-direction: column;
+              gap: 20px;
+            }
+
+            .trigger-section {
+              padding: 20px;
+              border: 1px solid #ebeef5;
+              border-radius: 8px;
+              background: var(--bg-card);
+
+              &.trigger-section--compact {
+                padding-bottom: 4px;
+              }
+
+              .trigger-section__header {
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-start;
+                gap: 16px;
+                margin-bottom: 20px;
+              }
+
+              .trigger-section__heading {
+                flex: 1;
+              }
+
+              .trigger-section__title-row {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 8px;
+              }
+
+              h4 {
+                margin: 0;
+                font-size: 16px;
+                font-weight: 600;
+                color: var(--text-primary);
+              }
+
+              p {
+                margin: 0;
+                font-size: 13px;
+                line-height: 1.6;
+                color: var(--text-secondary);
+              }
+
+              .trigger-section__body {
+                margin-bottom: 20px;
+              }
+
+              .schedule-mode-group {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+              }
+
+              .trigger-inline-field--compact {
+                width: auto;
+              }
+
+              .trigger-inline-field--wrap {
+                flex-wrap: wrap;
+              }
+
+              .trigger-advanced-box {
+                width: 100%;
+                padding: 12px 14px;
+                background: var(--bg-secondary);
+                border-radius: 8px;
+
+                &.trigger-advanced-box--visible {
+                  display: flex;
+                  flex-direction: column;
+                  gap: 8px;
+                }
+
+                .trigger-advanced-box__header {
+                  display: flex;
+                  justify-content: space-between;
+                  align-items: center;
+                  gap: 12px;
+                  margin-bottom: 8px;
+                  font-size: 13px;
+                  color: var(--text-secondary);
+                }
+              }
+
+              .trigger-meta-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                gap: 12px;
+              }
+
+              .trigger-meta-card {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                padding: 12px 14px;
+                border-radius: 8px;
+                background: var(--bg-secondary);
+              }
+
+              .trigger-meta-label {
+                font-size: 12px;
+                color: var(--text-muted);
+              }
+
+              .trigger-meta-value {
+                font-size: 14px;
+                font-weight: 500;
+                color: var(--text-primary);
+                word-break: break-word;
+              }
+
+              .webhook-event-list {
+                display: flex;
+                flex-direction: column;
+                gap: 16px;
+                margin-bottom: 20px;
+              }
+
+              .webhook-event-card {
+                padding: 16px;
+                border: 1px solid #ebeef5;
+                border-radius: 8px;
+                background: var(--bg-secondary);
+
+                .webhook-event-card__header {
+                  display: flex;
+                  justify-content: space-between;
+                  align-items: flex-start;
+                  gap: 16px;
+                  margin-bottom: 16px;
+                }
+
+                .webhook-event-card__title {
+                  margin-bottom: 6px;
+                  font-size: 14px;
+                  font-weight: 600;
+                  color: var(--text-primary);
+                }
+
+                p {
+                  font-size: 12px;
+                  color: var(--text-muted);
+                }
+
+                .trigger-nested-item {
+                  margin-bottom: 0;
+                }
+              }
+            }
+          }
+
+          .trigger-inline-field {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            width: 100%;
+
+            :deep(.el-input) {
+              flex: 1;
+            }
+          }
+            
           .form-tip {
             margin-left: 12px;
             font-size: 12px;
             color: var(--text-muted);
+
+            &.form-tip--inline {
+              margin-left: 0;
+            }
+
+            &.form-tip--block {
+              display: block;
+              margin-left: 0;
+            }
           }
         }
       }

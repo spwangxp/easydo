@@ -31,6 +31,15 @@ type PipelineHandler struct {
 	DB *gorm.DB
 }
 
+const pipelineRunTriggerTypeDeploymentRequest = "deployment_request"
+
+func pipelineManagementQuery(db *gorm.DB, includeHidden bool) *gorm.DB {
+	if includeHidden {
+		return db
+	}
+	return db.Where("management_hidden = ?", false)
+}
+
 type pipelineTaskTypeResponse struct {
 	Type            string                       `json:"type"`
 	Category        string                       `json:"category"`
@@ -266,8 +275,9 @@ func (h *PipelineHandler) GetPipelineList(c *gin.Context) {
 	var pipelines []models.Pipeline
 	var total int64
 	workspaceID := c.GetUint64("workspace_id")
+	includeHidden := strings.EqualFold(strings.TrimSpace(c.Query("include_publish_owned")), "true")
 
-	query := h.DB.Model(&models.Pipeline{}).Where("workspace_id = ?", workspaceID)
+	query := pipelineManagementQuery(h.DB.Model(&models.Pipeline{}), includeHidden).Where("workspace_id = ?", workspaceID)
 
 	if keyword != "" {
 		query = query.Where("name LIKE ?", "%"+keyword+"%")
@@ -296,9 +306,9 @@ func (h *PipelineHandler) GetPipelineList(c *gin.Context) {
 
 	// 计算各tab的数量
 	var allCount, createdCount, favoritedCount int64
-	h.DB.Model(&models.Pipeline{}).Where("workspace_id = ?", workspaceID).Count(&allCount)
-	h.DB.Model(&models.Pipeline{}).Where("workspace_id = ? AND owner_id = ?", workspaceID, userID).Count(&createdCount)
-	h.DB.Model(&models.Pipeline{}).Where("workspace_id = ? AND is_favorite = ?", workspaceID, true).Count(&favoritedCount)
+	pipelineManagementQuery(h.DB.Model(&models.Pipeline{}), includeHidden).Where("workspace_id = ?", workspaceID).Count(&allCount)
+	pipelineManagementQuery(h.DB.Model(&models.Pipeline{}), includeHidden).Where("workspace_id = ? AND owner_id = ?", workspaceID, userID).Count(&createdCount)
+	pipelineManagementQuery(h.DB.Model(&models.Pipeline{}), includeHidden).Where("workspace_id = ? AND is_favorite = ?", workspaceID, true).Count(&favoritedCount)
 
 	query.Count(&total)
 
@@ -324,13 +334,13 @@ func (h *PipelineHandler) GetPipelineList(c *gin.Context) {
 
 	lastRunByPipeline := make(map[uint64]models.PipelineRun, len(pipelines))
 	if len(pipelineIDs) > 0 {
-		lastRunSubQuery := h.DB.Model(&models.PipelineRun{}).
+		lastRunSubQuery := regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).
 			Select("pipeline_id, MAX(build_number) AS max_build_number").
 			Where("pipeline_id IN ?", pipelineIDs).
 			Group("pipeline_id")
 
 		var lastRuns []models.PipelineRun
-		h.DB.Model(&models.PipelineRun{}).
+		regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).
 			Joins("JOIN (?) latest ON latest.pipeline_id = pipeline_runs.pipeline_id AND latest.max_build_number = pipeline_runs.build_number", lastRunSubQuery).
 			Where("pipeline_runs.pipeline_id IN ?", pipelineIDs).
 			Order("pipeline_runs.id DESC").
@@ -380,6 +390,10 @@ func (h *PipelineHandler) GetPipelineList(c *gin.Context) {
 			},
 		},
 	})
+}
+
+func regularPipelineRunsQuery(db *gorm.DB) *gorm.DB {
+	return db.Where("(trigger_type IS NULL OR trigger_type = '' OR trigger_type <> ?)", pipelineRunTriggerTypeDeploymentRequest)
 }
 
 func (h *PipelineHandler) GetPipelineDetail(c *gin.Context) {
@@ -651,50 +665,18 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 		return
 	}
 
-	// 检查是否有需要 Agent 执行的节点
-	hasAgentNode := false
-	for _, node := range config.Nodes {
-		if isAgentPipelineTaskType(node.Type) {
-			hasAgentNode = true
-			break
-		}
-	}
-
-	runStatus := models.PipelineRunStatusRunning
-	startTime := time.Now().Unix()
-	if hasAgentNode {
-		runStatus = models.PipelineRunStatusQueued
-		startTime = 0
-	}
-
-	// 创建新的构建记录，保存配置快照
-	run := &models.PipelineRun{
-		WorkspaceID:     pipeline.WorkspaceID,
-		PipelineID:      pipeline.ID,
-		Status:          runStatus,
+	run, buildNumber, err := h.launchPipelineRun(pipeline, config, pipelineRunTriggerContext{
 		TriggerType:     "manual",
 		TriggerUser:     triggerUsername,
 		TriggerUserID:   triggerUserID,
 		TriggerUserRole: triggerRole,
-		StartTime:       startTime,
-		Config:          pipeline.Config, // 保存配置快照
-	}
-
-	buildNumber, err := h.createPipelineRunWithUniqueBuildNumber(run)
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code": 500,
 			"msg":  "创建运行记录失败: " + err.Error(),
 		})
 		return
-	}
-	syncLiveRunStateFromRun(run)
-
-	if hasAgentNode {
-		go h.scheduleQueuedPipelineRuns(h.DB)
-	} else {
-		// 无需 agent 的流水线直接执行
-		go h.executePipelineTasks(pipeline, run, config, triggerUserID, triggerRole)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1173,6 +1155,10 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 			nodeConfig = normalizePipelineNodeConfig(node.Type, canonicalType, resolvedConfig)
 		}
 	}
+	if err := resolveResourceBackedNodeConfig(db, canonicalType, run.WorkspaceID, nodeConfig); err != nil {
+		fmt.Printf("Failed to resolve resource-backed config for node %s: %v\n", node.ID, err)
+		return false, nil
+	}
 
 	if err := h.injectCredentialEnv(db, canonicalType, def, nodeConfig, run, triggerUserID, triggerRole); err != nil {
 		fmt.Printf("Failed to inject credential for node %s: %v\n", node.ID, err)
@@ -1258,7 +1244,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 			WorkspaceID:   run.WorkspaceID,
 			PipelineRunID: run.ID,
 			NodeID:        node.ID,
-			TaskType:      "shell",
+			TaskType:      canonicalType,
 			Name:          node.Name,
 			Params:        h.jsonEncode(nodeConfig),
 			Script:        script,
@@ -1278,7 +1264,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 		}
 	} else {
 		task.AgentID = agentID
-		task.TaskType = "shell"
+		task.TaskType = canonicalType
 		task.Params = h.jsonEncode(nodeConfig)
 		task.Script = script
 		task.WorkDir = workDir
@@ -1556,21 +1542,36 @@ func validateTaskCredentialPayload(taskType string, slot taskCredentialSlot, cre
 		}
 
 	case "docker", "docker-run":
-		if slot.Slot != "registry_auth" {
-			return nil
-		}
-		switch credential.Type {
-		case models.TypeToken:
-			if !hasAny("token", "access_token") {
-				return missing("token")
+		switch slot.Slot {
+		case "registry_auth":
+			switch credential.Type {
+			case models.TypeToken:
+				if !hasAny("token", "access_token") {
+					return missing("token")
+				}
+			case models.TypePassword:
+				return requireAll("username", "password")
 			}
-		case models.TypePassword:
-			return requireAll("username", "password")
+		case "ssh_auth":
+			switch credential.Type {
+			case models.TypeSSHKey:
+				return requireAll("private_key")
+			case models.TypePassword:
+				return requireAll("username", "password")
+			}
+		default:
+			return nil
 		}
 
 	case "ssh":
-		if slot.Slot == "ssh_auth" && credential.Type == models.TypeSSHKey {
+		if slot.Slot != "ssh_auth" {
+			return nil
+		}
+		switch credential.Type {
+		case models.TypeSSHKey:
 			return requireAll("private_key")
+		case models.TypePassword:
+			return requireAll("username", "password")
 		}
 
 	case "kubernetes":
@@ -1629,6 +1630,95 @@ func validateTaskCredentialPayload(taskType string, slot taskCredentialSlot, cre
 	return nil
 }
 
+func resolveResourceBackedNodeConfig(db *gorm.DB, canonicalType string, workspaceID uint64, nodeConfig map[string]interface{}) error {
+	if db == nil || nodeConfig == nil || canonicalType != "docker-run" {
+		return nil
+	}
+	resourceID := toUint64Value(nodeConfig["target_resource_id"])
+	if resourceID == 0 {
+		return nil
+	}
+	var resource models.Resource
+	if err := db.Where("workspace_id = ?", workspaceID).First(&resource, resourceID).Error; err != nil {
+		return fmt.Errorf("target resource not found: %w", err)
+	}
+	if resource.Type != models.ResourceTypeVM {
+		return fmt.Errorf("target resource %d is not a VM resource", resource.ID)
+	}
+	host, port := parseEndpointHostPort(resource.Endpoint)
+	if strings.TrimSpace(host) == "" {
+		return fmt.Errorf("target VM resource %d endpoint is empty", resource.ID)
+	}
+	nodeConfig["host"] = host
+	if strings.TrimSpace(port) != "" {
+		nodeConfig["port"] = port
+	} else if toInt(nodeConfig["port"]) <= 0 {
+		nodeConfig["port"] = 22
+	}
+
+	var bindings []models.ResourceCredentialBinding
+	if err := db.Where("workspace_id = ? AND resource_id = ?", workspaceID, resource.ID).Order("created_at ASC, id ASC").Find(&bindings).Error; err != nil {
+		return err
+	}
+	if len(bindings) == 0 {
+		return nil
+	}
+	bindingByPurpose := make(map[string]uint64, len(bindings))
+	for _, binding := range bindings {
+		if binding.CredentialID == 0 {
+			continue
+		}
+		if _, exists := bindingByPurpose[binding.Purpose]; !exists {
+			bindingByPurpose[binding.Purpose] = binding.CredentialID
+		}
+	}
+	resourceCredentialID := deploymentResourceCredentialID(resource.Type, bindingByPurpose)
+	if resourceCredentialID == 0 {
+		return nil
+	}
+	credentials, _ := nodeConfig["credentials"].(map[string]interface{})
+	if credentials == nil {
+		credentials = make(map[string]interface{})
+		nodeConfig["credentials"] = credentials
+	}
+	credentials["ssh_auth"] = map[string]interface{}{"credential_id": resourceCredentialID}
+	return nil
+}
+
+func toUint64Value(v interface{}) uint64 {
+	switch val := v.(type) {
+	case uint64:
+		return val
+	case uint:
+		return uint64(val)
+	case uint32:
+		return uint64(val)
+	case int:
+		if val > 0 {
+			return uint64(val)
+		}
+	case int64:
+		if val > 0 {
+			return uint64(val)
+		}
+	case float64:
+		if val > 0 {
+			return uint64(val)
+		}
+	case json.Number:
+		i, _ := val.Int64()
+		if i > 0 {
+			return uint64(i)
+		}
+	case string:
+		parsed, err := strconv.ParseUint(strings.TrimSpace(val), 10, 64)
+		if err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
 func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, canonicalType string, def pipelineTaskDefinition, nodeConfig map[string]interface{}, run *models.PipelineRun, userID uint64, role string) error {
 	if nodeConfig == nil || len(def.CredentialSlots) == 0 {
 		return nil
@@ -1659,7 +1749,7 @@ func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, canonicalType string,
 		if err := db.First(&credential, credentialID).Error; err != nil {
 			return fmt.Errorf("credential not found for slot '%s': %w", slot.Slot, err)
 		}
-		if !canReadCredential(db, &credential, userID, role) {
+		if !canReadCredential(db, &credential, userID, role) && !canUseDeploymentBoundCredential(db, &credential, run, slot.Slot) {
 			return fmt.Errorf("access denied for credential slot '%s'", slot.Slot)
 		}
 		if !credential.IsUsable() {
@@ -2077,10 +2167,6 @@ func (h *PipelineHandler) executeInAppTask(logger *taskProcessLogger, db *gorm.D
 	if content == "" {
 		content = fmt.Sprintf("流水线运行 #%d 的节点 %s 已触发站内信通知", run.ID, node.Name)
 	}
-	msgType := strings.TrimSpace(toString(config["message_type"]))
-	if msgType == "" {
-		msgType = models.MessageTypeSystem
-	}
 	priority := toInt(config["priority"])
 
 	metadata := map[string]interface{}{
@@ -2096,27 +2182,17 @@ func (h *PipelineHandler) executeInAppTask(logger *taskProcessLogger, db *gorm.D
 			}
 		}
 	}
-	metadataJSON, _ := json.Marshal(metadata)
 	logger.Command(fmt.Sprintf("in_app notify recipient=%d title=%s", run.TriggerUserID, title))
 	logger.Info("message_preview=" + sanitizeTaskLogPreview(content, 400))
 
-	message := &models.Message{
-		WorkspaceID: run.WorkspaceID,
-		Type:        msgType,
-		Title:       title,
-		Content:     content,
-		SenderType:  "system",
-		Priority:    priority,
-		Metadata:    string(metadataJSON),
+	if run.TriggerUserID == 0 {
+		return true, ""
 	}
-	if run.TriggerUserID > 0 {
-		triggerUserID := run.TriggerUserID
-		message.RecipientID = &triggerUserID
-	}
-	if err := db.Create(message).Error; err != nil {
+	metadata["priority"] = priority
+	if err := emitSystemInboxNotification(db, run.WorkspaceID, run.TriggerUserID, title, content, metadata, fmt.Sprintf("pipeline-in-app-node:%d:%s", run.ID, node.ID)); err != nil {
 		return false, "站内信创建失败: " + err.Error()
 	}
-	logger.Info(fmt.Sprintf("站内信创建成功 message_id=%d", message.ID))
+	logger.Info("站内信创建成功")
 	return true, ""
 }
 
@@ -2263,12 +2339,21 @@ func (h *PipelineHandler) updateRunStatus(runID uint64, status, errorMsg string)
 	run.Duration = duration
 	run.ErrorMsg = errorMsg
 	syncLiveRunStateFromRun(&run)
+	syncDeploymentStateFromRun(h.DB, &run)
 
 	// Broadcast run status to frontend clients
 	wsHandler := SharedWebSocketHandler()
 	wsHandler.BroadcastRunStatus(runID, status, errorMsg)
 
 	if status == models.PipelineRunStatusSuccess || status == models.PipelineRunStatusFailed || status == models.PipelineRunStatusCancelled {
+		switch status {
+		case models.PipelineRunStatusSuccess:
+			emitPipelineRunTerminalNotification(h.DB, &run, NotificationEventTypePipelineRunSucceeded)
+		case models.PipelineRunStatusFailed:
+			emitPipelineRunTerminalNotification(h.DB, &run, NotificationEventTypePipelineRunFailed)
+		case models.PipelineRunStatusCancelled:
+			emitPipelineRunTerminalNotification(h.DB, &run, NotificationEventTypePipelineRunCancelled)
+		}
 		if run.AgentID > 0 {
 			updateAgentStatusByPipelineConcurrency(h.DB, run.AgentID)
 		}
@@ -2290,10 +2375,10 @@ func (h *PipelineHandler) GetPipelineRuns(c *gin.Context) {
 	var runs []models.PipelineRun
 	var total int64
 
-	h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipelineID).Count(&total)
+	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipelineID).Count(&total)
 
 	offset := (page - 1) * pageSize
-	h.DB.Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipelineID).Order("created_at DESC").Offset(offset).Limit(pageSize).Find(&runs)
+	regularPipelineRunsQuery(h.DB).Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipelineID).Order("created_at DESC").Offset(offset).Limit(pageSize).Find(&runs)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -2340,13 +2425,13 @@ func (h *PipelineHandler) GetPipelineStatistics(c *gin.Context) {
 	var totalRuns, successfulRuns, failedRuns int64
 	var avgDuration float64
 
-	h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipelineID).Count(&totalRuns)
-	h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND pipeline_id = ? AND status = ?", workspaceID, pipelineID, models.PipelineRunStatusSuccess).Count(&successfulRuns)
-	h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND pipeline_id = ? AND status = ?", workspaceID, pipelineID, models.PipelineRunStatusFailed).Count(&failedRuns)
+	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipelineID).Count(&totalRuns)
+	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ? AND pipeline_id = ? AND status = ?", workspaceID, pipelineID, models.PipelineRunStatusSuccess).Count(&successfulRuns)
+	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ? AND pipeline_id = ? AND status = ?", workspaceID, pipelineID, models.PipelineRunStatusFailed).Count(&failedRuns)
 
 	// 计算平均耗时
 	var totalDuration int64
-	h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND pipeline_id = ? AND duration > 0", workspaceID, pipelineID).Pluck("duration", &totalDuration)
+	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Select("COALESCE(SUM(duration), 0)").Where("workspace_id = ? AND pipeline_id = ? AND duration > 0", workspaceID, pipelineID).Scan(&totalDuration)
 	if totalRuns > 0 {
 		avgDuration = float64(totalDuration) / float64(totalRuns) / 60 // 转换为分钟
 	}

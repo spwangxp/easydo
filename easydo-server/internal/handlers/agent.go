@@ -192,6 +192,8 @@ func (h *AgentHandler) RegisterAgent(c *gin.Context) {
 	cpuCores := int(getInt(req, "cpu_cores"))
 	memoryTotal := int64(getFloat64(req, "memory_total"))
 	diskTotal := int64(getFloat64(req, "disk_total"))
+	baseInfo, _ := req["base_info"].(string)
+	baseInfoCollectedAt := getInt64(req, "base_info_collected_at")
 	token, _ := req["token"].(string)
 	workspaceID := uint64(getInt64(req, "workspace_id"))
 	scopeType, _ := req["scope_type"].(string)
@@ -213,7 +215,7 @@ func (h *AgentHandler) RegisterAgent(c *gin.Context) {
 		var existingAgent models.Agent
 		if err := h.DB.Where("token = ? AND registration_status = ?", token, models.AgentRegistrationStatusApproved).First(&existingAgent).Error; err == nil {
 			// 老agent重新注册，更新信息
-			h.DB.Model(&existingAgent).Updates(map[string]interface{}{
+			updates := map[string]interface{}{
 				"name":          name,
 				"host":          host,
 				"port":          port,
@@ -227,7 +229,12 @@ func (h *AgentHandler) RegisterAgent(c *gin.Context) {
 				"memory_total":  memoryTotal,
 				"disk_total":    diskTotal,
 				"last_heart_at": time.Now().Unix(),
-			})
+			}
+			if baseInfo != "" {
+				updates["base_info"] = baseInfo
+				updates["base_info_collected_at"] = baseInfoCollectedAt
+			}
+			h.DB.Model(&existingAgent).Updates(updates)
 
 			c.JSON(http.StatusOK, gin.H{
 				"code":    200,
@@ -248,25 +255,27 @@ func (h *AgentHandler) RegisterAgent(c *gin.Context) {
 	registerKey, _ := generateToken()
 
 	agent := &models.Agent{
-		Name:               name,
-		Host:               host,
-		Port:               port,
-		Token:              "",
-		RegisterKey:        registerKey,
-		Status:             models.AgentStatusOffline,
-		RegistrationStatus: models.AgentRegistrationStatusPending,
-		Labels:             labels,
-		Tags:               tags,
-		OS:                 os,
-		Arch:               arch,
-		Hostname:           hostname,
-		IPAddress:          ipAddress,
-		CPUCores:           cpuCores,
-		MemoryTotal:        memoryTotal,
-		DiskTotal:          diskTotal,
-		ScopeType:          scopeType,
-		WorkspaceID:        workspaceID,
-		LastHeartAt:        time.Now().Unix(),
+		Name:                name,
+		Host:                host,
+		Port:                port,
+		Token:               "",
+		RegisterKey:         registerKey,
+		Status:              models.AgentStatusOffline,
+		RegistrationStatus:  models.AgentRegistrationStatusPending,
+		Labels:              labels,
+		Tags:                tags,
+		OS:                  os,
+		Arch:                arch,
+		Hostname:            hostname,
+		IPAddress:           ipAddress,
+		CPUCores:            cpuCores,
+		MemoryTotal:         memoryTotal,
+		DiskTotal:           diskTotal,
+		BaseInfo:            baseInfo,
+		BaseInfoCollectedAt: baseInfoCollectedAt,
+		ScopeType:           scopeType,
+		WorkspaceID:         workspaceID,
+		LastHeartAt:         time.Now().Unix(),
 	}
 
 	if err := h.DB.Create(agent).Error; err != nil {
@@ -1058,6 +1067,7 @@ func (h *AgentHandler) ApproveAgent(c *gin.Context) {
 		"approved_by":         approvedBy,
 		"approved_remark":     req.Remark,
 	})
+	emitAgentLifecycleNotification(h.DB, &agent, NotificationEventTypeAgentApproved, approvedBy, "执行器已批准", "执行器审批已通过并已下发令牌")
 	updateAgentStatusByPipelineConcurrency(h.DB, agent.ID)
 	go NewPipelineHandler().scheduleQueuedPipelineRuns(h.DB)
 
@@ -1112,6 +1122,7 @@ func (h *AgentHandler) RejectAgent(c *gin.Context) {
 		"approved_by":         approvedBy,
 		"approved_remark":     req.Remark,
 	})
+	emitAgentLifecycleNotification(h.DB, &agent, NotificationEventTypeAgentRejected, approvedBy, "执行器已拒绝", "执行器注册申请已被拒绝")
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
@@ -1203,6 +1214,7 @@ func (h *AgentHandler) RemoveAgent(c *gin.Context) {
 		"token":               "",
 		"status":              models.AgentStatusOffline,
 	})
+	emitAgentLifecycleNotification(h.DB, &agent, NotificationEventTypeAgentRemoved, c.GetUint64("user_id"), "执行器已移除", "执行器已被移除，需要重新注册审批")
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,

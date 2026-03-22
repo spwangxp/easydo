@@ -29,6 +29,11 @@
   --bg-sidebar: #{$bg-sidebar};
   --bg-card: #{$bg-card};
   --bg-elevated: #{$bg-elevated};
+  --terminal-bg: #{$terminal-bg};
+  --terminal-bg-alt: #{$terminal-bg-alt};
+  --terminal-fg: #{$terminal-fg};
+  --terminal-muted: #{$terminal-muted};
+  --terminal-selection: #{$terminal-selection};
 
   --border-color: #{$border-color};
   --border-color-light: #{$border-color-light};
@@ -142,6 +147,11 @@
   --bg-sidebar: #{$dark-bg-sidebar};
   --bg-card: #{$dark-bg-card};
   --bg-elevated: #{$dark-bg-elevated};
+  --terminal-bg: #{$dark-terminal-bg};
+  --terminal-bg-alt: #{$dark-terminal-bg-alt};
+  --terminal-fg: #{$dark-terminal-fg};
+  --terminal-muted: #{$dark-terminal-muted};
+  --terminal-selection: #{$dark-terminal-selection};
 
   --border-color: #{$dark-border-color};
   --border-color-light: #{$dark-border-color-light};

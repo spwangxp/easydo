@@ -1,16 +1,17 @@
 package task
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"easydo-agent/internal/system"
 	"github.com/sirupsen/logrus"
 )
 
@@ -21,10 +22,26 @@ type TaskParams struct {
 	NodeID        string
 	TaskType      string
 	Name          string
+	Params        map[string]interface{}
 	Script        string
 	WorkDir       string
 	EnvVars       map[string]string
 	Timeout       int
+}
+
+func ParseStructuredParamsJSON(raw string) map[string]interface{} {
+	if raw == "" {
+		return nil
+	}
+
+	var params map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &params); err != nil {
+		return nil
+	}
+	if len(params) == 0 {
+		return nil
+	}
+	return params
 }
 
 // LogCallback is called for each log line
@@ -43,8 +60,68 @@ type Result struct {
 type Executor struct {
 	log         *logrus.Logger
 	workspace   *WorkspaceManager
+	runtime     system.RuntimeCapabilities
 	logCallback LogCallback
 	mu          sync.RWMutex
+}
+
+type outputCaptureWriter struct {
+	executor *Executor
+	buf      *bytes.Buffer
+	pending  bytes.Buffer
+	level    string
+	source   string
+	lineNum  int
+}
+
+func (w *outputCaptureWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if _, err := w.buf.Write(p); err != nil {
+		return 0, err
+	}
+	if _, err := w.pending.Write(p); err != nil {
+		return 0, err
+	}
+	w.emitPendingLines(false)
+	return len(p), nil
+}
+
+func (w *outputCaptureWriter) Flush() {
+	w.emitPendingLines(true)
+}
+
+func (w *outputCaptureWriter) emitPendingLines(flushRemainder bool) {
+	for {
+		data := w.pending.Bytes()
+		newlineIndex := bytes.IndexByte(data, '\n')
+		if newlineIndex < 0 {
+			if flushRemainder && len(data) > 0 {
+				w.emitLine(data)
+				w.pending.Reset()
+			}
+			return
+		}
+		w.emitLine(data[:newlineIndex])
+		w.pending.Next(newlineIndex + 1)
+	}
+}
+
+func (w *outputCaptureWriter) emitLine(raw []byte) {
+	line := raw
+	if len(line) > 0 && line[len(line)-1] == '\r' {
+		line = line[:len(line)-1]
+	}
+	w.lineNum++
+	if w.executor == nil {
+		return
+	}
+	w.executor.mu.RLock()
+	if w.executor.logCallback != nil {
+		w.executor.logCallback(w.level, string(line), w.source, w.lineNum)
+	}
+	w.executor.mu.RUnlock()
 }
 
 func stringifyEnvValue(value interface{}) string {
@@ -84,10 +161,11 @@ func ParseEnvVarsJSON(raw string) map[string]string {
 }
 
 // NewExecutor creates a new task executor
-func NewExecutor(log *logrus.Logger, basePath string) *Executor {
+func NewExecutor(log *logrus.Logger, basePath string, runtimeCaps system.RuntimeCapabilities) *Executor {
 	return &Executor{
 		log:       log,
 		workspace: NewWorkspaceManager(basePath, log),
+		runtime:   runtimeCaps,
 	}
 }
 
@@ -111,6 +189,25 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams) *Result {
 		e.log.Warnf("Failed to create workspace: %v", err)
 	}
 
+	// Determine working directory: use workspacePath as default, fallback to params.WorkDir if provided
+	workDir := workspacePath
+	if params.WorkDir != "" {
+		// If WorkDir is a relative path, join it with workspacePath
+		if !filepath.IsAbs(params.WorkDir) {
+			workDir = filepath.Join(workspacePath, params.WorkDir)
+		} else {
+			workDir = params.WorkDir
+		}
+	}
+
+	if params.TaskType == "docker" {
+		dockerScript, err := e.dockerBuildScript(params, workDir)
+		if err != nil {
+			return &Result{ExitCode: -1, Error: err.Error(), Duration: time.Since(startTime)}
+		}
+		params.Script = dockerScript
+	}
+
 	// Write task file
 	if workspacePath != "" {
 		_, err = e.workspace.WriteTaskFile(workspacePath, params.TaskID, params.Script)
@@ -122,17 +219,6 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams) *Result {
 	// Prepare execution context with timeout
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(params.Timeout)*time.Second)
 	defer cancel()
-
-	// Determine working directory: use workspacePath as default, fallback to params.WorkDir if provided
-	workDir := workspacePath
-	if params.WorkDir != "" {
-		// If WorkDir is a relative path, join it with workspacePath
-		if !filepath.IsAbs(params.WorkDir) {
-			workDir = filepath.Join(workspacePath, params.WorkDir)
-		} else {
-			workDir = params.WorkDir
-		}
-	}
 
 	e.log.Infof("Task %d executing in workspace: %s", params.TaskID, workDir)
 
@@ -161,10 +247,24 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams) *Result {
 
 // runScript executes a shell script and captures output
 func (e *Executor) runScript(ctx context.Context, script, workDir string, envVars map[string]string) (string, string, error) {
-	// Build environment variables
-	env := []string{}
+	env := append([]string{}, os.Environ()...)
+	seen := make(map[string]int, len(env))
+	for i, item := range env {
+		for j := 0; j < len(item); j++ {
+			if item[j] == '=' {
+				seen[item[:j]] = i
+				break
+			}
+		}
+	}
 	for k, v := range envVars {
-		env = append(env, fmt.Sprintf("%s=%s", k, v))
+		entry := fmt.Sprintf("%s=%s", k, v)
+		if idx, ok := seen[k]; ok {
+			env[idx] = entry
+			continue
+		}
+		seen[k] = len(env)
+		env = append(env, entry)
 	}
 
 	// Determine shell command
@@ -178,69 +278,23 @@ func (e *Executor) runScript(ctx context.Context, script, workDir string, envVar
 	cmd.Env = env
 	cmd.Dir = workDir
 
-	// Create pipes for output
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", "", fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return "", "", fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
+	var stdoutBuf, stderrBuf bytes.Buffer
+	stdoutWriter := &outputCaptureWriter{executor: e, buf: &stdoutBuf, level: "info", source: "stdout"}
+	stderrWriter := &outputCaptureWriter{executor: e, buf: &stderrBuf, level: "error", source: "stderr"}
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
 
 	// Start command
 	if err := cmd.Start(); err != nil {
 		return "", "", fmt.Errorf("failed to start command: %w", err)
 	}
 
-	// Read output concurrently
-	var stdoutBuf, stderrBuf bytes.Buffer
-	var wg sync.WaitGroup
-
-	wg.Add(2)
-	go e.readOutput(ctx, stdoutPipe, &stdoutBuf, "info", "stdout", &wg)
-	go e.readOutput(ctx, stderrPipe, &stderrBuf, "error", "stderr", &wg)
-
 	// Wait for command to complete
-	err = cmd.Wait()
-
-	wg.Wait()
+	err := cmd.Wait()
+	stdoutWriter.Flush()
+	stderrWriter.Flush()
 
 	return stdoutBuf.String(), stderrBuf.String(), err
-}
-
-// readOutput reads output from a pipe and reports logs
-func (e *Executor) readOutput(ctx context.Context, pipe interface{}, buf *bytes.Buffer, level, source string, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	var scanner *bufio.Scanner
-
-	if p, ok := pipe.(interface{ Read([]byte) (int, error) }); ok {
-		scanner = bufio.NewScanner(p)
-	} else {
-		return
-	}
-
-	lineNum := 0
-	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			line := scanner.Text()
-			buf.WriteString(line)
-			buf.WriteString("\n")
-			lineNum++
-
-			// Report log via callback
-			e.mu.RLock()
-			if e.logCallback != nil {
-				e.logCallback(level, line, source, lineNum)
-			}
-			e.mu.RUnlock()
-		}
-	}
 }
 
 // ParseParams parses task parameters from the task object
@@ -266,6 +320,9 @@ func ParseParams(task interface{}) (*TaskParams, error) {
 	}
 	if name, ok := taskMap["name"].(string); ok {
 		params.Name = name
+	}
+	if rawParams, ok := taskMap["params"].(string); ok && rawParams != "" {
+		params.Params = ParseStructuredParamsJSON(rawParams)
 	}
 	if script, ok := taskMap["script"].(string); ok {
 		params.Script = script

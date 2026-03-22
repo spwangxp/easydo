@@ -372,7 +372,7 @@ eval "$CMD"`,
 		ExecMode:      taskExecModeAgent,
 		ShellTemplate: `set -e
 HOST={{ shq (def "" (dig "host")) }}
-USER_NAME={{ shq (def "root" (dig "user")) }}
+USER_NAME={{ shq (def "" (dig "user")) }}
 PORT={{ toInt (def 22 (dig "port")) }}
 REMOTE_SCRIPT={{ shq (def "" (dig "script")) }}
 if [ -z "$HOST" ]; then
@@ -384,6 +384,10 @@ if [ -z "$REMOTE_SCRIPT" ]; then
   exit 1
 fi
 SSH_KEY_FILE=""
+AUTH_TYPE="${EASYDO_CRED_SSH_AUTH_TYPE:-}"
+AUTH_USER="${EASYDO_CRED_SSH_AUTH_USERNAME:-}"
+AUTH_PASSWORD="${EASYDO_CRED_SSH_AUTH_PASSWORD:-}"
+AUTH_PASSWORD_B64=""
 REMOTE_SCRIPT_LOG={{ logq (def "" (dig "script")) }}
 cleanup() {
   if [ -n "$SSH_KEY_FILE" ] && [ -f "$SSH_KEY_FILE" ]; then
@@ -392,32 +396,45 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [ -n "$AUTH_PASSWORD" ] && command -v base64 >/dev/null 2>&1; then
+  AUTH_PASSWORD_B64="$(printf '%s' "$AUTH_PASSWORD" | base64 | tr -d '\n')"
+fi
+
+if [ -z "$USER_NAME" ] && [ -n "$AUTH_USER" ]; then
+  USER_NAME="$AUTH_USER"
+fi
+if [ -z "$USER_NAME" ]; then
+  USER_NAME="root"
+fi
+
 easydo_step "执行 SSH 远程任务"
 easydo_info "target=$USER_NAME@$HOST port=$PORT"
 easydo_cmd "ssh -p $PORT $USER_NAME@$HOST <remote-script>"
 easydo_cmd "$REMOTE_SCRIPT_LOG"
 
-if [ -n "${EASYDO_CRED_SSH_AUTH_PRIVATE_KEY:-}" ]; then
+if [ "$AUTH_TYPE" = "SSH_KEY" ] && [ -n "${EASYDO_CRED_SSH_AUTH_PRIVATE_KEY:-}" ]; then
   SSH_KEY_FILE="$(mktemp)"
   printf '%s\n' "${EASYDO_CRED_SSH_AUTH_PRIVATE_KEY}" > "$SSH_KEY_FILE"
   chmod 600 "$SSH_KEY_FILE"
-  ssh -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no -p "$PORT" "$USER_NAME@$HOST" "$REMOTE_SCRIPT"
+  printf '%s\n' "$REMOTE_SCRIPT" | ssh -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no -p "$PORT" "$USER_NAME@$HOST" EASYDO_REMOTE_AUTH_PASSWORD_B64="$AUTH_PASSWORD_B64" sh -s
+elif [ "$AUTH_TYPE" = "PASSWORD" ] && [ -n "$AUTH_PASSWORD" ]; then
+  if ! command -v sshpass >/dev/null 2>&1; then
+    echo "sshpass is required for PASSWORD ssh_auth" >&2
+    exit 1
+  fi
+  printf '%s\n' "$REMOTE_SCRIPT" | SSHPASS="$AUTH_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no -p "$PORT" "$USER_NAME@$HOST" EASYDO_REMOTE_AUTH_PASSWORD_B64="$AUTH_PASSWORD_B64" sh -s
 else
-  ssh -o StrictHostKeyChecking=no -p "$PORT" "$USER_NAME@$HOST" "$REMOTE_SCRIPT"
+  printf '%s\n' "$REMOTE_SCRIPT" | ssh -o StrictHostKeyChecking=no -p "$PORT" "$USER_NAME@$HOST" EASYDO_REMOTE_AUTH_PASSWORD_B64="$AUTH_PASSWORD_B64" sh -s
 fi`,
 		CredentialSlots: []taskCredentialSlot{
 			{
 				Slot:     "ssh_auth",
 				Label:    "SSH 认证",
 				Required: false,
+				// VM 资源可以绑定密码或 SSH 密钥，因此 ssh_auth 需要同时接受两种凭据类型。
 				AllowedTypes: []models.CredentialType{
 					models.TypeSSHKey,
-				},
-				AllowedCategories: []models.CredentialCategory{
-					models.CategoryCustom,
-					models.CategoryAWS,
-					models.CategoryGCP,
-					models.CategoryAzure,
+					models.TypePassword,
 				},
 			},
 		},
@@ -521,18 +538,44 @@ fi`,
 		Category:      "deploy",
 		ExecMode:      taskExecModeAgent,
 		ShellTemplate: `set -e
+HOST={{ shq (def "" (dig "host")) }}
+USER_NAME={{ shq (def "" (dig "user")) }}
+PORT={{ toInt (def 22 (dig "port")) }}
+RUNTIME_HINT={{ shq (def "auto" (dig "runtime")) }}
 IMAGE_NAME={{ shq (def "" (dig "image_name")) }}
 IMAGE_TAG={{ shq (def "latest" (dig "image_tag")) }}
 CONTAINER_NAME={{ shq (def "" (dig "container_name")) }}
-RUN_ARGS={{ def "" (dig "run_args") }}
+RUN_ARGS={{ shq (def "" (dig "run_args")) }}
 REGISTRY={{ shq (def "" (dig "registry")) }}
+if [ -z "$HOST" ]; then
+  echo "host is required" >&2
+  exit 1
+fi
 if [ -z "$IMAGE_NAME" ]; then
   echo "image_name is required" >&2
   exit 1
 fi
 
+SSH_KEY_FILE=""
+AUTH_TYPE="${EASYDO_CRED_SSH_AUTH_TYPE:-}"
+AUTH_USER="${EASYDO_CRED_SSH_AUTH_USERNAME:-}"
+AUTH_PASSWORD="${EASYDO_CRED_SSH_AUTH_PASSWORD:-}"
 RUN_ARGS_LOG={{ logq (def "" (dig "run_args")) }}
+cleanup() {
+  if [ -n "$SSH_KEY_FILE" ] && [ -f "$SSH_KEY_FILE" ]; then
+    rm -f "$SSH_KEY_FILE"
+  fi
+}
+trap cleanup EXIT
+if [ -z "$USER_NAME" ] && [ -n "$AUTH_USER" ]; then
+  USER_NAME="$AUTH_USER"
+fi
+if [ -z "$USER_NAME" ]; then
+  USER_NAME="root"
+fi
+
 easydo_step "执行 Docker 运行任务"
+easydo_info "target=$USER_NAME@$HOST port=$PORT runtime_hint=$RUNTIME_HINT"
 
 if [ -z "$REGISTRY" ]; then
   FIRST_PART="${IMAGE_NAME%%/*}"
@@ -553,21 +596,107 @@ fi
 
 REGISTRY_USER="${EASYDO_CRED_REGISTRY_AUTH_USERNAME:-}"
 REGISTRY_PASSWORD="${EASYDO_CRED_REGISTRY_AUTH_PASSWORD:-${EASYDO_CRED_REGISTRY_AUTH_TOKEN:-}}"
-if [ -n "$REGISTRY" ] && [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then
-  easydo_cmd "docker login $REGISTRY --username $REGISTRY_USER --password-stdin"
-  echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
+easydo_cmd "ssh -p $PORT $USER_NAME@$HOST <remote-docker-run>"
+if ! command -v base64 >/dev/null 2>&1; then
+  echo "base64 is required for docker-run argument transport" >&2
+  exit 1
 fi
-
+encode_easydo_b64() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
+EASYDO_REMOTE_RUNTIME_HINT_B64="$(encode_easydo_b64 "$RUNTIME_HINT")"
+EASYDO_REMOTE_IMAGE_REF_B64="$(encode_easydo_b64 "$IMAGE_REF")"
+EASYDO_REMOTE_CONTAINER_NAME_B64="$(encode_easydo_b64 "$CONTAINER_NAME")"
+EASYDO_REMOTE_RUN_ARGS_B64="$(encode_easydo_b64 "$RUN_ARGS")"
+EASYDO_REMOTE_REGISTRY_B64="$(encode_easydo_b64 "$REGISTRY")"
+EASYDO_REMOTE_REGISTRY_USER_B64="$(encode_easydo_b64 "$REGISTRY_USER")"
+EASYDO_REMOTE_REGISTRY_PASSWORD_B64="$(encode_easydo_b64 "$REGISTRY_PASSWORD")"
+REMOTE_SCRIPT='set -e
+decode_easydo_b64() {
+  if [ -z "$1" ]; then
+    printf ""
+    return 0
+  fi
+  printf "%s" "$1" | base64 -d
+}
+RUNTIME_HINT="$(decode_easydo_b64 "${EASYDO_REMOTE_RUNTIME_HINT_B64:-}")"
+IMAGE_REF="$(decode_easydo_b64 "${EASYDO_REMOTE_IMAGE_REF_B64:-}")"
+CONTAINER_NAME="$(decode_easydo_b64 "${EASYDO_REMOTE_CONTAINER_NAME_B64:-}")"
+RUN_ARGS="$(decode_easydo_b64 "${EASYDO_REMOTE_RUN_ARGS_B64:-}")"
+REGISTRY="$(decode_easydo_b64 "${EASYDO_REMOTE_REGISTRY_B64:-}")"
+REGISTRY_USER="$(decode_easydo_b64 "${EASYDO_REMOTE_REGISTRY_USER_B64:-}")"
+REGISTRY_PASSWORD="$(decode_easydo_b64 "${EASYDO_REMOTE_REGISTRY_PASSWORD_B64:-}")"
+RUNTIME_BIN="$RUNTIME_HINT"
+if [ -z "$RUNTIME_BIN" ] || [ "$RUNTIME_BIN" = "auto" ]; then
+  RUNTIME_BIN=""
+  for candidate in docker podman nerdctl; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      RUNTIME_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "$RUNTIME_BIN" ]; then
+  echo "no remote container runtime found (docker/podman/nerdctl)" >&2
+  exit 1
+fi
+if [ -n "$REGISTRY" ] && [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then
+  printf "%s\n" "$REGISTRY_PASSWORD" | "$RUNTIME_BIN" login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
+fi
+CONTAINER_REF=""
 if [ -n "$CONTAINER_NAME" ]; then
-  easydo_cmd "docker rm -f $CONTAINER_NAME"
-  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-  easydo_cmd "docker run -d --name $CONTAINER_NAME $RUN_ARGS_LOG $IMAGE_REF"
-  docker run -d --name "$CONTAINER_NAME" $RUN_ARGS "$IMAGE_REF"
+	if "$RUNTIME_BIN" inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+	  echo "container name already exists: $CONTAINER_NAME" >&2
+	  exit 1
+	fi
+	if [ -n "$RUN_ARGS" ]; then
+	  CONTAINER_REF=$(eval "\"$RUNTIME_BIN\" run -d --name \"$CONTAINER_NAME\" $RUN_ARGS \"$IMAGE_REF\"")
+	else
+	  CONTAINER_REF=$("$RUNTIME_BIN" run -d --name "$CONTAINER_NAME" "$IMAGE_REF")
+  fi
 else
-  easydo_cmd "docker run --rm $RUN_ARGS_LOG $IMAGE_REF"
-  docker run --rm $RUN_ARGS "$IMAGE_REF"
+  if [ -n "$RUN_ARGS" ]; then
+    CONTAINER_REF=$(eval "\"$RUNTIME_BIN\" run -d $RUN_ARGS \"$IMAGE_REF\"")
+  else
+    CONTAINER_REF=$("$RUNTIME_BIN" run -d "$IMAGE_REF")
+  fi
+fi
+CONTAINER_REF="$(printf '%s' "$CONTAINER_REF" | tr -d '\r\n')"
+if [ -z "$CONTAINER_REF" ]; then
+  echo "docker-run did not return a container reference" >&2
+  exit 1
+fi
+sleep 10
+STATUS="$($RUNTIME_BIN inspect "$CONTAINER_REF" --format {{ shq "{{.State.Status}}" }} 2>/dev/null || true)"
+RESTART_COUNT="$($RUNTIME_BIN inspect "$CONTAINER_REF" --format {{ shq "{{.RestartCount}}" }} 2>/dev/null || true)"
+if [ -z "$STATUS" ] || [ "$STATUS" != "running" ] || [ "$RESTART_COUNT" != "0" ]; then
+  echo "docker-run container did not stay running for 10s (status=$STATUS restart_count=$RESTART_COUNT ref=$CONTAINER_REF)" >&2
+  exit 1
+fi'
+if [ "$AUTH_TYPE" = "SSH_KEY" ] && [ -n "${EASYDO_CRED_SSH_AUTH_PRIVATE_KEY:-}" ]; then
+  SSH_KEY_FILE="$(mktemp)"
+  printf '%s\n' "${EASYDO_CRED_SSH_AUTH_PRIVATE_KEY}" > "$SSH_KEY_FILE"
+  chmod 600 "$SSH_KEY_FILE"
+  printf '%s\n' "$REMOTE_SCRIPT" | ssh -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no -p "$PORT" "$USER_NAME@$HOST" EASYDO_REMOTE_RUNTIME_HINT_B64="$EASYDO_REMOTE_RUNTIME_HINT_B64" EASYDO_REMOTE_IMAGE_REF_B64="$EASYDO_REMOTE_IMAGE_REF_B64" EASYDO_REMOTE_CONTAINER_NAME_B64="$EASYDO_REMOTE_CONTAINER_NAME_B64" EASYDO_REMOTE_RUN_ARGS_B64="$EASYDO_REMOTE_RUN_ARGS_B64" EASYDO_REMOTE_REGISTRY_B64="$EASYDO_REMOTE_REGISTRY_B64" EASYDO_REMOTE_REGISTRY_USER_B64="$EASYDO_REMOTE_REGISTRY_USER_B64" EASYDO_REMOTE_REGISTRY_PASSWORD_B64="$EASYDO_REMOTE_REGISTRY_PASSWORD_B64" sh -s
+elif [ "$AUTH_TYPE" = "PASSWORD" ] && [ -n "$AUTH_PASSWORD" ]; then
+  if ! command -v sshpass >/dev/null 2>&1; then
+    echo "sshpass is required for PASSWORD ssh_auth" >&2
+    exit 1
+  fi
+  printf '%s\n' "$REMOTE_SCRIPT" | SSHPASS="$AUTH_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no -p "$PORT" "$USER_NAME@$HOST" EASYDO_REMOTE_RUNTIME_HINT_B64="$EASYDO_REMOTE_RUNTIME_HINT_B64" EASYDO_REMOTE_IMAGE_REF_B64="$EASYDO_REMOTE_IMAGE_REF_B64" EASYDO_REMOTE_CONTAINER_NAME_B64="$EASYDO_REMOTE_CONTAINER_NAME_B64" EASYDO_REMOTE_RUN_ARGS_B64="$EASYDO_REMOTE_RUN_ARGS_B64" EASYDO_REMOTE_REGISTRY_B64="$EASYDO_REMOTE_REGISTRY_B64" EASYDO_REMOTE_REGISTRY_USER_B64="$EASYDO_REMOTE_REGISTRY_USER_B64" EASYDO_REMOTE_REGISTRY_PASSWORD_B64="$EASYDO_REMOTE_REGISTRY_PASSWORD_B64" sh -s
+else
+  printf '%s\n' "$REMOTE_SCRIPT" | ssh -o StrictHostKeyChecking=no -p "$PORT" "$USER_NAME@$HOST" EASYDO_REMOTE_RUNTIME_HINT_B64="$EASYDO_REMOTE_RUNTIME_HINT_B64" EASYDO_REMOTE_IMAGE_REF_B64="$EASYDO_REMOTE_IMAGE_REF_B64" EASYDO_REMOTE_CONTAINER_NAME_B64="$EASYDO_REMOTE_CONTAINER_NAME_B64" EASYDO_REMOTE_RUN_ARGS_B64="$EASYDO_REMOTE_RUN_ARGS_B64" EASYDO_REMOTE_REGISTRY_B64="$EASYDO_REMOTE_REGISTRY_B64" EASYDO_REMOTE_REGISTRY_USER_B64="$EASYDO_REMOTE_REGISTRY_USER_B64" EASYDO_REMOTE_REGISTRY_PASSWORD_B64="$EASYDO_REMOTE_REGISTRY_PASSWORD_B64" sh -s
 fi`,
 		CredentialSlots: []taskCredentialSlot{
+			{
+				Slot:     "ssh_auth",
+				Label:    "SSH 认证",
+				Required: false,
+				AllowedTypes: []models.CredentialType{
+					models.TypeSSHKey,
+					models.TypePassword,
+				},
+			},
 			{
 				Slot:     "registry_auth",
 				Label:    "镜像仓库认证",

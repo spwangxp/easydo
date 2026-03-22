@@ -274,6 +274,8 @@ func (h *WorkspaceHandler) UpdateMember(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "更新成员角色失败"})
 		return
 	}
+	member.Role = newRole
+	emitWorkspaceMemberRoleUpdatedNotification(h.DB, workspaceID, &member, c.GetUint64("user_id"))
 	_ = middleware.BumpWorkspaceAuthVersion(c.Request.Context(), workspaceID)
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "更新成功"})
 }
@@ -299,6 +301,7 @@ func (h *WorkspaceHandler) RemoveMember(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "移除成员失败"})
 		return
 	}
+	emitWorkspaceMemberRemovedNotification(h.DB, workspaceID, &member, c.GetUint64("user_id"))
 	_ = middleware.BumpWorkspaceAuthVersion(c.Request.Context(), workspaceID)
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "移除成功"})
 }
@@ -320,7 +323,7 @@ func (h *WorkspaceHandler) ListInvitations(c *gin.Context) {
 
 func (h *WorkspaceHandler) CreateInvitation(c *gin.Context) {
 	workspaceID, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-	_, actorRole, ok := h.getWorkspaceForUser(c, workspaceID)
+	workspace, actorRole, ok := h.getWorkspaceForUser(c, workspaceID)
 	if !ok || !middleware.WorkspaceRoleAtLeast(actorRole, models.WorkspaceRoleMaintainer) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权邀请成员"})
 		return
@@ -361,6 +364,7 @@ func (h *WorkspaceHandler) CreateInvitation(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "创建邀请失败"})
 		return
 	}
+	emitWorkspaceInvitationCreatedNotification(h.DB, workspace, &invitation, actorID)
 	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"id": invitation.ID, "token": token, "expires_at": invitation.ExpiresAt}})
 }
 
@@ -383,11 +387,19 @@ func (h *WorkspaceHandler) RevokeInvitation(c *gin.Context) {
 
 func (h *WorkspaceHandler) AcceptInvitation(c *gin.Context) {
 	userID := c.GetUint64("user_id")
-	tokenHash := sha256.Sum256([]byte(strings.TrimSpace(c.Param("token"))))
 	var invitation models.WorkspaceInvitation
-	if err := h.DB.Where("token_hash = ?", hex.EncodeToString(tokenHash[:])).First(&invitation).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "邀请不存在"})
-		return
+	lookup := strings.TrimSpace(c.Param("token"))
+	if invitationID, err := strconv.ParseUint(lookup, 10, 64); err == nil && invitationID > 0 {
+		if err := h.DB.First(&invitation, invitationID).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "邀请不存在"})
+			return
+		}
+	} else {
+		tokenHash := sha256.Sum256([]byte(lookup))
+		if err := h.DB.Where("token_hash = ?", hex.EncodeToString(tokenHash[:])).First(&invitation).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "邀请不存在"})
+			return
+		}
 	}
 	if invitation.Status != models.WorkspaceInvitationStatusPending || invitation.ExpiresAt < time.Now().Unix() {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "邀请已失效"})
@@ -438,6 +450,10 @@ func (h *WorkspaceHandler) AcceptInvitation(c *gin.Context) {
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "接受邀请失败"})
 		return
+	}
+	var workspace models.Workspace
+	if err := h.DB.First(&workspace, invitation.WorkspaceID).Error; err == nil {
+		emitWorkspaceInvitationAcceptedNotification(h.DB, &workspace, &invitation, &user)
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "加入工作空间成功", "data": gin.H{"workspace_id": invitation.WorkspaceID}})
 }

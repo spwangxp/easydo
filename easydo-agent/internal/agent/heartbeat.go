@@ -27,10 +27,10 @@ type Heartbeat struct {
 
 // HeartbeatResponse represents the heartbeat response
 type HeartbeatResponse struct {
-	Status           string `json:"status"`
-	ServerTime       int64  `json:"server_time"`
-	PendingTasks     int    `json:"pending_tasks"`
-	HeartbeatInterval int   `json:"heartbeat_interval"`
+	Status            string `json:"status"`
+	ServerTime        int64  `json:"server_time"`
+	PendingTasks      int    `json:"pending_tasks"`
+	HeartbeatInterval int    `json:"heartbeat_interval"`
 }
 
 // NewHeartbeat creates a new heartbeat handler

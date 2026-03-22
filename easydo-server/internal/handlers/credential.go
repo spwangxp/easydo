@@ -3,8 +3,10 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"easydo-server/internal/models"
@@ -22,25 +24,27 @@ func NewCredentialHandler() *CredentialHandler {
 }
 
 type CreateCredentialRequest struct {
-	Name        string                    `json:"name" binding:"required,min=1,max=128"`
-	Description string                    `json:"description" binding:"max=512"`
-	Type        models.CredentialType     `json:"type" binding:"required"`
-	Category    models.CredentialCategory `json:"category"`
-	Payload     map[string]interface{}    `json:"payload" binding:"required"`
-	Scope       models.CredentialScope    `json:"scope"`
-	ProjectID   uint64                    `json:"project_id"`
-	ExpiresAt   *int64                    `json:"expires_at"`
+	Name        string                     `json:"name" binding:"required,min=1,max=128"`
+	Description string                     `json:"description" binding:"max=512"`
+	Type        models.CredentialType      `json:"type" binding:"required"`
+	Category    models.CredentialCategory  `json:"category"`
+	Payload     map[string]interface{}     `json:"payload" binding:"required"`
+	LockState   models.CredentialLockState `json:"lock_state"`
+	Scope       models.CredentialScope     `json:"scope"`
+	ProjectID   uint64                     `json:"project_id"`
+	ExpiresAt   *int64                     `json:"expires_at"`
 }
 
 type UpdateCredentialRequest struct {
-	Name        string                    `json:"name"`
-	Description string                    `json:"description"`
-	Category    models.CredentialCategory `json:"category"`
-	Payload     map[string]interface{}    `json:"payload"`
-	Scope       models.CredentialScope    `json:"scope"`
-	ProjectID   uint64                    `json:"project_id"`
-	Status      models.CredentialStatus   `json:"status"`
-	ExpiresAt   *int64                    `json:"expires_at"`
+	Name        string                     `json:"name"`
+	Description string                     `json:"description"`
+	Category    models.CredentialCategory  `json:"category"`
+	Payload     map[string]interface{}     `json:"payload"`
+	LockState   models.CredentialLockState `json:"lock_state"`
+	Scope       models.CredentialScope     `json:"scope"`
+	ProjectID   uint64                     `json:"project_id"`
+	Status      models.CredentialStatus    `json:"status"`
+	ExpiresAt   *int64                     `json:"expires_at"`
 }
 
 type CredentialImpactReference struct {
@@ -88,8 +92,17 @@ func (h *CredentialHandler) CreateCredential(c *gin.Context) {
 		return
 	}
 	req.Type = models.NormalizeType(req.Type)
+	if err := models.ValidateCredentialPayload(req.Type, req.Category, req.Payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+		return
+	}
 	if !validateExpiry(req.ExpiresAt) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Expiration time must be in the future"})
+		return
+	}
+	lockState, err := normalizeCredentialLockState(req.LockState, models.CredentialLockStateLocked, false)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 		return
 	}
 	ownerID, role := getRequestUser(c)
@@ -118,6 +131,7 @@ func (h *CredentialHandler) CreateCredential(c *gin.Context) {
 		ProjectID:        projectID,
 		OwnerID:          ownerID,
 		EncryptedPayload: encryptedPayload,
+		LockState:        lockState,
 		Status:           models.CredentialStatusActive,
 		ExpiresAt:        req.ExpiresAt,
 	}
@@ -126,7 +140,7 @@ func (h *CredentialHandler) CreateCredential(c *gin.Context) {
 		return
 	}
 	h.writeCredentialEvent(credential.ID, models.CredentialEventCreated, "user", ownerID, "success", gin.H{"scope": scope, "project_id": projectID})
-	c.JSON(http.StatusOK, gin.H{"code": 200, "data": credential.ToResponse()})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": h.buildCredentialResponse(&credential, ownerID, role)})
 }
 
 func (h *CredentialHandler) ListCredentials(c *gin.Context) {
@@ -142,8 +156,11 @@ func (h *CredentialHandler) ListCredentials(c *gin.Context) {
 	if page < 1 {
 		page = 1
 	}
-	if size < 1 || size > 100 {
+	if size < 1 {
 		size = 10
+	}
+	if size > 1000 {
+		size = 1000
 	}
 	query := applyCredentialReadScope(models.DB.Model(&models.Credential{}), ownerID, role).Where("workspace_id = ?", workspaceID)
 	if credentialType != "" {
@@ -175,7 +192,7 @@ func (h *CredentialHandler) ListCredentials(c *gin.Context) {
 	query.Order("created_at DESC").Offset(offset).Limit(size).Find(&credentials)
 	responses := make([]models.CredentialResponse, len(credentials))
 	for i := range credentials {
-		responses[i] = credentials[i].ToResponse()
+		responses[i] = h.buildCredentialResponse(&credentials[i], ownerID, role)
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"list": responses, "total": total, "page": page, "size": size}})
 }
@@ -185,7 +202,8 @@ func (h *CredentialHandler) GetCredential(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"code": 200, "data": credential.ToResponse()})
+	ownerID, role := getRequestUser(c)
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": h.buildCredentialResponse(credential, ownerID, role)})
 }
 
 func (h *CredentialHandler) GetCredentialPayload(c *gin.Context) {
@@ -215,6 +233,11 @@ func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
 	}
 	if !validateExpiry(req.ExpiresAt) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Expiration time must be in the future"})
+		return
+	}
+	lockState, err := normalizeCredentialLockState(req.LockState, "", true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 		return
 	}
 	if req.Name != "" && len(req.Name) > 128 {
@@ -252,12 +275,23 @@ func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
 		}
 		updates["status"] = req.Status
 	}
+	if lockState != "" {
+		updates["lock_state"] = lockState
+	}
 	if req.ExpiresAt != nil {
 		updates["expires_at"] = req.ExpiresAt
 	}
 	if req.Payload != nil {
 		if len(req.Payload) == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "payload cannot be empty"})
+			return
+		}
+		effectiveCategory := credential.Category
+		if req.Category != "" {
+			effectiveCategory = req.Category
+		}
+		if err := models.ValidateCredentialPayload(credential.Type, effectiveCategory, req.Payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
 		}
 		encryptedPayload, err := h.encryptionService.EncryptCredentialData(req.Payload)
@@ -267,8 +301,20 @@ func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
 		}
 		updates["encrypted_payload"] = encryptedPayload
 	}
+	if req.Category != "" && req.Payload == nil {
+		payload, err := h.encryptionService.DecryptCredentialData(credential.EncryptedPayload)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Failed to decrypt credential data"})
+			return
+		}
+		if err := models.ValidateCredentialPayload(credential.Type, req.Category, payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
+	}
 	if len(updates) == 0 {
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": credential.ToResponse()})
+		ownerID, role := getRequestUser(c)
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": h.buildCredentialResponse(credential, ownerID, role)})
 		return
 	}
 	if err := models.DB.Model(&credential).Updates(updates).Error; err != nil {
@@ -277,6 +323,7 @@ func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
 	}
 	models.DB.First(&credential, credential.ID)
 	ownerID, _ := getRequestUser(c)
+	_, role := getRequestUser(c)
 	eventAction := models.CredentialEventUpdated
 	if credential.Status == models.CredentialStatusInactive {
 		eventAction = models.CredentialEventDisabled
@@ -284,7 +331,7 @@ func (h *CredentialHandler) UpdateCredential(c *gin.Context) {
 		eventAction = models.CredentialEventRevoked
 	}
 	h.writeCredentialEvent(credential.ID, eventAction, "user", ownerID, "success", updates)
-	c.JSON(http.StatusOK, gin.H{"code": 200, "data": credential.ToResponse()})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": h.buildCredentialResponse(credential, ownerID, role)})
 }
 
 func (h *CredentialHandler) DeleteCredential(c *gin.Context) {
@@ -378,7 +425,7 @@ func (h *CredentialHandler) BatchCredentialImpact(c *gin.Context) {
 }
 
 func (h *CredentialHandler) VerifyCredential(c *gin.Context) {
-	credential, ok := h.authorizedCredential(c, false)
+	credential, ok := h.authorizedVerifiableCredential(c)
 	if !ok {
 		return
 	}
@@ -474,7 +521,7 @@ func (h *CredentialHandler) BatchDeleteCredentials(c *gin.Context) {
 		return
 	}
 	for i := range credentials {
-		if !canWriteCredential(models.DB, &credentials[i], ownerID, role) {
+		if !canDeleteCredential(models.DB, &credentials[i], ownerID, role) {
 			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "Some credentials are not writable"})
 			return
 		}
@@ -506,9 +553,9 @@ func (h *CredentialHandler) authorizedCredential(c *gin.Context, includeValue bo
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "Access denied"})
 		return nil, false
 	}
-	allowed := canReadCredential(models.DB, &credential, ownerID, role)
+	allowed := canReadCredentialMetadata(models.DB, &credential, ownerID, role)
 	if includeValue {
-		allowed = canReadCredentialValue(models.DB, &credential, ownerID, role)
+		allowed = canViewCredentialSecret(models.DB, &credential, ownerID, role)
 	}
 	if !allowed {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "Access denied"})
@@ -530,7 +577,27 @@ func (h *CredentialHandler) authorizedWritableCredential(c *gin.Context) (*model
 		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "Credential not found"})
 		return nil, false
 	}
-	if credential.WorkspaceID != workspaceID || !canWriteCredential(models.DB, &credential, ownerID, role) {
+	if credential.WorkspaceID != workspaceID || !canEditCredential(models.DB, &credential, ownerID, role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "Access denied"})
+		return nil, false
+	}
+	return &credential, true
+}
+
+func (h *CredentialHandler) authorizedVerifiableCredential(c *gin.Context) (*models.Credential, bool) {
+	ownerID, role := getRequestUser(c)
+	workspaceID, _ := getRequestWorkspace(c)
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Invalid credential ID"})
+		return nil, false
+	}
+	var credential models.Credential
+	if err := models.DB.First(&credential, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "Credential not found"})
+		return nil, false
+	}
+	if credential.WorkspaceID != workspaceID || !canVerifyCredential(models.DB, &credential, ownerID, role) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "Access denied"})
 		return nil, false
 	}
@@ -564,8 +631,89 @@ func normalizeCredentialScope(db *gorm.DB, scope models.CredentialScope, project
 	}
 }
 
+func normalizeCredentialLockState(state models.CredentialLockState, defaultState models.CredentialLockState, allowEmpty bool) (models.CredentialLockState, error) {
+	if state == "" {
+		if allowEmpty {
+			return "", nil
+		}
+		return defaultState, nil
+	}
+	switch state {
+	case models.CredentialLockStateLocked, models.CredentialLockStateUnlocked:
+		return state, nil
+	default:
+		return "", errors.New("Invalid credential lock_state")
+	}
+}
+
+func (h *CredentialHandler) buildCredentialResponse(credential *models.Credential, userID uint64, role string) models.CredentialResponse {
+	response := credential.ToResponse()
+	response.CanViewSecret = canViewCredentialSecret(models.DB, credential, userID, role)
+	response.CanEdit = canEditCredential(models.DB, credential, userID, role)
+	response.CanVerify = canVerifyCredential(models.DB, credential, userID, role)
+	response.CanDelete = canDeleteCredential(models.DB, credential, userID, role)
+	response.CanToggleLock = canToggleCredentialLock(models.DB, credential, userID, role)
+
+	payload, err := h.encryptionService.DecryptCredentialData(credential.EncryptedPayload)
+	if err == nil {
+		response.Summary = buildCredentialSummary(credential, payload)
+	}
+	return response
+}
+
+func buildCredentialSummary(credential *models.Credential, payload map[string]interface{}) models.CredentialSummary {
+	if credential == nil || len(payload) == 0 {
+		return models.CredentialSummary{}
+	}
+	summary := models.CredentialSummary{
+		Username: firstPayloadValue(payload, "username"),
+		KeyType:  firstPayloadValue(payload, "key_type"),
+	}
+	if credential.Category == models.CategoryKubernetes {
+		summary.AuthMode = firstPayloadValue(payload, "auth_mode")
+		if summary.AuthMode == "" {
+			summary.AuthMode = inferKubernetesAuthMode(payload)
+		}
+		summary.Server = firstPayloadValue(payload, "server", "api_server")
+		summary.Namespace = firstPayloadValue(payload, "namespace")
+	}
+	return summary
+}
+
+func inferKubernetesAuthMode(payload map[string]interface{}) string {
+	if firstPayloadValue(payload, "kubeconfig") != "" {
+		return "kubeconfig"
+	}
+	if firstPayloadValue(payload, "server", "api_server") != "" {
+		if firstPayloadValue(payload, "token", "access_token") != "" {
+			return "server_token"
+		}
+		if firstPayloadValue(payload, "cert_pem") != "" && firstPayloadValue(payload, "key_pem") != "" {
+			return "server_cert"
+		}
+	}
+	return ""
+}
+
+func firstPayloadValue(payload map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		value, ok := payload[key]
+		if !ok || value == nil {
+			continue
+		}
+		text := strings.TrimSpace(fmt.Sprintf("%v", value))
+		if text != "" && text != "<nil>" {
+			return text
+		}
+	}
+	return ""
+}
+
 func deleteCredentialWithRelations(db *gorm.DB, credentialID uint64) error {
 	if err := db.Where("credential_id = ?", credentialID).Delete(&models.PipelineCredentialRef{}).Error; err != nil {
+		return err
+	}
+	if err := db.Where("credential_id = ?", credentialID).Delete(&models.ResourceCredentialBinding{}).Error; err != nil {
 		return err
 	}
 	if err := db.Where("credential_id = ?", credentialID).Delete(&models.CredentialEvent{}).Error; err != nil {

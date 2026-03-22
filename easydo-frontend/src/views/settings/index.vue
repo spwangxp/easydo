@@ -81,37 +81,72 @@
         <!-- 通知设置 -->
         <div v-if="activeMenu === 'notifications'" class="settings-section">
           <h2 class="section-title">通知设置</h2>
-          
-          <div class="notification-group">
-            <h4>邮件通知</h4>
-            
-            <div class="notification-item">
-              <div class="notification-info">
-                <span class="notification-label">构建失败通知</span>
-                <span class="notification-desc">流水线构建失败时发送邮件</span>
-              </div>
-              <el-switch v-model="notifications.buildFailed" />
+          <div v-if="!userStore.currentWorkspaceId" class="empty-hint">请先在顶部切换到一个工作空间</div>
+
+          <div v-else v-loading="notificationPreferencesLoading" class="notification-group">
+            <div class="notification-scope-caption">
+              当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}。未单独配置的通知项会继承个人中心中的默认通知偏好。
             </div>
-            
-            <div class="notification-item">
-              <div class="notification-info">
-                <span class="notification-label">构建成功通知</span>
-                <span class="notification-desc">流水线构建成功时发送邮件</span>
-              </div>
-              <el-switch v-model="notifications.buildSuccess" />
+
+            <div class="notification-module-tabs">
+              <button
+                v-for="group in notificationEventGroups"
+                :key="group.value"
+                type="button"
+                class="module-tab"
+                :class="{ active: activeNotificationModule === group.value }"
+                @click="activeNotificationModule = group.value"
+              >
+                <span class="module-tab-label">{{ group.label }}</span>
+                <span class="module-tab-count">{{ group.events.length }} 个事件</span>
+              </button>
             </div>
-            
-            <div class="notification-item">
-              <div class="notification-info">
-                <span class="notification-label">发布通知</span>
-                <span class="notification-desc">发布任务完成时发送邮件</span>
+
+            <div v-if="currentNotificationGroup" class="notification-module-panel">
+              <div class="notification-family-header">
+                <span class="notification-family-label">{{ currentNotificationGroup.label }}</span>
+                <span class="notification-family-desc">{{ currentNotificationGroup.description }}</span>
+                <span v-if="currentNotificationGroup.supports_resource_scope" class="scope-hint">{{ currentNotificationGroup.resource_scope_label }}</span>
               </div>
-              <el-switch v-model="notifications.deployComplete" />
+
+              <div class="notification-grid-header">
+                <span></span>
+                <span
+                  v-for="channel in notificationChannels"
+                  :key="channel.value"
+                  class="notification-channel"
+                >
+                  {{ channel.label }}
+                </span>
+              </div>
+
+              <div
+                v-for="event in currentNotificationGroup.events"
+                :key="event.value"
+                class="notification-item"
+              >
+                <div class="notification-info">
+                  <span class="notification-label">{{ event.label }}</span>
+                  <span class="notification-desc">{{ event.description }}</span>
+                </div>
+
+                <div class="notification-switch">
+                  <el-switch
+                    :model-value="getWorkspacePreferenceEnabled(event.value, 'in_app')"
+                    :loading="isPreferenceSaving(userStore.currentWorkspaceId, event.value, 'in_app')"
+                    @change="(value) => updateWorkspacePreference(event, 'in_app', value)"
+                  />
+                </div>
+
+                <div class="notification-switch">
+                  <el-switch
+                    :model-value="getWorkspacePreferenceEnabled(event.value, 'email')"
+                    :loading="isPreferenceSaving(userStore.currentWorkspaceId, event.value, 'email')"
+                    @change="(value) => updateWorkspacePreference(event, 'email', value)"
+                  />
+                </div>
+              </div>
             </div>
-          </div>
-          
-          <div class="form-actions">
-            <el-button type="primary" @click="saveNotifications">保存设置</el-button>
           </div>
         </div>
         
@@ -328,6 +363,14 @@
 import { ref, reactive, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useUserStore } from '@/stores/user'
+import {
+  NOTIFICATION_CHANNELS,
+  NOTIFICATION_EVENT_GROUPS,
+  listNotificationPreferences,
+  resolveNotificationPreferenceEnabled,
+  upsertNotificationPreference,
+  upsertNotificationPreferenceInList
+} from '@/api/notification'
 import { createWorkspace, createWorkspaceInvitation, getWorkspaceInvitations, getWorkspaceList, getWorkspaceMembers, removeWorkspaceMember, revokeWorkspaceInvitation, updateWorkspaceMember } from '@/api/workspace'
 import { createUser } from '@/api/user'
 import { 
@@ -356,6 +399,17 @@ const createUserLoading = ref(false)
 const createWorkspaceDialogVisible = ref(false)
 const createWorkspaceLoading = ref(false)
 const workspaceOptions = ref([])
+const notificationEventGroups = computed(() => {
+  return NOTIFICATION_EVENT_GROUPS.map(group => ({
+    ...group,
+    events: group.events.map(event => ({ ...event, family: group.value }))
+  }))
+})
+const notificationChannels = NOTIFICATION_CHANNELS
+const notificationPreferences = ref([])
+const notificationPreferencesLoading = ref(false)
+const notificationSavingKeys = ref([])
+const activeNotificationModule = ref(NOTIFICATION_EVENT_GROUPS[0]?.value || '')
 const inviteForm = reactive({
   email: '',
   role: 'viewer'
@@ -388,12 +442,6 @@ const settings = reactive({
   systemName: 'EasyDo',
   theme: 'light',
   twoFactorEnabled: false
-})
-
-const notifications = reactive({
-  buildFailed: true,
-  buildSuccess: false,
-  deployComplete: true
 })
 
 const showPasswordDialog = ref(false)
@@ -458,8 +506,86 @@ const saveSettings = () => {
   ElMessage.success('当前阶段未实现基础设置保存')
 }
 
-const saveNotifications = () => {
-  ElMessage.success('当前阶段未实现通知设置保存')
+const getPreferenceSavingKey = (workspaceId, eventType, channel) => {
+  return `${workspaceId ?? 'global'}:${eventType}:${channel}`
+}
+
+const setPreferenceSaving = (savingKey, isSaving) => {
+  if (isSaving) {
+    if (!notificationSavingKeys.value.includes(savingKey)) {
+      notificationSavingKeys.value = [...notificationSavingKeys.value, savingKey]
+    }
+    return
+  }
+  notificationSavingKeys.value = notificationSavingKeys.value.filter(item => item !== savingKey)
+}
+
+const isPreferenceSaving = (workspaceId, eventType, channel) => {
+  return notificationSavingKeys.value.includes(getPreferenceSavingKey(workspaceId, eventType, channel))
+}
+
+const currentNotificationGroup = computed(() => {
+  return notificationEventGroups.value.find(group => group.value === activeNotificationModule.value) || notificationEventGroups.value[0] || null
+})
+
+const getWorkspacePreferenceEnabled = (eventType, channel) => {
+  return resolveNotificationPreferenceEnabled(notificationPreferences.value, {
+    eventType,
+    channel,
+    workspaceId: userStore.currentWorkspaceId || null,
+    fallbackToGlobal: true,
+    defaultEnabled: true
+  })
+}
+
+const loadNotificationPreferences = async () => {
+  if (!userStore.currentWorkspaceId) {
+    notificationPreferences.value = []
+    return
+  }
+
+  notificationPreferencesLoading.value = true
+  try {
+    const res = await listNotificationPreferences({ workspace_id: userStore.currentWorkspaceId })
+    if (res.code === 200) {
+      notificationPreferences.value = res.data?.list || []
+      return
+    }
+    ElMessage.error(res.message || '加载通知设置失败')
+  } catch (error) {
+    ElMessage.error('加载通知设置失败')
+  } finally {
+    notificationPreferencesLoading.value = false
+  }
+}
+
+const updateWorkspacePreference = async (event, channel, enabled) => {
+  if (!userStore.currentWorkspaceId) {
+    return
+  }
+
+  const workspaceId = Number(userStore.currentWorkspaceId)
+  const savingKey = getPreferenceSavingKey(workspaceId, event.value, channel)
+  setPreferenceSaving(savingKey, true)
+  try {
+    const res = await upsertNotificationPreference({
+      workspace_id: workspaceId,
+      family: event.family,
+      event_type: event.value,
+      channel,
+      enabled
+    })
+    if (res.code === 200) {
+      notificationPreferences.value = upsertNotificationPreferenceInList(notificationPreferences.value, res.data)
+      ElMessage.success('工作空间通知设置已更新')
+      return
+    }
+    ElMessage.error(res.message || '更新通知设置失败')
+  } catch (error) {
+    ElMessage.error('更新通知设置失败')
+  } finally {
+    setPreferenceSaving(savingKey, false)
+  }
 }
 
 const handleInviteSubmit = async () => {
@@ -471,7 +597,7 @@ const handleInviteSubmit = async () => {
   try {
     const res = await createWorkspaceInvitation(userStore.currentWorkspaceId, inviteForm)
     if (res.code === 200) {
-      inviteResultLink.value = `${window.location.origin}/workspace-invitations/${res.data.token}`
+    inviteResultLink.value = `${window.location.origin}/workspace-invitations/${res.data.id}`
       inviteResultVisible.value = true
       ElMessage.success('邀请已生成')
       inviteDialogVisible.value = false
@@ -662,6 +788,9 @@ const handleRevokeInvitation = async (row) => {
 watch(() => [activeMenu.value, userStore.currentWorkspaceId], async ([menu]) => {
   if (menu === 'users') {
     await loadWorkspaceManagementData()
+  }
+  if (menu === 'notifications') {
+    await loadNotificationPreferences()
   }
 }, { immediate: true })
 </script>
@@ -882,21 +1011,106 @@ watch(() => [activeMenu.value, userStore.currentWorkspaceId], async ([menu]) => 
       // ============================================
       .notification-group {
         margin-bottom: 28px;
-        
-        h4 {
-          font-size: 15px;
-          font-weight: 600;
-          color: var(--text-primary);
+
+        .notification-scope-caption {
+          margin-bottom: 18px;
+          font-size: 13px;
+          line-height: 1.6;
+          color: var(--text-muted);
+        }
+
+        .notification-grid-header,
+        .notification-item {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 120px 120px;
+          align-items: center;
+          gap: 16px;
+        }
+
+        .notification-module-tabs {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 12px;
           margin-bottom: 20px;
         }
-        
+
+        .module-tab {
+          border: 1px solid var(--border-color-light);
+          background: var(--bg-secondary);
+          border-radius: 12px;
+          padding: 14px 16px;
+          text-align: left;
+          cursor: pointer;
+
+          &.active {
+            border-color: var(--primary-color);
+            background: var(--primary-lighter);
+          }
+
+          .module-tab-label {
+            display: block;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+          }
+
+          .module-tab-count {
+            font-size: 12px;
+            color: var(--text-muted);
+          }
+        }
+
+        .notification-module-panel {
+          border: 1px solid var(--border-color-light);
+          border-radius: 16px;
+          padding: 20px;
+          background: var(--bg-secondary);
+        }
+
+        .notification-grid-header {
+          padding-bottom: 12px;
+          border-bottom: 1px solid var(--border-color-light);
+        }
+
+        .notification-family-header {
+          margin-bottom: 8px;
+
+          .notification-family-label {
+            display: block;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+          }
+
+          .notification-family-desc {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+          }
+
+          .scope-hint {
+            display: inline-flex;
+            font-size: 12px;
+            color: var(--primary-color);
+            background: var(--primary-lighter);
+            border-radius: 999px;
+            padding: 4px 10px;
+          }
+        }
+
+        .notification-channel {
+          text-align: center;
+          font-size: 12px;
+          font-weight: 500;
+          color: var(--text-muted);
+        }
+
         .notification-item {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
           padding: 18px 0;
           border-bottom: 1px solid var(--border-color-light);
-          
+           
           .notification-info {
             .notification-label {
               display: block;
@@ -911,7 +1125,12 @@ watch(() => [activeMenu.value, userStore.currentWorkspaceId], async ([menu]) => 
               color: var(--text-muted);
             }
           }
-          
+
+          .notification-switch {
+            display: flex;
+            justify-content: center;
+          }
+           
           :deep(.el-switch) {
             .el-switch__core {
               border-radius: 10px;

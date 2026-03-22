@@ -25,27 +25,17 @@ func TestValidateMultiReplicaRequirements_AllowsCompleteInternalSettings(t *test
 	}
 }
 
-func TestDatabaseStartupFlags_DefaultDisabled(t *testing.T) {
+func TestDatabaseStartupFlags_AreNoLongerConfigured(t *testing.T) {
+	t.Setenv("DB_AUTO_MIGRATE", "true")
+	t.Setenv("DB_SEED_TEST_DATA", "true")
+
 	Init()
 
-	if ShouldAutoMigrate() {
-		t.Fatal("expected auto migrate to be disabled by default")
+	if Config.IsSet("database.auto_migrate") {
+		t.Fatal("expected database.auto_migrate to be removed from configuration")
 	}
-	if ShouldSeedTestData() {
-		t.Fatal("expected seed test data to be disabled by default")
-	}
-}
-
-func TestDatabaseStartupFlags_AllowExplicitEnable(t *testing.T) {
-	Init()
-	Config.Set("database.auto_migrate", true)
-	Config.Set("database.seed_test_data", true)
-
-	if !ShouldAutoMigrate() {
-		t.Fatal("expected auto migrate to be enabled when configured")
-	}
-	if !ShouldSeedTestData() {
-		t.Fatal("expected seed test data to be enabled when configured")
+	if Config.IsSet("database.seed_test_data") {
+		t.Fatal("expected database.seed_test_data to be removed from configuration")
 	}
 }
 

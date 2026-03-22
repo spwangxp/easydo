@@ -18,11 +18,10 @@ func Init() {
 	Config.SetDefault("server.port", 8080)
 	Config.SetDefault("server.mode", "release")
 	Config.SetDefault("server.id", "")
+	Config.SetDefault("server.public_url", "")
 	Config.SetDefault("server.internal_url", "")
 	Config.SetDefault("server.internal_token", "")
 	Config.SetDefault("database.driver", "mysql")
-	Config.SetDefault("database.auto_migrate", false)
-	Config.SetDefault("database.seed_test_data", false)
 	Config.SetDefault("database.port", 3306)
 	Config.SetDefault("database.max_open_conns", 100)
 	Config.SetDefault("database.max_idle_conns", 10)
@@ -46,6 +45,13 @@ func Init() {
 	Config.SetDefault("object_storage.access_key", "")
 	Config.SetDefault("object_storage.secret_key", "")
 	Config.SetDefault("object_storage.region", "us-east-1")
+	Config.SetDefault("notification.smtp.enabled", false)
+	Config.SetDefault("notification.smtp.host", "")
+	Config.SetDefault("notification.smtp.port", 25)
+	Config.SetDefault("notification.smtp.username", "")
+	Config.SetDefault("notification.smtp.password", "")
+	Config.SetDefault("notification.smtp.from_address", "")
+	Config.SetDefault("notification.smtp.from_name", "EasyDo")
 
 	// 2. 从配置文件读取
 	Config.SetConfigName("config")
@@ -62,6 +68,7 @@ func Init() {
 	Config.BindEnv("server.port", "SERVER_PORT")
 	Config.BindEnv("server.mode", "SERVER_MODE")
 	Config.BindEnv("server.id", "SERVER_ID")
+	Config.BindEnv("server.public_url", "SERVER_PUBLIC_URL")
 	Config.BindEnv("server.internal_url", "SERVER_INTERNAL_URL")
 	Config.BindEnv("server.internal_token", "SERVER_INTERNAL_TOKEN")
 
@@ -70,8 +77,6 @@ func Init() {
 	Config.BindEnv("database.username", "DB_USERNAME")
 	Config.BindEnv("database.password", "DB_PASSWORD")
 	Config.BindEnv("database.name", "DB_NAME")
-	Config.BindEnv("database.auto_migrate", "DB_AUTO_MIGRATE")
-	Config.BindEnv("database.seed_test_data", "DB_SEED_TEST_DATA")
 
 	Config.BindEnv("redis.host", "REDIS_HOST")
 	Config.BindEnv("redis.port", "REDIS_PORT")
@@ -94,6 +99,13 @@ func Init() {
 	Config.BindEnv("object_storage.access_key", "OBJECT_STORAGE_ACCESS_KEY")
 	Config.BindEnv("object_storage.secret_key", "OBJECT_STORAGE_SECRET_KEY")
 	Config.BindEnv("object_storage.region", "OBJECT_STORAGE_REGION")
+	Config.BindEnv("notification.smtp.enabled", "NOTIFICATION_SMTP_ENABLED")
+	Config.BindEnv("notification.smtp.host", "NOTIFICATION_SMTP_HOST")
+	Config.BindEnv("notification.smtp.port", "NOTIFICATION_SMTP_PORT")
+	Config.BindEnv("notification.smtp.username", "NOTIFICATION_SMTP_USERNAME")
+	Config.BindEnv("notification.smtp.password", "NOTIFICATION_SMTP_PASSWORD")
+	Config.BindEnv("notification.smtp.from_address", "NOTIFICATION_SMTP_FROM_ADDRESS")
+	Config.BindEnv("notification.smtp.from_name", "NOTIFICATION_SMTP_FROM_NAME")
 }
 
 func GetDSN() string {
@@ -123,15 +135,6 @@ func ValidateMultiReplicaRequirements() error {
 	}
 	return nil
 }
-
-func ShouldAutoMigrate() bool {
-	return Config.GetBool("database.auto_migrate")
-}
-
-func ShouldSeedTestData() bool {
-	return Config.GetBool("database.seed_test_data")
-}
-
 func ServerMode() string {
 	switch strings.ToLower(strings.TrimSpace(Config.GetString("server.mode"))) {
 	case "debug", "release", "test":

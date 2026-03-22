@@ -339,6 +339,34 @@
                   :max="param.max"
                   @change="updateNode(selectedNode)"
                 />
+                <el-checkbox-group
+                  v-else-if="param.type === 'checkbox_group'"
+                  v-model="selectedNode.params[param.key]"
+                  @change="updateNode(selectedNode)"
+                >
+                  <el-checkbox
+                    v-for="opt in param.options"
+                    :key="opt.value"
+                    :label="opt.value"
+                  >
+                    {{ opt.label }}
+                  </el-checkbox>
+                </el-checkbox-group>
+                <el-select
+                  v-else-if="param.type === 'resource_selector'"
+                  v-model="selectedNode.params[param.key]"
+                  filterable
+                  clearable
+                  :placeholder="param.placeholder || '选择资源'"
+                  @change="updateNode(selectedNode)"
+                >
+                  <el-option
+                    v-for="resource in getResourceOptions(param.resource_type)"
+                    :key="resource.id"
+                    :label="formatResourceOptionLabel(resource)"
+                    :value="resource.id"
+                  />
+                </el-select>
                 <CredentialSelector
                   v-else-if="param.type === 'credential_selector'"
                   v-model="selectedNode.params[param.key]"
@@ -477,6 +505,8 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import CredentialSelector from './components/CredentialSelector.vue'
+import { getResourceList } from '@/api/resource'
+import { getVisibleCredentialSlots } from './credentialSlots'
 import {
   ArrowDown,
   ArrowRight,
@@ -497,6 +527,7 @@ const route = useRoute()
 const pipelineId = computed(() => parseInt(route.params.id))
 const taskTypeDefinitions = ref({})
 const loadedCredentialBindingSnapshot = ref([])
+const availableResources = ref([])
 
 // 画布状态
 const canvasArea = ref(null)
@@ -653,7 +684,7 @@ const getNodeCredentialSlots = (type) => {
   if (!def || !Array.isArray(def.credential_slots)) {
     return []
   }
-  return def.credential_slots
+  return getVisibleCredentialSlots(normalized, def.credential_slots)
 }
 
 // 获取节点参数定义
@@ -687,6 +718,10 @@ const getNodeParams = (type) => {
       { key: 'image_tag', label: '镜像标签', type: 'text', placeholder: 'latest' },
       { key: 'dockerfile', label: 'Dockerfile 路径', type: 'text', placeholder: './Dockerfile', value: './Dockerfile' },
       { key: 'context', label: '构建上下文', type: 'text', placeholder: '.', value: '.' },
+      { key: 'architectures', label: '目标架构', type: 'checkbox_group', options: [
+        { label: 'Linux AMD64 (x86_64)', value: 'linux/amd64' },
+        { label: 'Linux ARM64', value: 'linux/arm64' }
+      ], value: ['linux/amd64', 'linux/arm64'] },
       { key: 'push', label: '构建后推送', type: 'boolean', value: true },
       { key: 'registry', label: '仓库地址', type: 'text', placeholder: 'registry.example.com' },
       { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 60, value: 600 }
@@ -734,6 +769,14 @@ const getNodeParams = (type) => {
       { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 600 }
     ],
     'docker-run': [
+      { key: 'target_resource_id', label: '目标 VM 资源', type: 'resource_selector', resource_type: 'vm', placeholder: '选择资源管理中的 VM' },
+      { key: 'user', label: 'SSH 用户', type: 'text', placeholder: 'root' },
+      { key: 'runtime', label: '远程运行时', type: 'select', options: [
+        { label: '自动检测', value: 'auto' },
+        { label: 'Docker', value: 'docker' },
+        { label: 'Podman', value: 'podman' },
+        { label: 'nerdctl', value: 'nerdctl' }
+      ], value: 'auto' },
       { key: 'registry', label: '镜像仓库(可选)', type: 'text', placeholder: 'registry.example.com' },
       { key: 'image_name', label: '镜像名称', type: 'text', placeholder: 'myapp' },
       { key: 'image_tag', label: '镜像标签', type: 'text', placeholder: 'latest' },
@@ -789,6 +832,51 @@ const getNodeParams = (type) => {
     ]
   }
   return paramDefs[type] || []
+}
+
+const buildDefaultNodeParams = (type) => {
+  const params = {}
+  for (const param of getNodeParams(type)) {
+    if (typeof param.value === 'undefined') continue
+    params[param.key] = Array.isArray(param.value) ? [...param.value] : param.value
+  }
+  return params
+}
+
+const normalizeNodeParams = (type, params = {}) => {
+  const normalized = { ...params }
+  if (type === 'docker') {
+    const current = normalized.architectures
+    if (Array.isArray(current)) {
+      normalized.architectures = current.length > 0 ? current : ['linux/amd64', 'linux/arm64']
+    } else if (typeof current === 'string' && current.trim()) {
+      normalized.architectures = current.split(',').map(item => item.trim()).filter(Boolean)
+    } else {
+      normalized.architectures = ['linux/amd64', 'linux/arm64']
+    }
+  }
+  return normalized
+}
+
+const loadResources = async () => {
+  try {
+    const response = await getResourceList({ type: 'vm' })
+    if (response.code === 200 && Array.isArray(response.data)) {
+      availableResources.value = response.data
+    }
+  } catch (error) {
+    console.error('加载资源列表失败:', error)
+  }
+}
+
+const getResourceOptions = (resourceType) => {
+  if (!resourceType) return availableResources.value
+  return availableResources.value.filter(item => item.type === resourceType)
+}
+
+const formatResourceOptionLabel = (resource) => {
+  if (!resource) return ''
+  return `${resource.name} (${resource.endpoint || resource.type || 'resource'})`
 }
 
 // 获取连接路径 - 使用节点两侧锚点，确保终点箭头在节点外侧清晰可见
@@ -898,7 +986,7 @@ const handleDrop = (event) => {
       width: 200,
       inputs: (component.inputs || []).map(i => ({ ...i, connected: false })),
       outputs: (component.outputs || []).map(o => ({ ...o, connected: false })),
-      params: {},
+      params: buildDefaultNodeParams(component.type),
       conditions: [],
       predecessors: [],
       status: 'pending'
@@ -927,7 +1015,7 @@ const addNodeFromLibrary = (component) => {
     width: 200,
     inputs: component.inputs.map(i => ({ ...i, connected: false })),
     outputs: component.outputs.map(o => ({ ...o, connected: false })),
-    params: {},
+      params: buildDefaultNodeParams(component.type),
     conditions: [],
     predecessors: [],
     status: 'pending'
@@ -1915,7 +2003,7 @@ const loadPipeline = async () => {
               width: 200,
               inputs: getDefaultInputs(node.type),
               outputs: getDefaultOutputs(node.type),
-              params: params,
+              params: normalizeNodeParams(node.type, params),
               conditions: [],
               predecessors: [],
               status: 'pending'
@@ -2050,6 +2138,7 @@ const updateAllPortsConnectionStatus = () => {
 // 初始化
 onMounted(async () => {
   await loadTaskTypeDefinitions()
+  await loadResources()
 
   // 加载流水线配置
   await loadPipeline()

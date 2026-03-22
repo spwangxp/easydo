@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,14 +38,18 @@ var upgrader = websocket.Upgrader{
 // The distinction matters in multi-replica mode: a process may die at any time,
 // so anything stored here must be reconstructable from shared state.
 type WebSocketHandler struct {
-	agents          map[uint64]*wsClient
-	agentsMu        sync.RWMutex
-	frontends       map[string]map[string]*frontendClient // key: runID, value: map of clientID->client
-	frontendsMu     sync.RWMutex
-	runWatchers     map[uint64]*runWatcher
-	runWatchersMu   sync.Mutex
-	clientIDCounter uint64
-	clientIDMu      sync.Mutex
+	agents              map[uint64]*wsClient
+	agentsMu            sync.RWMutex
+	frontends           map[string]map[string]*frontendClient // key: runID, value: map of clientID->client
+	frontendsMu         sync.RWMutex
+	terminalFrontends   map[string]map[string]*terminalFrontendClient
+	terminalFrontendsMu sync.RWMutex
+	runWatchers         map[uint64]*runWatcher
+	runWatchersMu       sync.Mutex
+	clientIDCounter     uint64
+	clientIDMu          sync.Mutex
+	serverID            string
+	terminalRelayOnce   sync.Once
 }
 
 type runWatcher struct {
@@ -73,11 +78,14 @@ var (
 
 // NewWebSocketHandler creates a new WebSocket handler
 func NewWebSocketHandler() *WebSocketHandler {
-	return &WebSocketHandler{
-		agents:      make(map[uint64]*wsClient),
-		frontends:   make(map[string]map[string]*frontendClient),
-		runWatchers: make(map[uint64]*runWatcher),
+	handler := &WebSocketHandler{
+		agents:            make(map[uint64]*wsClient),
+		frontends:         make(map[string]map[string]*frontendClient),
+		terminalFrontends: make(map[string]map[string]*terminalFrontendClient),
+		runWatchers:       make(map[uint64]*runWatcher),
+		serverID:          utils.ServerID(),
 	}
+	return handler
 }
 
 // SharedWebSocketHandler returns the singleton realtime runtime for this server
@@ -120,6 +128,7 @@ type WebSocketMessage struct {
 
 // HandleAgentConnection handles new WebSocket connection requests from agents
 func (h *WebSocketHandler) HandleAgentConnection(c *gin.Context) {
+	h.startTerminalRelayConsumer()
 	agentIDStr := c.Query("agent_id")
 	token := c.Query("token")
 	registerKey := c.Query("register_key")
@@ -198,7 +207,7 @@ func (h *WebSocketHandler) HandleAgentConnection(c *gin.Context) {
 		conn:        conn,
 		agentID:     agentID,
 		sessionID:   uuid.NewString(),
-		serverID:    utils.ServerID(),
+		serverID:    h.serverID,
 		lastHeartAt: time.Now().Unix(),
 		cancel:      streamCancel,
 	}
@@ -341,6 +350,8 @@ func (h *WebSocketHandler) handleAgentMessages(client *wsClient, agent *models.A
 			h.handleAgentHeartbeat(client, agent, msg.Payload)
 		case "pull_task":
 			h.handleAgentPullTask(client, agent, msg.Payload)
+		case "terminal_session_ready", "terminal_session_output", "terminal_session_error", "terminal_session_closed":
+			h.handleTerminalAgentMessage(client, msg.Type, msg.Payload)
 		case "task_update_v2":
 			h.handleTaskUpdateV2(client, agent, msg.Payload)
 		case "task_log_chunk_v2":
@@ -733,9 +744,11 @@ func (h *WebSocketHandler) cleanupAgentConnection(client *wsClient, agent *model
 		if agent != nil && agent.ID != 0 {
 			agentRef = agent
 		}
-		models.DB.Model(agentRef).Where("id = ?", client.agentID).Updates(map[string]interface{}{
-			"status": models.AgentStatusOffline,
-		})
+		if models.DB != nil {
+			models.DB.Model(agentRef).Where("id = ?", client.agentID).Updates(map[string]interface{}{
+				"status": models.AgentStatusOffline,
+			})
+		}
 	}
 
 	client.mu.Lock()
@@ -957,11 +970,15 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 	task.Status = update.Status
 	task.ExitCode = update.ExitCode
 	task.ErrorMsg = update.ErrorMsg
+	if data, ok := updates["result_data"].(string); ok {
+		task.ResultData = data
+	}
 	task.StartTime = startTimeForFrontend
 	if v, ok := updates["end_time"].(int64); ok {
 		task.EndTime = v
 	}
 	task.Duration = durationForFrontend
+	_ = syncResourceOperationAuditRecords(models.DB, &task)
 	if !willRetry {
 		syncLiveTaskStateFromTask(&task, agent.Name)
 	}
@@ -1059,6 +1076,7 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 	}
 
 	h.checkAgentStatus(client.agentID)
+	h.persistResourceBaseInfoTaskResult(&task, update)
 
 	if isTerminal {
 		var completedTasks []models.AgentTask
@@ -1068,6 +1086,39 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 	}
 
 	h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, true, "", nil)
+}
+
+func (h *WebSocketHandler) persistResourceBaseInfoTaskResult(task *models.AgentTask, update taskUpdatePayloadV2) {
+	if task == nil {
+		return
+	}
+	payload, err := parseResourceBaseInfoTaskPayload(task.Params)
+	if err != nil {
+		return
+	}
+	updates := map[string]interface{}{}
+	if update.Status == models.TaskStatusExecuteSuccess {
+		baseInfoJSON, source, collectedAt, parseErr := buildResourceBaseInfoJSON(task, update.Result)
+		if parseErr != nil {
+			updates["base_info_status"] = "failed"
+			updates["base_info_last_error"] = parseErr.Error()
+		} else {
+			updates["base_info"] = baseInfoJSON
+			updates["base_info_status"] = "success"
+			updates["base_info_source"] = source
+			updates["base_info_last_error"] = ""
+			updates["base_info_collected_at"] = collectedAt
+		}
+	} else if models.IsTerminalTaskStatus(update.Status) {
+		updates["base_info_status"] = "failed"
+		updates["base_info_last_error"] = defaultIfEmpty(strings.TrimSpace(update.ErrorMsg), "基础资源采集失败")
+	}
+	if len(updates) == 0 {
+		return
+	}
+	_ = models.DB.Model(&models.Resource{}).
+		Where("id = ? AND workspace_id = ?", payload.Collection.ResourceID, task.WorkspaceID).
+		Updates(updates).Error
 }
 
 func (h *WebSocketHandler) handleTaskLogChunkV2(client *wsClient, agent *models.Agent, payload map[string]interface{}) {
@@ -1708,6 +1759,8 @@ func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
 		run.Duration = duration
 		run.ErrorMsg = firstErrorMsg
 		syncLiveRunStateFromRun(&run)
+		syncDeploymentStateFromRun(models.DB, &run)
+		emitPipelineRunTerminalNotification(models.DB, &run, NotificationEventTypePipelineRunFailed)
 		h.BroadcastRunStatus(runID, models.PipelineRunStatusFailed, firstErrorMsg, duration)
 		updateAgentStatusByPipelineConcurrency(models.DB, run.AgentID)
 		go NewPipelineHandler().scheduleQueuedPipelineRuns(models.DB)
@@ -1731,6 +1784,8 @@ func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
 		run.Duration = duration
 		run.ErrorMsg = ""
 		syncLiveRunStateFromRun(&run)
+		syncDeploymentStateFromRun(models.DB, &run)
+		emitPipelineRunTerminalNotification(models.DB, &run, NotificationEventTypePipelineRunSucceeded)
 		h.BroadcastRunStatus(runID, models.PipelineRunStatusSuccess, "", duration)
 		updateAgentStatusByPipelineConcurrency(models.DB, run.AgentID)
 		go NewPipelineHandler().scheduleQueuedPipelineRuns(models.DB)
@@ -1910,6 +1965,25 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 				continue
 			}
 			nodeConfig := normalizePipelineNodeConfig(node.Type, canonicalType, node.getNodeConfig())
+			if err := resolveResourceBackedNodeConfig(models.DB, canonicalType, run.WorkspaceID, nodeConfig); err != nil {
+				fmt.Printf("[ERROR] Failed to resolve resource-backed config for downstream node %s: %v\n", downstreamID, err)
+				failedTask := &models.AgentTask{
+					WorkspaceID:   run.WorkspaceID,
+					AgentID:       run.AgentID,
+					PipelineRunID: runID,
+					NodeID:        downstreamID,
+					TaskType:      canonicalType,
+					Name:          node.Name,
+					Status:        models.TaskStatusScheduleFailed,
+					ErrorMsg:      "资源解析失败: " + err.Error(),
+					StartTime:     time.Now().Unix(),
+					EndTime:       time.Now().Unix(),
+					Timeout:       node.Timeout,
+				}
+				_ = models.DB.Create(failedTask).Error
+				h.BroadcastTaskStatus(runID, failedTask.ID, failedTask.NodeID, failedTask.Status, 0, failedTask.ErrorMsg, "")
+				continue
+			}
 
 			timeout := node.Timeout
 			if timeout <= 0 {
@@ -2012,7 +2086,7 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 				AgentID:       run.AgentID,
 				PipelineRunID: runID,
 				NodeID:        downstreamID,
-				TaskType:      "shell",
+				TaskType:      canonicalType,
 				Name:          node.Name,
 				Params:        string(paramsJSON),
 				Script:        script,

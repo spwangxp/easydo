@@ -30,7 +30,7 @@ DC_MULTI       = docker-compose -f $(COMPOSE_FILE) -f $(MULTI_COMPOSE_FILE)
 .PHONY: all help build run stop down restart logs status ports
 .PHONY: build-all run-all down-all restart-all logs-all status-all
 .PHONY: clean-all prune-all rebuild-all debug-all
-.PHONY: multi-up multi-down multi-status multi-logs multi-rebuild
+.PHONY: multi-up multi-down multi-status multi-logs multi-rebuild multi-debug
 .PHONY: scale-server scale-server-up scale-server-down scale-agent scale-agent-up scale-agent-down
 
 all help:
@@ -52,6 +52,7 @@ all help:
 	@echo "   make multi-down     - 停止多副本栈"
 	@echo "   make multi-status   - 查看多副本栈状态"
 	@echo "   make multi-logs     - 查看多副本栈日志"
+	@echo "   make multi-debug    - 清理现场 + 删除旧镜像 + 重新编译并部署多副本栈"
 	@echo "   make scale-server-up   - 扩容后端到 2 副本"
 	@echo "   make scale-server-down - 缩容后端到 1 副本 (保留 LB)"
 	@echo "   make scale-agent-up    - 扩容 Agent 到 2 副本"
@@ -211,6 +212,16 @@ multi-rebuild:
 	@$(DC_MULTI) down --remove-orphans
 	@$(DC_MULTI) up --build -d
 	@echo "$(GREEN)✅ 多副本服务已重建!$(NC)"
+
+multi-debug:
+	@echo ""
+	@echo "$(RED)🔥 清理现场 + 删除旧镜像 + 重新编译并部署多副本栈...$(NC)"
+	@$(DC_MULTI) down -v --remove-orphans 2>/dev/null || true
+	@docker rmi easydo3-frontend:latest easydo3-server:latest easydo3-server2:latest easydo3-agent:latest easydo3-agent2:latest 2>/dev/null || true
+	@$(DC_MULTI) up -d --build
+	@echo ""
+	@echo "$(GREEN)✅ 多副本调试部署完成!$(NC)"
+	@$(DC_MULTI) ps
 
 scale-server:
 	@if [ "$(N)" = "2" ]; then \

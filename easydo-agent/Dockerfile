@@ -32,6 +32,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
   -ldflags "-X easydo-agent/internal/version.Commit=${GIT_COMMIT} -X easydo-agent/internal/version.CommitShort=${GIT_COMMIT_SHORT} -X easydo-agent/internal/version.Date=${GIT_DATE}" \
   -o easydo-agent ./cmd/main.go
 
+FROM moby/buildkit:rootless AS buildkit
+
 # Production image
 FROM alpine:3.19
 
@@ -39,11 +41,15 @@ FROM alpine:3.19
 RUN addgroup -g 1000 appgroup && \
     adduser -u 1000 -G appgroup -s /bin/sh -D appuser
 
-# Install git and docker-cli for agent operations
-RUN apk add --no-cache git docker-cli
+RUN apk add --no-cache git docker-cli openssh-client-default sshpass kubectl runc
+
+COPY --from=buildkit /usr/bin/buildctl /usr/local/bin/buildctl
+COPY --from=buildkit /usr/bin/buildkitd /usr/local/bin/buildkitd
+COPY --from=buildkit /usr/bin/rootlesskit /usr/local/bin/rootlesskit
 
 # Create directories for agent data
 RUN mkdir -p /data/agent && \
+    mkdir -p /home/appuser/.local/share/buildkit /home/appuser/.config/buildkit && \
     chown -R appuser:appgroup /data/agent
 
 # Copy binary from builder
@@ -54,8 +60,7 @@ COPY --from=builder /app/config.yaml /etc/easydo-agent/config.yaml
 
 WORKDIR /data/agent
 
-USER appuser
-USER appuser
+USER root
 
 # Expose health check port
 EXPOSE 8080

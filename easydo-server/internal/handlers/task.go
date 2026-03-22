@@ -643,6 +643,7 @@ func (h *TaskHandler) AgentReportTaskStatus(c *gin.Context) {
 		return
 	}
 	fmt.Printf("[DEBUG] Task %d status saved as: %s\n", task.ID, task.Status)
+	_ = syncResourceOperationAuditRecords(h.DB, &task)
 
 	// Create execution record
 	var taskDuration int

@@ -219,6 +219,93 @@ func TestAssignOneQueuedRun_UpdatesAgentStatusToBusyAfterAssignment(t *testing.T
 	}
 }
 
+func TestAssignOneQueuedRun_SyncsDeploymentRequestStatusToRunning(t *testing.T) {
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+
+	workspace := models.Workspace{Name: "deploy-workspace", Slug: "deploy-workspace", Status: models.WorkspaceStatusActive}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	agent := models.Agent{
+		Name:                   "scheduler-agent",
+		Host:                   "host",
+		Port:                   1,
+		Token:                  "token",
+		Status:                 models.AgentStatusOnline,
+		RegistrationStatus:     models.AgentRegistrationStatusApproved,
+		ScopeType:              models.AgentScopeWorkspace,
+		WorkspaceID:            workspace.ID,
+		MaxConcurrentPipelines: 1,
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID: workspace.ID,
+		PipelineID:  1,
+		BuildNumber: 1,
+		Status:      models.PipelineRunStatusQueued,
+		Config:      `{"version":"2.0","nodes":[],"edges":[]}`,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create queued run failed: %v", err)
+	}
+	if err := db.Create(&models.AgentTask{
+		WorkspaceID:   workspace.ID,
+		AgentID:       agent.ID,
+		PipelineRunID: run.ID,
+		NodeID:        "deploy",
+		TaskType:      "ssh",
+		Name:          "deploy",
+		Status:        models.TaskStatusQueued,
+	}).Error; err != nil {
+		t.Fatalf("create queued task failed: %v", err)
+	}
+	request := models.DeploymentRequest{
+		WorkspaceID:        workspace.ID,
+		TemplateID:         1,
+		TemplateVersionID:  1,
+		TemplateType:       models.StoreTemplateTypeLLM,
+		TargetResourceID:   1,
+		TargetResourceType: models.ResourceTypeVM,
+		Status:             models.DeploymentRequestStatusQueued,
+		PipelineRunID:      run.ID,
+		RequestedBy:        1,
+	}
+	if err := db.Create(&request).Error; err != nil {
+		t.Fatalf("create deployment request failed: %v", err)
+	}
+	if err := db.Create(&models.DeploymentRecord{
+		WorkspaceID:   workspace.ID,
+		RequestID:     request.ID,
+		PipelineRunID: run.ID,
+		Status:        models.DeploymentRequestStatusQueued,
+	}).Error; err != nil {
+		t.Fatalf("create deployment record failed: %v", err)
+	}
+
+	if _, ok := h.assignOneQueuedRun(db); !ok {
+		t.Fatalf("assignOneQueuedRun returned not ok")
+	}
+
+	var gotRequest models.DeploymentRequest
+	if err := db.First(&gotRequest, request.ID).Error; err != nil {
+		t.Fatalf("reload deployment request failed: %v", err)
+	}
+	if gotRequest.Status != models.DeploymentRequestStatusRunning {
+		t.Fatalf("deployment request status=%s, want=%s", gotRequest.Status, models.DeploymentRequestStatusRunning)
+	}
+	var gotRecord models.DeploymentRecord
+	if err := db.First(&gotRecord, 1).Error; err != nil {
+		t.Fatalf("reload deployment record failed: %v", err)
+	}
+	if gotRecord.Status != models.DeploymentRequestStatusRunning {
+		t.Fatalf("deployment record status=%s, want=%s", gotRecord.Status, models.DeploymentRequestStatusRunning)
+	}
+}
+
 func TestAssignOneQueuedRun_UpdatesExistingQueuedTasksToPendingAndSelectedAgent(t *testing.T) {
 	db := openHandlerTestDB(t)
 	h := &PipelineHandler{DB: db}
@@ -522,4 +609,80 @@ func TestAssignOneQueuedRun_BreaksCreatedAtTiesByID(t *testing.T) {
 	if runID != run1.ID {
 		t.Fatalf("assigned run=%d, want lower id run=%d when created_at ties", runID, run1.ID)
 	}
+}
+
+func TestRunQueuedPipelineSchedulerTick_SchedulesQueuedRunAndCreatesInitialTasks(t *testing.T) {
+	setupSchedulerRedis(t, "server-sweep")
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = originalDB
+	})
+
+	agent := models.Agent{
+		Name:                   "sweep-agent",
+		Host:                   "host",
+		Port:                   1,
+		Token:                  "token",
+		Status:                 models.AgentStatusOnline,
+		RegistrationStatus:     models.AgentRegistrationStatusApproved,
+		MaxConcurrentPipelines: 1,
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+
+	pipeline := models.Pipeline{
+		Name:        "sched-sweep",
+		Description: "scheduler sweep test",
+		OwnerID:     1,
+		Environment: "test",
+		Config: `{
+			"version":"2.0",
+			"nodes":[{"id":"n1","type":"sleep","name":"Sleep","config":{"seconds":1}}],
+			"edges":[]
+		}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	queuedRun := models.PipelineRun{
+		PipelineID:  pipeline.ID,
+		BuildNumber: 1,
+		Status:      models.PipelineRunStatusQueued,
+		Config:      pipeline.Config,
+	}
+	if err := db.Create(&queuedRun).Error; err != nil {
+		t.Fatalf("create queued run failed: %v", err)
+	}
+
+	scheduled := runQueuedPipelineSchedulerTick(db)
+	if scheduled != 1 {
+		t.Fatalf("scheduled=%d, want=1", scheduled)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var gotRun models.PipelineRun
+		var tasks []models.AgentTask
+		_ = db.First(&gotRun, queuedRun.ID).Error
+		_ = db.Where("pipeline_run_id = ?", queuedRun.ID).Find(&tasks).Error
+
+		if gotRun.Status == models.PipelineRunStatusRunning && len(tasks) > 0 {
+			if gotRun.AgentID != agent.ID {
+				t.Fatalf("run agent_id=%d, want=%d", gotRun.AgentID, agent.ID)
+			}
+			return
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	var gotRun models.PipelineRun
+	var tasks []models.AgentTask
+	_ = db.First(&gotRun, queuedRun.ID).Error
+	_ = db.Where("pipeline_run_id = ?", queuedRun.ID).Find(&tasks).Error
+	t.Fatalf("timeout waiting queued sweep, run_status=%s task_count=%d", gotRun.Status, len(tasks))
 }

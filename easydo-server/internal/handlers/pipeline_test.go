@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1009,5 +1010,451 @@ func TestBuildWebhookTLSConfig_InvalidCA(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid tls_ca_cert PEM") {
 		t.Fatalf("expected invalid tls_ca_cert PEM error, got %v", err)
+	}
+}
+
+func TestGetPipelineRuns_ExcludesDeploymentRequestRuns(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "pipeline-history-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{Name: "history-pipeline", WorkspaceID: workspace.ID, OwnerID: user.ID, Config: `{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo hi"}}],"edges":[]}`}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+	runs := []models.PipelineRun{
+		{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, Status: models.PipelineRunStatusSuccess, TriggerType: "manual", TriggerUser: "builder"},
+		{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 2, Status: models.PipelineRunStatusSuccess, TriggerType: "deployment_request", TriggerUser: "release-bot"},
+	}
+	for i := range runs {
+		if err := db.Create(&runs[i]).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/pipelines/1/history", nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}}
+	c.Set("workspace_id", workspace.ID)
+
+	h.GetPipelineRuns(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("release-bot")) {
+		t.Fatalf("expected deployment-triggered run excluded from pipeline history, got %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"total":1`)) {
+		t.Fatalf("expected total=1 after excluding deployment-triggered runs, got %s", w.Body.String())
+	}
+}
+
+func TestGetPipelineStatistics_ExcludesDeploymentRequestRuns(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "pipeline-stats-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{Name: "stats-pipeline", WorkspaceID: workspace.ID, OwnerID: user.ID, Config: `{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo hi"}}],"edges":[]}`}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+	runs := []models.PipelineRun{
+		{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, Status: models.PipelineRunStatusSuccess, TriggerType: "manual", Duration: 60},
+		{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 2, Status: models.PipelineRunStatusFailed, TriggerType: "deployment_request", Duration: 180},
+	}
+	for i := range runs {
+		if err := db.Create(&runs[i]).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/pipelines/1/statistics", nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}}
+	c.Set("workspace_id", workspace.ID)
+
+	h.GetPipelineStatistics(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"total_runs":1`)) {
+		t.Fatalf("expected deployment-triggered runs excluded from statistics total, got %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"failed_runs":0`)) {
+		t.Fatalf("expected deployment-triggered failures excluded from statistics, got %s", w.Body.String())
+	}
+}
+
+func TestGetPipelineList_ExcludesManagementHiddenPipelinesByDefault(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "pipeline-list-user", models.WorkspaceRoleDeveloper)
+
+	visible := models.Pipeline{
+		Name:        "visible-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Config:      `{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo visible"}}],"edges":[]}`,
+	}
+	hidden := models.Pipeline{
+		Name:             "publish-owned-pipeline",
+		WorkspaceID:      workspace.ID,
+		OwnerID:          user.ID,
+		Config:           `{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo hidden"}}],"edges":[]}`,
+		ManagementHidden: true,
+	}
+	if err := db.Create(&visible).Error; err != nil {
+		t.Fatalf("create visible pipeline failed: %v", err)
+	}
+	if err := db.Create(&hidden).Error; err != nil {
+		t.Fatalf("create hidden pipeline failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/pipelines", nil)
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+	c.Set("workspace_id", workspace.ID)
+
+	h.GetPipelineList(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("visible-pipeline")) {
+		t.Fatalf("expected visible pipeline in response, got %s", w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("publish-owned-pipeline")) {
+		t.Fatalf("expected management-hidden pipeline excluded from response, got %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"total":1`)) {
+		t.Fatalf("expected hidden pipeline excluded from total count, got %s", w.Body.String())
+	}
+}
+
+func TestGetPipelineList_IncludesManagementHiddenPipelinesWhenRequested(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "pipeline-hidden-user", models.WorkspaceRoleDeveloper)
+
+	visible := models.Pipeline{Name: "visible-pipeline", WorkspaceID: workspace.ID, OwnerID: user.ID, Config: `{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo visible"}}],"edges":[]}`}
+	hidden := models.Pipeline{Name: "publish-owned-pipeline", WorkspaceID: workspace.ID, OwnerID: user.ID, Config: `{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo hidden"}}],"edges":[]}`, ManagementHidden: true}
+	if err := db.Create(&visible).Error; err != nil {
+		t.Fatalf("create visible pipeline failed: %v", err)
+	}
+	if err := db.Create(&hidden).Error; err != nil {
+		t.Fatalf("create hidden pipeline failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/pipelines?include_publish_owned=true", nil)
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+	c.Set("workspace_id", workspace.ID)
+
+	h.GetPipelineList(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("publish-owned-pipeline")) {
+		t.Fatalf("expected management-hidden pipeline included when explicitly requested, got %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"total":2`)) {
+		t.Fatalf("expected hidden pipeline included in total count, got %s", w.Body.String())
+	}
+}
+
+func TestUpdatePipelineTriggers_PersistsDisabledFlagsAndBlankCron(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "trigger-settings-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{
+		Name:        "trigger-settings-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Environment: "development",
+		Config:      `{"version":"2.0","nodes":[{"id":"1","type":"in_app","name":"Notify","config":{"title":"done"}}],"edges":[]}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	body := bytes.NewBuffer(mustJSON(t, map[string]interface{}{
+		"provider":                            "gitlab",
+		"webhook_enabled":                     false,
+		"push_enabled":                        false,
+		"tag_enabled":                         false,
+		"schedule_enabled":                    false,
+		"cron_expression":                     "",
+		"timezone":                            "UTC",
+		"push_branch_filters":                 "main\nrelease/*",
+		"tag_filters":                         "v*",
+		"merge_request_source_branch_filters": "feature/*",
+		"merge_request_target_branch_filters": "main",
+	}))
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/pipelines/1/triggers", body)
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}}
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+	c.Set("workspace_id", workspace.ID)
+
+	h.UpdatePipelineTriggers(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var trigger models.PipelineTrigger
+	if err := db.Where("pipeline_id = ?", pipeline.ID).First(&trigger).Error; err != nil {
+		t.Fatalf("load trigger failed: %v", err)
+	}
+	if trigger.WebhookEnabled {
+		t.Fatalf("expected webhook_enabled=false to persist")
+	}
+	if trigger.PushEnabled {
+		t.Fatalf("expected push_enabled=false to persist")
+	}
+	if trigger.TagEnabled {
+		t.Fatalf("expected tag_enabled=false to persist")
+	}
+	if trigger.ScheduleEnabled {
+		t.Fatalf("expected schedule_enabled=false to persist")
+	}
+	if trigger.CronExpression != "" {
+		t.Fatalf("expected blank cron expression to persist, got %q", trigger.CronExpression)
+	}
+	if trigger.PushBranchFilters != "main\nrelease/*" {
+		t.Fatalf("expected push branch filters to persist, got %q", trigger.PushBranchFilters)
+	}
+	if trigger.TagFilters != "v*" {
+		t.Fatalf("expected tag filters to persist, got %q", trigger.TagFilters)
+	}
+	if trigger.MergeRequestSourceBranchFilters != "feature/*" {
+		t.Fatalf("expected mr source branch filters to persist, got %q", trigger.MergeRequestSourceBranchFilters)
+	}
+	if trigger.MergeRequestTargetBranchFilters != "main" {
+		t.Fatalf("expected mr target branch filters to persist, got %q", trigger.MergeRequestTargetBranchFilters)
+	}
+}
+
+func TestGetPipelineTriggers_ReturnsWorkspaceScopedConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "get-trigger-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{
+		Name:        "get-trigger-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Environment: "development",
+		Config:      `{"version":"2.0","nodes":[{"id":"1","type":"in_app","name":"Notify","config":{"title":"done"}}],"edges":[]}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+	trigger := models.PipelineTrigger{
+		WorkspaceID:                     workspace.ID,
+		PipelineID:                      pipeline.ID,
+		Provider:                        "gitlab",
+		WebhookEnabled:                  true,
+		PushEnabled:                     true,
+		TagEnabled:                      false,
+		ScheduleEnabled:                 true,
+		CronExpression:                  "0 0 * * *",
+		Timezone:                        "UTC",
+		SecretToken:                     "secret-token",
+		WebhookToken:                    "public-token",
+		PushBranchFilters:               "main\nrelease/*",
+		MergeRequestTargetBranchFilters: "main",
+	}
+	if err := db.Create(&trigger).Error; err != nil {
+		t.Fatalf("create trigger failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/pipelines/1/triggers", nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}}
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+	c.Set("workspace_id", workspace.ID)
+
+	h.GetPipelineTriggers(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"provider":"gitlab"`)) {
+		t.Fatalf("expected provider in response, got %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"push_enabled":true`)) {
+		t.Fatalf("expected push_enabled=true in response, got %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"cron_expression":"0 0 * * *"`)) {
+		t.Fatalf("expected cron expression in response, got %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"push_branch_filters":"main\nrelease/*"`)) {
+		t.Fatalf("expected push branch filters in response, got %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`/api/pipeline/run/webhook/public-token`)) {
+		t.Fatalf("expected vendor-neutral webhook url in response, got %s", w.Body.String())
+	}
+}
+
+func TestHandleGitLabWebhook_PushCreatesQueuedWebhookRun(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "webhook-trigger-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{
+		Name:        "webhook-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Environment: "development",
+		Config:      `{"version":"2.0","nodes":[{"id":"1","type":"git_clone","name":"Clone","config":{"repository":{"url":"https://example.com/repo.git","branch":"main"}}},{"id":"2","type":"shell","name":"Build","config":{"script":"echo build"}}],"edges":[{"from":"1","to":"2"}]}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+	trigger := models.PipelineTrigger{
+		WorkspaceID:       workspace.ID,
+		PipelineID:        pipeline.ID,
+		Provider:          "gitlab",
+		WebhookEnabled:    true,
+		PushEnabled:       true,
+		SecretToken:       "gitlab-secret",
+		WebhookToken:      "public-trigger-token",
+		Timezone:          "UTC",
+		PushBranchFilters: "main\nrelease/*",
+	}
+	if err := db.Create(&trigger).Error; err != nil {
+		t.Fatalf("create trigger failed: %v", err)
+	}
+
+	payload := mustJSON(t, map[string]interface{}{
+		"object_kind": "push",
+		"ref":         "refs/heads/main",
+		"project": map[string]interface{}{
+			"path_with_namespace": "group/project",
+		},
+		"user_username": "gitlab-user",
+		"checkout_sha":  "abc123def456",
+	})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/pipeline/run/webhook/public-trigger-token", bytes.NewReader(payload))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Gitlab-Token", "gitlab-secret")
+	c.Params = gin.Params{{Key: "token", Value: "public-trigger-token"}}
+
+	h.HandleGitLabWebhook(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var run models.PipelineRun
+	if err := db.Where("pipeline_id = ?", pipeline.ID).First(&run).Error; err != nil {
+		t.Fatalf("load pipeline run failed: %v", err)
+	}
+	if run.TriggerType != "webhook" {
+		t.Fatalf("trigger_type=%s, want webhook", run.TriggerType)
+	}
+	if run.Status != models.PipelineRunStatusQueued {
+		t.Fatalf("status=%s, want queued", run.Status)
+	}
+	if run.TriggerUser != "gitlab-user" {
+		t.Fatalf("trigger_user=%s, want gitlab-user", run.TriggerUser)
+	}
+	if !strings.Contains(run.TriggerSource, "gitlab:push") {
+		t.Fatalf("trigger_source=%s, want gitlab:push metadata", run.TriggerSource)
+	}
+
+	var configSnapshot PipelineConfig
+	if err := json.Unmarshal([]byte(run.Config), &configSnapshot); err != nil {
+		t.Fatalf("unmarshal run config failed: %v", err)
+	}
+	repo, _ := configSnapshot.Nodes[0].Config["repository"].(map[string]interface{})
+	if repo["branch"] != "main" {
+		t.Fatalf("branch override=%v, want main", repo["branch"])
+	}
+	if repo["commit_id"] != "abc123def456" {
+		t.Fatalf("commit override=%v, want abc123def456", repo["commit_id"])
+	}
+}
+
+func TestHandleGitLabWebhook_PushBranchFilterMissReturnsIgnored(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "webhook-filter-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{
+		Name:        "webhook-filter-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Environment: "development",
+		Config:      `{"version":"2.0","nodes":[{"id":"1","type":"git_clone","name":"Clone","config":{"repository":{"url":"https://example.com/repo.git","branch":"main"}}}],"edges":[]}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+	trigger := models.PipelineTrigger{
+		WorkspaceID:       workspace.ID,
+		PipelineID:        pipeline.ID,
+		Provider:          "gitlab",
+		WebhookEnabled:    true,
+		PushEnabled:       true,
+		SecretToken:       "gitlab-secret",
+		WebhookToken:      "public-trigger-token",
+		Timezone:          "UTC",
+		PushBranchFilters: "release/*",
+	}
+	if err := db.Create(&trigger).Error; err != nil {
+		t.Fatalf("create trigger failed: %v", err)
+	}
+
+	payload := mustJSON(t, map[string]interface{}{
+		"object_kind": "push",
+		"ref":         "refs/heads/main",
+		"project": map[string]interface{}{
+			"path_with_namespace": "group/project",
+		},
+		"user_username": "gitlab-user",
+		"checkout_sha":  "abc123def456",
+	})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/pipeline/run/webhook/public-trigger-token", bytes.NewReader(payload))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Gitlab-Token", "gitlab-secret")
+	c.Params = gin.Params{{Key: "token", Value: "public-trigger-token"}}
+
+	h.HandleGitLabWebhook(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"ignored":true`)) {
+		t.Fatalf("expected ignored response, got %s", w.Body.String())
+	}
+	var count int64
+	if err := db.Model(&models.PipelineRun{}).Where("pipeline_id = ?", pipeline.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count pipeline runs failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no runs created when filter misses, got %d", count)
 	}
 }

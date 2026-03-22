@@ -1,6 +1,8 @@
 package models
 
 import (
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -133,21 +135,29 @@ const (
 	CredentialStatusRevoked  CredentialStatus = "revoked"  // 已撤销/吊销
 )
 
+type CredentialLockState string
+
+const (
+	CredentialLockStateUnlocked CredentialLockState = "unlocked"
+	CredentialLockStateLocked   CredentialLockState = "locked"
+)
+
 type Credential struct {
 	BaseModel
-	Name             string             `gorm:"size:128;not null;index" json:"name"`
-	Description      string             `gorm:"size:512" json:"description"`
-	Type             CredentialType     `gorm:"size:32;not null;index" json:"type"`
-	Category         CredentialCategory `gorm:"size:32;index" json:"category"`
-	Scope            CredentialScope    `gorm:"size:32;default:'personal'" json:"scope"`
-	WorkspaceID      uint64             `gorm:"not null;index" json:"workspace_id"`
-	ProjectID        uint64             `gorm:"index" json:"project_id"`
-	OwnerID          uint64             `gorm:"not null;index" json:"owner_id"`
-	EncryptedPayload string             `gorm:"column:encrypted_payload;type:longtext;not null" json:"-"`
-	Status           CredentialStatus   `gorm:"size:32;default:'active';index" json:"status"`
-	ExpiresAt        *int64             `json:"expires_at"`
-	UsedCount        int64              `gorm:"default:0" json:"used_count"`
-	LastUsedAt       int64              `json:"last_used_at"`
+	Name             string              `gorm:"size:128;not null;index" json:"name"`
+	Description      string              `gorm:"size:512" json:"description"`
+	Type             CredentialType      `gorm:"size:32;not null;index" json:"type"`
+	Category         CredentialCategory  `gorm:"size:32;index" json:"category"`
+	Scope            CredentialScope     `gorm:"size:32;default:'personal'" json:"scope"`
+	WorkspaceID      uint64              `gorm:"not null;index" json:"workspace_id"`
+	ProjectID        uint64              `gorm:"index" json:"project_id"`
+	OwnerID          uint64              `gorm:"not null;index" json:"owner_id"`
+	EncryptedPayload string              `gorm:"column:encrypted_payload;type:longtext;not null" json:"-"`
+	LockState        CredentialLockState `gorm:"size:32;default:'unlocked';index" json:"lock_state"`
+	Status           CredentialStatus    `gorm:"size:32;default:'active';index" json:"status"`
+	ExpiresAt        *int64              `json:"expires_at"`
+	UsedCount        int64               `gorm:"default:0" json:"used_count"`
+	LastUsedAt       int64               `json:"last_used_at"`
 }
 
 func (Credential) TableName() string {
@@ -156,24 +166,39 @@ func (Credential) TableName() string {
 
 // CredentialResponse - 凭据响应结构
 type CredentialResponse struct {
-	ID           uint64             `json:"id"`
-	Name         string             `json:"name"`
-	Description  string             `json:"description"`
-	Type         CredentialType     `json:"type"`
-	Category     CredentialCategory `json:"category"`
-	Scope        CredentialScope    `json:"scope"`
-	WorkspaceID  uint64             `json:"workspace_id"`
-	ProjectID    uint64             `json:"project_id"`
-	OwnerID      uint64             `json:"owner_id"`
-	Status       CredentialStatus   `json:"status"`
-	TypeInfo     TypeInfo           `json:"type_info"`
-	CategoryInfo CategoryInfo       `json:"category_info"`
-	StatusInfo   StatusInfo         `json:"status_info"`
-	ExpiresAt    *int64             `json:"expires_at"`
-	UsedCount    int64              `json:"used_count"`
-	LastUsedAt   int64              `json:"last_used_at"`
-	CreatedAt    time.Time          `json:"created_at"`
-	UpdatedAt    time.Time          `json:"updated_at"`
+	ID            uint64              `json:"id"`
+	Name          string              `json:"name"`
+	Description   string              `json:"description"`
+	Type          CredentialType      `json:"type"`
+	Category      CredentialCategory  `json:"category"`
+	Scope         CredentialScope     `json:"scope"`
+	WorkspaceID   uint64              `json:"workspace_id"`
+	ProjectID     uint64              `json:"project_id"`
+	OwnerID       uint64              `json:"owner_id"`
+	LockState     CredentialLockState `json:"lock_state"`
+	Status        CredentialStatus    `json:"status"`
+	TypeInfo      TypeInfo            `json:"type_info"`
+	CategoryInfo  CategoryInfo        `json:"category_info"`
+	StatusInfo    StatusInfo          `json:"status_info"`
+	Summary       CredentialSummary   `json:"summary"`
+	CanViewSecret bool                `json:"can_view_secret"`
+	CanEdit       bool                `json:"can_edit"`
+	CanVerify     bool                `json:"can_verify"`
+	CanDelete     bool                `json:"can_delete"`
+	CanToggleLock bool                `json:"can_toggle_lock"`
+	ExpiresAt     *int64              `json:"expires_at"`
+	UsedCount     int64               `json:"used_count"`
+	LastUsedAt    int64               `json:"last_used_at"`
+	CreatedAt     time.Time           `json:"created_at"`
+	UpdatedAt     time.Time           `json:"updated_at"`
+}
+
+type CredentialSummary struct {
+	Username  string `json:"username,omitempty"`
+	KeyType   string `json:"key_type,omitempty"`
+	AuthMode  string `json:"auth_mode,omitempty"`
+	Server    string `json:"server,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // ToResponse - 将模型转换为响应结构
@@ -188,6 +213,7 @@ func (c *Credential) ToResponse() CredentialResponse {
 		WorkspaceID:  c.WorkspaceID,
 		ProjectID:    c.ProjectID,
 		OwnerID:      c.OwnerID,
+		LockState:    c.EffectiveLockState(),
 		Status:       c.EffectiveStatus(),
 		TypeInfo:     c.Type.GetTypeInfo(),
 		CategoryInfo: c.Category.GetCategoryInfo(),
@@ -598,6 +624,32 @@ func (c CredentialCategory) GetCategoryInfo() CategoryInfo {
 			Icon:             "Grid",
 			Description:      "Kubernetes 集群",
 			RecommendedTypes: []CredentialType{TypeCert, TypeToken, TypeIAM},
+			SupportedModes: []CredentialMode{
+				{
+					Code:         "kubeconfig",
+					Label:        "Kubeconfig",
+					Description:  "直接提供 kubeconfig 内容，由现有 TOKEN/CERTIFICATE 顶层类型承载。",
+					AllowedTypes: []CredentialType{TypeToken, TypeCert},
+					RequiredKeys: []string{"kubeconfig"},
+					OptionalKeys: []string{"auth_mode"},
+				},
+				{
+					Code:         "server_token",
+					Label:        "Server + Token",
+					Description:  "使用 API Server 地址与 Bearer Token 认证 Kubernetes 集群。",
+					AllowedTypes: []CredentialType{TypeToken},
+					RequiredKeys: []string{"server", "token"},
+					OptionalKeys: []string{"api_server", "access_token", "ca_cert", "auth_mode"},
+				},
+				{
+					Code:         "server_cert",
+					Label:        "Server + Client Certificate",
+					Description:  "使用 API Server 地址与客户端证书/私钥认证 Kubernetes 集群。",
+					AllowedTypes: []CredentialType{TypeCert},
+					RequiredKeys: []string{"server", "cert_pem", "key_pem"},
+					OptionalKeys: []string{"api_server", "ca_cert", "auth_mode"},
+				},
+			},
 		},
 		CategoryDingTalk: {
 			Name:             "钉钉",
@@ -621,25 +673,25 @@ func (c CredentialCategory) GetCategoryInfo() CategoryInfo {
 			Name:             "AWS",
 			Icon:             "Cloud",
 			Description:      "Amazon Web Services",
-			RecommendedTypes: []CredentialType{TypeIAM, TypeCert, TypeToken},
+			RecommendedTypes: []CredentialType{TypeIAM, TypeCert, TypeToken, TypeSSHKey},
 		},
 		CategoryGCP: {
 			Name:             "Google Cloud",
 			Icon:             "Cloud",
 			Description:      "Google Cloud Platform",
-			RecommendedTypes: []CredentialType{TypeIAM, TypeOAuth2},
+			RecommendedTypes: []CredentialType{TypeIAM, TypeOAuth2, TypeSSHKey},
 		},
 		CategoryAzure: {
 			Name:             "Azure",
 			Icon:             "Cloud",
 			Description:      "Microsoft Azure",
-			RecommendedTypes: []CredentialType{TypeIAM, TypeCert},
+			RecommendedTypes: []CredentialType{TypeIAM, TypeCert, TypeSSHKey},
 		},
 		CategoryCustom: {
 			Name:             "自定义",
 			Icon:             "Setting",
 			Description:      "自定义服务",
-			RecommendedTypes: []CredentialType{TypePassword, TypeToken, TypeCert},
+			RecommendedTypes: []CredentialType{TypePassword, TypeToken, TypeCert, TypeSSHKey},
 		},
 	}
 	if info, ok := infos[c]; ok {
@@ -659,6 +711,16 @@ type CategoryInfo struct {
 	Icon             string           `json:"icon"`
 	Description      string           `json:"description"`
 	RecommendedTypes []CredentialType `json:"recommended_types"`
+	SupportedModes   []CredentialMode `json:"supported_modes,omitempty"`
+}
+
+type CredentialMode struct {
+	Code         string           `json:"code"`
+	Label        string           `json:"label"`
+	Description  string           `json:"description"`
+	AllowedTypes []CredentialType `json:"allowed_types,omitempty"`
+	RequiredKeys []string         `json:"required_keys,omitempty"`
+	OptionalKeys []string         `json:"optional_keys,omitempty"`
 }
 
 func (c CredentialCategory) GetCategoryLabel() string {
@@ -743,6 +805,122 @@ func (s CredentialStatus) GetLabel() string {
 	return s.GetStatusLabel()
 }
 
+func ValidateCredentialPayload(t CredentialType, category CredentialCategory, payload map[string]interface{}) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	if category == CategoryKubernetes {
+		return validateKubernetesCredentialPayload(t, payload)
+	}
+	if t == TypePassword {
+		return validatePasswordCredentialPayload(payload)
+	}
+	if t == TypeSSHKey {
+		return validateSSHCredentialPayload(payload)
+	}
+	return nil
+}
+
+func validatePasswordCredentialPayload(payload map[string]interface{}) error {
+	username := strings.TrimSpace(fmt.Sprintf("%v", payload["username"]))
+	if username == "" || username == "<nil>" {
+		return fmt.Errorf("password credential requires username")
+	}
+	password := strings.TrimSpace(fmt.Sprintf("%v", payload["password"]))
+	if password == "" || password == "<nil>" {
+		return fmt.Errorf("password credential requires password")
+	}
+	return nil
+}
+
+func validateSSHCredentialPayload(payload map[string]interface{}) error {
+	privateKey := strings.TrimSpace(fmt.Sprintf("%v", payload["private_key"]))
+	if privateKey == "" || privateKey == "<nil>" {
+		return fmt.Errorf("ssh key credential requires private_key")
+	}
+	keyType := strings.TrimSpace(fmt.Sprintf("%v", payload["key_type"]))
+	if keyType == "" || keyType == "<nil>" {
+		return fmt.Errorf("ssh key credential requires key_type")
+	}
+	switch keyType {
+	case "rsa", "ed25519", "ecdsa":
+		return nil
+	default:
+		return fmt.Errorf("unsupported ssh key_type: %s", keyType)
+	}
+}
+
+func validateKubernetesCredentialPayload(t CredentialType, payload map[string]interface{}) error {
+	hasValue := func(keys ...string) bool {
+		for _, key := range keys {
+			value, ok := payload[key]
+			if !ok || value == nil {
+				continue
+			}
+			if strings.TrimSpace(fmt.Sprintf("%v", value)) != "" {
+				return true
+			}
+		}
+		return false
+	}
+
+	authMode := strings.TrimSpace(fmt.Sprintf("%v", payload["auth_mode"]))
+	if authMode == "<nil>" {
+		authMode = ""
+	}
+	if authMode != "" && authMode != "kubeconfig" && authMode != "server_token" && authMode != "server_cert" {
+		return fmt.Errorf("unsupported kubernetes credential auth_mode: %s", authMode)
+	}
+
+	if hasValue("kubeconfig") {
+		if authMode != "" && authMode != "kubeconfig" {
+			return fmt.Errorf("kubernetes credential auth_mode %s does not match kubeconfig payload", authMode)
+		}
+		if t != TypeToken && t != TypeCert {
+			return fmt.Errorf("kubernetes kubeconfig mode requires TOKEN or CERTIFICATE type")
+		}
+		return nil
+	}
+
+	serverPresent := hasValue("server", "api_server")
+	tokenPresent := hasValue("token", "access_token")
+	certPresent := hasValue("cert_pem")
+	keyPresent := hasValue("key_pem")
+
+	if authMode == "server_token" || (serverPresent && tokenPresent) {
+		if t != TypeToken {
+			return fmt.Errorf("kubernetes server_token mode requires TOKEN type")
+		}
+		if !serverPresent || !tokenPresent {
+			return fmt.Errorf("kubernetes server_token mode requires server and token")
+		}
+		return nil
+	}
+
+	if authMode == "server_cert" || (serverPresent && certPresent && keyPresent) {
+		if t != TypeCert {
+			return fmt.Errorf("kubernetes server_cert mode requires CERTIFICATE type")
+		}
+		if !serverPresent || !certPresent || !keyPresent {
+			return fmt.Errorf("kubernetes server_cert mode requires server, cert_pem and key_pem")
+		}
+		return nil
+	}
+
+	if authMode != "" {
+		switch authMode {
+		case "kubeconfig":
+			return fmt.Errorf("kubernetes kubeconfig mode requires kubeconfig")
+		case "server_token":
+			return fmt.Errorf("kubernetes server_token mode requires server and token")
+		case "server_cert":
+			return fmt.Errorf("kubernetes server_cert mode requires server, cert_pem and key_pem")
+		}
+	}
+
+	return fmt.Errorf("kubernetes credentials must use kubeconfig, server+token, or server+cert mode")
+}
+
 // =============================================================================
 // Payload 类型断言和验证方法
 // =============================================================================
@@ -804,6 +982,13 @@ func (c *Credential) EffectiveStatus() CredentialStatus {
 		return CredentialStatusExpired
 	}
 	return c.Status
+}
+
+func (c *Credential) EffectiveLockState() CredentialLockState {
+	if c == nil || c.LockState == "" {
+		return CredentialLockStateUnlocked
+	}
+	return c.LockState
 }
 
 func (c *Credential) IsUsable() bool {

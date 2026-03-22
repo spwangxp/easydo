@@ -3,12 +3,14 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"easydo-agent/internal/client"
 	"easydo-agent/internal/config"
+	"easydo-agent/internal/system"
 	"easydo-agent/internal/task"
 	"github.com/sirupsen/logrus"
 )
@@ -44,14 +46,14 @@ type pendingWebSocketMessage struct {
 }
 
 // NewTaskHandler creates a new task handler
-func NewTaskHandler(httpClient *client.HTTPClient, wsClient *client.WebSocketClient, cfg *config.Config, tokenMgr *TokenManager, log *logrus.Logger) *TaskHandler {
+func NewTaskHandler(httpClient *client.HTTPClient, wsClient *client.WebSocketClient, cfg *config.Config, tokenMgr *TokenManager, runtimeCaps system.RuntimeCapabilities, log *logrus.Logger) *TaskHandler {
 	return &TaskHandler{
 		httpClient: httpClient,
 		wsClient:   wsClient,
 		cfg:        cfg,
 		tokenMgr:   tokenMgr,
 		log:        log,
-		executor:   task.NewExecutor(log, cfg.GetWorkspacePath()),
+		executor:   task.NewExecutor(log, cfg.GetWorkspacePath(), runtimeCaps),
 		stopChan:   make(chan struct{}),
 	}
 }
@@ -503,17 +505,8 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 	// Execute the task with workspace support
 	result := th.executor.Execute(ctx, *params)
 
-	// Report task completion with actual duration
-	status := "execute_success"
-	if result.Error != "" || result.ExitCode != 0 {
-		status = "execute_failed"
-	}
-
-	finalResult := map[string]interface{}{
-		"stdout_size": len(result.Stdout),
-		"stderr_size": len(result.Stderr),
-	}
-	if err := th.reportTaskUpdateV2(task, attempt, status, result.ExitCode, result.Error, result.Duration.Milliseconds(), finalResult); err != nil {
+	finalResult, status, errorMsg := th.buildTaskResultPayload(task, result)
+	if err := th.reportTaskUpdateV2(task, attempt, status, result.ExitCode, errorMsg, result.Duration.Milliseconds(), finalResult); err != nil {
 		th.log.Warnf("Failed to report v2 task completion: %v", err)
 	}
 	if err := th.reportTaskLogEndV2(task, attempt, atomic.LoadInt64(&logSeq)); err != nil {
@@ -532,6 +525,7 @@ func (t *Task) ParseParams() (*task.TaskParams, error) {
 		NodeID:        t.NodeID,
 		TaskType:      t.TaskType,
 		Name:          t.Name,
+		Params:        task.ParseStructuredParamsJSON(t.Params),
 		Script:        t.Script,
 		WorkDir:       t.WorkDir,
 		Timeout:       t.Timeout,
@@ -543,6 +537,76 @@ func (t *Task) ParseParams() (*task.TaskParams, error) {
 	}
 
 	return params, nil
+}
+
+func (th *TaskHandler) buildTaskResultPayload(task *Task, result *task.Result) (map[string]interface{}, string, string) {
+	status := "execute_success"
+	errorMsg := ""
+	if result != nil {
+		errorMsg = result.Error
+		if result.Error != "" || result.ExitCode != 0 {
+			status = "execute_failed"
+		}
+	}
+	payload := map[string]interface{}{}
+	if result != nil {
+		payload["stdout_size"] = len(result.Stdout)
+		payload["stderr_size"] = len(result.Stderr)
+	}
+	if result == nil {
+		return payload, status, errorMsg
+	}
+	if shouldEmbedTaskStdStreams(task) {
+		payload["stdout"] = result.Stdout
+		payload["stderr"] = result.Stderr
+	}
+	if !isResourceBaseInfoTask(task) {
+		return payload, status, errorMsg
+	}
+	hasVMMarkers := strings.Contains(result.Stdout, "EASYDO_BASE_INFO_BEGIN")
+	hasK8sMarkers := strings.Contains(result.Stdout, "EASYDO_K8S_VERSION_BEGIN") && strings.Contains(result.Stdout, "EASYDO_K8S_NODES_BEGIN")
+	if status == "execute_success" && !hasVMMarkers && !hasK8sMarkers {
+		status = "execute_failed"
+		if errorMsg == "" {
+			errorMsg = "基础资源采集结果格式无效"
+		}
+	}
+	return payload, status, errorMsg
+}
+
+func shouldEmbedTaskStdStreams(assignedTask *Task) bool {
+	if assignedTask == nil {
+		return false
+	}
+	params := task.ParseStructuredParamsJSON(assignedTask.Params)
+	if len(params) == 0 {
+		return false
+	}
+	if isResourceBaseInfoTask(assignedTask) {
+		return true
+	}
+	k8s, ok := params["k8s"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	kind, _ := k8s["kind"].(string)
+	return kind == "resource_k8s_namespace_query" || kind == "resource_k8s_resource_query"
+}
+
+func isResourceBaseInfoTask(assignedTask *Task) bool {
+	if assignedTask == nil {
+		return false
+	}
+	params := task.ParseStructuredParamsJSON(assignedTask.Params)
+	if len(params) == 0 {
+		return false
+	}
+	collection, ok := params["collection"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	kind, _ := collection["kind"].(string)
+	return kind == "resource_base_info_refresh"
 }
 
 func (th *TaskHandler) reportTaskUpdateV2(t *Task, attempt int, status string, exitCode int, errorMsg string, durationMs int64, result map[string]interface{}) error {

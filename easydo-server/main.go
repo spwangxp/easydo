@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"easydo-server/internal/config"
+	"easydo-server/internal/handlers"
+	"easydo-server/internal/migrations"
 	"easydo-server/internal/models"
 	"easydo-server/internal/routers"
 	"easydo-server/internal/services"
@@ -20,6 +23,10 @@ func main() {
 	if err := config.ValidateMultiReplicaRequirements(); err != nil {
 		panic(err)
 	}
+	// 服务启动时先执行内置的版本化 SQL 迁移，确保所有副本共享同一套迁移历史与锁语义。
+	if err := migrations.RunEmbeddedFromConfig(context.Background()); err != nil {
+		panic("Failed to apply database migrations: " + err.Error())
+	}
 
 	// 初始化数据库
 	models.InitDB()
@@ -30,7 +37,12 @@ func main() {
 	// 启动Agent离线检测定时任务
 	cronService := services.GetCronService(models.DB)
 	cronService.StartAgentOfflineChecker()
+	cronService.StartNotificationDeliveryProcessor()
+	cronService.StartPipelineTriggerEvaluator(handlers.NewPipelineHandler())
 	defer cronService.StopAgentOfflineChecker()
+	queuedRunScheduler := handlers.NewQueuedRunScheduler(models.DB, 0)
+	queuedRunScheduler.Start()
+	defer queuedRunScheduler.Stop()
 
 	// 初始化路由
 	router := routers.InitRouter()

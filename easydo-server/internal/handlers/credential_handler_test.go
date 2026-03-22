@@ -45,6 +45,9 @@ func TestCredentialHandler_CreateRevealVerifyAndUsage(t *testing.T) {
 	if stored.EncryptedPayload == "" {
 		t.Fatalf("expected encrypted payload to be stored")
 	}
+	if stored.LockState != models.CredentialLockStateLocked {
+		t.Fatalf("expected new credential to default to locked, got %s", stored.LockState)
+	}
 
 	revealRecorder := performCredentialRequest(t, h.GetCredentialPayload, user.ID, "user", workspace.ID, http.MethodGet, "/api/v1/credentials/1/payload", nil, pathID(createdID))
 	if revealRecorder.Code != http.StatusOK {
@@ -90,7 +93,7 @@ func TestCredentialHandler_CreateRevealVerifyAndUsage(t *testing.T) {
 	}
 }
 
-func TestCredentialHandler_PersonalScopeBlocksOtherDeveloper(t *testing.T) {
+func TestCredentialHandler_PersonalScopeStillExposesMetadataToViewer(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
 	originalDB := models.DB
@@ -98,8 +101,8 @@ func TestCredentialHandler_PersonalScopeBlocksOtherDeveloper(t *testing.T) {
 	t.Cleanup(func() { models.DB = originalDB })
 
 	owner, workspace := seedCredentialTestUserAndWorkspace(t, db, "owner", models.WorkspaceRoleDeveloper)
-	other := seedCredentialMember(t, db, workspace.ID, "other", models.WorkspaceRoleDeveloper)
-	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{"password": "secret"})
+	viewer := seedCredentialMember(t, db, workspace.ID, "viewer", models.WorkspaceRoleViewer)
+	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{"username": "root", "password": "secret"})
 	if err != nil {
 		t.Fatalf("encrypt payload failed: %v", err)
 	}
@@ -109,14 +112,200 @@ func TestCredentialHandler_PersonalScopeBlocksOtherDeveloper(t *testing.T) {
 	}
 
 	h := NewCredentialHandler()
-	getRecorder := performCredentialRequest(t, h.GetCredential, other.ID, "user", workspace.ID, http.MethodGet, "/api/v1/credentials/1", nil, pathID(credential.ID))
-	if getRecorder.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for personal credential read, got %d body=%s", getRecorder.Code, getRecorder.Body.String())
+	getRecorder := performCredentialRequest(t, h.GetCredential, viewer.ID, "user", workspace.ID, http.MethodGet, "/api/v1/credentials/1", nil, pathID(credential.ID), withWorkspaceRole(models.WorkspaceRoleViewer))
+	if getRecorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 for personal credential metadata read, got %d body=%s", getRecorder.Code, getRecorder.Body.String())
+	}
+	if !bytes.Contains(getRecorder.Body.Bytes(), []byte(`"username":"root"`)) {
+		t.Fatalf("expected safe username summary in detail response, got %s", getRecorder.Body.String())
+	}
+	if bytes.Contains(getRecorder.Body.Bytes(), []byte(`"password":"secret"`)) {
+		t.Fatalf("expected metadata-only detail response without password leakage, got %s", getRecorder.Body.String())
+	}
+	if !bytes.Contains(getRecorder.Body.Bytes(), []byte(`"can_view_secret":false`)) {
+		t.Fatalf("expected personal credential metadata response to include secret access flag, got %s", getRecorder.Body.String())
+	}
+}
+
+func TestCredentialHandler_ListCredentialsIncludesSafeSummaryFieldsAndPermissions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "summary-user", models.WorkspaceRoleDeveloper)
+	encryptionService := NewCredentialHandler().encryptionService
+
+	passwordPayload, err := encryptionService.EncryptCredentialData(map[string]interface{}{"username": "ubuntu", "password": "vm-secret"})
+	if err != nil {
+		t.Fatalf("encrypt password payload failed: %v", err)
+	}
+	sshPayload, err := encryptionService.EncryptCredentialData(map[string]interface{}{"private_key": "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----", "key_type": "rsa"})
+	if err != nil {
+		t.Fatalf("encrypt ssh payload failed: %v", err)
+	}
+	kubePayload, err := encryptionService.EncryptCredentialData(map[string]interface{}{"auth_mode": "server_token", "server": "https://kubernetes.example.com", "namespace": "prod", "token": "cluster-secret"})
+	if err != nil {
+		t.Fatalf("encrypt kubernetes payload failed: %v", err)
 	}
 
-	revealRecorder := performCredentialRequest(t, h.GetCredentialPayload, other.ID, "user", workspace.ID, http.MethodGet, "/api/v1/credentials/1/payload", nil, pathID(credential.ID))
-	if revealRecorder.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for personal credential reveal, got %d body=%s", revealRecorder.Code, revealRecorder.Body.String())
+	credentials := []models.Credential{
+		{Name: "vm-password", Type: models.TypePassword, Category: models.CategoryCustom, Scope: models.ScopeWorkspace, WorkspaceID: workspace.ID, OwnerID: user.ID, EncryptedPayload: passwordPayload, Status: models.CredentialStatusActive},
+		{Name: "vm-ssh", Type: models.TypeSSHKey, Category: models.CategoryCustom, Scope: models.ScopeWorkspace, WorkspaceID: workspace.ID, OwnerID: user.ID, EncryptedPayload: sshPayload, Status: models.CredentialStatusActive},
+		{Name: "prod-cluster", Type: models.TypeToken, Category: models.CategoryKubernetes, Scope: models.ScopeWorkspace, WorkspaceID: workspace.ID, OwnerID: user.ID, EncryptedPayload: kubePayload, Status: models.CredentialStatusActive},
+	}
+	for i := range credentials {
+		if err := db.Create(&credentials[i]).Error; err != nil {
+			t.Fatalf("create credential %d failed: %v", i, err)
+		}
+	}
+
+	h := NewCredentialHandler()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/credentials?page=1&size=20", nil)
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+	c.Set("workspace_id", workspace.ID)
+	c.Set("workspace_role", models.WorkspaceRoleDeveloper)
+
+	h.ListCredentials(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	responseBody := w.Body.Bytes()
+	for _, expected := range []string{
+		`"lock_state":"unlocked"`,
+		`"username":"ubuntu"`,
+		`"key_type":"rsa"`,
+		`"auth_mode":"server_token"`,
+		`"server":"https://kubernetes.example.com"`,
+		`"namespace":"prod"`,
+		`"can_view_secret":true`,
+		`"can_edit":true`,
+		`"can_verify":true`,
+		`"can_delete":true`,
+		`"can_toggle_lock":true`,
+	} {
+		if !bytes.Contains(responseBody, []byte(expected)) {
+			t.Fatalf("expected list response to contain %s, got %s", expected, w.Body.String())
+		}
+	}
+	for _, forbidden := range []string{"vm-secret", "cluster-secret", "BEGIN PRIVATE KEY"} {
+		if bytes.Contains(responseBody, []byte(forbidden)) {
+			t.Fatalf("expected list response to omit secret value %q, got %s", forbidden, w.Body.String())
+		}
+	}
+}
+
+func TestCredentialHandler_LockedCredentialAllowsDeveloperVerifyButBlocksRevealAndMutation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	creator, workspace := seedCredentialTestUserAndWorkspace(t, db, "locked-creator", models.WorkspaceRoleDeveloper)
+	developer := seedCredentialMember(t, db, workspace.ID, "locked-developer", models.WorkspaceRoleDeveloper)
+	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{"username": "root", "password": "locked-secret"})
+	if err != nil {
+		t.Fatalf("encrypt payload failed: %v", err)
+	}
+	credential := models.Credential{Name: "locked-vm", Type: models.TypePassword, Category: models.CategoryCustom, Scope: models.ScopeWorkspace, WorkspaceID: workspace.ID, OwnerID: creator.ID, EncryptedPayload: encrypted, Status: models.CredentialStatusActive, LockState: models.CredentialLockStateLocked}
+	if err := db.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential failed: %v", err)
+	}
+
+	h := NewCredentialHandler()
+	detailRecorder := performCredentialRequest(t, h.GetCredential, developer.ID, "user", workspace.ID, http.MethodGet, "/api/v1/credentials/1", nil, pathID(credential.ID))
+	if detailRecorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 for locked credential metadata, got %d body=%s", detailRecorder.Code, detailRecorder.Body.String())
+	}
+	for _, expected := range []string{`"lock_state":"locked"`, `"can_view_secret":false`, `"can_edit":false`, `"can_verify":true`, `"can_delete":false`, `"can_toggle_lock":false`} {
+		if !bytes.Contains(detailRecorder.Body.Bytes(), []byte(expected)) {
+			t.Fatalf("expected locked credential detail to contain %s, got %s", expected, detailRecorder.Body.String())
+		}
+	}
+
+	payloadRecorder := performCredentialRequest(t, h.GetCredentialPayload, developer.ID, "user", workspace.ID, http.MethodGet, "/api/v1/credentials/1/payload", nil, pathID(credential.ID))
+	if payloadRecorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for locked credential reveal, got %d body=%s", payloadRecorder.Code, payloadRecorder.Body.String())
+	}
+	verifyRecorder := performCredentialRequest(t, h.VerifyCredential, developer.ID, "user", workspace.ID, http.MethodPost, "/api/v1/credentials/1/verify", nil, pathID(credential.ID))
+	if verifyRecorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 for locked credential verify, got %d body=%s", verifyRecorder.Code, verifyRecorder.Body.String())
+	}
+	if !bytes.Contains(verifyRecorder.Body.Bytes(), []byte(`"valid":true`)) {
+		t.Fatalf("expected locked credential verify success for developer, got %s", verifyRecorder.Body.String())
+	}
+	updateRecorder := performCredentialRequest(t, h.UpdateCredential, developer.ID, "user", workspace.ID, http.MethodPut, "/api/v1/credentials/1", mustJSON(t, map[string]interface{}{"description": "blocked update"}), pathID(credential.ID))
+	if updateRecorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for locked credential update, got %d body=%s", updateRecorder.Code, updateRecorder.Body.String())
+	}
+	deleteRecorder := performCredentialRequest(t, h.DeleteCredential, developer.ID, "user", workspace.ID, http.MethodDelete, "/api/v1/credentials/1", nil, pathID(credential.ID))
+	if deleteRecorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for locked credential delete, got %d body=%s", deleteRecorder.Code, deleteRecorder.Body.String())
+	}
+}
+
+func TestCredentialHandler_LockedCredentialAllowsCreatorOwnerAndAdminSensitiveActions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	workspaceOwner, workspace := seedCredentialTestUserAndWorkspace(t, db, "workspace-owner", models.WorkspaceRoleOwner)
+	creator := seedCredentialMember(t, db, workspace.ID, "credential-creator", models.WorkspaceRoleDeveloper)
+	admin := models.User{Username: "sys-admin", Role: "admin", Status: "active"}
+	if err := admin.SetPassword("1qaz2WSX"); err != nil {
+		t.Fatalf("set admin password failed: %v", err)
+	}
+	if err := db.Create(&admin).Error; err != nil {
+		t.Fatalf("create admin failed: %v", err)
+	}
+	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{"token": "locked-token", "token_type": "bearer"})
+	if err != nil {
+		t.Fatalf("encrypt payload failed: %v", err)
+	}
+
+	creatorCredential := models.Credential{Name: "creator-locked", Type: models.TypeToken, Category: models.CategoryGitHub, Scope: models.ScopeWorkspace, WorkspaceID: workspace.ID, OwnerID: creator.ID, EncryptedPayload: encrypted, Status: models.CredentialStatusActive, LockState: models.CredentialLockStateLocked}
+	ownerCredential := models.Credential{Name: "owner-locked", Type: models.TypeToken, Category: models.CategoryGitHub, Scope: models.ScopeWorkspace, WorkspaceID: workspace.ID, OwnerID: creator.ID, EncryptedPayload: encrypted, Status: models.CredentialStatusActive, LockState: models.CredentialLockStateLocked}
+	adminCredential := models.Credential{Name: "admin-locked", Type: models.TypeToken, Category: models.CategoryGitHub, Scope: models.ScopeWorkspace, WorkspaceID: workspace.ID, OwnerID: creator.ID, EncryptedPayload: encrypted, Status: models.CredentialStatusActive, LockState: models.CredentialLockStateLocked}
+	for _, credential := range []*models.Credential{&creatorCredential, &ownerCredential, &adminCredential} {
+		if err := db.Create(credential).Error; err != nil {
+			t.Fatalf("create locked credential failed: %v", err)
+		}
+	}
+
+	h := NewCredentialHandler()
+	creatorPayloadRecorder := performCredentialRequest(t, h.GetCredentialPayload, creator.ID, "user", workspace.ID, http.MethodGet, "/api/v1/credentials/1/payload", nil, pathID(creatorCredential.ID))
+	if creatorPayloadRecorder.Code != http.StatusOK {
+		t.Fatalf("expected creator reveal success, got %d body=%s", creatorPayloadRecorder.Code, creatorPayloadRecorder.Body.String())
+	}
+	ownerDeleteRecorder := performCredentialRequest(t, h.DeleteCredential, workspaceOwner.ID, "user", workspace.ID, http.MethodDelete, "/api/v1/credentials/1", nil, pathID(ownerCredential.ID), withWorkspaceRole(models.WorkspaceRoleOwner))
+	if ownerDeleteRecorder.Code != http.StatusOK {
+		t.Fatalf("expected workspace owner delete success, got %d body=%s", ownerDeleteRecorder.Code, ownerDeleteRecorder.Body.String())
+	}
+	adminVerifyRecorder := performCredentialRequest(t, h.VerifyCredential, admin.ID, "admin", workspace.ID, http.MethodPost, "/api/v1/credentials/1/verify", nil, pathID(adminCredential.ID))
+	if adminVerifyRecorder.Code != http.StatusOK {
+		t.Fatalf("expected system admin verify success, got %d body=%s", adminVerifyRecorder.Code, adminVerifyRecorder.Body.String())
+	}
+	if !bytes.Contains(adminVerifyRecorder.Body.Bytes(), []byte(`"valid":true`)) {
+		t.Fatalf("expected system admin verify valid response, got %s", adminVerifyRecorder.Body.String())
+	}
+	adminUpdateRecorder := performCredentialRequest(t, h.UpdateCredential, admin.ID, "admin", workspace.ID, http.MethodPut, "/api/v1/credentials/1", mustJSON(t, map[string]interface{}{"lock_state": string(models.CredentialLockStateUnlocked)}), pathID(adminCredential.ID))
+	if adminUpdateRecorder.Code != http.StatusOK {
+		t.Fatalf("expected system admin unlock success, got %d body=%s", adminUpdateRecorder.Code, adminUpdateRecorder.Body.String())
+	}
+	var updated models.Credential
+	if err := db.First(&updated, adminCredential.ID).Error; err != nil {
+		t.Fatalf("reload admin credential failed: %v", err)
+	}
+	if updated.LockState != models.CredentialLockStateUnlocked {
+		t.Fatalf("expected admin credential to be unlocked, got %s", updated.LockState)
 	}
 }
 
@@ -171,6 +360,46 @@ func TestCredentialHandler_ImpactAndBatchDelete(t *testing.T) {
 	db.Model(&models.PipelineCredentialRef{}).Where("credential_id = ?", credential.ID).Count(&count)
 	if count != 0 {
 		t.Fatalf("expected pipeline refs to be deleted")
+	}
+}
+
+func TestCredentialHandler_LockedCredentialImpactRemainsMetadataAccessible(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	creator, workspace := seedCredentialTestUserAndWorkspace(t, db, "impact-creator", models.WorkspaceRoleDeveloper)
+	viewer := seedCredentialMember(t, db, workspace.ID, "impact-viewer", models.WorkspaceRoleViewer)
+	project := models.Project{Name: "impact-proj", WorkspaceID: workspace.ID, OwnerID: creator.ID}
+	if err := db.Create(&project).Error; err != nil {
+		t.Fatalf("create project failed: %v", err)
+	}
+	pipeline := models.Pipeline{Name: "impact-pipeline", WorkspaceID: workspace.ID, ProjectID: project.ID, OwnerID: creator.ID, Config: "{}"}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{"username": "demo", "password": "pass"})
+	if err != nil {
+		t.Fatalf("encrypt payload failed: %v", err)
+	}
+	credential := models.Credential{Name: "locked-impact-auth", Type: models.TypePassword, Category: models.CategoryDocker, Scope: models.ScopeWorkspace, WorkspaceID: workspace.ID, OwnerID: creator.ID, EncryptedPayload: encrypted, LockState: models.CredentialLockStateLocked, Status: models.CredentialStatusActive}
+	if err := db.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential failed: %v", err)
+	}
+	ref := models.PipelineCredentialRef{PipelineID: pipeline.ID, NodeID: "node-1", TaskType: "docker", CredentialSlot: "registry_auth", CredentialID: credential.ID}
+	if err := db.Create(&ref).Error; err != nil {
+		t.Fatalf("create ref failed: %v", err)
+	}
+
+	h := NewCredentialHandler()
+	impactRecorder := performCredentialRequest(t, h.GetCredentialImpact, viewer.ID, "user", workspace.ID, http.MethodGet, "/api/v1/credentials/1/impact", nil, pathID(credential.ID), withWorkspaceRole(models.WorkspaceRoleViewer))
+	if impactRecorder.Code != http.StatusOK {
+		t.Fatalf("expected metadata impact access for locked credential, got %d body=%s", impactRecorder.Code, impactRecorder.Body.String())
+	}
+	if !bytes.Contains(impactRecorder.Body.Bytes(), []byte(`"reference_count":1`)) {
+		t.Fatalf("unexpected impact response: %s", impactRecorder.Body.String())
 	}
 }
 
@@ -294,6 +523,248 @@ func TestCredentialHandler_PartialStatusUpdateWithoutName(t *testing.T) {
 	}
 }
 
+func TestCredentialHandler_KubernetesCategoryExposesSupportedModes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	NewCredentialHandler().GetCredentialCategories(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"value":"kubernetes"`)) {
+		t.Fatalf("expected kubernetes category in response, got %s", w.Body.String())
+	}
+	for _, mode := range []string{"kubeconfig", "server_token", "server_cert"} {
+		if !bytes.Contains(w.Body.Bytes(), []byte(mode)) {
+			t.Fatalf("expected kubernetes supported mode %q in response, got %s", mode, w.Body.String())
+		}
+	}
+}
+
+func TestCredentialHandler_KubernetesCredentialModeValidation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "kube-mode-user", models.WorkspaceRoleDeveloper)
+	h := NewCredentialHandler()
+
+	validBodies := []map[string]interface{}{
+		{
+			"name":     "kubeconfig-cluster",
+			"type":     string(models.TypeToken),
+			"category": string(models.CategoryKubernetes),
+			"scope":    string(models.ScopeWorkspace),
+			"payload": map[string]interface{}{
+				"auth_mode":  "kubeconfig",
+				"kubeconfig": "apiVersion: v1\nclusters: []\ncontexts: []\ncurrent-context: \"\"\nusers: []\n",
+			},
+		},
+		{
+			"name":     "server-token-cluster",
+			"type":     string(models.TypeToken),
+			"category": string(models.CategoryKubernetes),
+			"scope":    string(models.ScopeWorkspace),
+			"payload": map[string]interface{}{
+				"auth_mode": "server_token",
+				"server":    "https://kubernetes.example.com",
+				"token":     "cluster-token",
+			},
+		},
+		{
+			"name":     "server-cert-cluster",
+			"type":     string(models.TypeCert),
+			"category": string(models.CategoryKubernetes),
+			"scope":    string(models.ScopeWorkspace),
+			"payload": map[string]interface{}{
+				"auth_mode": "server_cert",
+				"server":    "https://kubernetes.example.com",
+				"cert_pem":  "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
+				"key_pem":   "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----",
+			},
+		},
+	}
+
+	for _, body := range validBodies {
+		recorder := performCredentialRequest(t, h.CreateCredential, user.ID, "user", workspace.ID, http.MethodPost, "/api/v1/credentials", mustJSON(t, body))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected kubernetes credential create success for %v, got %d body=%s", body["name"], recorder.Code, recorder.Body.String())
+		}
+	}
+
+	invalidBody := mustJSON(t, map[string]interface{}{
+		"name":     "invalid-k8s-password",
+		"type":     string(models.TypePassword),
+		"category": string(models.CategoryKubernetes),
+		"scope":    string(models.ScopeWorkspace),
+		"payload": map[string]interface{}{
+			"username": "admin",
+			"password": "secret",
+		},
+	})
+	recorder := performCredentialRequest(t, h.CreateCredential, user.ID, "user", workspace.ID, http.MethodPost, "/api/v1/credentials", invalidBody)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unsupported kubernetes password credential, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestCredentialHandler_SSHKeyValidationRequiresPrivateKeyAndKeyType(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "ssh-key-user", models.WorkspaceRoleDeveloper)
+	h := NewCredentialHandler()
+
+	validBody := mustJSON(t, map[string]interface{}{
+		"name":     "vm-ssh-key",
+		"type":     string(models.TypeSSHKey),
+		"category": string(models.CategoryCustom),
+		"scope":    string(models.ScopeWorkspace),
+		"payload": map[string]interface{}{
+			"private_key": "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+			"key_type":    "rsa",
+		},
+	})
+	validRecorder := performCredentialRequest(t, h.CreateCredential, user.ID, "user", workspace.ID, http.MethodPost, "/api/v1/credentials", validBody)
+	if validRecorder.Code != http.StatusOK {
+		t.Fatalf("expected ssh key credential create success, got %d body=%s", validRecorder.Code, validRecorder.Body.String())
+	}
+
+	missingPrivateKeyBody := mustJSON(t, map[string]interface{}{
+		"name":     "broken-ssh-key",
+		"type":     string(models.TypeSSHKey),
+		"category": string(models.CategoryCustom),
+		"scope":    string(models.ScopeWorkspace),
+		"payload": map[string]interface{}{
+			"key_type": "rsa",
+		},
+	})
+	recorder := performCredentialRequest(t, h.CreateCredential, user.ID, "user", workspace.ID, http.MethodPost, "/api/v1/credentials", missingPrivateKeyBody)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing private_key, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	missingKeyTypeBody := mustJSON(t, map[string]interface{}{
+		"name":     "missing-key-type",
+		"type":     string(models.TypeSSHKey),
+		"category": string(models.CategoryCustom),
+		"scope":    string(models.ScopeWorkspace),
+		"payload": map[string]interface{}{
+			"private_key": "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+		},
+	})
+	recorder = performCredentialRequest(t, h.CreateCredential, user.ID, "user", workspace.ID, http.MethodPost, "/api/v1/credentials", missingKeyTypeBody)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing key_type, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestCredentialHandler_PasswordValidationRequiresUsernameAndPassword(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "password-validation-user", models.WorkspaceRoleDeveloper)
+	h := NewCredentialHandler()
+
+	validBody := mustJSON(t, map[string]interface{}{
+		"name":     "vm-password",
+		"type":     string(models.TypePassword),
+		"category": string(models.CategoryCustom),
+		"scope":    string(models.ScopeWorkspace),
+		"payload": map[string]interface{}{
+			"username": "root",
+			"password": "secret123",
+		},
+	})
+	validRecorder := performCredentialRequest(t, h.CreateCredential, user.ID, "user", workspace.ID, http.MethodPost, "/api/v1/credentials", validBody)
+	if validRecorder.Code != http.StatusOK {
+		t.Fatalf("expected password credential create success, got %d body=%s", validRecorder.Code, validRecorder.Body.String())
+	}
+
+	missingUsernameBody := mustJSON(t, map[string]interface{}{
+		"name":     "broken-password-no-user",
+		"type":     string(models.TypePassword),
+		"category": string(models.CategoryCustom),
+		"scope":    string(models.ScopeWorkspace),
+		"payload": map[string]interface{}{
+			"password": "secret123",
+		},
+	})
+	recorder := performCredentialRequest(t, h.CreateCredential, user.ID, "user", workspace.ID, http.MethodPost, "/api/v1/credentials", missingUsernameBody)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing username, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	missingPasswordBody := mustJSON(t, map[string]interface{}{
+		"name":     "broken-password-no-pass",
+		"type":     string(models.TypePassword),
+		"category": string(models.CategoryCustom),
+		"scope":    string(models.ScopeWorkspace),
+		"payload": map[string]interface{}{
+			"username": "root",
+		},
+	})
+	recorder = performCredentialRequest(t, h.CreateCredential, user.ID, "user", workspace.ID, http.MethodPost, "/api/v1/credentials", missingPasswordBody)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing password, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestCredentialHandler_ListCredentialsHonorsLargePageSize(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "list-credentials-user", models.WorkspaceRoleDeveloper)
+	for i := 0; i < 15; i++ {
+		credential := models.Credential{
+			Name:             "ssh-credential-" + strconv.Itoa(i),
+			Type:             models.TypeSSHKey,
+			Category:         models.CategoryCustom,
+			Scope:            models.ScopeWorkspace,
+			WorkspaceID:      workspace.ID,
+			OwnerID:          user.ID,
+			EncryptedPayload: "payload",
+			Status:           models.CredentialStatusActive,
+		}
+		if err := db.Create(&credential).Error; err != nil {
+			t.Fatalf("create credential %d failed: %v", i, err)
+		}
+	}
+
+	h := NewCredentialHandler()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/credentials?page=1&size=500", nil)
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+	c.Set("workspace_id", workspace.ID)
+
+	h.ListCredentials(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"total":15`)) {
+		t.Fatalf("expected all credentials returned in list response, got %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("ssh-credential-14")) {
+		t.Fatalf("expected later credentials included with large page size, got %s", w.Body.String())
+	}
+}
+
 func seedCredentialTestUserAndWorkspace(t *testing.T, db *gorm.DB, username, workspaceRole string) (models.User, models.Workspace) {
 	t.Helper()
 	user := models.User{Username: username, Role: "user", Status: "active"}
@@ -356,6 +827,12 @@ func performCredentialRequest(t *testing.T, handler gin.HandlerFunc, userID uint
 func pathID(id uint64) func(*gin.Context) {
 	return func(c *gin.Context) {
 		c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(id, 10)}}
+	}
+}
+
+func withWorkspaceRole(role string) func(*gin.Context) {
+	return func(c *gin.Context) {
+		c.Set("workspace_role", role)
 	}
 }
 

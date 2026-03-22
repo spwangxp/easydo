@@ -64,7 +64,7 @@ func (h *StatisticsHandler) GetOverview(c *gin.Context) {
 	endDate := c.DefaultQuery("end_date", "")
 	workspaceID := c.GetUint64("workspace_id")
 
-	query := h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ?", workspaceID)
+	query := regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ?", workspaceID)
 
 	if startDate != "" {
 		startTime, err := time.Parse("2006-01-02", startDate)
@@ -116,7 +116,7 @@ func (h *StatisticsHandler) GetOverview(c *gin.Context) {
 	today := time.Now()
 	todayStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
 	var todayRuns int64
-	h.DB.Model(&models.PipelineRun{}).Where("workspace_id = ? AND created_at >= ?", workspaceID, todayStart).Count(&todayRuns)
+	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ? AND created_at >= ?", workspaceID, todayStart).Count(&todayRuns)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -156,7 +156,7 @@ func (h *StatisticsHandler) GetTrend(c *gin.Context) {
 	}
 
 	var rows []trendRow
-	h.DB.Model(&models.PipelineRun{}).
+	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).
 		Select(`DATE(created_at) AS date,
 			COUNT(*) AS total,
 			SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
@@ -225,7 +225,7 @@ func (h *StatisticsHandler) GetTopPipelines(c *gin.Context) {
 			COUNT(pipeline_runs.id) AS run_count,
 			SUM(CASE WHEN pipeline_runs.status = 'success' THEN 1 ELSE 0 END) AS success_count,
 			COALESCE(SUM(CASE WHEN pipeline_runs.duration > 0 THEN pipeline_runs.duration ELSE 0 END), 0) AS total_duration`).
-		Joins(`LEFT JOIN pipeline_runs ON pipeline_runs.pipeline_id = pipelines.id AND pipeline_runs.workspace_id = pipelines.workspace_id`).
+		Joins(`LEFT JOIN pipeline_runs ON pipeline_runs.pipeline_id = pipelines.id AND pipeline_runs.workspace_id = pipelines.workspace_id AND (pipeline_runs.trigger_type IS NULL OR pipeline_runs.trigger_type <> ?)`, pipelineRunTriggerTypeDeploymentRequest).
 		Where("pipelines.workspace_id = ?", workspaceID)
 
 	if startDate != "" {

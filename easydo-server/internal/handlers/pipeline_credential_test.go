@@ -121,6 +121,43 @@ func TestInjectCredentialEnv_RejectsInactiveCredential(t *testing.T) {
 	}
 }
 
+func TestInjectCredentialEnv_AllowsLockedCredentialForRuntime(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "locked-runtime-user", models.WorkspaceRoleDeveloper)
+	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{"token": "ghp_locked_runtime", "token_type": "bearer"})
+	if err != nil {
+		t.Fatalf("encrypt payload failed: %v", err)
+	}
+	credential := models.Credential{Name: "locked-runtime-auth", Type: models.TypeToken, Category: models.CategoryGitHub, Scope: models.ScopeWorkspace, WorkspaceID: workspace.ID, OwnerID: user.ID, EncryptedPayload: encrypted, Status: models.CredentialStatusActive, LockState: models.CredentialLockStateLocked}
+	if err := db.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential failed: %v", err)
+	}
+
+	handler := &PipelineHandler{}
+	run := &models.PipelineRun{BaseModel: models.BaseModel{ID: 105}, WorkspaceID: workspace.ID}
+	nodeConfig := map[string]interface{}{
+		"credentials": map[string]interface{}{
+			"repo_auth": map[string]interface{}{"credential_id": credential.ID},
+		},
+	}
+	if err := handler.injectCredentialEnv(db, "git_clone", pipelineTaskDefinitions["git_clone"], nodeConfig, run, user.ID, "user"); err != nil {
+		t.Fatalf("expected locked credential runtime injection to remain allowed, got %v", err)
+	}
+
+	envMap, ok := nodeConfig["env"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected env map to be injected")
+	}
+	if envMap["EASYDO_CRED_REPO_AUTH_TOKEN"] != "ghp_locked_runtime" {
+		t.Fatalf("expected token env injection, got %#v", envMap["EASYDO_CRED_REPO_AUTH_TOKEN"])
+	}
+}
+
 func TestInjectCredentialEnv_RejectsTypeSpecificMissingPayload(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
@@ -257,5 +294,160 @@ func TestInjectCredentialEnv_GitClonePasswordCredential(t *testing.T) {
 	}
 	if envMap["EASYDO_CRED_REPO_AUTH_TYPE"] != string(models.TypePassword) {
 		t.Fatalf("expected type env injection, got %#v", envMap["EASYDO_CRED_REPO_AUTH_TYPE"])
+	}
+}
+
+func TestInjectCredentialEnv_SSHPasswordCredential(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "ssh-password-user", models.WorkspaceRoleDeveloper)
+	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{
+		"username": "root",
+		"password": "secret123",
+	})
+	if err != nil {
+		t.Fatalf("encrypt payload failed: %v", err)
+	}
+	credential := models.Credential{
+		Name:             "vm-password-auth",
+		Type:             models.TypePassword,
+		Category:         models.CategoryCustom,
+		Scope:            models.ScopeWorkspace,
+		WorkspaceID:      workspace.ID,
+		OwnerID:          user.ID,
+		EncryptedPayload: encrypted,
+		Status:           models.CredentialStatusActive,
+	}
+	if err := db.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential failed: %v", err)
+	}
+
+	handler := &PipelineHandler{}
+	run := &models.PipelineRun{BaseModel: models.BaseModel{ID: 103}, WorkspaceID: workspace.ID}
+	nodeConfig := map[string]interface{}{
+		"credentials": map[string]interface{}{
+			"ssh_auth": map[string]interface{}{"credential_id": credential.ID},
+		},
+	}
+	if err := handler.injectCredentialEnv(db, "ssh", pipelineTaskDefinitions["ssh"], nodeConfig, run, user.ID, "user"); err != nil {
+		t.Fatalf("inject credential env failed: %v", err)
+	}
+
+	envMap, ok := nodeConfig["env"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected env map to be injected")
+	}
+	if envMap["EASYDO_CRED_SSH_AUTH_USERNAME"] != "root" {
+		t.Fatalf("expected username env injection, got %#v", envMap["EASYDO_CRED_SSH_AUTH_USERNAME"])
+	}
+	if envMap["EASYDO_CRED_SSH_AUTH_PASSWORD"] != "secret123" {
+		t.Fatalf("expected password env injection, got %#v", envMap["EASYDO_CRED_SSH_AUTH_PASSWORD"])
+	}
+	if envMap["EASYDO_CRED_SSH_AUTH_TYPE"] != string(models.TypePassword) {
+		t.Fatalf("expected type env injection, got %#v", envMap["EASYDO_CRED_SSH_AUTH_TYPE"])
+	}
+}
+
+func TestInjectCredentialEnv_AllowsResourceBoundDeploymentCredentialForRequester(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	maintainer, workspace := seedCredentialTestUserAndWorkspace(t, db, "bound-credential-owner", models.WorkspaceRoleMaintainer)
+	developer := seedCredentialMember(t, db, workspace.ID, "bound-credential-requester", models.WorkspaceRoleDeveloper)
+
+	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{
+		"username": "root",
+		"password": "secret123",
+	})
+	if err != nil {
+		t.Fatalf("encrypt payload failed: %v", err)
+	}
+	credential := models.Credential{
+		Name:             "deployment-bound-ssh-auth",
+		Type:             models.TypePassword,
+		Category:         models.CategoryCustom,
+		Scope:            models.ScopeUser,
+		WorkspaceID:      workspace.ID,
+		OwnerID:          maintainer.ID,
+		EncryptedPayload: encrypted,
+		Status:           models.CredentialStatusActive,
+	}
+	if err := db.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential failed: %v", err)
+	}
+
+	resource := models.Resource{
+		WorkspaceID: workspace.ID,
+		Name:        "bound-resource-vm",
+		Type:        models.ResourceTypeVM,
+		Environment: "development",
+		Status:      models.ResourceStatusOnline,
+		Endpoint:    "10.0.0.8:22",
+		CreatedBy:   maintainer.ID,
+	}
+	if err := db.Create(&resource).Error; err != nil {
+		t.Fatalf("create resource failed: %v", err)
+	}
+	if err := db.Create(&models.ResourceCredentialBinding{
+		WorkspaceID:  workspace.ID,
+		ResourceID:   resource.ID,
+		CredentialID: credential.ID,
+		Purpose:      "ssh_auth",
+		BoundBy:      maintainer.ID,
+	}).Error; err != nil {
+		t.Fatalf("create resource binding failed: %v", err)
+	}
+
+	run := &models.PipelineRun{
+		BaseModel:       models.BaseModel{ID: 104},
+		WorkspaceID:     workspace.ID,
+		TriggerType:     "deployment_request",
+		TriggerUserID:   developer.ID,
+		TriggerUserRole: models.WorkspaceRoleDeveloper,
+	}
+	if err := db.Create(run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+	if err := db.Create(&models.DeploymentRequest{
+		WorkspaceID:        workspace.ID,
+		TemplateID:         1,
+		TemplateVersionID:  1,
+		TemplateType:       models.StoreTemplateTypeLLM,
+		TargetResourceID:   resource.ID,
+		TargetResourceType: models.ResourceTypeVM,
+		Status:             models.DeploymentRequestStatusQueued,
+		PipelineRunID:      run.ID,
+		RequestedBy:        developer.ID,
+	}).Error; err != nil {
+		t.Fatalf("create deployment request failed: %v", err)
+	}
+
+	handler := &PipelineHandler{}
+	nodeConfig := map[string]interface{}{
+		"credentials": map[string]interface{}{
+			"ssh_auth": map[string]interface{}{"credential_id": credential.ID},
+		},
+	}
+	err = handler.injectCredentialEnv(db, "ssh", pipelineTaskDefinitions["ssh"], nodeConfig, run, developer.ID, models.WorkspaceRoleDeveloper)
+	if err != nil {
+		t.Fatalf("expected resource-bound deployment credential injection to succeed, got %v", err)
+	}
+
+	envMap, ok := nodeConfig["env"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected env map to be injected")
+	}
+	if envMap["EASYDO_CRED_SSH_AUTH_USERNAME"] != "root" {
+		t.Fatalf("expected username env injection, got %#v", envMap["EASYDO_CRED_SSH_AUTH_USERNAME"])
+	}
+	if envMap["EASYDO_CRED_SSH_AUTH_PASSWORD"] != "secret123" {
+		t.Fatalf("expected password env injection, got %#v", envMap["EASYDO_CRED_SSH_AUTH_PASSWORD"])
 	}
 }

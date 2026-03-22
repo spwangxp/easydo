@@ -122,8 +122,8 @@
             </button>
           </el-tooltip>
 
-          <el-badge :value="3" :max="99" class="header-badge">
-            <button class="icon-btn" type="button">
+          <el-badge :value="notificationStore.unreadCount" :max="99" :hidden="notificationStore.unreadCount < 1" class="header-badge">
+            <button class="icon-btn" type="button" @click="router.push('/messages')">
               <el-icon :size="18"><Bell /></el-icon>
             </button>
           </el-badge>
@@ -133,21 +133,6 @@
               <el-icon :size="18"><QuestionFilled /></el-icon>
             </button>
           </el-tooltip>
-
-          <el-dropdown trigger="click">
-            <button class="quick-app-btn" type="button">
-              <el-icon :size="15"><Link /></el-icon>
-              <span>应用</span>
-              <el-icon :size="12"><ArrowDown /></el-icon>
-            </button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item>应用1</el-dropdown-item>
-                <el-dropdown-item>应用2</el-dropdown-item>
-                <el-dropdown-item>应用3</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
 
           <el-dropdown trigger="click" @command="handleCommand">
             <button class="user-chip" type="button">
@@ -185,10 +170,11 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { useUserStore } from '@/stores/user'
+import { useNotificationStore } from '@/stores/notification'
 import { useThemeStore } from '@/stores/theme'
 import {
   House,
@@ -204,9 +190,10 @@ import {
   ArrowDown,
   Fold,
   Expand,
-  Link,
   Monitor,
   Key,
+  Collection,
+  Shop,
   Sunny,
   Moon,
   Calendar
@@ -215,6 +202,7 @@ import {
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const notificationStore = useNotificationStore()
 const themeStore = useThemeStore()
 
 const isCollapsed = ref(false)
@@ -224,12 +212,14 @@ let dateTimer = null
 
 onMounted(() => {
   themeStore.init()
+  notificationStore.startPolling()
   dateTimer = setInterval(() => {
     currentDate.value = new Date()
   }, 60000)
 })
 
 onUnmounted(() => {
+  notificationStore.stopPolling()
   if (dateTimer) {
     clearInterval(dateTimer)
   }
@@ -251,9 +241,11 @@ const menuItems = [
   { name: '工作台', path: '/', icon: House },
   { name: '流水线', path: '/pipeline', icon: Connection, permission: 'pipeline.read' },
   { name: '项目', path: '/project', icon: Box, permission: 'project.read' },
+  { name: '商店', path: '/store', icon: Shop, permission: 'store.template.read' },
   { name: '执行器', path: '/agent', icon: Monitor, permission: 'agent.read' },
+  { name: '资源管理', path: '/resources', icon: Collection, permission: 'resource.read' },
   { name: '发布', path: '/deploy', icon: Promotion },
-      { name: '凭据管理', path: '/credentials', icon: Key, permission: 'credential.read' },
+  { name: '凭据管理', path: '/credentials', icon: Key, permission: 'credential.read' },
   { name: '统计', path: '/statistics', icon: DataAnalysis, permission: 'workspace.read' },
   { name: '设置', path: '/settings', icon: Setting, permission: 'workspace.read' }
 ]
@@ -274,6 +266,10 @@ const currentPageTitle = computed(() => {
   })
   return currentRoute?.name || '工作台'
 })
+
+watch(() => userStore.currentWorkspaceId, async () => {
+  await notificationStore.refreshUnreadCount()
+}, { immediate: true })
 
 const isActive = (path) => {
   if (path === '/') {

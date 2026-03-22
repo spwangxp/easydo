@@ -22,6 +22,8 @@ type Agent struct {
 	CPUCores               int     `json:"cpu_cores"`                                                                  // Number of CPU cores
 	MemoryTotal            int64   `json:"memory_total"`                                                               // Total memory in bytes
 	DiskTotal              int64   `json:"disk_total"`                                                                 // Total disk space in bytes
+	BaseInfo               string  `gorm:"type:longtext" json:"base_info"`
+	BaseInfoCollectedAt    int64   `json:"base_info_collected_at"`
 	Hostname               string  `gorm:"size:128" json:"hostname"`
 	IPAddress              string  `gorm:"size:64" json:"ip_address"`
 	LastHeartAt            int64   `json:"last_heart_at"`                                                  // Last heartbeat timestamp

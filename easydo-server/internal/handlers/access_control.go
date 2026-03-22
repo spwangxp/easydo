@@ -218,6 +218,74 @@ func canReadCredentialValue(db *gorm.DB, credential *models.Credential, userID u
 	return true
 }
 
+func canUseCredentialOperationally(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
+	return canReadCredentialValue(db, credential, userID, role)
+}
+
+func canReadCredentialMetadata(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
+	if credential == nil {
+		return false
+	}
+	return userCanAccessWorkspace(db, credential.WorkspaceID, userID, role)
+}
+
+func isWorkspaceOwner(db *gorm.DB, workspaceID, userID uint64, role string) bool {
+	if isAdminRole(role) {
+		return true
+	}
+	workspaceRole, ok := userWorkspaceRole(db, workspaceID, userID)
+	return ok && workspaceRole == models.WorkspaceRoleOwner
+}
+
+func canAccessLockedCredentialSensitiveOperation(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
+	if credential == nil || !userCanAccessWorkspace(db, credential.WorkspaceID, userID, role) {
+		return false
+	}
+	if isAdminRole(role) || credential.OwnerID == userID {
+		return true
+	}
+	return isWorkspaceOwner(db, credential.WorkspaceID, userID, role)
+}
+
+func canAccessUnlockedCredentialSensitiveOperation(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
+	if credential == nil {
+		return false
+	}
+	return userCanWriteWorkspaceResource(db, credential.WorkspaceID, userID, role)
+}
+
+func canViewCredentialSecret(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
+	if credential == nil {
+		return false
+	}
+	if credential.EffectiveLockState() == models.CredentialLockStateLocked {
+		return canAccessLockedCredentialSensitiveOperation(db, credential, userID, role)
+	}
+	return canAccessUnlockedCredentialSensitiveOperation(db, credential, userID, role)
+}
+
+func canEditCredential(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
+	return canViewCredentialSecret(db, credential, userID, role)
+}
+
+func canVerifyCredential(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
+	return canUseCredentialOperationally(db, credential, userID, role)
+}
+
+func canDeleteCredential(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
+	return canViewCredentialSecret(db, credential, userID, role)
+}
+
+func canToggleCredentialLock(db *gorm.DB, credential *models.Credential, userID uint64, role string) bool {
+	if credential == nil {
+		return false
+	}
+	if credential.EffectiveLockState() == models.CredentialLockStateLocked {
+		return canAccessLockedCredentialSensitiveOperation(db, credential, userID, role)
+	}
+	return canAccessUnlockedCredentialSensitiveOperation(db, credential, userID, role)
+}
+
 func applyCredentialReadScope(db *gorm.DB, userID uint64, role string) *gorm.DB {
 	if isAdminRole(role) {
 		return db

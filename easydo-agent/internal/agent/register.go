@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -29,6 +30,21 @@ type RegisterResponse struct {
 	Status             string `json:"status"`
 	RegistrationStatus string `json:"registration_status"`
 	RegisterKey        string `json:"register_key,omitempty"`
+}
+
+func runtimeLabelsJSON(info *system.Info) string {
+	if info == nil {
+		return ""
+	}
+	labels := info.Runtime.Labels()
+	if len(labels) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(labels)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // SelfResponse represents the response from /api/agents/self endpoint
@@ -96,18 +112,20 @@ func (r *Register) Execute(ctx context.Context) (agentID uint64, registerKey str
 // newRegistration performs a new agent registration
 func (r *Register) newRegistration(ctx context.Context) (uint64, string, RegistrationStatus, error) {
 	registerReq := map[string]interface{}{
-		"name":         r.agentName,
-		"host":         r.sysInfo.Hostname,
-		"port":         0, // Agent doesn't expose a port
-		"labels":       "",
-		"tags":         "",
-		"os":           r.sysInfo.OS,
-		"arch":         r.sysInfo.Arch,
-		"hostname":     r.sysInfo.Hostname,
-		"ip_address":   r.sysInfo.IPAddress,
-		"cpu_cores":    r.sysInfo.CPUCores,
-		"memory_total": r.sysInfo.MemoryTotal,
-		"disk_total":   r.sysInfo.DiskTotal,
+		"name":                   r.agentName,
+		"host":                   r.sysInfo.Hostname,
+		"port":                   0,
+		"labels":                 runtimeLabelsJSON(r.sysInfo),
+		"tags":                   "",
+		"os":                     r.sysInfo.OS,
+		"arch":                   r.sysInfo.Arch,
+		"hostname":               r.sysInfo.Hostname,
+		"ip_address":             r.sysInfo.IPAddress,
+		"cpu_cores":              r.sysInfo.CPUCores,
+		"memory_total":           r.sysInfo.MemoryTotal,
+		"disk_total":             r.sysInfo.DiskTotal,
+		"base_info":              r.sysInfo.BaseInfo,
+		"base_info_collected_at": r.sysInfo.BaseInfoCollectedAt,
 	}
 	if r.cfg != nil && r.cfg.Agent.WorkspaceID > 0 {
 		registerReq["workspace_id"] = r.cfg.Agent.WorkspaceID
@@ -150,19 +168,21 @@ func (r *Register) newRegistration(ctx context.Context) (uint64, string, Registr
 // reRegister re-registers an existing agent with its token
 func (r *Register) reRegister(ctx context.Context, token string) (uint64, string, RegistrationStatus, error) {
 	registerReq := map[string]interface{}{
-		"name":         r.agentName,
-		"host":         r.sysInfo.Hostname,
-		"port":         0,
-		"labels":       "",
-		"tags":         "",
-		"os":           r.sysInfo.OS,
-		"arch":         r.sysInfo.Arch,
-		"hostname":     r.sysInfo.Hostname,
-		"ip_address":   r.sysInfo.IPAddress,
-		"cpu_cores":    r.sysInfo.CPUCores,
-		"memory_total": r.sysInfo.MemoryTotal,
-		"disk_total":   r.sysInfo.DiskTotal,
-		"token":        token,
+		"name":                   r.agentName,
+		"host":                   r.sysInfo.Hostname,
+		"port":                   0,
+		"labels":                 runtimeLabelsJSON(r.sysInfo),
+		"tags":                   "",
+		"os":                     r.sysInfo.OS,
+		"arch":                   r.sysInfo.Arch,
+		"hostname":               r.sysInfo.Hostname,
+		"ip_address":             r.sysInfo.IPAddress,
+		"cpu_cores":              r.sysInfo.CPUCores,
+		"memory_total":           r.sysInfo.MemoryTotal,
+		"disk_total":             r.sysInfo.DiskTotal,
+		"base_info":              r.sysInfo.BaseInfo,
+		"base_info_collected_at": r.sysInfo.BaseInfoCollectedAt,
+		"token":                  token,
 	}
 
 	resp, err := r.client.Post(ctx, "/api/agents/register", registerReq)

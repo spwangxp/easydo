@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -194,7 +195,7 @@ func convertToString(value interface{}) string {
 	case int64:
 		return fmt.Sprintf("%d", v)
 	case float64:
-		return fmt.Sprintf("%f", v)
+		return strconv.FormatFloat(v, 'f', -1, 64)
 	case bool:
 		return fmt.Sprintf("%t", v)
 	case []int:

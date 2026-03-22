@@ -93,56 +93,69 @@
         
         <!-- 偏好设置 -->
         <div v-if="activeMenu === 'preferences'" class="profile-section">
-          <h2 class="section-title">偏好设置</h2>
+          <h2 class="section-title">个人通知偏好</h2>
           
-          <div class="preferences-form">
-            <div class="form-item">
-              <div class="form-label">
-                <h4>语言</h4>
-                <p>选择界面显示语言</p>
-              </div>
-              <el-select v-model="preferences.language" style="width: 200px">
-                <el-option label="简体中文" value="zh-CN" />
-                <el-option label="English" value="en-US" />
-              </el-select>
+          <div v-loading="preferencesLoading" class="preferences-form">
+            <div class="preferences-tip">以下设置会作为你的默认通知方式，当前工作空间中的通知设置可以覆盖这里的默认值。</div>
+
+            <div class="notification-module-tabs">
+              <button
+                v-for="group in notificationEventGroups"
+                :key="group.value"
+                type="button"
+                class="module-tab"
+                :class="{ active: activeNotificationModule === group.value }"
+                @click="activeNotificationModule = group.value"
+              >
+                <span class="module-tab-label">{{ group.label }}</span>
+                <span class="module-tab-count">{{ group.events.length }} 个事件</span>
+              </button>
             </div>
-            
-            <div class="form-item">
-              <div class="form-label">
-                <h4>时区</h4>
-                <p>选择时区用于时间显示</p>
+
+            <div v-if="currentNotificationGroup" class="preference-module-panel">
+              <div class="preference-module-header">
+                <h3>{{ currentNotificationGroup.label }}</h3>
+                <p>{{ currentNotificationGroup.description }}</p>
+                <span v-if="currentNotificationGroup.supports_resource_scope" class="scope-hint">{{ currentNotificationGroup.resource_scope_label }}</span>
               </div>
-              <el-select v-model="preferences.timezone" style="width: 200px">
-                <el-option label="Asia/Shanghai (UTC+8)" value="Asia/Shanghai" />
-                <el-option label="America/New_York (UTC-5)" value="America/New_York" />
-                <el-option label="Europe/London (UTC+0)" value="Europe/London" />
-              </el-select>
-            </div>
-            
-            <div class="form-item">
-              <div class="form-label">
-                <h4>主题</h4>
-                <p>选择界面主题颜色</p>
+
+              <div class="preference-grid-header">
+                <span></span>
+                <span
+                  v-for="channel in notificationChannels"
+                  :key="channel.value"
+                  class="preference-channel"
+                >
+                  {{ channel.label }}
+                </span>
               </div>
-              <el-radio-group v-model="preferences.theme">
-                <el-radio-button label="light">浅色</el-radio-button>
-                <el-radio-button label="dark">深色</el-radio-button>
-              </el-radio-group>
-            </div>
-            
-            <div class="form-item">
-              <div class="form-label">
-                <h4>通知方式</h4>
-                <p>选择接收通知的方式</p>
+
+              <div
+                v-for="event in currentNotificationGroup.events"
+                :key="event.value"
+                class="preference-row"
+              >
+                <div class="form-label">
+                  <h4>{{ event.label }}</h4>
+                  <p>{{ event.description }}</p>
+                </div>
+
+                <div class="preference-switch">
+                  <el-switch
+                    :model-value="getGlobalPreferenceEnabled(event.value, 'in_app')"
+                    :loading="isPreferenceSaving(null, event.value, 'in_app')"
+                    @change="(value) => updateGlobalPreference(event, 'in_app', value)"
+                  />
+                </div>
+
+                <div class="preference-switch">
+                  <el-switch
+                    :model-value="getGlobalPreferenceEnabled(event.value, 'email')"
+                    :loading="isPreferenceSaving(null, event.value, 'email')"
+                    @change="(value) => updateGlobalPreference(event, 'email', value)"
+                  />
+                </div>
               </div>
-              <el-checkbox-group v-model="preferences.notificationMethods">
-                <el-checkbox label="email">邮件</el-checkbox>
-                <el-checkbox label="browser">浏览器推送</el-checkbox>
-              </el-checkbox-group>
-            </div>
-            
-            <div class="form-actions">
-              <el-button type="primary" @click="savePreferences">保存设置</el-button>
             </div>
           </div>
         </div>
@@ -187,7 +200,16 @@
 
 <script setup>
 import { ref, reactive, computed, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { useUserStore } from '@/stores/user'
+import {
+  NOTIFICATION_CHANNELS,
+  NOTIFICATION_EVENT_GROUPS,
+  listNotificationPreferences,
+  resolveNotificationPreferenceEnabled,
+  upsertNotificationPreference,
+  upsertNotificationPreferenceInList
+} from '@/api/notification'
 import { 
   User, 
   Lock, 
@@ -224,12 +246,17 @@ watch(() => userStore.userInfo, (value) => {
   profileForm.email = value?.email || ''
 }, { immediate: true, deep: true })
 
-const preferences = reactive({
-  language: 'zh-CN',
-  timezone: 'Asia/Shanghai',
-  theme: 'light',
-  notificationMethods: ['email', 'browser']
+const notificationEventGroups = computed(() => {
+  return NOTIFICATION_EVENT_GROUPS.map(group => ({
+    ...group,
+    events: group.events.map(event => ({ ...event, family: group.value }))
+  }))
 })
+const notificationChannels = NOTIFICATION_CHANNELS
+const preferencesLoading = ref(false)
+const notificationPreferences = ref([])
+const savingPreferenceKeys = ref([])
+const activeNotificationModule = ref(NOTIFICATION_EVENT_GROUPS[0]?.value || '')
 
 const devices = ref([
   {
@@ -258,10 +285,6 @@ const saveProfile = () => {
   console.log('保存资料')
 }
 
-const savePreferences = () => {
-  console.log('保存偏好设置')
-}
-
 const regenerateToken = () => {
   console.log('重新生成Token')
 }
@@ -269,6 +292,85 @@ const regenerateToken = () => {
 const logoutDevice = (deviceId) => {
   devices.value = devices.value.filter(d => d.id !== deviceId)
 }
+
+const globalNotificationPreferences = computed(() => {
+  return notificationPreferences.value.filter(item => item.workspace_id === null || item.workspace_id === undefined)
+})
+
+const getPreferenceSavingKey = (workspaceId, eventType, channel) => {
+  return `${workspaceId ?? 'global'}:${eventType}:${channel}`
+}
+
+const setPreferenceSaving = (savingKey, isSaving) => {
+  if (isSaving) {
+    if (!savingPreferenceKeys.value.includes(savingKey)) {
+      savingPreferenceKeys.value = [...savingPreferenceKeys.value, savingKey]
+    }
+    return
+  }
+  savingPreferenceKeys.value = savingPreferenceKeys.value.filter(item => item !== savingKey)
+}
+
+const isPreferenceSaving = (workspaceId, eventType, channel) => {
+  return savingPreferenceKeys.value.includes(getPreferenceSavingKey(workspaceId, eventType, channel))
+}
+
+const currentNotificationGroup = computed(() => {
+  return notificationEventGroups.value.find(group => group.value === activeNotificationModule.value) || notificationEventGroups.value[0] || null
+})
+
+const getGlobalPreferenceEnabled = (eventType, channel) => {
+  return resolveNotificationPreferenceEnabled(globalNotificationPreferences.value, {
+    eventType,
+    channel,
+    workspaceId: null,
+    defaultEnabled: true
+  })
+}
+
+const loadNotificationPreferences = async () => {
+  preferencesLoading.value = true
+  try {
+    const res = await listNotificationPreferences()
+    if (res.code === 200) {
+      notificationPreferences.value = res.data?.list || []
+      return
+    }
+    ElMessage.error(res.message || '加载通知偏好失败')
+  } catch (error) {
+    ElMessage.error('加载通知偏好失败')
+  } finally {
+    preferencesLoading.value = false
+  }
+}
+
+const updateGlobalPreference = async (event, channel, enabled) => {
+  const savingKey = getPreferenceSavingKey(null, event.value, channel)
+  setPreferenceSaving(savingKey, true)
+  try {
+    const res = await upsertNotificationPreference({
+      workspace_id: null,
+      family: event.family,
+      event_type: event.value,
+      channel,
+      enabled
+    })
+    if (res.code === 200) {
+      notificationPreferences.value = upsertNotificationPreferenceInList(notificationPreferences.value, res.data)
+      ElMessage.success('个人通知偏好已更新')
+      return
+    }
+    ElMessage.error(res.message || '更新通知偏好失败')
+  } catch (error) {
+    ElMessage.error('更新通知偏好失败')
+  } finally {
+    setPreferenceSaving(savingKey, false)
+  }
+}
+
+watch(() => userStore.currentWorkspaceId, async () => {
+  await loadNotificationPreferences()
+}, { immediate: true })
 </script>
 
 <style lang="scss" scoped>
@@ -405,13 +507,37 @@ const logoutDevice = (deviceId) => {
       }
       
       .preferences-form {
-        .form-item {
-          display: flex;
+        .preferences-tip {
+          margin-bottom: 16px;
+          font-size: 13px;
+          line-height: 1.6;
+          color: var(--text-muted);
+        }
+
+        .preference-grid-header,
+        .preference-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 120px 120px;
+          gap: 16px;
           align-items: center;
-          justify-content: space-between;
+        }
+
+        .preference-grid-header {
+          padding-bottom: 12px;
+          border-bottom: 1px solid var(--border-color-light);
+        }
+
+        .preference-channel {
+          text-align: center;
+          font-size: 12px;
+          font-weight: 500;
+          color: var(--text-muted);
+        }
+
+        .preference-row {
           padding: 20px 0;
-          border-bottom: 1px solid #ebeef5;
-          
+          border-bottom: 1px solid var(--border-color-light);
+
           .form-label {
             h4 {
               font-size: 14px;
@@ -426,9 +552,77 @@ const logoutDevice = (deviceId) => {
             }
           }
         }
-        
-        .form-actions {
-          margin-top: 24px;
+
+        .notification-module-tabs {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 12px;
+          margin-bottom: 20px;
+        }
+
+        .module-tab {
+          border: 1px solid var(--border-color-light);
+          background: var(--bg-secondary);
+          border-radius: 12px;
+          padding: 14px 16px;
+          text-align: left;
+          cursor: pointer;
+
+          &.active {
+            border-color: var(--primary-color);
+            background: var(--primary-lighter);
+          }
+
+          .module-tab-label {
+            display: block;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+          }
+
+          .module-tab-count {
+            font-size: 12px;
+            color: var(--text-muted);
+          }
+        }
+
+        .preference-module-panel {
+          border: 1px solid var(--border-color-light);
+          border-radius: 16px;
+          padding: 20px;
+          background: var(--bg-secondary);
+        }
+
+        .preference-module-header {
+          margin-bottom: 12px;
+
+          h3 {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+          }
+
+          p {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+          }
+
+          .scope-hint {
+            display: inline-flex;
+            font-size: 12px;
+            color: var(--primary-color);
+            background: var(--primary-lighter);
+            border-radius: 999px;
+            padding: 4px 10px;
+          }
+        }
+
+        .preference-switch {
+          display: flex;
+          justify-content: center;
         }
       }
       

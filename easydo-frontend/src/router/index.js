@@ -15,6 +15,12 @@ const routes = [
     meta: { requiresAuth: false }
   },
   {
+      path: '/terminal',
+      name: 'ResourceTerminal',
+      component: () => import('@/views/resources/terminal/index.vue'),
+      meta: { requiresAuth: true, permission: 'resource.use' }
+    },
+  {
     path: '',
     component: () => import('@/views/layout/index.vue'),
     meta: { requiresAuth: true },
@@ -44,7 +50,36 @@ const routes = [
       {
         path: 'deploy',
         name: 'Deploy',
-        component: () => import('@/views/deploy/index.vue')
+        component: () => import('@/views/deploy/index.vue'),
+        meta: { permission: 'resource.use' }
+      },
+      {
+        path: 'resources',
+        name: 'Resources',
+        component: () => import('@/views/resources/index.vue'),
+        meta: { permission: 'resource.read' }
+      },
+      {
+        path: 'resources/:id/k8s',
+        name: 'ResourceK8sBrowser',
+        component: () => import('@/views/resources/k8s/index.vue'),
+        meta: { permission: 'resource.read' }
+      },
+      {
+        path: 'store',
+        redirect: '/store/apps'
+      },
+      {
+        path: 'store/apps',
+        name: 'AppStore',
+        component: () => import('@/views/store/apps.vue'),
+        meta: { permission: 'store.template.read' }
+      },
+      {
+        path: 'store/llms',
+        name: 'LLMStore',
+        component: () => import('@/views/store/llms.vue'),
+        meta: { permission: 'store.template.read' }
       },
       {
         path: 'statistics',

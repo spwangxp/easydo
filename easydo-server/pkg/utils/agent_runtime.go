@@ -22,6 +22,7 @@ const (
 	agentPresenceKeyPrefix = "easydo:agent:presence:"
 	agentStreamKeyPrefix   = "easydo:agent:stream:"
 	frontendRealtimeTopic  = "easydo:frontend:realtime"
+	terminalRelayTopicBase = "easydo:terminal:relay:"
 	InternalTokenHeader    = "X-EasyDo-Internal-Token"
 )
 
@@ -48,6 +49,9 @@ type AgentPresence struct {
 }
 
 func ServerInternalURL() string {
+	if config.Config == nil {
+		return "http://127.0.0.1:8080"
+	}
 	if v := strings.TrimSpace(config.Config.GetString("server.internal_url")); v != "" {
 		return strings.TrimRight(v, "/")
 	}
@@ -59,6 +63,9 @@ func ServerInternalURL() string {
 }
 
 func ServerInternalToken() string {
+	if config.Config == nil {
+		return ""
+	}
 	return strings.TrimSpace(config.Config.GetString("server.internal_token"))
 }
 
@@ -71,6 +78,10 @@ type AgentStreamEvent struct {
 
 func ServerID() string {
 	serverIDOnce.Do(func() {
+		if config.Config == nil {
+			serverID = "srv-" + uuid.NewString()
+			return
+		}
 		if id := strings.TrimSpace(config.Config.GetString("server.id")); id != "" {
 			serverID = id
 			return
@@ -90,6 +101,10 @@ func AgentStreamKey(agentID uint64) string {
 
 func FrontendRealtimeTopic() string {
 	return frontendRealtimeTopic
+}
+
+func TerminalRelayTopic(serverID string) string {
+	return terminalRelayTopicBase + strings.TrimSpace(serverID)
 }
 
 func PutAgentPresence(ctx context.Context, presence AgentPresence) error {

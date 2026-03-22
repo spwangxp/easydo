@@ -83,6 +83,21 @@ export function getPipelineStatistics(id, params) {
   })
 }
 
+export function getPipelineTriggers(id) {
+  return request({
+    url: `/pipelines/${id}/triggers`,
+    method: 'get'
+  })
+}
+
+export function updatePipelineTriggers(id, data) {
+  return request({
+    url: `/pipelines/${id}/triggers`,
+    method: 'put',
+    data
+  })
+}
+
 export function getPipelineTestReports(id, params) {
   return request({
     url: `/pipelines/${id}/test-reports`,
