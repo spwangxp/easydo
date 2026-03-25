@@ -17,6 +17,7 @@
 - [核心功能 / Core Features](#核心功能--core-features)
 - [功能截图 / Feature Screenshots](#功能截图--feature-screenshots)
 - [技术架构 / Tech Stack](#技术架构--tech-stack)
+- [架构特性 / Architecture Highlights](#架构特性--architecture-highlights)
 - [项目结构 / Project Structure](#项目结构--project-structure)
 - [快速开始 / Quick Start](#快速开始--quick-start)
 - [测试账号 / Test Accounts](#测试账号--test-accounts)
@@ -54,6 +55,10 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
   Complete Docker containerization support
 - 🔄 **可扩展性 / Extensibility** - 模块化设计，易于扩展和维护
   Modular design, easy to extend and maintain
+- 🌐 **多副本高可用 / Multi-replica HA** - 无状态多副本部署，WebSocket 实时状态同步
+  Stateless multi-replica deployment with WebSocket real-time state synchronization
+- 📡 **实时通信 / Real-time Communication** - 前端与 Agent 均通过 WebSocket 与 Server 保持长连接
+  Both frontend and Agent maintain persistent WebSocket connections to Server
 
 ---
 
@@ -64,6 +69,7 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 - JWT Token 认证机制 / JWT Token Authentication
 - 密码加密存储（bcrypt）/ Password Encrypted Storage (bcrypt)
 - 会话管理与安全控制 / Session Management & Security Control
+- 多因素认证支持 / Multi-factor Authentication Support
 
 ### 2. 🔄 流水线管理 / Pipeline Management
 - 可视化流水线列表 / Visual Pipeline List
@@ -71,12 +77,17 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 - 流水线构建历史记录 / Pipeline Build History
 - 收藏常用流水线 / Favorite Common Pipelines
 - 实时构建状态跟踪 / Real-time Build Status Tracking
+- DAG 可视化编排 / DAG Visualization & Orchestration
+- 流水线触发器配置 / Pipeline Trigger Configuration
+- 流水线变量管理 / Pipeline Variable Management
+- 流水线定时调度 / Pipeline Cron Scheduling
 
 ### 3. 📁 项目管理 / Project Management
 - 项目列表与分组管理 / Project List & Group Management
 - 项目详情与配置 / Project Details & Configuration
 - 项目统计信息展示 / Project Statistics Display
 - 项目成员管理 / Project Member Management
+- 项目级流水线管理 / Project-level Pipeline Management
 
 ### 4. 🚀 发布部署 / Release & Deployment
 - 一键快速发布 / One-click Quick Release
@@ -84,6 +95,7 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 - 版本回滚功能 / Version Rollback
 - 发布部署统计 / Deployment Statistics
 - 多环境部署支持 / Multi-environment Deployment Support
+- 发布进度实时跟踪 / Real-time Deployment Progress Tracking
 
 ### 5. 📈 统计分析 / Statistics & Analytics
 - 运行趋势分析 / Run Trend Analysis
@@ -91,6 +103,7 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 - Top 流水线排行 / Top Pipelines Ranking
 - 时间范围筛选 / Time Range Filter
 - 多维度数据可视化 / Multi-dimensional Data Visualization
+- 流水线执行明细 / Pipeline Execution Details
 
 ### 6. ⚙️ 系统设置 / System Settings
 - 基本设置 / Basic Settings
@@ -98,12 +111,68 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 - 通知设置 / Notification Settings
 - 用户管理 / User Management
 - 第三方集成 / Third-party Integration
+- Webhook 配置 / Webhook Configuration
 
 ### 7. 👤 个人中心 / Personal Center
 - 基本资料管理 / Profile Management
 - 安全设置（修改密码）/ Security Settings (Change Password)
 - 偏好设置 / Preference Settings
 - 登录设备管理 / Login Device Management
+
+### 8. 🏢 工作空间 / Workspace Management
+- 工作空间创建与管理 / Workspace Creation & Management
+- 工作空间邀请与成员管理 / Workspace Invitation & Member Management
+- 多角色权限控制（Viewer/Developer/Maintainer/Owner）/ Multi-role Access Control
+- 工作空间级资源配置 / Workspace-level Resource Configuration
+
+### 9. 🤖 执行器管理 / Agent Management
+- 分布式 Agent 注册与心跳 / Distributed Agent Registration & Heartbeat
+- Agent 实时状态监控 / Real-time Agent Status Monitoring
+- Agent 并发数控制 / Agent Concurrency Control
+- Agent 范围管理（平台级/工作空间级）/ Agent Scope Management
+- Agent 会话故障转移 / Agent Session Failover
+- 任务分发超时控制 / Task Dispatch Timeout Control
+
+### 10. 🔑 凭据管理 / Credential Management
+- 多类型凭据支持 / Multi-type Credential Support
+  - 密码（Password）/ Password Authentication
+  - SSH 密钥（SSH Key）/ SSH Key Authentication
+  - API 令牌（Token）/ API Token Authentication
+  - OAuth2 授权 / OAuth2 Authorization
+  - X.509 证书 / X.509 Certificate
+  - 多因素认证（MFA）/ Multi-factor Authentication
+  - IAM 角色 / IAM Role Authentication
+  - Passkey / Passkey Authentication
+- 按类别管理凭据 / Category-based Credential Management
+  - GitHub / GitLab / Gitee 代码托管
+  - Docker 镜像仓库 / Docker Registry
+  - Kubernetes 集群 / Kubernetes Cluster
+  - 钉钉 / 企业微信 / DingTalk / WeCom
+  - AWS / GCP / Azure 云平台
+- 凭据加密存储与审计 / Encrypted Storage & Audit
+- 凭据有效期管理 / Credential Expiration Management
+- 凭据使用统计 / Credential Usage Statistics
+
+### 11. 📊 资源终端 / Resource Terminal
+- SSH 远程命令执行 / SSH Remote Command Execution
+- Kubernetes 终端会话 / Kubernetes Terminal Session
+- Docker 运行时管理 / Docker Runtime Management
+- 实时会话输出 / Real-time Session Output
+
+### 12. 📬 消息通知 / Notification System
+- 多通道通知投递 / Multi-channel Notification Delivery
+  -站内消息 / In-app Messages
+  - 邮件通知 / Email Notifications
+- 通知偏好设置 / Notification Preference Settings
+- 按资源类型和事件类型过滤 / Filter by Resource Type & Event Type
+- 通知优先级管理 / Notification Priority Management
+
+### 13. 🗄️ 资源管理 / Resource Management
+- VM 资源管理 / VM Resource Management
+- Kubernetes 集群管理 / Kubernetes Cluster Management
+- 资源状态监控 / Resource Status Monitoring
+- 资源连通性测试 / Resource Connectivity Testing
+- 资源操作审计 / Resource Operation Audit
 
 ---
 
@@ -121,37 +190,77 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 
 ![Pipeline](./screenshots/03-pipeline.png)
 
-### 4. 项目管理 / Project Management
+### 4. 流水线设计 / Pipeline Design (DAG)
+
+![Pipeline Design](./screenshots/12-pipeline-design.png)
+
+### 5. 流水线运行详情 / Pipeline Run Detail
+
+![Pipeline Detail](./screenshots/13-pipeline-detail.png)
+
+### 6. 项目管理 / Project Management
 
 ![Project](./screenshots/04-project.png)
 
-### 5. 发布部署 / Release & Deployment
+### 7. 发布部署 / Release & Deployment
 
 ![Deployment](./screenshots/05-deploy.png)
 
-### 6. 统计分析 / Statistics
+### 8. 统计分析 / Statistics
 
 ![Statistics](./screenshots/06-statistics.png)
 
-### 7. 系统设置 / System Settings
+### 9. 系统设置 / System Settings
 
 ![Settings](./screenshots/07-settings.png)
 
-### 8. 消息中心 / Messages
+### 10. 工作空间管理 / Workspace Management
+
+![Workspace](./screenshots/14-workspace.png)
+
+### 11. 消息中心 / Messages
 
 ![Messages](./screenshots/08-messages.png)
 
-### 9. 个人中心 / Personal Center
+### 12. 通知设置 / Notification Settings
+
+![Notification Settings](./screenshots/15-notification-settings.png)
+
+### 13. 个人中心 / Personal Center
 
 ![Profile](./screenshots/09-profile.png)
 
-### 10. 执行器管理 / Agent Management
+### 14. 执行器管理 / Agent Management
 
 ![Agent](./screenshots/10-agent.png)
 
-### 11. 凭据管理 / Credential Management
+### 15. 凭据管理 / Credential Management
 
 ![Credentials](./screenshots/11-credentials.png)
+
+### 16. 资源管理 / Resource Management
+
+![Resources](./screenshots/16-resources.png)
+
+### 17. Kubernetes 集群管理 / Kubernetes Cluster Management
+
+![K8s Resources](./screenshots/17-k8s-resources.png)
+
+### 18. 资源终端 / Resource Terminal
+
+![Resource Terminal](./screenshots/18-resource-terminal.png)
+
+### 19. 应用商店 / App Store
+
+![App Store](./screenshots/19-app-store.png)
+
+### 20. AI 模型商店 / AI Model Store
+
+![AI Model Store](./screenshots/20-ai-store.png)
+
+### 21. 工作空间邀请 / Workspace Invitation
+
+![Workspace Invitation](./screenshots/21-workspace-invitation.png)
 
 ---
 
@@ -177,7 +286,7 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 | Gin | 1.9+ | Web 框架 / Web Framework |
 | GORM | 1.25+ | ORM 框架 / ORM Framework |
 | MySQL | 8.0 | 主数据库 / Primary Database |
-| Redis | 7.x | 缓存/会话 / Cache/Session |
+| Redis | 7.x | 缓存/会话/消息队列 / Cache/Session/Message Queue |
 | JWT | 5.2+ | 认证授权 / Authentication |
 | Viper | 1.18+ | 配置管理 / Configuration |
 
@@ -188,6 +297,56 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 - **Nginx** - 前端服务与反向代理 / Frontend & Reverse Proxy
 - **MySQL** - 关系型数据库 / Relational Database
 - **Redis** - 缓存与会话存储 / Cache & Session Storage
+- **对象存储** - 日志持久化存储 / Object Storage for Log Persistence
+
+---
+
+## 架构特性 / Architecture Highlights
+
+### 🌐 多副本高可用 / Multi-replica High Availability
+
+EasyDo 采用**无状态多副本**架构设计，任意 Server 副本都能处理任意请求，无需依赖 sticky session：
+
+- **前端实时状态同步**：前端连接的任意 Server 可通过 Redis Live State + MySQL Fallback 获取 Run/Task 状态
+- **Agent Session Failover**：运行中的任务在 Owner Server 崩溃后，可自动迁移 Agent Session，保持状态不回退并最终收敛
+- **任务分发容错**：Redis Stream 用于任务分发，超时任务自动进入 `dispatch_timeout` 状态，Agent 恢复后可重新分发
+- **日志共享化**：运行中日志由 Owner Server 提供实时增量；完成后日志从对象存储读取，不再依赖原 Owner 存活
+
+### 📡 WebSocket 实时通信 / WebSocket Real-time Communication
+
+- **前端 ↔ Server**：前端通过 WebSocket 订阅 Run/Task 状态与日志，支持断线重连、自动降级到轮询
+- **Agent ↔ Server**：Agent 通过 WebSocket 上报心跳、资源状态、任务状态和日志；Server 通过 WebSocket 下发任务和控制消息
+- **跨副本日志拉取**：非 Owner Server 可通过内部 HTTP 接口向 Owner Server 拉取运行中日志增量
+
+### 🔄 任务状态机 / Task State Machine
+
+EasyDo 采用**单一状态字段**的显式状态机设计，状态命名单次、明确、不可歧义：
+
+```
+queued → assigned → dispatching → pulling → acked → running
+                                                        ↓
+                              execute_success ← execute_failed
+                                      
+调度失败：queued/assigned → schedule_failed
+分发超时：dispatching/pulling → dispatch_timeout → queued（可重新调度）
+租约过期：acked/running → lease_expired → queued 或 schedule_failed
+取消：任意状态 → cancelled（终态）
+```
+
+### 🔐 凭据安全体系 / Credential Security System
+
+- **多层加密**：凭据载荷使用 AES-256-GCM 加密存储，Master Key 由系统安全保管
+- **按需揭秘**：凭据仅在真正使用时解密，且可设置锁定状态防止未授权使用
+- **完整审计**：每次凭据创建、查看、使用、删除操作均有审计记录
+- **有效期管理**：支持设置凭据过期时间，提前提醒即将过期的凭据
+- **Kubernetes 认证**：支持 Kubeconfig、Server+Token、Server+Client Cert 三种认证模式
+
+### 📊 统计分析体系 / Statistics System
+
+- **运行趋势分析**：按天/周/月统计流水线运行次数和成功率
+- **Top 排行**：展示运行次数最多和成功率最高的流水线
+- **时间范围筛选**：支持自定义时间范围进行数据分析
+- **多维度聚合**：减少 N+1 查询，预聚合统计结果提升查询性能
 
 ---
 
