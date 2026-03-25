@@ -9,7 +9,13 @@ import (
 	"easydo-agent/internal/client"
 	"easydo-agent/internal/config"
 	"easydo-agent/internal/system"
+	agenttask "easydo-agent/internal/task"
 	"github.com/sirupsen/logrus"
+)
+
+const (
+	workspaceSweepRetention = 24 * time.Hour
+	workspaceSweepInterval  = time.Hour
 )
 
 // Client is the main agent client that orchestrates all components
@@ -19,13 +25,14 @@ type Client struct {
 	agentName string
 	log       *logrus.Logger
 
-	httpClient      *client.HTTPClient
-	wsClient        *client.WebSocketClient
-	tokenMgr        *TokenManager
-	register        *Register
-	heartbeat       *Heartbeat
-	taskHandler     *TaskHandler
-	terminalHandler *TerminalHandler
+	httpClient       *client.HTTPClient
+	wsClient         *client.WebSocketClient
+	tokenMgr         *TokenManager
+	register         *Register
+	heartbeat        *Heartbeat
+	taskHandler      *TaskHandler
+	workspaceSweeper *agenttask.WorkspaceSweeper
+	terminalHandler  *TerminalHandler
 
 	mu          sync.RWMutex
 	agentID     uint64
@@ -38,6 +45,7 @@ type Client struct {
 func NewClient(cfg *config.Config, sysInfo *system.Info, agentName string, log *logrus.Logger) *Client {
 	httpClient := client.NewHTTPClient(cfg.ServerURL, 30*time.Second)
 	tokenMgr := NewTokenManager(cfg.Agent.TokenFile)
+	taskHandler := NewTaskHandler(httpClient, nil, cfg, tokenMgr, sysInfo.Runtime, log)
 
 	return &Client{
 		cfg:       cfg,
@@ -45,12 +53,13 @@ func NewClient(cfg *config.Config, sysInfo *system.Info, agentName string, log *
 		agentName: agentName,
 		log:       log,
 
-		httpClient:      httpClient,
-		tokenMgr:        tokenMgr,
-		register:        NewRegister(httpClient, tokenMgr, cfg, sysInfo, agentName, log),
-		heartbeat:       NewHeartbeat(httpClient, cfg, tokenMgr, 0, log),
-		taskHandler:     NewTaskHandler(httpClient, nil, cfg, tokenMgr, sysInfo.Runtime, log),
-		terminalHandler: NewTerminalHandler(log),
+		httpClient:       httpClient,
+		tokenMgr:         tokenMgr,
+		register:         NewRegister(httpClient, tokenMgr, cfg, sysInfo, agentName, log),
+		heartbeat:        NewHeartbeat(httpClient, cfg, tokenMgr, 0, log),
+		taskHandler:      taskHandler,
+		workspaceSweeper: agenttask.NewWorkspaceSweeper(taskHandler.WorkspaceManager(), log, workspaceSweepRetention, workspaceSweepInterval),
+		terminalHandler:  NewTerminalHandler(log),
 	}
 }
 
@@ -137,6 +146,9 @@ func (c *Client) Start(ctx context.Context) error {
 	// Runtime communication (task exchange/status/log/heartbeat) is websocket-only.
 
 	c.taskHandler.Start(ctx)
+	if c.workspaceSweeper != nil {
+		c.workspaceSweeper.Start(ctx)
+	}
 
 	c.log.Infof("Agent started successfully: id=%d, name=%s", c.agentID, c.agentName)
 	return nil
@@ -176,6 +188,9 @@ func (c *Client) Shutdown(ctx context.Context) error {
 
 	c.taskHandler.Stop()
 	c.heartbeat.Stop()
+	if c.workspaceSweeper != nil {
+		c.workspaceSweeper.Stop()
+	}
 
 	// Close WebSocket connection
 	if c.wsClient != nil {

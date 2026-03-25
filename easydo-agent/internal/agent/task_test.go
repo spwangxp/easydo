@@ -193,3 +193,162 @@ func TestBuildTaskResultPayload_IncludesStdoutForResourceK8sQueryTasks(t *testin
 		t.Fatalf("stderr payload mismatch, got=%v want=%q", payload["stderr"], result.Stderr)
 	}
 }
+
+func TestBuildNodeOutputs_BasicFields(t *testing.T) {
+	h := &TaskHandler{}
+	result := &agenttask.Result{
+		ExitCode: 0,
+		Stdout:   "some output",
+		Stderr:   "",
+		Error:    "",
+		Duration: 5 * time.Second,
+	}
+
+	outputs := h.buildNodeOutputs("node_1", "shell", result)
+
+	if outputs["exit_code"] != 0 {
+		t.Fatalf("exit_code=%v, want 0", outputs["exit_code"])
+	}
+	if outputs["duration"] != 5.0 {
+		t.Fatalf("duration=%v, want 5.0", outputs["duration"])
+	}
+}
+
+func TestBuildNodeOutputs_WithError(t *testing.T) {
+	h := &TaskHandler{}
+	result := &agenttask.Result{
+		ExitCode: 1,
+		Stdout:   "",
+		Stderr:   "",
+		Error:    "command failed",
+		Duration: 2 * time.Second,
+	}
+
+	outputs := h.buildNodeOutputs("node_1", "shell", result)
+
+	if outputs["exit_code"] != 1 {
+		t.Fatalf("exit_code=%v, want 1", outputs["exit_code"])
+	}
+	if outputs["error"] != "command failed" {
+		t.Fatalf("error=%v, want 'command failed'", outputs["error"])
+	}
+}
+
+func TestBuildNodeOutputs_GitClone(t *testing.T) {
+	h := &TaskHandler{}
+	result := &agenttask.Result{
+		ExitCode: 0,
+		Stdout:   `Cloning into 'repo'...\ngit_info:{"url":"https://github.com/example/repo.git","branch":"main","commit":"abc123def456","path":"/workspace/repo"}`,
+		Stderr:   "",
+		Error:    "",
+		Duration: 3 * time.Second,
+	}
+
+	outputs := h.buildNodeOutputs("node_1", "git_clone", result)
+
+	if outputs["commit_sha"] != "abc123def456" {
+		t.Fatalf("commit_sha=%v, want abc123def456", outputs["commit_sha"])
+	}
+	if outputs["repo_url"] != "https://github.com/example/repo.git" {
+		t.Fatalf("repo_url=%v, want https://github.com/example/repo.git", outputs["repo_url"])
+	}
+	if outputs["branch"] != "main" {
+		t.Fatalf("branch=%v, want main", outputs["branch"])
+	}
+	if outputs["repo_path"] != "/workspace/repo" {
+		t.Fatalf("repo_path=%v, want /workspace/repo", outputs["repo_path"])
+	}
+}
+
+func TestBuildNodeOutputs_Docker(t *testing.T) {
+	h := &TaskHandler{}
+	stdout := "[easydo][info] image=myapp:v1.0\n[easydo][info] docker push success"
+	result := &agenttask.Result{
+		ExitCode: 0,
+		Stdout:   stdout,
+		Stderr:   "",
+		Error:    "",
+		Duration: 120 * time.Second,
+	}
+
+	outputs := h.buildNodeOutputs("node_2", "docker", result)
+
+	imageName := outputs["image_name"]
+	if imageName != "myapp" {
+		t.Fatalf("image_name=%v (%T), want myapp", imageName, imageName)
+	}
+	imageTag := outputs["image_tag"]
+	if imageTag != "v1.0" {
+		t.Fatalf("image_tag=%v (%T), want v1.0", imageTag, imageTag)
+	}
+	imageFullName := outputs["image_full_name"]
+	if imageFullName != "myapp:v1.0" {
+		t.Fatalf("image_full_name=%v (%T), want myapp:v1.0", imageFullName, imageFullName)
+	}
+	if outputs["pushed"] != true {
+		t.Fatalf("pushed=%v, want true", outputs["pushed"])
+	}
+}
+
+func TestBuildNodeOutputs_DockerNotPushed(t *testing.T) {
+	h := &TaskHandler{}
+	result := &agenttask.Result{
+		ExitCode: 0,
+		Stdout:   `[easydo][info] image=myapp:latest`,
+		Stderr:   "",
+		Error:    "",
+		Duration: 60 * time.Second,
+	}
+
+	outputs := h.buildNodeOutputs("node_2", "docker", result)
+
+	if outputs["pushed"] != false {
+		t.Fatalf("pushed=%v, want false", outputs["pushed"])
+	}
+}
+
+func TestBuildNodeOutputs_TestOutputs(t *testing.T) {
+	h := &TaskHandler{}
+	result := &agenttask.Result{
+		ExitCode: 0,
+		Stdout:   `Running tests...\npassed: 10, failed: 2, skipped: 1`,
+		Stderr:   "",
+		Error:    "",
+		Duration: 45 * time.Second,
+	}
+
+	outputs := h.buildNodeOutputs("node_3", "unit", result)
+
+	if outputs["tests_passed"] != 10 {
+		t.Fatalf("tests_passed=%v, want 10", outputs["tests_passed"])
+	}
+	if outputs["tests_failed"] != 2 {
+		t.Fatalf("tests_failed=%v, want 2", outputs["tests_failed"])
+	}
+	if outputs["tests_skipped"] != 1 {
+		t.Fatalf("tests_skipped=%v, want 1", outputs["tests_skipped"])
+	}
+}
+
+func TestBuildNodeOutputs_UnknownTaskType(t *testing.T) {
+	h := &TaskHandler{}
+	result := &agenttask.Result{
+		ExitCode: 0,
+		Stdout:   "some output",
+		Stderr:   "",
+		Error:    "",
+		Duration: 1 * time.Second,
+	}
+
+	outputs := h.buildNodeOutputs("node_1", "unknown_task", result)
+
+	if outputs["exit_code"] != 0 {
+		t.Fatalf("exit_code=%v, want 0", outputs["exit_code"])
+	}
+	if outputs["duration"] != 1.0 {
+		t.Fatalf("duration=%v, want 1.0", outputs["duration"])
+	}
+	if len(outputs) != 2 {
+		t.Fatalf("expected only basic fields for unknown task type, got %d fields: %v", len(outputs), outputs)
+	}
+}

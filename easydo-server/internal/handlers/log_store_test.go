@@ -41,7 +41,7 @@ func TestTaskLogStoreAppendAndQuery(t *testing.T) {
 		t.Fatalf("append second log failed: %v", err)
 	}
 
-	runLogs, err := store.QueryRunLogs(101, "", "")
+	runLogs, err := store.QueryRunLogs(101, 0, "", "")
 	if err != nil {
 		t.Fatalf("query run logs failed: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestTaskLogStoreAppendAndQuery(t *testing.T) {
 		t.Fatalf("unexpected task log message: %q", taskLogs[0].Message)
 	}
 
-	errLogs, err := store.QueryRunLogs(101, "error", "")
+	errLogs, err := store.QueryRunLogs(101, 0, "error", "")
 	if err != nil {
 		t.Fatalf("query run logs by level failed: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestTaskLogStoreAppendAndQuery(t *testing.T) {
 		t.Fatalf("expected 1 error log, got %+v", errLogs)
 	}
 
-	stdoutLogs, err := store.QueryRunLogs(101, "", "stdout")
+	stdoutLogs, err := store.QueryRunLogs(101, 0, "", "stdout")
 	if err != nil {
 		t.Fatalf("query run logs by source failed: %v", err)
 	}
@@ -146,5 +146,68 @@ func TestTaskLogStoreQueryTaskLogs_DedupesPersistedChunksAndLiveBuffer(t *testin
 	}
 	if logs[0].Message != "only-once" {
 		t.Fatalf("unexpected log message: %+v", logs)
+	}
+}
+
+func TestQueryRunLogs_FiltersByTaskID(t *testing.T) {
+	models.DB = openHandlerTestDB(t)
+	store := newTaskLogStore()
+	now := time.Now().Unix()
+
+	entries := []fileLogEntry{
+		{AgentID: 1, TaskID: 10, PipelineRunID: 100, Level: "info", Message: "task 10 log 1", Source: "stdout", Timestamp: now, Attempt: 1, Seq: 1},
+		{AgentID: 1, TaskID: 10, PipelineRunID: 100, Level: "info", Message: "task 10 log 2", Source: "stdout", Timestamp: now + 1, Attempt: 1, Seq: 2},
+		{AgentID: 1, TaskID: 20, PipelineRunID: 100, Level: "info", Message: "task 20 log 1", Source: "stdout", Timestamp: now + 2, Attempt: 1, Seq: 3},
+		{AgentID: 1, TaskID: 20, PipelineRunID: 100, Level: "error", Message: "task 20 error", Source: "stderr", Timestamp: now + 3, Attempt: 1, Seq: 4},
+	}
+	for _, entry := range entries {
+		if err := store.Append(entry); err != nil {
+			t.Fatalf("append log failed: %v", err)
+		}
+	}
+
+	allLogs, err := store.QueryRunLogs(100, 0, "", "")
+	if err != nil {
+		t.Fatalf("query all run logs failed: %v", err)
+	}
+	if len(allLogs) != 4 {
+		t.Fatalf("expected 4 logs without task_id filter, got %d", len(allLogs))
+	}
+
+	task10Logs, err := store.QueryRunLogs(100, 10, "", "")
+	if err != nil {
+		t.Fatalf("query run logs with task_id=10 failed: %v", err)
+	}
+	if len(task10Logs) != 2 {
+		t.Fatalf("expected 2 logs for task_id=10, got %d", len(task10Logs))
+	}
+	for _, log := range task10Logs {
+		if log.TaskID != 10 {
+			t.Fatalf("expected task_id=10, got %d", log.TaskID)
+		}
+	}
+
+	task20Logs, err := store.QueryRunLogs(100, 20, "", "")
+	if err != nil {
+		t.Fatalf("query run logs with task_id=20 failed: %v", err)
+	}
+	if len(task20Logs) != 2 {
+		t.Fatalf("expected 2 logs for task_id=20, got %d", len(task20Logs))
+	}
+	for _, log := range task20Logs {
+		if log.TaskID != 20 {
+			t.Fatalf("expected task_id=20, got %d", log.TaskID)
+		}
+	}
+
+	task20ErrorLogs, err := store.QueryRunLogs(100, 20, "error", "")
+	if err != nil {
+		t.Fatalf("query run logs with task_id=20 and level=error failed: %v", err)
+	}
+	if len(task20ErrorLogs) != 1 {
+		t.Fatalf("expected 1 error log for task_id=20, got %d", len(task20ErrorLogs))
+	}
+	if task20ErrorLogs[0].Level != "error" || task20ErrorLogs[0].TaskID != 20 {
+		t.Fatalf("unexpected log: %+v", task20ErrorLogs[0])
 	}
 }

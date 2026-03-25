@@ -143,6 +143,7 @@ class RealtimeClient {
           this.handleTaskStatus(message.payload)
           break
         case 'task_log':
+        case 'task_log_stream':
           this.handleTaskLog(message.payload)
           break
         case 'run_status':

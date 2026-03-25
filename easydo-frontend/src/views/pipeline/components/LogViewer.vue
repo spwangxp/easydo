@@ -9,6 +9,10 @@
     <!-- 日志工具栏 -->
     <div class="log-toolbar">
       <div class="toolbar-left">
+        <el-select v-model="logFilter.taskId" placeholder="按任务过滤" clearable size="small" style="width: 160px" v-if="taskList && taskList.length > 0">
+          <el-option label="全部任务" :value="0" />
+          <el-option v-for="task in taskList" :key="task.id" :label="task.name || `任务 #${task.id}`" :value="task.id" />
+        </el-select>
         <el-select v-model="logFilter.level" placeholder="日志级别" clearable size="small" style="width: 120px">
           <el-option label="全部" value="" />
           <el-option label="INFO" value="info" />
@@ -104,6 +108,10 @@ const props = defineProps({
   title: {
     type: String,
     default: '任务日志'
+  },
+  taskList: {
+    type: Array,
+    default: () => []
   }
 })
 
@@ -117,7 +125,8 @@ const logContainerRef = ref(null)
 
 const logFilter = ref({
   level: '',
-  keyword: ''
+  keyword: '',
+  taskId: 0
 })
 
 // 打开对话框
@@ -136,7 +145,11 @@ const refreshLogs = async () => {
     if (props.taskId) {
       response = await getTaskLogs(props.taskId)
     } else if (props.pipelineId && props.pipelineRunId) {
-      response = await getRunLogs(props.pipelineId, props.pipelineRunId)
+      const params = {}
+      if (logFilter.value.taskId && logFilter.value.taskId !== 0) {
+        params.task_id = logFilter.value.taskId
+      }
+      response = await getRunLogs(props.pipelineId, props.pipelineRunId, params)
     }
 
     if (response?.code === 200) {
@@ -155,6 +168,10 @@ const refreshLogs = async () => {
 // 过滤后的日志
 const filteredLogs = computed(() => {
   return logs.value.filter(log => {
+    // 按任务过滤
+    if (logFilter.value.taskId && logFilter.value.taskId !== 0 && Number(log.task_id) !== Number(logFilter.value.taskId)) {
+      return false
+    }
     // 按级别过滤
     if (logFilter.value.level && log.level !== logFilter.value.level) {
       return false
@@ -234,6 +251,14 @@ const downloadLogs = () => {
 watch([() => logFilter.value.level, () => logFilter.value.keyword], async () => {
   await nextTick()
   scrollToBottom()
+})
+
+// 监听任务过滤变化，刷新日志
+watch(() => logFilter.value.taskId, async (newTaskId, oldTaskId) => {
+  if (newTaskId !== oldTaskId && dialogVisible.value) {
+    logs.value = []
+    await refreshLogs()
+  }
 })
 
 // 打开时刷新

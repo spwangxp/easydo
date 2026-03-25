@@ -121,7 +121,6 @@ func managedModels() []interface{} {
 		&AgentHeartbeat{},
 		&AgentLog{},
 		&AgentTaskEvent{},
-		&AgentLogChunk{},
 		&AgentLogSegment{},
 		&WebhookConfig{},
 		&WebhookEvent{},

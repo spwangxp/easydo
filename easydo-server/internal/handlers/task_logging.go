@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"easydo-server/internal/models"
-	"gorm.io/gorm/clause"
 )
 
 var (
@@ -119,30 +118,6 @@ func appendTaskLogChunk(h *WebSocketHandler, task models.AgentTask, logChunk tas
 	}
 	normalizedTimestamp := normalizeUnixTimestamp(logChunk.Timestamp)
 
-	uniqueKey := buildTaskLogChunkUniqueKey(logChunk.TaskID, logChunk.Attempt, logChunk.Seq)
-	chunkModel := &models.AgentLogChunk{
-		TaskID:         logChunk.TaskID,
-		PipelineRunID:  task.PipelineRunID,
-		AgentID:        agentID,
-		AgentSessionID: agentSessionID,
-		Attempt:        logChunk.Attempt,
-		Seq:            logChunk.Seq,
-		Stream:         logChunk.Stream,
-		Chunk:          logChunk.Chunk,
-		Timestamp:      normalizedTimestamp,
-		UniqueKey:      uniqueKey,
-	}
-	result := models.DB.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "unique_key"}},
-		DoNothing: true,
-	}).Create(chunkModel)
-	if result.Error != nil {
-		return false, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return false, nil
-	}
-
 	if err := agentFileLogs.Append(fileLogEntry{
 		AgentID:       agentID,
 		TaskID:        logChunk.TaskID,
@@ -159,15 +134,6 @@ func appendTaskLogChunk(h *WebSocketHandler, task models.AgentTask, logChunk tas
 	}
 
 	if h != nil {
-		h.broadcastToFrontend(task.PipelineRunID, "task_log_stream", map[string]interface{}{
-			"task_id":   logChunk.TaskID,
-			"run_id":    task.PipelineRunID,
-			"attempt":   logChunk.Attempt,
-			"seq":       logChunk.Seq,
-			"stream":    logChunk.Stream,
-			"chunk":     logChunk.Chunk,
-			"timestamp": normalizedTimestamp,
-		})
 		h.broadcastToFrontend(task.PipelineRunID, "task_log", map[string]interface{}{
 			"task_id":     logChunk.TaskID,
 			"run_id":      task.PipelineRunID,

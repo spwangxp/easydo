@@ -689,6 +689,157 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 	})
 }
 
+// CancelPipelineRun cancels a running pipeline run and marks non-terminal tasks as cancelled.
+// Only runs in queued, pending, or running state can be cancelled.
+func (h *PipelineHandler) CancelPipelineRun(c *gin.Context) {
+	id := c.Param("id")
+	runID := c.Param("run_id")
+	workspaceID := c.GetUint64("workspace_id")
+
+	pipelineID, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "无效的流水线ID",
+		})
+		return
+	}
+
+	if !pipelineBelongsToWorkspace(h.DB, pipelineID, workspaceID) {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "流水线不存在",
+		})
+		return
+	}
+
+	runIDNum, err := strconv.ParseUint(runID, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "无效的运行ID",
+		})
+		return
+	}
+
+	var run models.PipelineRun
+	if err := h.DB.Where("id = ? AND pipeline_id = ? AND workspace_id = ?", runIDNum, pipelineID, workspaceID).First(&run).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "运行记录不存在",
+		})
+		return
+	}
+
+	switch run.Status {
+	case models.PipelineRunStatusQueued, models.PipelineRunStatusPending, models.PipelineRunStatusRunning:
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": fmt.Sprintf("运行状态 '%s' 不支持取消操作", run.Status),
+		})
+		return
+	}
+
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		var tasks []models.AgentTask
+		if err := tx.Where("pipeline_run_id = ? AND status NOT IN ?",
+			runIDNum,
+			[]string{
+				models.TaskStatusExecuteSuccess,
+				models.TaskStatusExecuteFailed,
+				models.TaskStatusScheduleFailed,
+				models.TaskStatusCancelled,
+			}).Find(&tasks).Error; err != nil {
+			return fmt.Errorf("查询任务失败: %w", err)
+		}
+
+		now := time.Now().Unix()
+		for i := range tasks {
+			task := &tasks[i]
+			if !models.IsTaskStatusTransitionAllowed(task.Status, models.TaskStatusCancelled) {
+				continue
+			}
+
+			updates := map[string]interface{}{
+				"status":   models.TaskStatusCancelled,
+				"end_time": now,
+			}
+			if task.StartTime > 0 {
+				updates["duration"] = int(now - task.StartTime)
+			}
+
+			if err := tx.Model(task).Updates(updates).Error; err != nil {
+				return fmt.Errorf("更新任务 %d 状态失败: %w", task.ID, err)
+			}
+
+			task.Status = models.TaskStatusCancelled
+			task.EndTime = now
+			if task.StartTime > 0 {
+				task.Duration = int(now - task.StartTime)
+			}
+			syncLiveTaskStateFromTask(task, "")
+
+			SharedWebSocketHandler().BroadcastTaskStatus(
+				runIDNum,
+				task.ID,
+				task.NodeID,
+				models.TaskStatusCancelled,
+				0,
+				"任务已被取消",
+				"",
+			)
+		}
+
+		duration := 0
+		if run.StartTime > 0 {
+			duration = int(now - run.StartTime)
+		}
+
+		runUpdates := map[string]interface{}{
+			"status":   models.PipelineRunStatusCancelled,
+			"end_time": now,
+			"duration": duration,
+		}
+		if err := tx.Model(&run).Updates(runUpdates).Error; err != nil {
+			return fmt.Errorf("更新运行状态失败: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "取消流水线运行失败: " + err.Error(),
+		})
+		return
+	}
+
+	run.Status = models.PipelineRunStatusCancelled
+	run.EndTime = time.Now().Unix()
+	if run.StartTime > 0 {
+		run.Duration = int(run.EndTime - run.StartTime)
+	}
+	syncLiveRunStateFromRun(&run)
+	syncDeploymentStateFromRun(h.DB, &run)
+
+	SharedWebSocketHandler().BroadcastRunStatus(runIDNum, models.PipelineRunStatusCancelled, "流水线运行已取消")
+
+	emitPipelineRunTerminalNotification(h.DB, &run, NotificationEventTypePipelineRunCancelled)
+
+	if run.AgentID > 0 {
+		updateAgentStatusByPipelineConcurrency(h.DB, run.AgentID)
+	}
+
+	go h.scheduleQueuedPipelineRuns(h.DB)
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    200,
+		"message": "流水线运行已取消",
+	})
+}
+
 func (h *PipelineHandler) createPipelineRunWithUniqueBuildNumber(run *models.PipelineRun) (int, error) {
 	if h == nil || h.DB == nil || run == nil {
 		return 0, fmt.Errorf("invalid pipeline run create context")
@@ -2766,6 +2917,7 @@ func (h *PipelineHandler) GetRunLogs(c *gin.Context) {
 	runID := c.Param("run_id")
 	level := c.DefaultQuery("level", "")
 	source := c.DefaultQuery("source", "")
+	taskIDStr := c.DefaultQuery("task_id", "")
 	workspaceID := c.GetUint64("workspace_id")
 
 	// 验证运行记录存在且属于指定流水线
@@ -2795,7 +2947,19 @@ func (h *PipelineHandler) GetRunLogs(c *gin.Context) {
 		return
 	}
 
-	logs, err := agentFileLogs.QueryRunLogs(runIDNum, level, source)
+	var taskID uint64
+	if taskIDStr != "" {
+		taskID, err = strconv.ParseUint(taskIDStr, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    400,
+				"message": "无效的任务ID",
+			})
+			return
+		}
+	}
+
+	logs, err := agentFileLogs.QueryRunLogs(runIDNum, taskID, level, source)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,

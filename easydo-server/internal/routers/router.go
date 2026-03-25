@@ -37,6 +37,9 @@ func InitRouter() *gin.Engine {
 		// WebSocket endpoint for frontend real-time updates
 		router.GET("/ws/frontend/pipeline", middleware.RateLimit(), wsHandler.HandleFrontendConnection)
 		router.GET("/ws/frontend/terminal", middleware.RateLimit(), wsHandler.HandleTerminalFrontendConnection)
+
+		// WebSocket endpoint for incoming proxy connections from remote servers (cross-server log forwarding)
+		router.GET("/ws/proxy", wsHandler.HandleProxyConnection)
 		router.POST("/api/pipeline/run/webhook/:token", middleware.RateLimit(), handlers.NewPipelineHandler().HandleGitLabWebhook)
 		internal := router.Group("/internal")
 		internal.Use(middleware.InternalServerAuth())
@@ -82,6 +85,7 @@ func InitRouter() *gin.Engine {
 			pipeline.GET("/:id/runs/:run_id", pipelineHandler.GetRunDetail)
 			pipeline.GET("/:id/runs/:run_id/tasks", pipelineHandler.GetRunTasks)
 			pipeline.GET("/:id/runs/:run_id/logs", middleware.RateLimit(), pipelineHandler.GetRunLogs)
+			pipeline.POST("/:id/runs/:run_id/cancel", pipelineHandler.CancelPipelineRun)
 			pipeline.GET("/:id/statistics", middleware.RateLimit(), pipelineHandler.GetPipelineStatistics)
 			pipeline.GET("/:id/test-reports", pipelineHandler.GetPipelineTestReports)
 			pipeline.POST("/:id/favorite", pipelineHandler.ToggleFavorite)

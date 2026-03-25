@@ -47,6 +47,71 @@ func TestDockerBuildScript_HostRuntimeMultiArchUsesBuildx(t *testing.T) {
 	}
 }
 
+func TestDockerBuildScript_HostRuntimePushDefaultsRegistryToDockerHub(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendHostRuntime, PrimaryRuntime: "docker"}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./Dockerfile",
+		"context":    ".",
+		"push":       true,
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if !strings.Contains(script, `REGISTRY="docker.io"`) {
+		t.Fatalf("expected empty registry push to default to docker.io, got:\n%s", script)
+	}
+	if !strings.Contains(script, `IMAGE_REF="docker.io/demo/app:v1"`) {
+		t.Fatalf("expected docker hub image ref for empty registry push, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_HostRuntimeMultiArchPushDefaultsRegistryToDockerHub(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendHostRuntime, PrimaryRuntime: "docker"}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name":    "demo/app",
+		"image_tag":     "v1",
+		"dockerfile":    "./Dockerfile",
+		"context":       ".",
+		"push":          true,
+		"architectures": []interface{}{"linux/amd64", "linux/arm64"},
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if !strings.Contains(script, `REGISTRY="docker.io"`) {
+		t.Fatalf("expected empty registry multi-arch push to default to docker.io, got:\n%s", script)
+	}
+	if !strings.Contains(script, `IMAGE_REF="docker.io/demo/app:v1"`) {
+		t.Fatalf("expected docker hub image ref for empty registry multi-arch push, got:\n%s", script)
+	}
+	if !strings.Contains(script, `--push`) {
+		t.Fatalf("expected empty registry multi-arch push to keep buildx --push path, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_HostRuntimePushNormalizesDockerHubAliases(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendHostRuntime, PrimaryRuntime: "docker"}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./Dockerfile",
+		"context":    ".",
+		"push":       true,
+		"registry":   "index.docker.io",
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if !strings.Contains(script, `REGISTRY="docker.io"`) {
+		t.Fatalf("expected docker hub alias to normalize to docker.io, got:\n%s", script)
+	}
+	if !strings.Contains(script, `IMAGE_REF="docker.io/demo/app:v1"`) {
+		t.Fatalf("expected docker hub alias image ref to normalize to docker.io, got:\n%s", script)
+	}
+}
+
 func TestDockerBuildScript_EmbeddedBuildkitUsesBuildctl(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
 	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{"image_name": "demo/app", "image_tag": "v1", "dockerfile": "./build/Dockerfile", "context": ".", "push": false}}, "/workspace/app")
@@ -107,5 +172,56 @@ func TestDockerBuildScript_EmbeddedBuildkitPushExportsDockerConfig(t *testing.T)
 	}
 	if !strings.Contains(script, `export DOCKER_CONFIG`) {
 		t.Fatalf("expected embedded buildkit push to export DOCKER_CONFIG, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitPushDefaultsRegistryToDockerHub(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./build/Dockerfile",
+		"context":    ".",
+		"push":       true,
+	}}, "/workspace/app")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if !strings.Contains(script, `REGISTRY="docker.io"`) {
+		t.Fatalf("expected embedded buildkit empty registry push to default to docker.io, got:\n%s", script)
+	}
+	if !strings.Contains(script, `OUTPUT_SPEC="type=image,name=docker.io/demo/app:v1,push=true"`) {
+		t.Fatalf("expected embedded buildkit empty registry push to target docker hub image ref, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitPushAddsDockerHubAliasAuthEntries(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./build/Dockerfile",
+		"context":    ".",
+		"push":       true,
+		"registry":   "registry-1.docker.io",
+	}}, "/workspace/app")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if !strings.Contains(script, `REGISTRY="docker.io"`) {
+		t.Fatalf("expected registry-1.docker.io to normalize to docker.io, got:\n%s", script)
+	}
+	if !strings.Contains(script, `OUTPUT_SPEC="type=image,name=docker.io/demo/app:v1,push=true"`) {
+		t.Fatalf("expected alias push output to target docker.io image ref, got:\n%s", script)
+	}
+	for _, expected := range []string{
+		`"docker.io":{"auth":"$AUTH_B64"}`,
+		`"index.docker.io":{"auth":"$AUTH_B64"}`,
+		`"registry-1.docker.io":{"auth":"$AUTH_B64"}`,
+		`"https://index.docker.io/v1/":{"auth":"$AUTH_B64"}`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("expected embedded buildkit auth config to include %s, got:\n%s", expected, script)
+		}
 	}
 }

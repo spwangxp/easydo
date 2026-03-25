@@ -5,14 +5,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
+
+const workspaceLastUsedMarkerName = ".easydo-last-used"
 
 // WorkspaceManager manages task workspaces
 type WorkspaceManager struct {
 	basePath string
 	log      *logrus.Logger
+	mu       sync.RWMutex
+	active   map[string]int
 }
 
 // NewWorkspaceManager creates a new workspace manager
@@ -20,6 +26,7 @@ func NewWorkspaceManager(basePath string, log *logrus.Logger) *WorkspaceManager 
 	wm := &WorkspaceManager{
 		basePath: basePath,
 		log:      log,
+		active:   make(map[string]int),
 	}
 
 	// Ensure base path exists with detailed logging
@@ -30,6 +37,91 @@ func NewWorkspaceManager(basePath string, log *logrus.Logger) *WorkspaceManager 
 	}
 
 	return wm
+}
+
+func (wm *WorkspaceManager) TouchWorkspaceMarker(workspacePath string, touchedAt time.Time) error {
+	if workspacePath == "" {
+		return fmt.Errorf("workspace path is empty")
+	}
+	if touchedAt.IsZero() {
+		touchedAt = time.Now()
+	}
+	if err := wm.ensureDirectoryExists(workspacePath); err != nil {
+		return fmt.Errorf("ensure workspace exists: %w", err)
+	}
+	markerPath := wm.markerPath(workspacePath)
+	payload := []byte(touchedAt.UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(markerPath, payload, 0644); err != nil {
+		return fmt.Errorf("write workspace marker: %w", err)
+	}
+	if err := os.Chtimes(markerPath, touchedAt, touchedAt); err != nil {
+		return fmt.Errorf("update workspace marker mtime: %w", err)
+	}
+	return nil
+}
+
+func (wm *WorkspaceManager) MarkWorkspaceActive(workspacePath string) {
+	if workspacePath == "" {
+		return
+	}
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	wm.active[workspacePath]++
+}
+
+func (wm *WorkspaceManager) MarkWorkspaceInactive(workspacePath string) {
+	if workspacePath == "" {
+		return
+	}
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	count := wm.active[workspacePath]
+	if count <= 1 {
+		delete(wm.active, workspacePath)
+		return
+	}
+	wm.active[workspacePath] = count - 1
+}
+
+func (wm *WorkspaceManager) SweepExpiredWorkspaces(now time.Time, retention time.Duration) ([]string, error) {
+	if retention <= 0 {
+		return nil, fmt.Errorf("retention must be positive")
+	}
+	entries, err := os.ReadDir(wm.basePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read workspace base path: %w", err)
+	}
+	deleted := make([]string, 0)
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "workspace_") {
+			continue
+		}
+		workspacePath := filepath.Join(wm.basePath, entry.Name())
+		if wm.isWorkspaceActive(workspacePath) {
+			continue
+		}
+		lastUsedAt, err := wm.workspaceLastUsedAt(workspacePath)
+		if err != nil {
+			if wm.log != nil {
+				wm.log.Warnf("Workspace: failed to read last-used marker for %s: %v", workspacePath, err)
+			}
+			continue
+		}
+		if now.Sub(lastUsedAt) < retention {
+			continue
+		}
+		if err := os.RemoveAll(workspacePath); err != nil {
+			return deleted, fmt.Errorf("remove expired workspace %s: %w", workspacePath, err)
+		}
+		deleted = append(deleted, workspacePath)
+		if wm.log != nil {
+			wm.log.Infof("Workspace: removed expired workspace %s last_used=%s", workspacePath, lastUsedAt.UTC().Format(time.RFC3339))
+		}
+	}
+	return deleted, nil
 }
 
 // validateAndCreateBasePath validates and creates the base workspace directory
@@ -180,6 +272,31 @@ func (wm *WorkspaceManager) CleanupWorkspace(pipelineRunID uint64) error {
 	}
 
 	return nil
+}
+
+func (wm *WorkspaceManager) markerPath(workspacePath string) string {
+	return filepath.Join(workspacePath, workspaceLastUsedMarkerName)
+}
+
+func (wm *WorkspaceManager) isWorkspaceActive(workspacePath string) bool {
+	wm.mu.RLock()
+	defer wm.mu.RUnlock()
+	return wm.active[workspacePath] > 0
+}
+
+func (wm *WorkspaceManager) workspaceLastUsedAt(workspacePath string) (time.Time, error) {
+	markerInfo, err := os.Stat(wm.markerPath(workspacePath))
+	if err == nil {
+		return markerInfo.ModTime(), nil
+	}
+	if !os.IsNotExist(err) {
+		return time.Time{}, err
+	}
+	workspaceInfo, err := os.Stat(workspacePath)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return workspaceInfo.ModTime(), nil
 }
 
 // GetBasePath returns the current base path

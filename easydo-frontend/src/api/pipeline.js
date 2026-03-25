@@ -120,3 +120,10 @@ export function getRunLogs(id, runId, params) {
     params
   })
 }
+
+export function cancelPipelineRun(id, runId) {
+  return request({
+    url: `/pipelines/${id}/runs/${runId}/cancel`,
+    method: 'post'
+  })
+}

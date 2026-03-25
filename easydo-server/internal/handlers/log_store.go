@@ -48,6 +48,7 @@ type liveTaskBuffer struct {
 	SegmentNo     int
 	Entries       []fileLogEntry
 	Completed     bool
+	LastFlushTime int64
 }
 
 type taskLogStore struct {
@@ -91,11 +92,15 @@ func (s *taskLogStore) Append(entry fileLogEntry) error {
 	s.mu.Lock()
 	buffer, ok := s.buffers[key]
 	if !ok {
-		buffer = &liveTaskBuffer{TaskID: entry.TaskID, PipelineRunID: entry.PipelineRunID, Attempt: entry.Attempt, SegmentNo: 1}
+		buffer = &liveTaskBuffer{TaskID: entry.TaskID, PipelineRunID: entry.PipelineRunID, Attempt: entry.Attempt, SegmentNo: 1, LastFlushTime: time.Now().Unix()}
 		s.buffers[key] = buffer
 	}
 	buffer.Entries = append(buffer.Entries, entry)
 	flushNow := len(buffer.Entries) >= logSegmentMaxLines()
+	if !flushNow {
+		ageSeconds := time.Now().Unix() - buffer.LastFlushTime
+		flushNow = ageSeconds >= int64(logSegmentMaxAgeSeconds())
+	}
 	s.mu.Unlock()
 	if flushNow {
 		return s.flushSegment(context.Background(), entry.TaskID, entry.Attempt, false)
@@ -114,30 +119,25 @@ func (s *taskLogStore) FinishTask(taskID uint64, attempt int) error {
 //
 // The merge order is intentional:
 // 1. object-storage segments (best long-term source),
-// 2. durable chunk rows not yet covered by a finished segment,
-// 3. current-process live buffer for in-flight tail reads.
-//
-// This is the key failover recovery behavior for logs: a dead owner may lose its
-// memory buffer, but already-persisted chunk rows remain query-visible.
+// 2. current-process live buffer for in-flight tail reads.
 func (s *taskLogStore) QueryTaskLogs(runID uint64, taskID uint64, level string) ([]models.AgentLog, error) {
 	entries, err := s.readSegments(context.Background(), taskID, runID, 0)
 	if err != nil {
 		return nil, err
 	}
-	persisted, err := s.readPersistedChunks(taskID, runID, 0)
-	if err != nil {
-		return nil, err
-	}
-	entries = mergeEntries(entries, persisted)
 	entries = append(entries, s.queryLive(liveLogQuery{TaskID: taskID, RunID: runID, Level: level})...)
 	return filterEntries(dedupeEntries(entries), taskID, level, ""), nil
 }
 
 // QueryRunLogs applies the same reconstruction strategy as QueryTaskLogs, but
 // across all tasks that belong to the run.
-func (s *taskLogStore) QueryRunLogs(runID uint64, level, source string) ([]models.AgentLog, error) {
+func (s *taskLogStore) QueryRunLogs(runID uint64, taskID uint64, level, source string) ([]models.AgentLog, error) {
 	var segments []models.AgentLogSegment
-	if err := models.DB.Where("pipeline_run_id = ?", runID).Order("created_at ASC").Find(&segments).Error; err != nil {
+	query := models.DB.Where("pipeline_run_id = ?", runID)
+	if taskID > 0 {
+		query = query.Where("task_id = ?", taskID)
+	}
+	if err := query.Order("created_at ASC").Find(&segments).Error; err != nil {
 		return nil, err
 	}
 	entries := make([]fileLogEntry, 0, len(segments)*8)
@@ -148,13 +148,8 @@ func (s *taskLogStore) QueryRunLogs(runID uint64, level, source string) ([]model
 		}
 		entries = append(entries, segmentEntries...)
 	}
-	persisted, err := s.readPersistedChunks(0, runID, 0)
-	if err != nil {
-		return nil, err
-	}
-	entries = mergeEntries(entries, persisted)
-	entries = append(entries, s.queryLive(liveLogQuery{RunID: runID, Level: level, Source: source})...)
-	return filterEntries(dedupeEntries(entries), 0, level, source), nil
+	entries = append(entries, s.queryLive(liveLogQuery{TaskID: taskID, RunID: runID, Level: level, Source: source})...)
+	return filterEntries(dedupeEntries(entries), taskID, level, source), nil
 }
 
 func (s *taskLogStore) QueryLiveTaskLogs(taskID uint64, attempt int, sinceSeq int64) ([]fileLogEntry, error) {
@@ -188,49 +183,6 @@ func (s *taskLogStore) readSegments(ctx context.Context, taskID, runID uint64, a
 			return nil, err
 		}
 		entries = append(entries, segmentEntries...)
-	}
-	return entries, nil
-}
-
-// readPersistedChunks projects durable `agent_log_chunks` rows into the same
-// entry shape used by segment and live-buffer reads.
-//
-// The chunk table is effectively our write-ahead recovery source for logs: each
-// WS chunk reaches this table before we rely on process-local buffering or later
-// segment compaction.
-func (s *taskLogStore) readPersistedChunks(taskID, runID uint64, attempt int) ([]fileLogEntry, error) {
-	query := models.DB.Model(&models.AgentLogChunk{})
-	if taskID > 0 {
-		query = query.Where("task_id = ?", taskID)
-	}
-	if runID > 0 {
-		query = query.Where("pipeline_run_id = ?", runID)
-	}
-	if attempt > 0 {
-		query = query.Where("attempt = ?", attempt)
-	}
-	var chunks []models.AgentLogChunk
-	if err := query.Order("timestamp ASC, seq ASC").Find(&chunks).Error; err != nil {
-		return nil, err
-	}
-	entries := make([]fileLogEntry, 0, len(chunks))
-	for _, chunk := range chunks {
-		level := "info"
-		if strings.EqualFold(chunk.Stream, "stderr") {
-			level = "error"
-		}
-		entries = append(entries, fileLogEntry{
-			AgentID:       chunk.AgentID,
-			TaskID:        chunk.TaskID,
-			PipelineRunID: chunk.PipelineRunID,
-			Level:         level,
-			Message:       chunk.Chunk,
-			Source:        chunk.Stream,
-			Timestamp:     chunk.Timestamp,
-			LineNumber:    int(chunk.Seq),
-			Attempt:       chunk.Attempt,
-			Seq:           chunk.Seq,
-		})
 	}
 	return entries, nil
 }
@@ -289,6 +241,7 @@ func (s *taskLogStore) flushSegment(ctx context.Context, taskID uint64, attempt 
 	buffer.Entries = nil
 	buffer.SegmentNo++
 	buffer.Completed = completed
+	buffer.LastFlushTime = time.Now().Unix()
 	if completed {
 		defer delete(s.buffers, key)
 	}
@@ -448,6 +401,17 @@ func logSegmentMaxLines() int {
 	v := config.Config.GetInt("logging.segment_max_lines")
 	if v <= 0 {
 		return 200
+	}
+	return v
+}
+
+func logSegmentMaxAgeSeconds() int {
+	if config.Config == nil {
+		return 60
+	}
+	v := config.Config.GetInt("logging.segment_max_age_seconds")
+	if v <= 0 {
+		return 60
 	}
 	return v
 }

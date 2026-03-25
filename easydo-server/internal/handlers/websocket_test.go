@@ -1131,3 +1131,134 @@ func TestLogLevelConstants(t *testing.T) {
 		assert.Equal(t, level, decoded.Payload["level"])
 	}
 }
+
+func TestTriggerDownstreamTasks_VariableSubstitution(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	runConfig, err := json.Marshal(PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{ID: "node_1", Type: "shell", Name: "Upstream", Config: map[string]interface{}{"script": "echo upstream"}},
+			{ID: "node_2", Type: "shell", Name: "Downstream", Config: map[string]interface{}{
+				"script": "echo Commit: ${outputs.node_1.commit_sha}",
+			}},
+		},
+		Edges: []PipelineEdge{{From: "node_1", To: "node_2"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal run config failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID: 1,
+		PipelineID:  1,
+		BuildNumber: 1,
+		Status:      models.PipelineRunStatusRunning,
+		Config:      string(runConfig),
+		AgentID:     1,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	upstreamTask := &models.AgentTask{
+		WorkspaceID:   1,
+		PipelineRunID: run.ID,
+		NodeID:        "node_1",
+		TaskType:      "shell",
+		Status:        models.TaskStatusExecuteSuccess,
+		ExitCode:      0,
+		Duration:      2,
+		ResultData:    `{"commit_sha": "abc123def"}`,
+	}
+	if err := db.Create(&upstreamTask).Error; err != nil {
+		t.Fatalf("create upstream task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	handler.triggerDownstreamTasks(run.ID, []models.AgentTask{*upstreamTask})
+
+	var downstream models.AgentTask
+	if err := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, "node_2").First(&downstream).Error; err != nil {
+		t.Fatalf("expected downstream task to be created: %v", err)
+	}
+
+	if !strings.Contains(downstream.Script, "abc123def") {
+		t.Fatalf("expected downstream script to contain substituted commit_sha 'abc123def', got: %s", downstream.Script)
+	}
+	if strings.Contains(downstream.Script, "${outputs.node_1.commit_sha}") {
+		t.Fatalf("expected downstream script to NOT contain unresolved variable, got: %s", downstream.Script)
+	}
+}
+
+func TestTriggerDownstreamTasks_VariableSubstitutionNoResultData(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	runConfig, err := json.Marshal(PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{ID: "node_1", Type: "shell", Name: "Upstream", Config: map[string]interface{}{"script": "echo upstream"}},
+			{ID: "node_2", Type: "shell", Name: "Downstream", Config: map[string]interface{}{
+				"script": "echo Commit: ${outputs.node_1.commit_sha}",
+			}},
+		},
+		Edges: []PipelineEdge{{From: "node_1", To: "node_2"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal run config failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID: 1,
+		PipelineID:  1,
+		BuildNumber: 1,
+		Status:      models.PipelineRunStatusRunning,
+		Config:      string(runConfig),
+		AgentID:     1,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	upstreamTask := &models.AgentTask{
+		WorkspaceID:   1,
+		PipelineRunID: run.ID,
+		NodeID:        "node_1",
+		TaskType:      "shell",
+		Status:        models.TaskStatusExecuteSuccess,
+		ExitCode:      0,
+		Duration:      2,
+		ResultData:    "",
+	}
+	if err := db.Create(&upstreamTask).Error; err != nil {
+		t.Fatalf("create upstream task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	handler.triggerDownstreamTasks(run.ID, []models.AgentTask{*upstreamTask})
+
+	var downstream models.AgentTask
+	if err := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, "node_2").First(&downstream).Error; err != nil {
+		t.Fatalf("expected downstream task to be created: %v", err)
+	}
+
+	if !strings.Contains(downstream.Script, "${outputs.node_1.commit_sha}") {
+		t.Fatalf("expected downstream script to contain unresolved variable when no result data, got: %s", downstream.Script)
+	}
+}

@@ -45,7 +45,8 @@ func ParseStructuredParamsJSON(raw string) map[string]interface{} {
 }
 
 // LogCallback is called for each log line
-type LogCallback func(level, message, source string, lineNumber int)
+// taskID is included to support parallel task execution with shared executor
+type LogCallback func(taskID uint64, level, message, source string, lineNumber int)
 
 // Result represents the result of task execution
 type Result struct {
@@ -72,6 +73,8 @@ type outputCaptureWriter struct {
 	level    string
 	source   string
 	lineNum  int
+	taskID   uint64
+	callback LogCallback
 }
 
 func (w *outputCaptureWriter) Write(p []byte) (int, error) {
@@ -114,14 +117,9 @@ func (w *outputCaptureWriter) emitLine(raw []byte) {
 		line = line[:len(line)-1]
 	}
 	w.lineNum++
-	if w.executor == nil {
-		return
+	if w.callback != nil {
+		w.callback(w.taskID, w.level, string(line), w.source, w.lineNum)
 	}
-	w.executor.mu.RLock()
-	if w.executor.logCallback != nil {
-		w.executor.logCallback(w.level, string(line), w.source, w.lineNum)
-	}
-	w.executor.mu.RUnlock()
 }
 
 func stringifyEnvValue(value interface{}) string {
@@ -169,11 +167,25 @@ func NewExecutor(log *logrus.Logger, basePath string, runtimeCaps system.Runtime
 	}
 }
 
+func (e *Executor) WorkspaceManager() *WorkspaceManager {
+	if e == nil {
+		return nil
+	}
+	return e.workspace
+}
+
 // SetLogCallback sets the callback for log reporting
 func (e *Executor) SetLogCallback(callback LogCallback) {
 	e.mu.Lock()
 	e.logCallback = callback
 	e.mu.Unlock()
+}
+
+// GetLogCallback returns the current log callback
+func (e *Executor) GetLogCallback() LogCallback {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.logCallback
 }
 
 // Execute executes a task
@@ -187,6 +199,18 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams) *Result {
 	workspacePath, err := e.workspace.CreateWorkspace(params.PipelineRunID)
 	if err != nil {
 		e.log.Warnf("Failed to create workspace: %v", err)
+	}
+	if workspacePath != "" {
+		if err := e.workspace.TouchWorkspaceMarker(workspacePath, startTime); err != nil {
+			e.log.Warnf("Failed to update workspace last-used marker at start: %v", err)
+		}
+		e.workspace.MarkWorkspaceActive(workspacePath)
+		defer func() {
+			e.workspace.MarkWorkspaceInactive(workspacePath)
+			if err := e.workspace.TouchWorkspaceMarker(workspacePath, time.Now()); err != nil {
+				e.log.Warnf("Failed to update workspace last-used marker at end: %v", err)
+			}
+		}()
 	}
 
 	// Determine working directory: use workspacePath as default, fallback to params.WorkDir if provided
@@ -223,7 +247,7 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams) *Result {
 	e.log.Infof("Task %d executing in workspace: %s", params.TaskID, workDir)
 
 	// Execute the script in the workspace directory
-	stdout, stderr, err := e.runScript(execCtx, params.Script, workDir, params.EnvVars)
+	stdout, stderr, err := e.runScript(execCtx, params.TaskID, params.Script, workDir, params.EnvVars)
 
 	duration := time.Since(startTime)
 
@@ -246,7 +270,7 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams) *Result {
 }
 
 // runScript executes a shell script and captures output
-func (e *Executor) runScript(ctx context.Context, script, workDir string, envVars map[string]string) (string, string, error) {
+func (e *Executor) runScript(ctx context.Context, taskID uint64, script, workDir string, envVars map[string]string) (string, string, error) {
 	env := append([]string{}, os.Environ()...)
 	seen := make(map[string]int, len(env))
 	for i, item := range env {
@@ -279,8 +303,9 @@ func (e *Executor) runScript(ctx context.Context, script, workDir string, envVar
 	cmd.Dir = workDir
 
 	var stdoutBuf, stderrBuf bytes.Buffer
-	stdoutWriter := &outputCaptureWriter{executor: e, buf: &stdoutBuf, level: "info", source: "stdout"}
-	stderrWriter := &outputCaptureWriter{executor: e, buf: &stderrBuf, level: "error", source: "stderr"}
+	callback := e.GetLogCallback()
+	stdoutWriter := &outputCaptureWriter{executor: e, buf: &stdoutBuf, level: "info", source: "stdout", taskID: taskID, callback: callback}
+	stderrWriter := &outputCaptureWriter{executor: e, buf: &stderrBuf, level: "error", source: "stderr", taskID: taskID, callback: callback}
 	cmd.Stdout = stdoutWriter
 	cmd.Stderr = stderrWriter
 

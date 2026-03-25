@@ -99,7 +99,7 @@ type DAGEngine struct {
 	completed       map[string]bool
 	outputs         map[string]map[string]interface{}
 	executor        *Executor
-	logCallback     func(taskID uint64, level, message, source string)
+	logCallback     func(taskID uint64, level, message, source string, lineNumber int)
 	nodeStatus      map[string]NodeStatus
 	initialInDegree map[string]int
 }
@@ -118,7 +118,7 @@ func NewDAGEngine(config PipelineConfig, executor *Executor) *DAGEngine {
 	}
 }
 
-func (e *DAGEngine) SetLogCallback(callback func(taskID uint64, level, message, source string)) {
+func (e *DAGEngine) SetLogCallback(callback func(taskID uint64, level, message, source string, lineNumber int)) {
 	e.logCallback = callback
 }
 

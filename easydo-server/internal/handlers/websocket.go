@@ -50,6 +50,14 @@ type WebSocketHandler struct {
 	clientIDMu          sync.Mutex
 	serverID            string
 	terminalRelayOnce   sync.Once
+
+	// proxyPool manages outgoing connections to remote servers for cross-server log forwarding
+	proxyPool *proxyClientPool
+
+	// proxyFrontends holds incoming proxy connections from remote servers (keyed by origin server)
+	// map[originServerID]map[clientID]*proxyFrontendClient
+	proxyFrontends   map[string]map[string]*proxyFrontendClient
+	proxyFrontendsMu sync.RWMutex
 }
 
 type runWatcher struct {
@@ -317,6 +325,11 @@ func (h *WebSocketHandler) HandleFrontendConnection(c *gin.Context) {
 
 	fmt.Printf("Frontend client %s connected for run %s\n", clientID, runID)
 
+	// Subscribe to remote task logs for cross-server log forwarding
+	// This looks up all tasks in the run, finds which server each agent is on,
+	// and establishes proxy connections to remote servers to receive logs.
+	go h.subscribeToRemoteTaskLogs(runIDNum, clientID)
+
 	h.handleFrontendMessages(client, runID, clientID)
 }
 
@@ -373,6 +386,10 @@ func (h *WebSocketHandler) handleAgentMessages(client *wsClient, agent *models.A
 // handleFrontendMessages handles incoming messages from frontend
 func (h *WebSocketHandler) handleFrontendMessages(client *frontendClient, runID, clientID string) {
 	defer func() {
+		// Unsubscribe from remote task logs (cross-server proxy)
+		runIDNum, _ := strconv.ParseUint(runID, 10, 64)
+		h.unsubscribeFromRemoteTaskLogs(runIDNum, clientID)
+
 		h.frontendsMu.Lock()
 		if runClients, exists := h.frontends[runID]; exists {
 			delete(runClients, clientID)
@@ -1618,15 +1635,21 @@ func (h *WebSocketHandler) handleAgentPullTask(client *wsClient, agent *models.A
 	h.sendAgentAck(client, "pull_task", taskID, task.DispatchAttempt, true, "", nil)
 }
 
-// broadcastToFrontend broadcasts a message to all frontend clients subscribed to a run
+// broadcastToFrontend broadcasts a message to all frontend clients subscribed to a run.
+// It also handles cross-server routing: when the message is task_log, it forwards
+// to proxy frontend clients (incoming connections from remote servers) that are
+// subscribed to the task.
 func (h *WebSocketHandler) broadcastToFrontend(runID uint64, msgType string, payload map[string]interface{}) {
 	runIDStr := strconv.FormatUint(runID, 10)
 
+	// Get reference to frontend clients under read lock (released immediately after)
 	h.frontendsMu.RLock()
 	runClients, exists := h.frontends[runIDStr]
+	hasLocalFrontends := exists && len(runClients) > 0
 	h.frontendsMu.RUnlock()
 
-	if !exists || len(runClients) == 0 {
+	// If no local frontends and no proxy routing needed, skip
+	if !hasLocalFrontends && msgType != "task_log" {
 		return
 	}
 
@@ -1637,17 +1660,27 @@ func (h *WebSocketHandler) broadcastToFrontend(runID uint64, msgType string, pay
 
 	data, _ := json.Marshal(msg)
 
-	h.frontendsMu.RLock()
-	defer h.frontendsMu.RUnlock()
+	// Broadcast to local frontends
+	if hasLocalFrontends {
+		h.frontendsMu.RLock()
+		for clientID, client := range runClients {
+			client.mu.Lock()
+			err := client.conn.WriteMessage(websocket.TextMessage, data)
+			client.mu.Unlock()
 
-	for clientID, client := range runClients {
-		client.mu.Lock()
-		err := client.conn.WriteMessage(websocket.TextMessage, data)
-		client.mu.Unlock()
-
-		if err != nil {
-			fmt.Printf("Failed to send message to frontend client %s for run %s: %v\n", clientID, runIDStr, err)
+			if err != nil {
+				fmt.Printf("Failed to send message to frontend client %s for run %s: %v\n", clientID, runIDStr, err)
+			}
 		}
+		h.frontendsMu.RUnlock()
+	}
+
+	// Also broadcast to proxy frontends (incoming connections from remote servers)
+	// that are subscribed to this task. This enables cross-server log forwarding.
+	// When msgType is "task_log", we extract taskID and forward to proxy subscribers.
+	if msgType == "task_log" {
+		taskID := uint64(getFloat64(payload, "task_id"))
+		h.broadcastToProxyFrontends(taskID, runID, payload)
 	}
 }
 
@@ -1740,6 +1773,9 @@ func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
 		if run.StartTime > 0 {
 			duration = int(now - run.StartTime)
 		}
+
+		// Cancel all non-terminal running tasks first before marking pipeline as failed
+		h.cancelRunningTasksForFailedPipeline(runID, run.AgentID)
 
 		updates := map[string]interface{}{
 			"status":   models.PipelineRunStatusFailed,
@@ -2016,6 +2052,42 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 				continue
 			}
 
+			// ===== Variable Substitution: Resolve ${outputs.<node_id>.<field>} references =====
+			// Build task outputs map from completed tasks
+			taskOutputs := make(map[string]map[string]interface{})
+			for _, completedTask := range completedTasks {
+				if completedTask.Status == models.TaskStatusExecuteSuccess && completedTask.ResultData != "" {
+					var resultData map[string]interface{}
+					if err := json.Unmarshal([]byte(completedTask.ResultData), &resultData); err == nil {
+						// Build base outputs with exit_code and duration
+						outputs := map[string]interface{}{
+							"exit_code": completedTask.ExitCode,
+							"duration":  completedTask.Duration,
+						}
+						// Merge ResultData fields
+						for k, v := range resultData {
+							outputs[k] = v
+						}
+						taskOutputs[completedTask.NodeID] = outputs
+					}
+				}
+			}
+
+			// Create resolver and populate with task outputs
+			resolver := NewVariableResolver()
+			for nodeID, outputs := range taskOutputs {
+				resolver.SetTaskOutput(nodeID, outputs)
+			}
+
+			// Resolve variables in nodeConfig
+			resolvedNodeConfig, err := resolver.ResolveNodeConfig(nodeConfig)
+			if err != nil {
+				fmt.Printf("[WARN] Failed to resolve variables in nodeConfig for %s: %v\n", downstreamID, err)
+				// Use original config if resolution fails
+			} else {
+				nodeConfig = resolvedNodeConfig
+			}
+
 			if def.ExecMode == taskExecModeServer {
 				success, errMsg := pipelineHandler.executeServerTask(models.DB, &run, node, canonicalType, nodeConfig, timeout)
 				if success {
@@ -2046,6 +2118,14 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 				_ = models.DB.Create(failedTask).Error
 				h.BroadcastTaskStatus(runID, failedTask.ID, failedTask.NodeID, failedTask.Status, 0, failedTask.ErrorMsg, "")
 				continue
+			}
+
+			// Resolve variables in rendered script
+			resolvedScript, err := resolver.ResolveVariables(script)
+			if err != nil {
+				fmt.Printf("[WARN] Failed to resolve script variables for %s: %v\n", downstreamID, err)
+			} else {
+				script = resolvedScript
 			}
 
 			workDir := ""
@@ -2215,11 +2295,61 @@ func buildTaskLogChunkUniqueKey(taskID uint64, attempt int, seq int64) string {
 }
 
 func normalizeUnixTimestamp(ts int64) int64 {
-	// Convert milliseconds to seconds when needed.
 	if ts > 1e12 {
 		return ts / 1000
 	}
 	return ts
+}
+
+func (h *WebSocketHandler) cancelRunningTasksForFailedPipeline(runID uint64, agentID uint64) {
+	nonTerminalStatuses := []string{
+		models.TaskStatusQueued,
+		models.TaskStatusAssigned,
+		models.TaskStatusDispatching,
+		models.TaskStatusPulling,
+		models.TaskStatusAcked,
+		models.TaskStatusRunning,
+	}
+
+	var tasks []models.AgentTask
+	if err := models.DB.Where("pipeline_run_id = ? AND status IN ?", runID, nonTerminalStatuses).Find(&tasks).Error; err != nil {
+		fmt.Printf("Failed to query non-terminal tasks for pipeline %d: %v\n", runID, err)
+		return
+	}
+
+	now := time.Now().Unix()
+	for i := range tasks {
+		task := &tasks[i]
+		if !models.IsTaskStatusTransitionAllowed(task.Status, models.TaskStatusCancelled) {
+			continue
+		}
+
+		duration := 0
+		if task.StartTime > 0 {
+			duration = int(now - task.StartTime)
+		}
+
+		updates := map[string]interface{}{
+			"status":   models.TaskStatusCancelled,
+			"end_time": now,
+			"duration": duration,
+		}
+		if err := models.DB.Model(task).Updates(updates).Error; err != nil {
+			fmt.Printf("Failed to cancel task %d: %v\n", task.ID, err)
+			continue
+		}
+
+		task.Status = models.TaskStatusCancelled
+		task.EndTime = now
+		task.Duration = duration
+		syncLiveTaskStateFromTask(task, "")
+
+		h.BroadcastTaskStatus(runID, task.ID, task.NodeID, models.TaskStatusCancelled, 0, "流水线已失败，任务被取消", "")
+	}
+
+	if agentID > 0 {
+		updateAgentStatusByPipelineConcurrency(models.DB, agentID)
+	}
 }
 
 // IsAgentOnline checks if an agent is connected via WebSocket

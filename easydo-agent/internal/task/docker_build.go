@@ -10,6 +10,8 @@ import (
 
 var defaultDockerPlatforms = []string{"linux/amd64", "linux/arm64"}
 
+const dockerHubRegistry = "docker.io"
+
 func (e *Executor) dockerBuildScript(params TaskParams, workDir string) (string, error) {
 	imageName := strings.TrimSpace(stringifyParam(params.Params["image_name"]))
 	if imageName == "" {
@@ -18,7 +20,7 @@ func (e *Executor) dockerBuildScript(params TaskParams, workDir string) (string,
 	imageTag := defaultString(stringifyParam(params.Params["image_tag"]), "latest")
 	dockerfile := defaultString(stringifyParam(params.Params["dockerfile"]), "./Dockerfile")
 	contextDir := defaultString(stringifyParam(params.Params["context"]), ".")
-	registry := strings.TrimSpace(stringifyParam(params.Params["registry"]))
+	registry := normalizeDockerRegistry(stringifyParam(params.Params["registry"]), toBool(params.Params["push"]))
 	push := toBool(params.Params["push"])
 	platforms := normalizeDockerPlatforms(params.Params["architectures"])
 	platformValue := strings.Join(platforms, ",")
@@ -98,7 +100,7 @@ fi
 func buildEmbeddedBuildkitScript(imageRef, dockerfile, dockerfileDir, contextDir, registry string, push bool, platforms string) string {
 	outputLine := fmt.Sprintf("OUTPUT_SPEC=\"type=oci,dest=.easydo-artifacts/images/%s.tar\"\nmkdir -p .easydo-artifacts/images", shellSafeFilename(imageRef))
 	if push {
-		outputLine = fmt.Sprintf("OUTPUT_SPEC=\"type=image,name=%s,push=true\"\nif [ -n \"$REGISTRY\" ] && [ -n \"$REGISTRY_USER\" ] && [ -n \"$REGISTRY_PASSWORD\" ]; then\n  mkdir -p \"$DOCKER_CONFIG\"\n  AUTH_B64=$(printf '%%s:%%s' \"$REGISTRY_USER\" \"$REGISTRY_PASSWORD\" | base64 | tr -d '\\n')\n  cat > \"$DOCKER_CONFIG/config.json\" <<EOF\n{\"auths\":{\"$REGISTRY\":{\"auth\":\"$AUTH_B64\"}}}\nEOF\nfi", imageRef)
+		outputLine = fmt.Sprintf("OUTPUT_SPEC=\"type=image,name=%s,push=true\"\nif [ -n \"$REGISTRY\" ] && [ -n \"$REGISTRY_USER\" ] && [ -n \"$REGISTRY_PASSWORD\" ]; then\n  mkdir -p \"$DOCKER_CONFIG\"\n  AUTH_B64=$(printf '%%s:%%s' \"$REGISTRY_USER\" \"$REGISTRY_PASSWORD\" | base64 | tr -d '\\n')\n  cat > \"$DOCKER_CONFIG/config.json\" <<EOF\n%s\nEOF\nfi", imageRef, buildRegistryAuthConfigJSON(registry))
 	}
 	return fmt.Sprintf(`set -e
 SOCKET_DIR="${XDG_RUNTIME_DIR:-$(pwd)/.buildkit-run}"
@@ -167,10 +169,46 @@ func toBool(value interface{}) bool {
 }
 
 func qualifyImageRef(registry, imageName, imageTag string) string {
+	registry = strings.TrimSpace(registry)
+	imageName = strings.TrimSpace(imageName)
+	if isDockerHubRegistryAlias(registry) {
+		for _, alias := range []string{dockerHubRegistry, "index.docker.io", "registry-1.docker.io"} {
+			if strings.HasPrefix(imageName, alias+"/") {
+				return dockerHubRegistry + "/" + strings.TrimPrefix(imageName, alias+"/") + ":" + imageTag
+			}
+		}
+	}
 	if strings.HasPrefix(imageName, registry+"/") {
 		return imageName + ":" + imageTag
 	}
 	return registry + "/" + imageName + ":" + imageTag
+}
+
+func normalizeDockerRegistry(registry string, push bool) string {
+	registry = strings.TrimSpace(registry)
+	if registry == "" {
+		if push {
+			return dockerHubRegistry
+		}
+		return ""
+	}
+	if isDockerHubRegistryAlias(registry) {
+		return dockerHubRegistry
+	}
+	return registry
+}
+
+func isDockerHubRegistryAlias(registry string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(registry))
+	normalized = strings.TrimSuffix(normalized, "/")
+	return normalized == dockerHubRegistry || normalized == "index.docker.io" || normalized == "registry-1.docker.io" || normalized == "https://index.docker.io/v1"
+}
+
+func buildRegistryAuthConfigJSON(registry string) string {
+	if isDockerHubRegistryAlias(registry) {
+		return `{"auths":{"docker.io":{"auth":"$AUTH_B64"},"index.docker.io":{"auth":"$AUTH_B64"},"registry-1.docker.io":{"auth":"$AUTH_B64"},"https://index.docker.io/v1/":{"auth":"$AUTH_B64"}}}`
+	}
+	return fmt.Sprintf(`{"auths":{"%s":{"auth":"$AUTH_B64"}}}`, registry)
 }
 
 func resolveBuildPath(workDir, pathValue string) string {

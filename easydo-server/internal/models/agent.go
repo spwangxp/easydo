@@ -172,21 +172,6 @@ type AgentTaskEvent struct {
 	ErrorMsg       string `gorm:"type:text" json:"error_msg"`
 }
 
-// AgentLogChunk stores ordered log chunks with deduplication key
-type AgentLogChunk struct {
-	BaseModel
-	TaskID         uint64 `gorm:"not null;index" json:"task_id"`
-	PipelineRunID  uint64 `gorm:"index" json:"pipeline_run_id"`
-	AgentID        uint64 `gorm:"index" json:"agent_id"`
-	AgentSessionID string `gorm:"size:64;index" json:"agent_session_id"`
-	Attempt        int    `gorm:"not null;default:1" json:"attempt"`
-	Seq            int64  `gorm:"not null" json:"seq"`
-	Stream         string `gorm:"size:16;default:'stdout'" json:"stream"`
-	Chunk          string `gorm:"type:longtext" json:"chunk"`
-	Timestamp      int64  `gorm:"not null" json:"timestamp"`
-	UniqueKey      string `gorm:"size:128;not null;uniqueIndex" json:"unique_key"`
-}
-
 type AgentLogSegment struct {
 	BaseModel
 	TaskID        uint64 `gorm:"not null;index;uniqueIndex:idx_task_attempt_segment" json:"task_id"`

@@ -176,7 +176,7 @@
             <el-button v-if="currentRun?.id" @click="viewRunLogs(currentRun)">
               运行日志
             </el-button>
-            <el-button v-if="currentRun?.status === 'running'" type="danger" @click="stopExecution">
+            <el-button v-if="['queued', 'pending', 'running'].includes(currentRun?.status)" type="danger" @click="stopExecution">
               停止执行
             </el-button>
           </div>
@@ -224,7 +224,8 @@
                 class="task-item"
                 :class="{ 
                   'task-running': task.status === 'running', 
-                  'task-failed': ['execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(task.status) || task.display_status === 'blocked',
+                  'task-failed': ['execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(task.status),
+                  'task-blocked': task.display_status === 'blocked',
                   'task-not-executed': task.display_status === 'not_executed'
                 }"
               >
@@ -233,13 +234,14 @@
                   <el-icon v-else-if="task.status === 'running'" color="#E6A23C" class="running-icon"><Loading /></el-icon>
                   <el-icon v-else-if="task.status === 'execute_success'" color="#67C23A"><SuccessFilled /></el-icon>
                   <el-icon v-else-if="task.status === 'cancelled'" :color="'var(--text-secondary)'"><CircleCloseFilled /></el-icon>
-                  <el-icon v-else-if="['execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(task.status) || task.display_status === 'blocked'" color="#F56C6C"><CircleCloseFilled /></el-icon>
+                  <el-icon v-else-if="task.display_status === 'blocked'" :color="'var(--warning-color)'"><Warning /></el-icon>
+                  <el-icon v-else-if="['execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(task.status)" :color="'var(--danger-color)'"><CircleCloseFilled /></el-icon>
                 </div>
                 <div class="task-info">
                   <div class="task-name">{{ task.name || `任务 #${task.id}` }}</div>
                   <div class="task-meta">
                     <el-tag v-if="task.display_status === 'not_executed'" type="info" size="small">暂未执行</el-tag>
-                    <el-tag v-else-if="task.display_status === 'blocked'" type="danger" size="small">已阻塞</el-tag>
+                    <el-tag v-else-if="task.display_status === 'blocked'" type="warning" size="small">已阻塞</el-tag>
                     <span class="task-agent" v-if="task.Agent">{{ task.Agent.name }}</span>
                     <span class="task-start-time">开始: {{ formatDateTime(task.start_time) }}</span>
                     <span class="task-duration" v-if="task.duration > 0">耗时: {{ formatDuration(task.duration) }}</span>
@@ -247,6 +249,21 @@
                   <div class="task-error" v-if="task.error_msg">
                     <el-icon><Warning /></el-icon>
                     {{ task.error_msg }}
+                  </div>
+                  <div class="task-outputs" v-if="hasTaskOutputs(task) && task.status === 'execute_success'">
+                    <div class="task-outputs-header">
+                      <span>任务输出</span>
+                    </div>
+                    <div class="task-outputs-grid">
+                      <div
+                        v-for="(output, idx) in formatTaskOutputs(getTaskOutputs(task), task.task_type || task.type)"
+                        :key="idx"
+                        class="task-output-item"
+                      >
+                        <span class="output-label">{{ output.label }}:</span>
+                        <span class="output-value" :class="`output-${output.type}`">{{ output.value }}</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <div class="task-actions">
@@ -751,6 +768,7 @@
       :pipeline-id="pipelineId"
       :pipeline-run-id="currentRun?.id || null"
       :title="`构建 #${currentRun?.build_number || ''}`"
+      :task-list="runTasks"
     />
   </div>
 </template>
@@ -777,7 +795,7 @@ import {
   Warning,
   Close
 } from '@element-plus/icons-vue'
-import { getPipelineDetail, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineStatistics, getPipelineTestReports, getRunTasks } from '@/api/pipeline'
+import { getPipelineDetail, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineStatistics, getPipelineTestReports, getRunTasks, cancelPipelineRun } from '@/api/pipeline'
 import { getTaskLogs as fetchTaskLogsFromApi } from '@/api/task'
 import { getProjectList } from '@/api/project'
 import DesignTab from './designTab.vue'
@@ -1441,12 +1459,23 @@ const downloadTaskLogs = () => {
 
 // 停止执行
 const stopExecution = () => {
-  ElMessageBox.confirm('确定要停止当前执行吗？', '停止确认', {
+  ElMessageBox.confirm('确定要停止当前执行吗？停止后所有正在运行的任务将被取消。', '停止确认', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning'
-  }).then(() => {
-    ElMessage.info('停止执行功能开发中')
+  }).then(async () => {
+    if (!currentRun.value?.id || !pipelineId.value) return
+    try {
+      const res = await cancelPipelineRun(pipelineId.value, currentRun.value.id)
+      if (res.code === 200) {
+        ElMessage.success('流水线已停止')
+        stopAllUpdates()
+      } else {
+        ElMessage.error(res.message || '停止失败')
+      }
+    } catch (error) {
+      ElMessage.error('停止执行失败')
+    }
   }).catch(() => {})
 }
 
@@ -1501,6 +1530,99 @@ const getTaskLogs = async (taskId, params = {}) => {
     console.error('获取任务日志失败:', error)
     return { code: 500, message: '获取日志失败', data: { list: [] } }
   }
+}
+
+// 解析任务输出数据
+const getTaskOutputs = (task) => {
+  if (!task) return null
+  const resultData = task.result_data || task.ResultData
+  if (!resultData) return null
+  try {
+    return JSON.parse(resultData)
+  } catch (e) {
+    console.error('解析任务输出失败:', e)
+    return null
+  }
+}
+
+// 格式化任务输出显示
+const formatTaskOutputs = (outputs, taskType) => {
+  if (!outputs) return []
+  const lines = []
+
+  // 通用字段
+  if (outputs.exit_code !== undefined) {
+    lines.push({ label: 'Exit Code', value: outputs.exit_code, type: outputs.exit_code === 0 ? 'success' : 'danger' })
+  }
+  if (outputs.duration !== undefined) {
+    lines.push({ label: 'Duration', value: `${outputs.duration}s`, type: 'info' })
+  }
+
+  // git_clone 任务输出
+  if (taskType === 'git_clone' || taskType === 'git-clone') {
+    if (outputs.commit_sha) lines.push({ label: 'Commit SHA', value: outputs.commit_sha, type: 'primary' })
+    if (outputs.branch) lines.push({ label: 'Branch', value: outputs.branch, type: 'primary' })
+    if (outputs.repo_url) lines.push({ label: 'Repo URL', value: outputs.repo_url, type: 'info' })
+    if (outputs.repo_path) lines.push({ label: 'Repo Path', value: outputs.repo_path, type: 'info' })
+  }
+
+  // docker 任务输出
+  if (taskType === 'docker') {
+    if (outputs.image_name) lines.push({ label: 'Image Name', value: outputs.image_name, type: 'primary' })
+    if (outputs.image_tag) lines.push({ label: 'Image Tag', value: outputs.image_tag, type: 'primary' })
+    if (outputs.image_full_name) lines.push({ label: 'Image Full Name', value: outputs.image_full_name, type: 'info' })
+    if (outputs.pushed !== undefined) lines.push({ label: 'Pushed', value: outputs.pushed ? 'Yes' : 'No', type: outputs.pushed ? 'success' : 'warning' })
+  }
+
+  // npm/maven/gradle 构建任务输出
+  if (taskType === 'npm' || taskType === 'maven' || taskType === 'gradle' || taskType === 'build') {
+    if (outputs.artifact_path) lines.push({ label: 'Artifact Path', value: outputs.artifact_path, type: 'info' })
+  }
+
+  // 测试任务输出
+  if (taskType === 'unit' || taskType === 'integration' || taskType === 'e2e' || taskType === 'test') {
+    if (outputs.tests_passed !== undefined) lines.push({ label: 'Tests Passed', value: outputs.tests_passed, type: 'success' })
+    if (outputs.tests_failed !== undefined) lines.push({ label: 'Tests Failed', value: outputs.tests_failed, type: 'danger' })
+    if (outputs.tests_skipped !== undefined) lines.push({ label: 'Tests Skipped', value: outputs.tests_skipped, type: 'warning' })
+  }
+
+  // coverage 任务输出
+  if (taskType === 'coverage') {
+    if (outputs.coverage_percentage !== undefined) lines.push({ label: 'Coverage', value: `${outputs.coverage_percentage}%`, type: outputs.coverage_percentage >= 80 ? 'success' : 'warning' })
+  }
+
+  // docker-run 任务输出
+  if (taskType === 'docker-run' || taskType === 'docker_run') {
+    if (outputs.container_id) lines.push({ label: 'Container ID', value: outputs.container_id.substring(0, 12), type: 'info' })
+    if (outputs.container_name) lines.push({ label: 'Container Name', value: outputs.container_name, type: 'info' })
+    if (outputs.image_ref) lines.push({ label: 'Image Ref', value: outputs.image_ref, type: 'info' })
+  }
+
+  // shell 任务输出
+  if (taskType === 'shell' || taskType === 'ssh' || taskType === 'kubernetes' || taskType === 'sleep') {
+    // shell 类型输出已经在通用字段中显示
+  }
+
+  // 添加其他未处理的字段
+  const knownKeys = ['exit_code', 'duration', 'commit_sha', 'branch', 'repo_url', 'repo_path',
+    'image_name', 'image_tag', 'image_full_name', 'pushed', 'artifact_path',
+    'tests_passed', 'tests_failed', 'tests_skipped', 'coverage_percentage',
+    'container_id', 'container_name', 'image_ref']
+  for (const [key, value] of Object.entries(outputs)) {
+    if (!knownKeys.includes(key) && value !== undefined && value !== null && value !== '') {
+      lines.push({ label: key, value: String(value), type: 'default' })
+    }
+  }
+
+  return lines
+}
+
+// 判断任务是否有输出可显示
+const hasTaskOutputs = (task) => {
+  if (!task) return false
+  const outputs = getTaskOutputs(task)
+  if (!outputs) return false
+  return Object.keys(outputs).length > 0
 }
 
 // 保存设置
@@ -1676,7 +1798,7 @@ watch(activeTab, (newTab) => {
 // 设置 WebSocket 实时更新
 const setupRealtimeUpdates = () => {
   realtimeHandlers.taskStatus = (payload) => {
-    if (!currentRun.value || payload.run_id !== currentRun.value.id) return
+    if (!currentRun.value || Number(payload.run_id) !== Number(currentRun.value.id)) return
     
     // 更新任务状态
     let taskIndex = -1
@@ -1718,24 +1840,28 @@ const setupRealtimeUpdates = () => {
         task.Agent = { name: payload.agent_name }
       }
 
+      // Only update selectedTask if the status update is for the exact same task
+      // Don't auto-update selectedTask based on node_id matching, as this can cause
+      // selectedTask.value to point to a different task than what the user selected
       if (selectedTask.value && payload.task_id && Number(selectedTask.value.id || 0) === Number(payload.task_id)) {
-        selectedTask.value = task
-      } else if (selectedTask.value && payload.node_id && getTaskNodeID(selectedTask.value) === payload.node_id) {
         selectedTask.value = task
       }
     } else if (payload.node_id) {
-      runTasks.value.push({
-        id: payload.task_id || 0,
-        node_id: payload.node_id,
-        name: payload.task_name || payload.node_id,
-        status: payload.status || 'queued',
-        display_status: payload.status || 'queued',
-        start_time: payload.start_time || 0,
-        duration: payload.duration || 0,
-        error_msg: payload.error_msg || '',
-        created_at: payload.timestamp || 0,
-        Agent: payload.agent_name ? { name: payload.agent_name } : null
-      })
+      const existingIndex = runTasks.value.findIndex(t => t.node_id === payload.node_id || (payload.task_id && Number(t.id || 0) === Number(payload.task_id)))
+      if (existingIndex === -1) {
+        runTasks.value.push({
+          id: payload.task_id || 0,
+          node_id: payload.node_id,
+          name: payload.task_name || payload.node_id,
+          status: payload.status || 'queued',
+          display_status: payload.status || 'queued',
+          start_time: payload.start_time || 0,
+          duration: payload.duration || 0,
+          error_msg: payload.error_msg || '',
+          created_at: payload.timestamp || 0,
+          Agent: payload.agent_name ? { name: payload.agent_name } : null
+        })
+      }
     }
     
     // 如果有选中的任务，显示错误信息
@@ -1745,10 +1871,10 @@ const setupRealtimeUpdates = () => {
   }
 
   realtimeHandlers.taskLog = (payload) => {
-    if (!currentRun.value || payload.run_id !== currentRun.value.id) return
+    if (!currentRun.value || Number(payload.run_id) !== Number(currentRun.value.id)) return
     
     // 如果有选中的任务，显示日志
-    if (selectedTask.value && payload.task_id === selectedTask.value.id) {
+    if (selectedTask.value && Number(payload.task_id) === Number(selectedTask.value.id || 0)) {
       taskLogs.value.push({
         level: payload.level,
         message: payload.message,
@@ -1766,7 +1892,7 @@ const setupRealtimeUpdates = () => {
   }
 
   realtimeHandlers.runStatus = (payload) => {
-    if (!currentRun.value || payload.run_id !== currentRun.value.id) return
+    if (!currentRun.value || Number(payload.run_id) !== Number(currentRun.value.id)) return
 
     // 更新流水线状态
     currentRun.value.status = payload.status
@@ -2415,6 +2541,10 @@ onUnmounted(() => {
               &.task-failed {
                 background: var(--danger-light);
               }
+
+              &.task-blocked {
+                background: var(--warning-light);
+              }
               
               &.task-not-executed {
                 background: var(--bg-secondary);
@@ -2468,8 +2598,50 @@ onUnmounted(() => {
                   align-items: center;
                   gap: 4px;
                 }
+
+                .task-outputs {
+                  margin-top: 8px;
+                  padding: 8px 12px;
+                  background: var(--bg-secondary);
+                  border-radius: 4px;
+                  font-size: 12px;
+
+                  .task-outputs-header {
+                    color: var(--text-secondary);
+                    margin-bottom: 6px;
+                    font-weight: 500;
+                  }
+
+                  .task-outputs-grid {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 8px 16px;
+
+                    .task-output-item {
+                      display: flex;
+                      align-items: center;
+                      gap: 4px;
+
+                      .output-label {
+                        color: var(--text-muted);
+                      }
+
+                      .output-value {
+                        font-weight: 500;
+                        font-family: 'Consolas', 'Monaco', monospace;
+
+                        &.output-primary { color: var(--primary-color); }
+                        &.output-success { color: #67C23A; }
+                        &.output-danger { color: #F56C6C; }
+                        &.output-warning { color: #E6A23C; }
+                        &.output-info { color: var(--text-secondary); }
+                        &.output-default { color: var(--text-primary); }
+                      }
+                    }
+                  }
+                }
               }
-              
+
               .task-actions {
                 margin-left: 16px;
               }

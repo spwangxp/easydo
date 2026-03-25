@@ -853,7 +853,7 @@ func (h *TaskHandler) GetPipelineRunLogs(c *gin.Context) {
 		return
 	}
 
-	logs, err := agentFileLogs.QueryRunLogs(runIDNum, level, source)
+	logs, err := agentFileLogs.QueryRunLogs(runIDNum, 0, level, source)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,

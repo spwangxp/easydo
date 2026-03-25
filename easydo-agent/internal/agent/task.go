@@ -2,7 +2,13 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,6 +62,13 @@ func NewTaskHandler(httpClient *client.HTTPClient, wsClient *client.WebSocketCli
 		executor:   task.NewExecutor(log, cfg.GetWorkspacePath(), runtimeCaps),
 		stopChan:   make(chan struct{}),
 	}
+}
+
+func (th *TaskHandler) WorkspaceManager() *task.WorkspaceManager {
+	if th == nil || th.executor == nil {
+		return nil
+	}
+	return th.executor.WorkspaceManager()
 }
 
 // Task represents a task to be executed
@@ -215,7 +228,7 @@ func (th *TaskHandler) executePipeline(msg *client.PipelineAssignMessage) error 
 	}
 
 	// Set up log callback for real-time reporting
-	dagEngine.SetLogCallback(func(taskID uint64, level, message, source string) {
+	dagEngine.SetLogCallback(func(taskID uint64, level, message, source string, _ int) {
 		th.reportPipelineLog(msg.RunID, taskID, level, message, source)
 	})
 
@@ -237,6 +250,7 @@ func (th *TaskHandler) executePipeline(msg *client.PipelineAssignMessage) error 
 		var wg sync.WaitGroup
 		nodeResults := make(map[string]*task.Result)
 		nodeSuccess := make(map[string]bool)
+		nodeTypes := make(map[string]string)
 		var resultMu sync.Mutex
 
 		for _, nodeID := range executableNodes {
@@ -254,6 +268,7 @@ func (th *TaskHandler) executePipeline(msg *client.PipelineAssignMessage) error 
 				resultMu.Lock()
 				nodeResults[nid] = result
 				nodeSuccess[nid] = success
+				nodeTypes[nid] = n.Type
 				resultMu.Unlock()
 			}(node, nodeID)
 		}
@@ -261,7 +276,8 @@ func (th *TaskHandler) executePipeline(msg *client.PipelineAssignMessage) error 
 		wg.Wait()
 
 		for nodeID, result := range nodeResults {
-			outputs := th.buildNodeOutputs(nodeID, result)
+			taskType := nodeTypes[nodeID]
+			outputs := th.buildNodeOutputs(nodeID, taskType, result)
 			success := nodeSuccess[nodeID]
 			dagEngine.MarkCompleted(nodeID, success, outputs)
 
@@ -336,7 +352,11 @@ func (th *TaskHandler) executeNode(runID uint64, node *task.PipelineNode) (*task
 
 		// Set up log callback for this node
 		nodeLineNumbers := make(map[string]int)
-		th.executor.SetLogCallback(func(level, message, source string, lineNumber int) {
+		th.executor.SetLogCallback(func(logTaskID uint64, level, message, source string, lineNumber int) {
+			// Only report logs for the current task (supports parallel execution)
+			if logTaskID != params.TaskID {
+				return
+			}
 			nodeLineNumbers[node.ID]++
 			th.reportPipelineLog(runID, 0, level, message, source)
 		})
@@ -389,8 +409,17 @@ func (th *TaskHandler) executeNode(runID uint64, node *task.PipelineNode) (*task
 	return lastResult, success
 }
 
-// buildNodeOutputs builds output map from execution result
-func (th *TaskHandler) buildNodeOutputs(nodeID string, result *task.Result) map[string]interface{} {
+// buildNodeOutputs constructs the output map for a completed task node.
+// This output map is stored in AgentTask.ResultData and used by downstream tasks
+// via the ${outputs.<node_id>.<field>} variable substitution syntax.
+//
+// Output structure (common fields):
+//   - exit_code: task execution exit code
+//   - duration: execution time in seconds
+//   - error: error message if task failed (optional)
+//
+// Type-specific fields are extracted based on taskType (see extractTypeSpecificOutputs).
+func (th *TaskHandler) buildNodeOutputs(nodeID, taskType string, result *task.Result) map[string]interface{} {
 	outputs := map[string]interface{}{
 		"exit_code": result.ExitCode,
 		"duration":  result.Duration.Seconds(),
@@ -400,7 +429,192 @@ func (th *TaskHandler) buildNodeOutputs(nodeID string, result *task.Result) map[
 		outputs["error"] = result.Error
 	}
 
+	th.extractTypeSpecificOutputs(taskType, result, outputs)
+
 	return outputs
+}
+
+// extractTypeSpecificOutputs dispatches to type-specific extractors based on taskType.
+// Each extractor parses the task's stdout to extract type-specific output fields.
+func (th *TaskHandler) extractTypeSpecificOutputs(taskType string, result *task.Result, outputs map[string]interface{}) {
+	switch taskType {
+	case "git_clone":
+		// git_clone 任务：从 stdout 中提取 git 信息
+		th.extractGitCloneOutputs(result.Stdout, outputs)
+	case "docker":
+		// docker 任务：从 stdout 中提取镜像信息
+		th.extractDockerOutputs(result.Stdout, outputs)
+	case "npm", "maven", "gradle":
+		// 构建任务：提取构建产物路径等
+		th.extractBuildOutputs(result.Stdout, outputs)
+	case "unit", "integration", "e2e":
+		// 测试任务：提取测试结果
+		th.extractTestOutputs(result.Stdout, outputs)
+	case "coverage":
+		// 覆盖率任务
+		th.extractCoverageOutputs(result.Stdout, outputs)
+	case "docker-run":
+		// docker-run 任务：提取容器信息
+		th.extractDockerRunOutputs(result.Stdout, outputs)
+	}
+}
+
+// extractGitCloneOutputs parses git_clone stdout for commit_sha, repo_url, branch, repo_path.
+// Expected stdout format: git_info:{"url":"...","branch":"...","commit":"...","path":"..."}
+func (th *TaskHandler) extractGitCloneOutputs(stdout string, outputs map[string]interface{}) {
+	if strings.Contains(stdout, "git_info") {
+		// 解析 git info JSON
+		lines := strings.Split(stdout, "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "git_info") {
+				// 尝试提取 JSON 部分
+				if idx := strings.Index(line, "{"); idx >= 0 {
+					jsonStr := line[idx:]
+					// 简单解析 - 实际应该用 json.Unmarshal
+					if strings.Contains(jsonStr, `"commit"`) {
+						outputs["commit_sha"] = th.extractJSONField(jsonStr, "commit")
+					}
+					if strings.Contains(jsonStr, `"url"`) {
+						outputs["repo_url"] = th.extractJSONField(jsonStr, "url")
+					}
+					if strings.Contains(jsonStr, `"branch"`) {
+						outputs["branch"] = th.extractJSONField(jsonStr, "branch")
+					}
+					if strings.Contains(jsonStr, `"path"`) {
+						outputs["repo_path"] = th.extractJSONField(jsonStr, "path")
+					}
+				}
+			}
+		}
+	}
+}
+
+// extractDockerOutputs parses docker build stdout for image_name, image_tag, image_full_name, pushed.
+// Looks for [easydo][info] image=<name:tag> format in stdout.
+func (th *TaskHandler) extractDockerOutputs(stdout string, outputs map[string]interface{}) {
+	if strings.Contains(stdout, "image=") {
+		lines := strings.Split(stdout, "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "image=") && strings.Contains(line, "[easydo][info]") {
+				// 格式: [easydo][info] image=myapp:tag
+				if idx := strings.Index(line, "image="); idx >= 0 {
+					imageStr := strings.TrimSpace(line[idx+6:])
+					parts := strings.Split(imageStr, ":")
+					if len(parts) >= 2 {
+						outputs["image_name"] = parts[0]
+						outputs["image_tag"] = parts[1]
+						outputs["image_full_name"] = imageStr
+					} else {
+						outputs["image_name"] = imageStr
+						outputs["image_tag"] = "latest"
+						outputs["image_full_name"] = imageStr + ":latest"
+					}
+				}
+			}
+		}
+	}
+	// 检查是否已推送
+	if strings.Contains(stdout, "docker push") || strings.Contains(stdout, "pushed to") {
+		outputs["pushed"] = true
+	} else {
+		outputs["pushed"] = false
+	}
+}
+
+// extractBuildOutputs parses build task stdout for artifact_path if present.
+func (th *TaskHandler) extractBuildOutputs(stdout string, outputs map[string]interface{}) {
+	// 构建任务默认输出 exit_code 和 duration
+	// 产物路径等需要从 stdout 中提取
+	if strings.Contains(stdout, "artifact_path=") {
+		lines := strings.Split(stdout, "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "artifact_path=") {
+				if idx := strings.Index(line, "artifact_path="); idx >= 0 {
+					outputs["artifact_path"] = strings.TrimSpace(line[idx+13:])
+				}
+			}
+		}
+	}
+}
+
+// extractTestOutputs parses test task stdout for tests_passed, tests_failed, tests_skipped.
+func (th *TaskHandler) extractTestOutputs(stdout string, outputs map[string]interface{}) {
+	// 尝试从 stdout 中提取测试结果统计
+	// 格式可能是: tests: 10 passed, 2 failed, 1 skipped
+	if strings.Contains(stdout, "passed") {
+		outputs["tests_passed"] = th.extractNumber(stdout, "passed")
+	}
+	if strings.Contains(stdout, "failed") {
+		outputs["tests_failed"] = th.extractNumber(stdout, "failed")
+	}
+	if strings.Contains(stdout, "skipped") {
+		outputs["tests_skipped"] = th.extractNumber(stdout, "skipped")
+	}
+}
+
+// extractCoverageOutputs parses coverage task stdout for coverage_percentage.
+func (th *TaskHandler) extractCoverageOutputs(stdout string, outputs map[string]interface{}) {
+	// 格式可能是: coverage: 85.5%
+	if strings.Contains(stdout, "coverage") {
+		outputs["coverage_percentage"] = th.extractNumber(stdout, "coverage")
+	}
+}
+
+// extractDockerRunOutputs parses docker-run stdout for container_id and image_ref.
+func (th *TaskHandler) extractDockerRunOutputs(stdout string, outputs map[string]interface{}) {
+	// docker-run 任务：提取容器 ID 和名称
+	if strings.Contains(stdout, "container_id=") {
+		lines := strings.Split(stdout, "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "container_id=") {
+				if idx := strings.Index(line, "container_id="); idx >= 0 {
+					outputs["container_id"] = strings.TrimSpace(line[idx+12:])
+				}
+			}
+		}
+	}
+	if strings.Contains(stdout, "image_ref=") {
+		lines := strings.Split(stdout, "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "image_ref=") {
+				if idx := strings.Index(line, "image_ref="); idx >= 0 {
+					outputs["image_ref"] = strings.TrimSpace(line[idx+10:])
+				}
+			}
+		}
+	}
+}
+
+// extractJSONField extracts a string or number field value from JSON using regex.
+// Returns the captured value or empty string if not found.
+func (th *TaskHandler) extractJSONField(json, field string) string {
+	pattern := fmt.Sprintf(`"%s"\s*:\s*"([^"]*)"`, field)
+	re := regexp.MustCompile(pattern)
+	matches := re.FindStringSubmatch(json)
+	if len(matches) >= 2 {
+		return matches[1]
+	}
+	// 尝试数字类型
+	pattern = fmt.Sprintf(`"%s"\s*:\s*([0-9.]+)`, field)
+	re = regexp.MustCompile(pattern)
+	matches = re.FindStringSubmatch(json)
+	if len(matches) >= 2 {
+		return matches[1]
+	}
+	return ""
+}
+
+// extractNumber finds the first integer after keyword in string.
+// Example: extractNumber("passed: 42", "passed") returns 42.
+func (th *TaskHandler) extractNumber(s, keyword string) int {
+	pattern := fmt.Sprintf(`%s\s*[:\s]*([0-9]+)`, keyword)
+	re := regexp.MustCompile(pattern)
+	matches := re.FindStringSubmatch(s)
+	if len(matches) >= 2 {
+		n, _ := strconv.Atoi(matches[1])
+		return n
+	}
+	return 0
 }
 
 // reportPipelineStatus reports task status via WebSocket
@@ -495,7 +709,11 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 
 	// Set up log callback for real-time log reporting
 	var logSeq int64
-	th.executor.SetLogCallback(func(level, message, source string, _ int) {
+	th.executor.SetLogCallback(func(logTaskID uint64, level, message, source string, _ int) {
+		// Only report logs for the current task (supports parallel execution)
+		if logTaskID != task.ID {
+			return
+		}
 		seq := atomic.AddInt64(&logSeq, 1)
 		if err := th.reportTaskLogChunkV2(task, attempt, seq, source, message); err != nil {
 			th.log.Warnf("Failed to report v2 log: %v", err)
@@ -560,6 +778,13 @@ func (th *TaskHandler) buildTaskResultPayload(task *Task, result *task.Result) (
 		payload["stdout"] = result.Stdout
 		payload["stderr"] = result.Stderr
 	}
+	// 获取任务输出变量
+	if status == "execute_success" {
+		taskOutputs := getTaskOutputs(task, result)
+		for k, v := range taskOutputs {
+			payload[k] = v
+		}
+	}
 	if !isResourceBaseInfoTask(task) {
 		return payload, status, errorMsg
 	}
@@ -572,6 +797,403 @@ func (th *TaskHandler) buildTaskResultPayload(task *Task, result *task.Result) (
 		}
 	}
 	return payload, status, errorMsg
+}
+
+// getTaskOutputs 根据任务类型获取输出变量
+func getTaskOutputs(t *Task, result *task.Result) map[string]interface{} {
+	outputs := make(map[string]interface{})
+
+	if t == nil {
+		return outputs
+	}
+
+	switch t.TaskType {
+	case "git_clone", "github", "gitee":
+		return getGitCloneOutputs(t)
+	case "docker":
+		return getDockerOutputs(t)
+	case "npm":
+		return getNpmOutputs(t)
+	case "maven":
+		return getMavenOutputs(t)
+	case "gradle":
+		return getGradleOutputs(t)
+	case "shell", "script", "custom":
+		return getShellOutputs(t, result)
+	default:
+		return outputs
+	}
+}
+
+// isGitCloneTask 检查任务是否是 git_clone 类型
+func isGitCloneTask(t *Task) bool {
+	if t == nil {
+		return false
+	}
+	return t.TaskType == "git_clone" || t.TaskType == "github" || t.TaskType == "gitee"
+}
+
+// getGitCloneOutputs 获取 git_clone 任务的输出变量
+// 在任务执行成功后，通过 git 命令获取 commit 信息
+func getGitCloneOutputs(t *Task) map[string]interface{} {
+	outputs := make(map[string]interface{})
+
+	// 从任务参数中获取 target_dir
+	params := task.ParseStructuredParamsJSON(t.Params)
+	repoConfig, ok := params["repository"].(map[string]interface{})
+	if !ok {
+		return outputs
+	}
+
+	targetDir, ok := repoConfig["target_dir"].(string)
+	if !ok || targetDir == "" {
+		targetDir = "./app"
+	}
+
+	// 如果 target_dir 是相对路径，转换为绝对路径
+	if !filepath.IsAbs(targetDir) {
+		// 使用工作空间路径
+		targetDir = filepath.Join("/data/agent/workspace", fmt.Sprintf("workspace_%d", t.PipelineRunID), targetDir)
+	}
+
+	// 检查目录是否存在
+	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
+		return outputs
+	}
+
+	// 获取 commit SHA
+	if cmd := exec.Command("git", "-C", targetDir, "rev-parse", "HEAD"); cmd != nil {
+		if out, err := cmd.Output(); err == nil {
+			commitSHA := strings.TrimSpace(string(out))
+			if commitSHA != "" {
+				outputs["commit_sha"] = commitSHA
+				outputs["commit_id"] = commitSHA
+			}
+		}
+	}
+
+	// 获取 short commit SHA
+	if cmd := exec.Command("git", "-C", targetDir, "rev-parse", "--short", "HEAD"); cmd != nil {
+		if out, err := cmd.Output(); err == nil {
+			shortCommitSHA := strings.TrimSpace(string(out))
+			if shortCommitSHA != "" {
+				outputs["short_commit_sha"] = shortCommitSHA
+				outputs["short_commit_id"] = shortCommitSHA
+			}
+		}
+	}
+
+	// 获取分支名
+	if cmd := exec.Command("git", "-C", targetDir, "rev-parse", "--abbrev-ref", "HEAD"); cmd != nil {
+		if out, err := cmd.Output(); err == nil {
+			branch := strings.TrimSpace(string(out))
+			if branch != "" {
+				outputs["branch"] = branch
+			}
+		}
+	}
+
+	// 获取远程仓库 URL
+	if cmd := exec.Command("git", "-C", targetDir, "remote", "get-url", "origin"); cmd != nil {
+		if out, err := cmd.Output(); err == nil {
+			repoURL := strings.TrimSpace(string(out))
+			if repoURL != "" {
+				outputs["repo_url"] = repoURL
+			}
+		}
+	}
+
+	return outputs
+}
+
+// getDockerOutputs 获取 docker 任务的输出变量
+// 从任务参数中获取镜像信息
+func getDockerOutputs(t *Task) map[string]interface{} {
+	outputs := make(map[string]interface{})
+
+	params := task.ParseStructuredParamsJSON(t.Params)
+	if len(params) == 0 {
+		return outputs
+	}
+
+	var imageName, imageTag, registry string
+
+	if v, ok := params["image_name"].(string); ok && v != "" {
+		imageName = v
+		outputs["image_name"] = imageName
+	}
+
+	if v, ok := params["image_tag"].(string); ok && v != "" {
+		imageTag = v
+	} else {
+		imageTag = "latest"
+	}
+	outputs["image_tag"] = imageTag
+
+	if v, ok := params["registry"].(string); ok && v != "" {
+		registry = v
+		outputs["registry"] = registry
+	}
+
+	if dockerfile, ok := params["dockerfile"].(string); ok && dockerfile != "" {
+		outputs["dockerfile"] = dockerfile
+	}
+
+	if context, ok := params["context"].(string); ok && context != "" {
+		outputs["context"] = context
+	}
+
+	if imageName != "" {
+		fullName := imageName + ":" + imageTag
+		if registry != "" {
+			fullName = registry + "/" + fullName
+		}
+		outputs["image_full_name"] = fullName
+	}
+
+	if push, ok := params["push"].(bool); ok {
+		outputs["pushed"] = push
+	} else {
+		outputs["pushed"] = false
+	}
+
+	return outputs
+}
+
+// getNpmOutputs 获取 npm 任务的输出变量
+// 从 package.json 中获取包信息
+func getNpmOutputs(t *Task) map[string]interface{} {
+	outputs := make(map[string]interface{})
+
+	params := task.ParseStructuredParamsJSON(t.Params)
+	if len(params) == 0 {
+		return outputs
+	}
+
+	// 获取工作目录
+	workDir, ok := params["working_dir"].(string)
+	if !ok || workDir == "" {
+		workDir = "."
+	}
+
+	// 如果是相对路径，转换为绝对路径
+	if !filepath.IsAbs(workDir) {
+		workDir = filepath.Join("/data/agent/workspace", fmt.Sprintf("workspace_%d", t.PipelineRunID), workDir)
+	}
+
+	// 读取 package.json
+	packageJSONPath := filepath.Join(workDir, "package.json")
+	if _, err := os.Stat(packageJSONPath); os.IsNotExist(err) {
+		return outputs
+	}
+
+	data, err := os.ReadFile(packageJSONPath)
+	if err != nil {
+		return outputs
+	}
+
+	var packageJSON map[string]interface{}
+	if err := json.Unmarshal(data, &packageJSON); err != nil {
+		return outputs
+	}
+
+	if name, ok := packageJSON["name"].(string); ok && name != "" {
+		outputs["package_name"] = name
+	}
+
+	if version, ok := packageJSON["version"].(string); ok && version != "" {
+		outputs["package_version"] = version
+	}
+
+	return outputs
+}
+
+// getMavenOutputs 获取 maven 任务的输出变量
+// 从 pom.xml 中获取项目信息
+func getMavenOutputs(t *Task) map[string]interface{} {
+	outputs := make(map[string]interface{})
+
+	params := task.ParseStructuredParamsJSON(t.Params)
+	if len(params) == 0 {
+		return outputs
+	}
+
+	// 获取工作目录
+	workDir, ok := params["working_dir"].(string)
+	if !ok || workDir == "" {
+		workDir = "."
+	}
+
+	// 如果是相对路径，转换为绝对路径
+	if !filepath.IsAbs(workDir) {
+		workDir = filepath.Join("/data/agent/workspace", fmt.Sprintf("workspace_%d", t.PipelineRunID), workDir)
+	}
+
+	// 读取 pom.xml
+	pomPath := filepath.Join(workDir, "pom.xml")
+	if _, err := os.Stat(pomPath); os.IsNotExist(err) {
+		return outputs
+	}
+
+	data, err := os.ReadFile(pomPath)
+	if err != nil {
+		return outputs
+	}
+
+	content := string(data)
+
+	// 简单的 XML 解析获取 artifactId 和 version
+	if artifactID := extractXMLValue(content, "artifactId"); artifactID != "" {
+		outputs["artifact_id"] = artifactID
+	}
+
+	if version := extractXMLValue(content, "version"); version != "" {
+		outputs["version"] = version
+	}
+
+	if groupID := extractXMLValue(content, "groupId"); groupID != "" {
+		outputs["group_id"] = groupID
+	}
+
+	return outputs
+}
+
+// getGradleOutputs 获取 gradle 任务的输出变量
+// 从 build.gradle 中获取项目信息
+func getGradleOutputs(t *Task) map[string]interface{} {
+	outputs := make(map[string]interface{})
+
+	params := task.ParseStructuredParamsJSON(t.Params)
+	if len(params) == 0 {
+		return outputs
+	}
+
+	// 获取工作目录
+	workDir, ok := params["working_dir"].(string)
+	if !ok || workDir == "" {
+		workDir = "."
+	}
+
+	// 如果是相对路径，转换为绝对路径
+	if !filepath.IsAbs(workDir) {
+		workDir = filepath.Join("/data/agent/workspace", fmt.Sprintf("workspace_%d", t.PipelineRunID), workDir)
+	}
+
+	// 读取 build.gradle
+	buildGradlePath := filepath.Join(workDir, "build.gradle")
+	if _, err := os.Stat(buildGradlePath); os.IsNotExist(err) {
+		// 尝试 build.gradle.kts
+		buildGradlePath = filepath.Join(workDir, "build.gradle.kts")
+		if _, err := os.Stat(buildGradlePath); os.IsNotExist(err) {
+			return outputs
+		}
+	}
+
+	data, err := os.ReadFile(buildGradlePath)
+	if err != nil {
+		return outputs
+	}
+
+	content := string(data)
+
+	// 简单的文本解析获取 group 和 version
+	if group := extractGradleValue(content, "group"); group != "" {
+		outputs["group"] = group
+	}
+
+	if version := extractGradleValue(content, "version"); version != "" {
+		outputs["version"] = version
+	}
+
+	if artifactID := extractGradleValue(content, "rootProject.name"); artifactID != "" {
+		outputs["artifact_id"] = artifactID
+	}
+
+	return outputs
+}
+
+// getShellOutputs 获取 shell 任务的输出变量
+// 支持从环境变量或文件中读取输出
+func getShellOutputs(t *Task, result *task.Result) map[string]interface{} {
+	outputs := make(map[string]interface{})
+
+	// 从环境变量 EASYDO_OUTPUT 中读取输出
+	if outputJSON := os.Getenv("EASYDO_OUTPUT"); outputJSON != "" {
+		var outputMap map[string]interface{}
+		if err := json.Unmarshal([]byte(outputJSON), &outputMap); err == nil {
+			for k, v := range outputMap {
+				outputs[k] = v
+			}
+		}
+	}
+
+	// 从工作目录中的 .easydo_output.json 文件读取输出
+	params := task.ParseStructuredParamsJSON(t.Params)
+	workDir, ok := params["working_dir"].(string)
+	if !ok || workDir == "" {
+		workDir = "."
+	}
+
+	if !filepath.IsAbs(workDir) {
+		workDir = filepath.Join("/data/agent/workspace", fmt.Sprintf("workspace_%d", t.PipelineRunID), workDir)
+	}
+
+	outputFile := filepath.Join(workDir, ".easydo_output.json")
+	if _, err := os.Stat(outputFile); err == nil {
+		if data, err := os.ReadFile(outputFile); err == nil {
+			var fileOutput map[string]interface{}
+			if err := json.Unmarshal(data, &fileOutput); err == nil {
+				for k, v := range fileOutput {
+					outputs[k] = v
+				}
+			}
+		}
+	}
+
+	return outputs
+}
+
+// extractXMLValue 从 XML 内容中提取指定标签的值
+func extractXMLValue(content, tag string) string {
+	startTag := "<" + tag + ">"
+	endTag := "</" + tag + ">"
+
+	startIdx := strings.Index(content, startTag)
+	if startIdx == -1 {
+		return ""
+	}
+
+	startIdx += len(startTag)
+	endIdx := strings.Index(content[startIdx:], endTag)
+	if endIdx == -1 {
+		return ""
+	}
+
+	return strings.TrimSpace(content[startIdx : startIdx+endIdx])
+}
+
+// extractGradleValue 从 Gradle 配置中提取指定属性的值
+func extractGradleValue(content, key string) string {
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, key+" ") || strings.HasPrefix(line, key+"=") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				value := strings.TrimSpace(parts[1])
+				// 移除引号
+				value = strings.Trim(value, "'\"")
+				return value
+			}
+			parts = strings.SplitN(line, " ", 2)
+			if len(parts) == 2 {
+				value := strings.TrimSpace(parts[1])
+				value = strings.Trim(value, "'\"")
+				return value
+			}
+		}
+	}
+	return ""
 }
 
 func shouldEmbedTaskStdStreams(assignedTask *Task) bool {

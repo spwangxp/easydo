@@ -32,6 +32,10 @@ DC_MULTI       = docker-compose -f $(COMPOSE_FILE) -f $(MULTI_COMPOSE_FILE)
 .PHONY: clean-all prune-all rebuild-all debug-all
 .PHONY: multi-up multi-down multi-status multi-logs multi-rebuild multi-debug
 .PHONY: scale-server scale-server-up scale-server-down scale-agent scale-agent-up scale-agent-down
+.PHONY: clean-multi-front clean-multi-srv clean-multi-agent
+.PHONY: build-multi-front build-multi-srv build-multi-agent
+.PHONY: deploy-multi-front deploy-multi-srv deploy-multi-agent
+.PHONY: debug-multi-front debug-multi-srv debug-multi-agent
 
 all help:
 	@echo ""
@@ -59,6 +63,20 @@ all help:
 	@echo "   make scale-agent-down  - 缩容 Agent 到 1 副本"
 	@echo "   make scale-server N=1|2 - 设置后端副本数"
 	@echo "   make scale-agent N=1|2  - 设置 Agent 副本数"
+	@echo ""
+	@echo "$(YELLOW)🚀 多副本单模块操作:$(NC)"
+	@echo "   make clean-multi-front - 清理多副本前端产物"
+	@echo "   make clean-multi-srv   - 清理多副本后端产物"
+	@echo "   make clean-multi-agent - 清理多副本 Agent 产物"
+	@echo "   make build-multi-front - 编译多副本前端镜像"
+	@echo "   make build-multi-srv   - 编译多副本后端镜像"
+	@echo "   make build-multi-agent - 编译多副本 Agent 镜像"
+	@echo "   make deploy-multi-front - 部署多副本前端 (停+编+启)"
+	@echo "   make deploy-multi-srv   - 部署多副本后端 (停 server1/2 + 编 + 启)"
+	@echo "   make deploy-multi-agent - 部署多副本 Agent (停 agent1/2 + 编 + 启)"
+	@echo "   make debug-multi-front  - 调试多副本前端 (删镜像+编+启)"
+	@echo "   make debug-multi-srv    - 调试多副本后端 (删镜像+编+启)"
+	@echo "   make debug-multi-agent  - 调试多副本 Agent (删镜像+编+启)"
 	@echo ""
 	@echo "$(YELLOW)🔧 运维操作:$(NC)"
 	@echo "   make clean        - 清理构建产物"
@@ -272,6 +290,95 @@ scale-agent-down:
 	@$(DC_MULTI) rm -f agent2 >/dev/null 2>&1 || true
 	@$(DC_MULTI) ps agent agent2
 	@echo "$(GREEN)✅ Agent 已缩容到 1 副本!$(NC)"
+
+# ════════════════════════════════════════════════════════════════
+# 多副本单模块操作 (clean / build / deploy / debug)
+# ════════════════════════════════════════════════════════════════
+
+.PHONY: clean-multi-front clean-multi-srv clean-multi-agent
+.PHONY: build-multi-front build-multi-srv build-multi-agent
+.PHONY: deploy-multi-front deploy-multi-srv deploy-multi-agent
+.PHONY: debug-multi-front debug-multi-srv debug-multi-agent
+
+# --- clean (only local build artifacts; containers/images handled by deploy/debug) ---
+
+clean-multi-front:
+	@echo ""
+	@echo "$(YELLOW)🧹 [多副本] 清理 Frontend 构建产物...$(NC)"
+	@make -C $(FRONTEND_DIR) clean
+	@echo "$(GREEN)✅ [多副本] Frontend 产物已清理!$(NC)"
+
+clean-multi-srv:
+	@echo ""
+	@echo "$(YELLOW)🧹 [多副本] 清理 Server 构建产物...$(NC)"
+	@make -C $(SERVER_DIR) clean
+	@echo "$(GREEN)✅ [多副本] Server 产物已清理!$(NC)"
+
+clean-multi-agent:
+	@echo ""
+	@echo "$(YELLOW)🧹 [多副本] 清理 Agent 构建产物...$(NC)"
+	@make -C $(AGENT_DIR) clean
+	@echo "$(GREEN)✅ [多副本] Agent 产物已清理!$(NC)"
+
+# --- build (compile images only, no restart) ---
+
+build-multi-front:
+	@make -C $(FRONTEND_DIR) build
+
+build-multi-srv:
+	@make -C $(SERVER_DIR) build
+
+build-multi-agent:
+	@make -C $(AGENT_DIR) build
+
+# --- deploy (stop containers -> rebuild images -> start containers) ---
+
+deploy-multi-front:
+	@echo ""
+	@echo "$(CYAN)🔄 [多副本] 部署 Frontend...$(NC)"
+	@$(DC_MULTI) down frontend 2>/dev/null || true
+	@$(DC_MULTI) up --build -d frontend
+	@echo "$(GREEN)✅ [多副本] Frontend 部署完成!$(NC)"
+
+deploy-multi-srv:
+	@echo ""
+	@echo "$(CYAN)🔄 [多副本] 部署 Server...$(NC)"
+	@$(DC_MULTI) down server server2 2>/dev/null || true
+	@$(DC_MULTI) up --build -d server server2 server-lb
+	@echo "$(GREEN)✅ [多副本] Server 部署完成!$(NC)"
+
+deploy-multi-agent:
+	@echo ""
+	@echo "$(CYAN)🔄 [多副本] 部署 Agent...$(NC)"
+	@$(DC_MULTI) down agent agent2 2>/dev/null || true
+	@$(DC_MULTI) up --build -d agent agent2
+	@echo "$(GREEN)✅ [多副本] Agent 部署完成!$(NC)"
+
+# --- debug (stop -> delete images -> rebuild -> start) ---
+
+debug-multi-front:
+	@echo ""
+	@echo "$(RED)🔥 [多副本] 调试部署 Frontend...$(NC)"
+	@$(DC_MULTI) down frontend 2>/dev/null || true
+	@docker rmi easydo-frontend easydo-frontend:latest 2>/dev/null || true
+	@$(DC_MULTI) up --build -d frontend
+	@echo "$(GREEN)✅ [多副本] Frontend 调试部署完成!$(NC)"
+
+debug-multi-srv:
+	@echo ""
+	@echo "$(RED)🔥 [多副本] 调试部署 Server...$(NC)"
+	@$(DC_MULTI) down server server2 2>/dev/null || true
+	@docker rmi easydo-server easydo-server:latest 2>/dev/null || true
+	@$(DC_MULTI) up --build -d server server2 server-lb
+	@echo "$(GREEN)✅ [多副本] Server 调试部署完成!$(NC)"
+
+debug-multi-agent:
+	@echo ""
+	@echo "$(RED)🔥 [多副本] 调试部署 Agent...$(NC)"
+	@$(DC_MULTI) down agent agent2 2>/dev/null || true
+	@docker rmi easydo-agent easydo-agent:latest 2>/dev/null || true
+	@$(DC_MULTI) up --build -d agent agent2
+	@echo "$(GREEN)✅ [多副本] Agent 调试部署完成!$(NC)"
 
 # ════════════════════════════════════════════════════════════════
 # 编译操作

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"easydo-server/internal/models"
 	"github.com/gin-gonic/gin"
@@ -1456,5 +1458,150 @@ func TestHandleGitLabWebhook_PushBranchFilterMissReturnsIgnored(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected no runs created when filter misses, got %d", count)
+	}
+}
+
+func TestCancelPipelineRun_CancelsRunningTasks(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "cancel-run-user", models.WorkspaceRoleDeveloper)
+
+	pipeline := models.Pipeline{
+		Name:        "cancel-test-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Environment: "development",
+		Config:      `{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo build"}},{"id":"2","type":"shell","name":"Test","config":{"script":"echo test"}}],"edges":[{"from":"1","to":"2"}]}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID: workspace.ID,
+		PipelineID:  pipeline.ID,
+		BuildNumber: 1,
+		Status:      models.PipelineRunStatusRunning,
+		StartTime:   time.Now().Unix() - 60,
+		Config:      pipeline.Config,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	tasks := []models.AgentTask{
+		{
+			WorkspaceID:   workspace.ID,
+			PipelineRunID: run.ID,
+			NodeID:        "1",
+			TaskType:      "shell",
+			Name:          "Build",
+			Status:        models.TaskStatusExecuteSuccess,
+			StartTime:     time.Now().Unix() - 50,
+			EndTime:       time.Now().Unix() - 30,
+			Duration:      20,
+		},
+		{
+			WorkspaceID:   workspace.ID,
+			PipelineRunID: run.ID,
+			NodeID:        "2",
+			TaskType:      "shell",
+			Name:          "Test",
+			Status:        models.TaskStatusRunning,
+			StartTime:     time.Now().Unix() - 25,
+		},
+	}
+	for i := range tasks {
+		if err := db.Create(&tasks[i]).Error; err != nil {
+			t.Fatalf("create task failed: %v", err)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/runs/%d/cancel", pipeline.ID, run.ID), nil)
+	c.Params = gin.Params{
+		{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)},
+		{Key: "run_id", Value: strconv.FormatUint(run.ID, 10)},
+	}
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+	c.Set("workspace_id", workspace.ID)
+
+	h.CancelPipelineRun(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var updatedRun models.PipelineRun
+	if err := db.First(&updatedRun, run.ID).Error; err != nil {
+		t.Fatalf("load run failed: %v", err)
+	}
+	if updatedRun.Status != models.PipelineRunStatusCancelled {
+		t.Fatalf("expected run status cancelled, got %s", updatedRun.Status)
+	}
+
+	var updatedTasks []models.AgentTask
+	if err := db.Where("pipeline_run_id = ?", run.ID).Order("node_id ASC").Find(&updatedTasks).Error; err != nil {
+		t.Fatalf("load tasks failed: %v", err)
+	}
+	if len(updatedTasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(updatedTasks))
+	}
+
+	if updatedTasks[0].Status != models.TaskStatusExecuteSuccess {
+		t.Fatalf("expected task 1 to remain success, got %s", updatedTasks[0].Status)
+	}
+	if updatedTasks[1].Status != models.TaskStatusCancelled {
+		t.Fatalf("expected task 2 to be cancelled, got %s", updatedTasks[1].Status)
+	}
+}
+
+func TestCancelPipelineRun_RejectsTerminalRun(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "cancel-terminal-user", models.WorkspaceRoleDeveloper)
+
+	pipeline := models.Pipeline{
+		Name:        "cancel-terminal-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Config:      `{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo build"}}],"edges":[]}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID: workspace.ID,
+		PipelineID:  pipeline.ID,
+		BuildNumber: 1,
+		Status:      models.PipelineRunStatusSuccess,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/runs/%d/cancel", pipeline.ID, run.ID), nil)
+	c.Params = gin.Params{
+		{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)},
+		{Key: "run_id", Value: strconv.FormatUint(run.ID, 10)},
+	}
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+	c.Set("workspace_id", workspace.ID)
+
+	h.CancelPipelineRun(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("不支持取消操作")) {
+		t.Fatalf("expected cancellation rejected message, got %s", w.Body.String())
 	}
 }

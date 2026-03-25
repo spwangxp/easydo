@@ -380,6 +380,43 @@
           </el-form>
         </div>
 
+        <!-- 可用输出变量 -->
+        <div class="config-section" v-if="getTaskOutputFields(selectedNode.type).length > 0">
+          <el-collapse>
+            <el-collapse-item name="outputs">
+              <template #title>
+                <div class="outputs-header">
+                  <span>可用输出变量</span>
+                  <el-icon class="outputs-icon"><QuestionFilled /></el-icon>
+                </div>
+              </template>
+              <div class="outputs-content">
+                <div class="outputs-tip">
+                  可使用 <code>${outputs.&lt;前置节点ID&gt;.&lt;field&gt;}</code> 引用前置任务输出
+                </div>
+                <div class="outputs-tip outputs-node-type">
+                  当前节点: {{ selectedNode.id }}
+                </div>
+                <div class="outputs-list">
+                  <div
+                    v-for="field in getTaskOutputFields(selectedNode.type)"
+                    :key="field.key"
+                    class="output-item"
+                    @click="copyToClipboard('${outputs.' + selectedNode.id + '.' + field.key + '}')"
+                  >
+                    <code class="output-key">${outputs.{{ selectedNode.id }}.{{ field.key }}}</code>
+                    <span class="output-desc">{{ field.desc }}</span>
+                  </div>
+                </div>
+                <div class="outputs-hint">
+                  <el-icon><DocumentCopy /></el-icon>
+                  点击变量即可复制进行粘贴
+                </div>
+              </div>
+            </el-collapse-item>
+          </el-collapse>
+        </div>
+
         <div class="config-section" v-if="getNodeCredentialSlots(selectedNode.type).length > 0">
           <div class="section-title">凭据绑定</div>
           <el-form label-position="top" size="small">
@@ -518,7 +555,9 @@ import {
   Delete,
   Close,
   Plus,
-  Check
+  Check,
+  QuestionFilled,
+  DocumentCopy
 } from '@element-plus/icons-vue'
 import { updatePipeline, getPipelineDetail, getPipelineTaskTypes } from '@/api/pipeline'
 import { buildConnectionPath } from './connectionGeometry'
@@ -1399,6 +1438,121 @@ const getPredecessorName = (predId) => {
   return node ? node.name : predId
 }
 
+// 获取任务类型的输出字段定义
+const getTaskOutputFields = (taskType) => {
+  const outputsMap = {
+    git_clone: [
+      { key: 'commit_sha', desc: 'Git commit SHA' },
+      { key: 'branch', desc: '分支名称' },
+      { key: 'repo_url', desc: '仓库地址' },
+      { key: 'repo_path', desc: '本地路径' }
+    ],
+    docker: [
+      { key: 'image_name', desc: '镜像名' },
+      { key: 'image_tag', desc: '镜像标签' },
+      { key: 'image_full_name', desc: '完整镜像名' },
+      { key: 'pushed', desc: '是否已推送' }
+    ],
+    docker_build: [
+      { key: 'image_name', desc: '镜像名' },
+      { key: 'image_tag', desc: '镜像标签' },
+      { key: 'image_full_name', desc: '完整镜像名' },
+      { key: 'pushed', desc: '是否已推送' }
+    ],
+    npm: [
+      { key: 'exit_code', desc: '退出码' },
+      { key: 'duration', desc: '执行时长(秒)' },
+      { key: 'artifact_path', desc: '构建产物路径' }
+    ],
+    maven: [
+      { key: 'exit_code', desc: '退出码' },
+      { key: 'duration', desc: '执行时长(秒)' },
+      { key: 'artifact_path', desc: '构建产物路径' }
+    ],
+    gradle: [
+      { key: 'exit_code', desc: '退出码' },
+      { key: 'duration', desc: '执行时长(秒)' },
+      { key: 'artifact_path', desc: '构建产物路径' }
+    ],
+    unit: [
+      { key: 'exit_code', desc: '退出码' },
+      { key: 'duration', desc: '执行时长(秒)' },
+      { key: 'tests_passed', desc: '通过数' },
+      { key: 'tests_failed', desc: '失败数' },
+      { key: 'tests_skipped', desc: '跳过数' }
+    ],
+    integration: [
+      { key: 'exit_code', desc: '退出码' },
+      { key: 'duration', desc: '执行时长(秒)' },
+      { key: 'tests_passed', desc: '通过数' },
+      { key: 'tests_failed', desc: '失败数' },
+      { key: 'tests_skipped', desc: '跳过数' }
+    ],
+    e2e: [
+      { key: 'exit_code', desc: '退出码' },
+      { key: 'duration', desc: '执行时长(秒)' },
+      { key: 'tests_passed', desc: '通过数' },
+      { key: 'tests_failed', desc: '失败数' },
+      { key: 'tests_skipped', desc: '跳过数' }
+    ],
+    coverage: [
+      { key: 'exit_code', desc: '退出码' },
+      { key: 'duration', desc: '执行时长(秒)' },
+      { key: 'coverage_percentage', desc: '覆盖率' }
+    ],
+    'docker-run': [
+      { key: 'exit_code', desc: '退出码' },
+      { key: 'duration', desc: '执行时长(秒)' },
+      { key: 'container_id', desc: '容器ID' },
+      { key: 'container_name', desc: '容器名称' },
+      { key: 'image_ref', desc: '镜像引用' }
+    ],
+    shell: [
+      { key: 'exit_code', desc: '退出码' },
+      { key: 'duration', desc: '执行时长(秒)' }
+    ],
+    ssh: [
+      { key: 'exit_code', desc: '退出码' },
+      { key: 'duration', desc: '执行时长(秒)' }
+    ],
+    kubernetes: [
+      { key: 'exit_code', desc: '退出码' },
+      { key: 'duration', desc: '执行时长(秒)' }
+    ],
+    sleep: [
+      { key: 'duration', desc: '实际等待秒数' }
+    ]
+  }
+  return outputsMap[taskType] || []
+}
+
+// 获取当前节点的第一个前置节点的 ID
+const getFirstPredecessorNodeId = (node) => {
+  if (!node || !node.predecessors || node.predecessors.length === 0) {
+    return null
+  }
+  return node.predecessors[0]
+}
+
+// 复制文本到剪贴板
+const copyToClipboard = async (text) => {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制到剪贴板')
+  } catch (err) {
+    // 降级方案
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    document.body.removeChild(textarea)
+    ElMessage.success('已复制到剪贴板')
+  }
+}
+
 // 连接键（用于去重和复用连接ID）
 const getConnectionKey = (from, to) => `${from}__${to}`
 
@@ -1698,22 +1852,19 @@ const findCycle = (nodes, connections) => {
   return []
 }
 
-// 计算节点的执行顺序（基于拓扑排序）
+// 计算节点的执行顺序（基于分层拓扑排序 Kahn 算法）
+// 每轮取当前所有入度为0的节点作为当前层，同层按节点数组顺序排列
 const getExecutionOrder = () => {
-  const orderMap = new Map()
-  const orderList = []
-
-  // 构建邻接表和入度表
+  // 1. 构建邻接表和入度表
   const adj = new Map()
   const inDegree = new Map()
-
+  
   // 初始化
   nodes.value.forEach(node => {
     adj.set(node.id, [])
     inDegree.set(node.id, 0)
-    orderMap.set(node.id, null)
   })
-
+  
   // 构建图
   if (connections.value) {
     connections.value.forEach(conn => {
@@ -1723,31 +1874,46 @@ const getExecutionOrder = () => {
       }
     })
   }
-
-  // 找出所有入度为0的节点（入口节点）
-  const queue = []
+  
+  // 2. 分层遍历：每轮取所有入度为0的节点作为当前层
+  const layers = []
+  let currentLayer = []
+  
+  // 初始：收集所有入度为0的节点
   inDegree.forEach((degree, nodeId) => {
     if (degree === 0) {
-      queue.push(nodeId)
+      currentLayer.push(nodeId)
     }
   })
-
-  // 拓扑排序
-  let order = 1
-  while (queue.length > 0) {
-    const current = queue.shift()
-    orderMap.set(current, order++)
-    orderList.push(current)
-
-    const neighbors = adj.get(current) || []
-    neighbors.forEach(neighbor => {
-      inDegree.set(neighbor, inDegree.get(neighbor) - 1)
-      if (inDegree.get(neighbor) === 0) {
-        queue.push(neighbor)
-      }
+  
+  while (currentLayer.length > 0) {
+    layers.push([...currentLayer])  // 复制当前层
+    
+    // 收集下一层节点
+    const nextLayer = []
+    currentLayer.forEach(nodeId => {
+      const neighbors = adj.get(nodeId) || []
+      neighbors.forEach(neighborId => {
+        const newDegree = inDegree.get(neighborId) - 1
+        inDegree.set(neighborId, newDegree)
+        if (newDegree === 0) {
+          nextLayer.push(neighborId)
+        }
+      })
     })
+    
+    currentLayer = nextLayer
   }
-
+  
+  // 3. 展平为顺序列表
+  const orderMap = new Map()
+  let order = 1
+  layers.forEach(layer => {
+    layer.forEach(nodeId => {
+      orderMap.set(nodeId, order++)
+    })
+  })
+  
   return orderMap
 }
 
@@ -1823,7 +1989,41 @@ const savePipeline = async () => {
   }
   
   try {
-    // 准备保存数据 - 转换为后端需要的格式
+    // ========== 步骤 1: 重新生成 node_id ==========
+    // 使用分层拓扑排序计算执行顺序
+    const executionOrder = getExecutionOrder()  // Map<nodeId, orderNumber>
+    
+    // 构建 oldId → newId 映射
+    const idMapping = new Map()
+    executionOrder.forEach((order, oldId) => {
+      idMapping.set(oldId, `node_${order}`)
+    })
+    
+    // 更新节点的 id
+    nodes.value.forEach(node => {
+      const newId = idMapping.get(node.id)
+      if (newId) {
+        node.id = newId
+      }
+    })
+    
+    // 更新连接的 from/to
+    connections.value.forEach(conn => {
+      if (idMapping.has(conn.from)) conn.from = idMapping.get(conn.from)
+      if (idMapping.has(conn.to)) conn.to = idMapping.get(conn.to)
+    })
+    
+    // 更新 predecessors
+    nodes.value.forEach(node => {
+      if (node.predecessors) {
+        node.predecessors = node.predecessors.map(predId => 
+          idMapping.has(predId) ? idMapping.get(predId) : predId
+        )
+      }
+    })
+    
+    // ========== 步骤 2: 准备保存数据 ==========
+    // 转换为后端需要的格式
     const nodeList = nodes.value.map(node => {
       // 将 params 中的嵌套配置转换为平铺的 config
       const config = {}
@@ -2827,6 +3027,89 @@ onUnmounted(() => {
     background: var(--bg-secondary);
     border-radius: $radius-md;
     border-left: 3px solid var(--info-color);
+  }
+
+  .outputs-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+
+    .outputs-icon {
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+  }
+
+  .outputs-content {
+    padding: 8px 0;
+
+    .outputs-tip {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+      line-height: 1.5;
+
+      code {
+        color: var(--primary-color);
+        font-family: 'Consolas', 'Monaco', monospace;
+        background: var(--bg-secondary);
+        padding: 2px 4px;
+        border-radius: 2px;
+      }
+
+      &.outputs-node-type {
+        font-weight: 500;
+        color: var(--text-secondary);
+      }
+    }
+
+    .outputs-list {
+      background: var(--bg-secondary);
+      border-radius: $radius-md;
+      overflow: hidden;
+
+      .output-item {
+        display: flex;
+        align-items: center;
+        padding: 8px 12px;
+        cursor: pointer;
+        transition: background 0.2s;
+
+        &:not(:last-child) {
+          border-bottom: 1px solid var(--border-color);
+        }
+
+        &:hover {
+          background: var(--bg-card);
+        }
+
+        .output-key {
+          flex: 0 0 auto;
+          font-family: 'Consolas', 'Monaco', monospace;
+          font-size: 12px;
+          color: var(--primary-color);
+          margin-right: 12px;
+        }
+
+        .output-desc {
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+      }
+    }
+
+    .outputs-hint {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+
+      .el-icon {
+        font-size: 12px;
+      }
+    }
   }
 
   .checkbox-label {
