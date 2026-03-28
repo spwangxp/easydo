@@ -120,6 +120,9 @@ func (s *taskLogStore) FinishTask(taskID uint64, attempt int) error {
 // The merge order is intentional:
 // 1. object-storage segments (best long-term source),
 // 2. current-process live buffer for in-flight tail reads.
+//
+// Note: agent_log_chunks table was dropped in migration V9.
+// Logs are now stored exclusively in agent_log_segments (object storage) + live buffer.
 func (s *taskLogStore) QueryTaskLogs(runID uint64, taskID uint64, level string) ([]models.AgentLog, error) {
 	entries, err := s.readSegments(context.Background(), taskID, runID, 0)
 	if err != nil {
@@ -131,6 +134,9 @@ func (s *taskLogStore) QueryTaskLogs(runID uint64, taskID uint64, level string) 
 
 // QueryRunLogs applies the same reconstruction strategy as QueryTaskLogs, but
 // across all tasks that belong to the run.
+//
+// Note: agent_log_chunks table was dropped in migration V9.
+// Logs are now stored exclusively in agent_log_segments (object storage) + live buffer.
 func (s *taskLogStore) QueryRunLogs(runID uint64, taskID uint64, level, source string) ([]models.AgentLog, error) {
 	var segments []models.AgentLogSegment
 	query := models.DB.Where("pipeline_run_id = ?", runID)
@@ -183,6 +189,42 @@ func (s *taskLogStore) readSegments(ctx context.Context, taskID, runID uint64, a
 			return nil, err
 		}
 		entries = append(entries, segmentEntries...)
+	}
+	return entries, nil
+}
+
+func (s *taskLogStore) readChunks(taskID, runID uint64, attempt int) ([]fileLogEntry, error) {
+	query := models.DB.Model(&models.AgentLogChunk{})
+	if taskID > 0 {
+		query = query.Where("task_id = ?", taskID)
+	}
+	if runID > 0 {
+		query = query.Where("pipeline_run_id = ?", runID)
+	}
+	if attempt > 0 {
+		query = query.Where("attempt = ?", attempt)
+	}
+	var chunks []models.AgentLogChunk
+	if err := query.Order("timestamp ASC, seq ASC, id ASC").Find(&chunks).Error; err != nil {
+		return nil, err
+	}
+	entries := make([]fileLogEntry, 0, len(chunks))
+	for _, chunk := range chunks {
+		level := "info"
+		if strings.EqualFold(chunk.Stream, "stderr") {
+			level = "error"
+		}
+		entries = append(entries, fileLogEntry{
+			AgentID:       chunk.AgentID,
+			TaskID:        chunk.TaskID,
+			PipelineRunID: chunk.PipelineRunID,
+			Level:         level,
+			Message:       chunk.Chunk,
+			Source:        chunk.Stream,
+			Timestamp:     chunk.Timestamp,
+			Attempt:       chunk.Attempt,
+			Seq:           chunk.Seq,
+		})
 	}
 	return entries, nil
 }

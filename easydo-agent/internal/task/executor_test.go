@@ -2,6 +2,8 @@ package task
 
 import (
 	"context"
+	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -30,7 +32,7 @@ func TestParseParams_PreservesEnvVarsWhenJSONContainsNonStringValues(t *testing.
 
 func TestRunScript_PreservesSystemPathWhenCustomEnvProvided(t *testing.T) {
 	executor := &Executor{}
-	stdout, stderr, err := executor.runScript(context.Background(), `command -v sh >/dev/null && printf '%s' "$PATH"`, "/tmp", map[string]string{"EASYDO_FLAG": "1"})
+	stdout, stderr, err := executor.runScript(context.Background(), 1, `command -v sh >/dev/null && printf '%s' "$PATH"`, "/tmp", map[string]string{"EASYDO_FLAG": "1"})
 	if err != nil {
 		t.Fatalf("expected runScript to preserve PATH, got err=%v stderr=%s", err, stderr)
 	}
@@ -43,6 +45,7 @@ func TestRunScript_PreservesLongSingleLineStdout(t *testing.T) {
 	executor := &Executor{}
 	stdout, stderr, err := executor.runScript(
 		context.Background(),
+		1,
 		`dd if=/dev/zero bs=70000 count=1 2>/dev/null | tr '\000' 'a'; printf '\n'`,
 		"/tmp",
 		nil,
@@ -58,5 +61,26 @@ func TestRunScript_PreservesLongSingleLineStdout(t *testing.T) {
 	}
 	if !strings.HasSuffix(stdout, "\n") {
 		t.Fatalf("expected stdout to keep trailing newline")
+	}
+}
+
+func TestErrToString_PreservesNonExitErrors(t *testing.T) {
+	err := errors.New("plain failure")
+	if got := errToString(err, ""); got != "plain failure" {
+		t.Fatalf("errToString()=%q, want plain failure", got)
+	}
+}
+
+func TestErrToString_IncludesStderrForExitErrors(t *testing.T) {
+	err := exec.Command("sh", "-c", "exit 5").Run()
+	if err == nil {
+		t.Fatal("expected exit error")
+	}
+	got := errToString(err, "Permission denied\nToo many authentication failures\n")
+	if !strings.Contains(got, "command exited with code 5") {
+		t.Fatalf("expected exit code in error, got=%q", got)
+	}
+	if !strings.Contains(got, "Permission denied") {
+		t.Fatalf("expected stderr snippet in error, got=%q", got)
 	}
 }

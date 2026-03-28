@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"easydo-server/internal/config"
 	"easydo-server/internal/models"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -13,6 +14,7 @@ import (
 
 func openHandlerTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
+	config.Init()
 
 	name := strings.NewReplacer("/", "_", " ", "_", ":", "_").Replace(t.Name())
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", name)

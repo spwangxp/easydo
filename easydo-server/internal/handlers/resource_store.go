@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,7 +18,9 @@ import (
 
 	"easydo-server/internal/models"
 	"easydo-server/internal/services"
+	"easydo-server/pkg/storage"
 	"github.com/gin-gonic/gin"
+	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
 )
 
@@ -26,7 +29,8 @@ type ResourceHandler struct {
 }
 
 type StoreTemplateHandler struct {
-	DB *gorm.DB
+	DB                 *gorm.DB
+	objectStoreFactory func() (storage.ObjectStore, error)
 }
 
 type DeploymentHandler struct {
@@ -42,7 +46,7 @@ func NewResourceHandler() *ResourceHandler {
 }
 
 func NewStoreTemplateHandler() *StoreTemplateHandler {
-	return &StoreTemplateHandler{DB: models.DB}
+	return &StoreTemplateHandler{DB: models.DB, objectStoreFactory: storage.NewObjectStore}
 }
 
 func NewDeploymentHandler() *DeploymentHandler {
@@ -469,6 +473,7 @@ func (h *ResourceHandler) DeleteResource(c *gin.Context) {
 type createTemplateRequest struct {
 	Name               string                     `json:"name"`
 	Description        string                     `json:"description"`
+	Category           string                     `json:"category"`
 	TemplateType       models.StoreTemplateType   `json:"template_type"`
 	TargetResourceType models.ResourceType        `json:"target_resource_type"`
 	Source             models.StoreTemplateSource `json:"source"`
@@ -477,14 +482,93 @@ type createTemplateRequest struct {
 }
 
 type createTemplateVersionRequest struct {
-	Version           string                     `json:"version"`
-	PipelineID        uint64                     `json:"pipeline_id"`
-	DeploymentMode    string                     `json:"deployment_mode"`
-	DefaultConfig     string                     `json:"default_config"`
-	DependencyConfig  string                     `json:"dependency_config"`
-	TargetConstraints string                     `json:"target_constraints"`
-	Status            models.StoreTemplateStatus `json:"status"`
-	Parameters        []templateParameterRequest `json:"parameters"`
+	Version            string                     `json:"version"`
+	PipelineID         uint64                     `json:"pipeline_id"`
+	DeploymentMode     string                     `json:"deployment_mode"`
+	DefaultConfig      string                     `json:"default_config"`
+	DependencyConfig   string                     `json:"dependency_config"`
+	TargetConstraints  string                     `json:"target_constraints"`
+	Status             models.StoreTemplateStatus `json:"status"`
+	Parameters         []templateParameterRequest `json:"parameters"`
+	InfraType          string                     `json:"infra_type"`
+	VersionDescription string                     `json:"version_description"`
+	CommandTemplate    string                     `json:"command_template"`
+	ChartSource        *appVariantChartSource     `json:"chart_source"`
+	BaseValuesYAML     string                     `json:"base_values_yaml"`
+}
+
+type previewTemplateVersionRequest struct {
+	TargetResourceID uint64                 `json:"target_resource_id"`
+	Parameters       map[string]interface{} `json:"parameters"`
+}
+
+type appVariantChartSource struct {
+	Type         string `json:"type,omitempty"`
+	RepoURL      string `json:"repo_url,omitempty"`
+	OCIURL       string `json:"oci_url,omitempty"`
+	ChartName    string `json:"chart_name,omitempty"`
+	ChartVersion string `json:"chart_version,omitempty"`
+	ObjectKey    string `json:"object_key,omitempty"`
+	FileName     string `json:"file_name,omitempty"`
+}
+
+type appVariantVMMetadata struct {
+	CommandTemplate string `json:"command_template,omitempty"`
+}
+
+type appVariantK8sMetadata struct {
+	ChartSource    *appVariantChartSource `json:"chart_source,omitempty"`
+	BaseValuesYAML string                 `json:"base_values_yaml,omitempty"`
+}
+
+type appVariantMetadata struct {
+	SchemaVersion      int                    `json:"schema_version,omitempty"`
+	InfraType          string                 `json:"infra_type,omitempty"`
+	ResourceType       models.ResourceType    `json:"resource_type,omitempty"`
+	VersionDescription string                 `json:"version_description,omitempty"`
+	ReleaseNotes       string                 `json:"release_notes,omitempty"`
+	VM                 *appVariantVMMetadata  `json:"vm,omitempty"`
+	K8s                *appVariantK8sMetadata `json:"k8s,omitempty"`
+}
+
+type templateCatalogResponse struct {
+	ID                     uint64                     `json:"id"`
+	Name                   string                     `json:"name"`
+	Description            string                     `json:"description"`
+	TemplateType           models.StoreTemplateType   `json:"template_type"`
+	TargetResourceType     models.ResourceType        `json:"target_resource_type"`
+	Source                 models.StoreTemplateSource `json:"source"`
+	Status                 models.StoreTemplateStatus `json:"status"`
+	Summary                string                     `json:"summary"`
+	Icon                   string                     `json:"icon"`
+	Category               string                     `json:"category"`
+	SupportedInfra         []string                   `json:"supported_infra,omitempty"`
+	SupportedInfras        []string                   `json:"supported_infras,omitempty"`
+	SupportedResourceTypes []string                   `json:"supported_resource_types,omitempty"`
+	CreatedAt              time.Time                  `json:"created_at"`
+	UpdatedAt              time.Time                  `json:"updated_at"`
+}
+
+type templateVersionResponse struct {
+	ID                 uint64                     `json:"id"`
+	TemplateID         uint64                     `json:"template_id"`
+	PipelineID         uint64                     `json:"pipeline_id"`
+	Version            string                     `json:"version"`
+	DeploymentMode     string                     `json:"deployment_mode"`
+	Status             models.StoreTemplateStatus `json:"status"`
+	Parameters         []models.TemplateParameter `json:"parameters"`
+	CreatedAt          time.Time                  `json:"created_at"`
+	UpdatedAt          time.Time                  `json:"updated_at"`
+	InfraType          string                     `json:"infra_type,omitempty"`
+	VersionDescription string                     `json:"version_description,omitempty"`
+	CommandTemplate    string                     `json:"command_template,omitempty"`
+	ChartSource        *appVariantChartSource     `json:"chart_source,omitempty"`
+	BaseValuesYAML     string                     `json:"base_values_yaml,omitempty"`
+}
+
+type previewDiffLine struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 type templateParameterRequest struct {
@@ -522,7 +606,13 @@ func (h *StoreTemplateHandler) ListTemplates(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": templates})
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": h.buildTemplateCatalogResponses(workspaceID, templates)})
+}
+
+func (h *StoreTemplateHandler) ListAppCatalog(c *gin.Context) {
+	c.Request.URL.RawQuery = "template_type=app"
+	c.Request.URL.ForceQuery = true
+	h.ListTemplates(c)
 }
 
 func (h *StoreTemplateHandler) CreateTemplate(c *gin.Context) {
@@ -563,6 +653,7 @@ func (h *StoreTemplateHandler) CreateTemplate(c *gin.Context) {
 		WorkspaceID:        workspaceValue,
 		Name:               strings.TrimSpace(req.Name),
 		Description:        strings.TrimSpace(req.Description),
+		Category:           strings.TrimSpace(req.Category),
 		TemplateType:       req.TemplateType,
 		TargetResourceType: req.TargetResourceType,
 		Source:             source,
@@ -576,7 +667,7 @@ func (h *StoreTemplateHandler) CreateTemplate(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": template})
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": h.buildTemplateCatalogResponses(workspaceID, []models.StoreTemplate{template})[0]})
 }
 
 func (h *StoreTemplateHandler) GetTemplate(c *gin.Context) {
@@ -594,7 +685,7 @@ func (h *StoreTemplateHandler) GetTemplate(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": template})
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": h.buildTemplateCatalogResponses(workspaceID, []models.StoreTemplate{template})[0]})
 }
 
 func (h *StoreTemplateHandler) UpdateTemplate(c *gin.Context) {
@@ -622,6 +713,7 @@ func (h *StoreTemplateHandler) UpdateTemplate(c *gin.Context) {
 	}
 	template.Name = strings.TrimSpace(req.Name)
 	template.Description = strings.TrimSpace(req.Description)
+	template.Category = strings.TrimSpace(req.Category)
 	template.TemplateType = req.TemplateType
 	template.TargetResourceType = req.TargetResourceType
 	template.Summary = strings.TrimSpace(req.Summary)
@@ -631,7 +723,7 @@ func (h *StoreTemplateHandler) UpdateTemplate(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": template})
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": h.buildTemplateCatalogResponses(workspaceID, []models.StoreTemplate{template})[0]})
 }
 
 func (h *StoreTemplateHandler) DeleteTemplate(c *gin.Context) {
@@ -642,13 +734,34 @@ func (h *StoreTemplateHandler) DeleteTemplate(c *gin.Context) {
 		return
 	}
 
-	result := h.DB.Where("workspace_id = ?", workspaceID).Delete(&models.StoreTemplate{}, c.Param("id"))
-	if result.Error != nil {
+	var template models.StoreTemplate
+	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&template, c.Param("id")).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "模板不存在"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "删除模板失败"})
 		return
 	}
-	if result.RowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "模板不存在"})
+
+	if err := h.DB.Transaction(func(tx *gorm.DB) error {
+		versions, err := loadTemplateVersionsForDeletion(tx, workspaceID, template.ID)
+		if err != nil {
+			return err
+		}
+		if err := ensureTemplateDeletionAllowed(tx, workspaceID, template.ID, versions); err != nil {
+			return err
+		}
+		if err := deleteTemplateVersionsWithDependents(tx, workspaceID, versions); err != nil {
+			return err
+		}
+		return tx.Delete(&template).Error
+	}); err != nil {
+		statusCode := http.StatusInternalServerError
+		if isTemplateDeletionBlocked(err) {
+			statusCode = http.StatusBadRequest
+		}
+		c.JSON(statusCode, gin.H{"code": statusCode, "message": err.Error()})
 		return
 	}
 
@@ -674,7 +787,7 @@ func (h *StoreTemplateHandler) ListTemplateVersions(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": versions})
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": h.buildTemplateVersionResponses(versions)})
 }
 
 func (h *StoreTemplateHandler) CreateTemplateVersion(c *gin.Context) {
@@ -700,18 +813,29 @@ func (h *StoreTemplateHandler) CreateTemplateVersion(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "版本号不能为空"})
 		return
 	}
-	if req.PipelineID == 0 {
+	if req.PipelineID == 0 && !isAppVariantCreateRequest(req) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "必须绑定流水线"})
 		return
 	}
 	var pipeline models.Pipeline
-	if err := h.DB.Where("id = ? AND workspace_id = ?", req.PipelineID, workspaceID).First(&pipeline).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "绑定流水线不存在"})
-		return
+	if req.PipelineID > 0 {
+		if err := h.DB.Where("id = ? AND workspace_id = ?", req.PipelineID, workspaceID).First(&pipeline).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "绑定流水线不存在"})
+			return
+		}
+		if ok, msg := validateTemplatePipelineCompatibility(template.TargetResourceType, pipeline.Config); !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": msg})
+			return
+		}
 	}
-	if ok, msg := validateTemplatePipelineCompatibility(template.TargetResourceType, pipeline.Config); !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": msg})
-		return
+	if isAppVariantCreateRequest(req) {
+		defaultConfig, deploymentMode, err := buildAppVariantMetadataConfig(req)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
+			return
+		}
+		req.DefaultConfig = defaultConfig
+		req.DeploymentMode = deploymentMode
 	}
 	status := req.Status
 	if status == "" {
@@ -735,6 +859,14 @@ func (h *StoreTemplateHandler) CreateTemplateVersion(c *gin.Context) {
 		return
 	}
 	if err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if isAppVariantCreateRequest(req) && pipeline.ID == 0 {
+			hiddenPipeline, err := ensureHiddenAppVariantPipeline(tx, &template, nil, workspaceID, userID, req)
+			if err != nil {
+				return err
+			}
+			pipeline = hiddenPipeline
+			version.PipelineID = hiddenPipeline.ID
+		}
 		if err := tx.Create(&version).Error; err != nil {
 			return err
 		}
@@ -753,7 +885,745 @@ func (h *StoreTemplateHandler) CreateTemplateVersion(c *gin.Context) {
 	}
 	version.Parameters = parameters
 
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": version})
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": h.buildTemplateVersionResponses([]models.StoreTemplateVersion{version})[0]})
+}
+
+func (h *StoreTemplateHandler) UpdateTemplateVersion(c *gin.Context) {
+	workspaceID, _ := getRequestWorkspace(c)
+	userID, role := getRequestUser(c)
+	if workspaceID == 0 || !userCanManageWorkspace(h.DB, workspaceID, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "无权修改模板版本"})
+		return
+	}
+
+	var version models.StoreTemplateVersion
+	if err := h.DB.Where("workspace_id = ? AND template_id = ?", workspaceID, c.Param("id")).
+		Preload("Parameters", func(db *gorm.DB) *gorm.DB {
+			return db.Order("sort_order ASC, id ASC")
+		}).
+		First(&version, c.Param("version_id")).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "模板版本不存在"})
+		return
+	}
+
+	var req createTemplateVersionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
+		return
+	}
+	if strings.TrimSpace(req.Version) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "版本号不能为空"})
+		return
+	}
+	if isAppVariantCreateRequest(req) {
+		defaultConfig, deploymentMode, err := buildAppVariantMetadataConfig(req)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
+			return
+		}
+		req.DefaultConfig = defaultConfig
+		req.DeploymentMode = deploymentMode
+	}
+
+	parameters, err := buildTemplateParameters(req.Parameters, userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
+		return
+	}
+	version.Version = strings.TrimSpace(req.Version)
+	version.DeploymentMode = defaultIfEmpty(strings.TrimSpace(req.DeploymentMode), version.DeploymentMode)
+	version.DefaultConfig = req.DefaultConfig
+	version.DependencyConfig = req.DependencyConfig
+	version.TargetConstraints = req.TargetConstraints
+	if req.Status != "" {
+		version.Status = req.Status
+	}
+
+	if err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if isAppVariantCreateRequest(req) && req.PipelineID == 0 {
+			var template models.StoreTemplate
+			if err := tx.First(&template, version.TemplateID).Error; err != nil {
+				return err
+			}
+			hiddenPipeline, err := ensureHiddenAppVariantPipeline(tx, &template, &version, workspaceID, userID, req)
+			if err != nil {
+				return err
+			}
+			version.PipelineID = hiddenPipeline.ID
+		}
+		if err := tx.Save(&version).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("template_version_id = ?", version.ID).Delete(&models.TemplateParameter{}).Error; err != nil {
+			return err
+		}
+		for i := range parameters {
+			parameters[i].TemplateVersionID = version.ID
+		}
+		if len(parameters) > 0 {
+			if err := tx.Create(&parameters).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "修改模板版本失败"})
+		return
+	}
+	version.Parameters = parameters
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": h.buildTemplateVersionResponses([]models.StoreTemplateVersion{version})[0]})
+}
+
+func (h *StoreTemplateHandler) DeleteTemplateVersion(c *gin.Context) {
+	workspaceID, _ := getRequestWorkspace(c)
+	userID, role := getRequestUser(c)
+	if workspaceID == 0 || !userCanManageWorkspace(h.DB, workspaceID, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "无权删除模板版本"})
+		return
+	}
+
+	var version models.StoreTemplateVersion
+	if err := h.DB.Where("workspace_id = ? AND template_id = ?", workspaceID, c.Param("id")).First(&version, c.Param("version_id")).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "模板版本不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "删除模板版本失败"})
+		return
+	}
+
+	if err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := ensureTemplateDeletionAllowed(tx, workspaceID, version.TemplateID, []models.StoreTemplateVersion{version}); err != nil {
+			return err
+		}
+		return deleteTemplateVersionsWithDependents(tx, workspaceID, []models.StoreTemplateVersion{version})
+	}); err != nil {
+		statusCode := http.StatusInternalServerError
+		if isTemplateDeletionBlocked(err) {
+			statusCode = http.StatusBadRequest
+		}
+		c.JSON(statusCode, gin.H{"code": statusCode, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "message": "删除成功"})
+}
+
+func loadTemplateVersionsForDeletion(tx *gorm.DB, workspaceID, templateID uint64) ([]models.StoreTemplateVersion, error) {
+	versions := make([]models.StoreTemplateVersion, 0)
+	if err := tx.Where("workspace_id = ? AND template_id = ?", workspaceID, templateID).Find(&versions).Error; err != nil {
+		return nil, err
+	}
+	return versions, nil
+}
+
+func ensureTemplateDeletionAllowed(tx *gorm.DB, workspaceID, templateID uint64, versions []models.StoreTemplateVersion) error {
+	versionIDs := make([]uint64, 0, len(versions))
+	for _, version := range versions {
+		versionIDs = append(versionIDs, version.ID)
+	}
+	if len(versionIDs) == 0 {
+		return nil
+	}
+
+	var count int64
+	if err := tx.Model(&models.DeploymentRequest{}).
+		Where("workspace_id = ? AND (template_id = ? OR template_version_id IN ?)", workspaceID, templateID, versionIDs).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return fmt.Errorf("模板已存在部署请求，请先清理部署记录后再删除")
+	}
+	return nil
+}
+
+func deleteTemplateVersionsWithDependents(tx *gorm.DB, workspaceID uint64, versions []models.StoreTemplateVersion) error {
+	if len(versions) == 0 {
+		return nil
+	}
+
+	versionIDs := make([]uint64, 0, len(versions))
+	hiddenPipelineIDs := make([]uint64, 0, len(versions))
+	for _, version := range versions {
+		versionIDs = append(versionIDs, version.ID)
+		if version.PipelineID == 0 {
+			continue
+		}
+
+		var pipeline models.Pipeline
+		if err := tx.Where("id = ? AND workspace_id = ?", version.PipelineID, workspaceID).First(&pipeline).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				continue
+			}
+			return err
+		}
+		if pipeline.ManagementHidden {
+			hiddenPipelineIDs = append(hiddenPipelineIDs, pipeline.ID)
+		}
+	}
+
+	if err := tx.Where("template_version_id IN ?", versionIDs).Delete(&models.TemplateParameter{}).Error; err != nil {
+		return err
+	}
+	if err := tx.Where("id IN ?", versionIDs).Delete(&models.StoreTemplateVersion{}).Error; err != nil {
+		return err
+	}
+	if len(hiddenPipelineIDs) > 0 {
+		if err := tx.Where("workspace_id = ?", workspaceID).Delete(&models.Pipeline{}, hiddenPipelineIDs).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isTemplateDeletionBlocked(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "部署请求")
+}
+
+func (h *StoreTemplateHandler) PreviewTemplateVersion(c *gin.Context) {
+	h.previewTemplateVersionInternal(c)
+}
+
+func (h *StoreTemplateHandler) PreviewAppVariant(c *gin.Context) {
+	h.previewTemplateVersionInternal(c)
+}
+
+func (h *StoreTemplateHandler) UploadTemplateVersionChart(c *gin.Context) {
+	workspaceID, _ := getRequestWorkspace(c)
+	userID, role := getRequestUser(c)
+	if workspaceID == 0 || !userCanManageWorkspace(h.DB, workspaceID, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "无权上传 chart 文件"})
+		return
+	}
+
+	var version models.StoreTemplateVersion
+	if err := h.DB.Where("workspace_id = ? AND template_id = ?", workspaceID, c.Param("id")).First(&version, c.Param("version_id")).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "模板版本不存在"})
+		return
+	}
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请选择 chart 文件"})
+		return
+	}
+	file, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "读取 chart 文件失败"})
+		return
+	}
+	defer file.Close()
+
+	body, err := io.ReadAll(file)
+	if err != nil || len(body) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "chart 文件内容无效"})
+		return
+	}
+	if h.objectStoreFactory == nil {
+		h.objectStoreFactory = storage.NewObjectStore
+	}
+	objectStore, err := h.objectStoreFactory()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "对象存储未配置"})
+		return
+	}
+	if err := objectStore.EnsureBucket(c.Request.Context()); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "初始化对象存储失败"})
+		return
+	}
+
+	fileName := filepath.Base(strings.TrimSpace(fileHeader.Filename))
+	if fileName == "." || fileName == "/" || fileName == "" {
+		fileName = fmt.Sprintf("chart-%d.tgz", time.Now().Unix())
+	}
+	objectKey := fmt.Sprintf(
+		"store/charts/workspace-%d/template-%s/version-%s/%d-%s",
+		workspaceID,
+		c.Param("id"),
+		c.Param("version_id"),
+		time.Now().Unix(),
+		fileName,
+	)
+	if _, err := objectStore.PutObject(c.Request.Context(), objectKey, body, fileHeader.Header.Get("Content-Type")); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "上传 chart 文件失败"})
+		return
+	}
+
+	metadata := decodeAppVariantMetadata(version.DefaultConfig)
+	if metadata.SchemaVersion == 0 {
+		metadata.SchemaVersion = 1
+	}
+	metadata.InfraType = string(models.ResourceTypeK8sCluster)
+	if metadata.K8s == nil {
+		metadata.K8s = &appVariantK8sMetadata{}
+	}
+	if metadata.K8s.ChartSource == nil {
+		metadata.K8s.ChartSource = &appVariantChartSource{}
+	}
+	metadata.K8s.ChartSource.Type = "upload"
+	metadata.K8s.ChartSource.ObjectKey = objectKey
+	metadata.K8s.ChartSource.FileName = fileName
+	rawMetadata, err := json.Marshal(metadata)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "保存 chart 信息失败"})
+		return
+	}
+	if err := h.DB.Model(&version).Update("default_config", string(rawMetadata)).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "保存 chart 信息失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": gin.H{
+		"chart_source": metadata.K8s.ChartSource,
+	}})
+}
+
+func (h *StoreTemplateHandler) previewTemplateVersionInternal(c *gin.Context) {
+	workspaceID, _ := getRequestWorkspace(c)
+	userID, role := getRequestUser(c)
+	if workspaceID == 0 || !userCanAccessWorkspace(h.DB, workspaceID, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "无权预览模板版本"})
+		return
+	}
+
+	var req previewTemplateVersionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
+		return
+	}
+	if req.TargetResourceID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "目标资源不能为空"})
+		return
+	}
+
+	var version models.StoreTemplateVersion
+	if err := h.DB.Where("workspace_id = ? AND template_id = ?", workspaceID, c.Param("id")).
+		Preload("Template").
+		Preload("Parameters", func(db *gorm.DB) *gorm.DB {
+			return db.Order("sort_order ASC, id ASC")
+		}).
+		First(&version, c.Param("version_id")).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "模板版本不存在"})
+		return
+	}
+	var resource models.Resource
+	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&resource, req.TargetResourceID).Error; err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "目标资源不存在"})
+		return
+	}
+
+	metadata := decodeAppVariantMetadata(version.DefaultConfig)
+	infraType := normalizeAppVariantInfra(metadata)
+	if infraType == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "当前模板版本未配置应用商店变体信息"})
+		return
+	}
+	if !resourceMatchesVariantInfra(resource.Type, infraType) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "模板版本与目标资源类型不匹配"})
+		return
+	}
+	parameters, err := resolveDeploymentParameters(&version, req.Parameters)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "部署参数无效: " + err.Error()})
+		return
+	}
+
+	preview, err := buildAppVariantPreview(&resource, parameters, metadata)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": preview})
+}
+
+func (h *StoreTemplateHandler) buildTemplateCatalogResponses(workspaceID uint64, templates []models.StoreTemplate) []templateCatalogResponse {
+	responses := make([]templateCatalogResponse, 0, len(templates))
+	if len(templates) == 0 {
+		return responses
+	}
+	templateIDs := make([]uint64, 0, len(templates))
+	for _, template := range templates {
+		templateIDs = append(templateIDs, template.ID)
+	}
+	var versions []models.StoreTemplateVersion
+	_ = h.DB.Where("template_id IN ? AND workspace_id = ?", templateIDs, workspaceID).Find(&versions).Error
+	infraMap := make(map[uint64][]string, len(templateIDs))
+	for _, version := range versions {
+		infra := normalizeAppVariantInfra(decodeAppVariantMetadata(version.DefaultConfig))
+		if infra == "" {
+			continue
+		}
+		existing := infraMap[version.TemplateID]
+		seen := false
+		for _, item := range existing {
+			if item == infra {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			infraMap[version.TemplateID] = append(existing, infra)
+		}
+	}
+	for _, template := range templates {
+		supported := infraMap[template.ID]
+		responses = append(responses, templateCatalogResponse{
+			ID:                     template.ID,
+			Name:                   template.Name,
+			Description:            resolveTemplateDescription(template),
+			TemplateType:           template.TemplateType,
+			TargetResourceType:     template.TargetResourceType,
+			Source:                 template.Source,
+			Status:                 template.Status,
+			Summary:                template.Summary,
+			Icon:                   template.Icon,
+			Category:               resolveTemplateCategory(template),
+			SupportedInfra:         supported,
+			SupportedInfras:        supported,
+			SupportedResourceTypes: supported,
+			CreatedAt:              template.CreatedAt,
+			UpdatedAt:              template.UpdatedAt,
+		})
+	}
+	return responses
+}
+
+func (h *StoreTemplateHandler) buildTemplateVersionResponses(versions []models.StoreTemplateVersion) []templateVersionResponse {
+	responses := make([]templateVersionResponse, 0, len(versions))
+	for _, version := range versions {
+		metadata := decodeAppVariantMetadata(version.DefaultConfig)
+		resp := templateVersionResponse{
+			ID:                 version.ID,
+			TemplateID:         version.TemplateID,
+			PipelineID:         version.PipelineID,
+			Version:            version.Version,
+			DeploymentMode:     version.DeploymentMode,
+			Status:             version.Status,
+			Parameters:         version.Parameters,
+			CreatedAt:          version.CreatedAt,
+			UpdatedAt:          version.UpdatedAt,
+			InfraType:          normalizeAppVariantInfra(metadata),
+			VersionDescription: resolveVariantDescription(metadata),
+		}
+		if metadata.VM != nil {
+			resp.CommandTemplate = strings.TrimSpace(metadata.VM.CommandTemplate)
+		}
+		if metadata.K8s != nil {
+			resp.ChartSource = metadata.K8s.ChartSource
+			resp.BaseValuesYAML = metadata.K8s.BaseValuesYAML
+		}
+		responses = append(responses, resp)
+	}
+	return responses
+}
+
+func resolveTemplateCategory(template models.StoreTemplate) string {
+	if category := strings.TrimSpace(template.Category); category != "" {
+		return category
+	}
+	description := strings.TrimSpace(template.Description)
+	if description == "" || !strings.HasPrefix(description, "{") {
+		return ""
+	}
+	parsed := decodeJSONObjectField(description, nil)
+	if payload, ok := parsed.(map[string]interface{}); ok {
+		return strings.TrimSpace(convertToString(payload["category"]))
+	}
+	return ""
+}
+
+func resolveTemplateDescription(template models.StoreTemplate) string {
+	description := strings.TrimSpace(template.Description)
+	if description == "" || !strings.HasPrefix(description, "{") {
+		return description
+	}
+	parsed := decodeJSONObjectField(description, nil)
+	if payload, ok := parsed.(map[string]interface{}); ok {
+		if body := strings.TrimSpace(convertToString(payload["body"])); body != "" {
+			return body
+		}
+	}
+	return description
+}
+
+func isAppVariantCreateRequest(req createTemplateVersionRequest) bool {
+	return strings.TrimSpace(req.InfraType) != "" || strings.TrimSpace(req.CommandTemplate) != "" || req.ChartSource != nil || strings.TrimSpace(req.BaseValuesYAML) != ""
+}
+
+func buildAppVariantMetadataConfig(req createTemplateVersionRequest) (string, string, error) {
+	infraType := strings.TrimSpace(req.InfraType)
+	if infraType == "" {
+		return "", "", fmt.Errorf("infra 类型不能为空")
+	}
+	metadata := appVariantMetadata{
+		SchemaVersion:      1,
+		InfraType:          infraType,
+		VersionDescription: strings.TrimSpace(req.VersionDescription),
+	}
+	deploymentMode := strings.TrimSpace(req.DeploymentMode)
+	switch infraType {
+	case string(models.ResourceTypeVM):
+		if strings.TrimSpace(req.CommandTemplate) == "" {
+			return "", "", fmt.Errorf("VM 命令模板不能为空")
+		}
+		metadata.VM = &appVariantVMMetadata{CommandTemplate: strings.TrimSpace(req.CommandTemplate)}
+		if deploymentMode == "" {
+			deploymentMode = "vm_command"
+		}
+	case string(models.ResourceTypeK8sCluster):
+		metadata.K8s = &appVariantK8sMetadata{
+			ChartSource:    req.ChartSource,
+			BaseValuesYAML: strings.TrimSpace(req.BaseValuesYAML),
+		}
+		if deploymentMode == "" {
+			deploymentMode = "k8s_chart"
+		}
+	default:
+		return "", "", fmt.Errorf("infra 类型无效")
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return "", "", fmt.Errorf("版本元数据序列化失败")
+	}
+	return string(raw), deploymentMode, nil
+}
+
+func decodeAppVariantMetadata(raw string) appVariantMetadata {
+	metadata := appVariantMetadata{}
+	if strings.TrimSpace(raw) == "" {
+		return metadata
+	}
+	_ = json.Unmarshal([]byte(raw), &metadata)
+	return metadata
+}
+
+func normalizeAppVariantInfra(metadata appVariantMetadata) string {
+	if infra := strings.TrimSpace(metadata.InfraType); infra != "" {
+		return infra
+	}
+	if metadata.ResourceType != "" {
+		return string(metadata.ResourceType)
+	}
+	if metadata.VM != nil {
+		return string(models.ResourceTypeVM)
+	}
+	if metadata.K8s != nil {
+		return string(models.ResourceTypeK8sCluster)
+	}
+	return ""
+}
+
+func resolveVariantDescription(metadata appVariantMetadata) string {
+	if value := strings.TrimSpace(metadata.VersionDescription); value != "" {
+		return value
+	}
+	return strings.TrimSpace(metadata.ReleaseNotes)
+}
+
+func resourceMatchesVariantInfra(resourceType models.ResourceType, infraType string) bool {
+	switch infraType {
+	case string(models.ResourceTypeVM):
+		return resourceType == models.ResourceTypeVM
+	case string(models.ResourceTypeK8sCluster):
+		return resourceType == models.ResourceTypeK8sCluster
+	default:
+		return false
+	}
+}
+
+func buildAppVariantPreview(resource *models.Resource, parameters map[string]interface{}, metadata appVariantMetadata) (gin.H, error) {
+	infraType := normalizeAppVariantInfra(metadata)
+	switch infraType {
+	case string(models.ResourceTypeVM):
+		if metadata.VM == nil || strings.TrimSpace(metadata.VM.CommandTemplate) == "" {
+			return nil, fmt.Errorf("当前 VM 版本未配置命令模板")
+		}
+		command := renderTemplateCommand(metadata.VM.CommandTemplate, parameters)
+		return gin.H{
+			"infra_type":       infraType,
+			"target_resource":  buildResourceResponse(*resource),
+			"rendered_command": command,
+		}, nil
+	case string(models.ResourceTypeK8sCluster):
+		if metadata.K8s == nil || metadata.K8s.ChartSource == nil {
+			return nil, fmt.Errorf("当前 K8s 版本未配置 chart 信息")
+		}
+		overrideYAML, err := buildK8sOverrideValuesYAML(parameters)
+		if err != nil {
+			return nil, err
+		}
+		diffLines := buildPreviewDiffLines(strings.TrimSpace(metadata.K8s.BaseValuesYAML), strings.TrimSpace(overrideYAML))
+		releaseName := defaultIfEmpty(strings.TrimSpace(convertToString(parameters["release_name"])), "app-release")
+		namespace := defaultIfEmpty(strings.TrimSpace(convertToString(parameters["namespace"])), "default")
+		command := buildHelmPreviewCommand(metadata.K8s.ChartSource, releaseName, namespace)
+		return gin.H{
+			"infra_type":           infraType,
+			"target_resource":      buildResourceResponse(*resource),
+			"chart_source":         metadata.K8s.ChartSource,
+			"base_values_yaml":     strings.TrimSpace(metadata.K8s.BaseValuesYAML),
+			"override_values_yaml": strings.TrimSpace(overrideYAML),
+			"diff_lines":           diffLines,
+			"helm_command":         command,
+		}, nil
+	default:
+		return nil, fmt.Errorf("当前版本 infra 配置无效")
+	}
+}
+
+func renderTemplateCommand(template string, parameters map[string]interface{}) string {
+	rendered := template
+	for key, value := range parameters {
+		rendered = strings.ReplaceAll(rendered, "{{"+key+"}}", convertToString(value))
+	}
+	return rendered
+}
+
+func buildK8sOverrideValuesYAML(parameters map[string]interface{}) (string, error) {
+	root := map[string]interface{}{}
+	for key, value := range parameters {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" || trimmedKey == "release_name" || trimmedKey == "namespace" {
+			continue
+		}
+		setNestedMapValue(root, strings.Split(trimmedKey, "."), value)
+	}
+	if len(root) == 0 {
+		return "", nil
+	}
+	raw, err := yaml.Marshal(root)
+	if err != nil {
+		return "", fmt.Errorf("渲染覆盖 values 失败")
+	}
+	return string(raw), nil
+}
+
+func setNestedMapValue(root map[string]interface{}, parts []string, value interface{}) {
+	if len(parts) == 0 {
+		return
+	}
+	if len(parts) == 1 {
+		root[parts[0]] = value
+		return
+	}
+	child, _ := root[parts[0]].(map[string]interface{})
+	if child == nil {
+		child = map[string]interface{}{}
+		root[parts[0]] = child
+	}
+	setNestedMapValue(child, parts[1:], value)
+}
+
+func buildPreviewDiffLines(baseValuesYAML, overrideValuesYAML string) []previewDiffLine {
+	lines := make([]previewDiffLine, 0)
+	for _, line := range strings.Split(strings.TrimSpace(baseValuesYAML), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lines = append(lines, previewDiffLine{Type: "context", Text: line})
+	}
+	for _, line := range strings.Split(strings.TrimSpace(overrideValuesYAML), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lines = append(lines, previewDiffLine{Type: "add", Text: "+" + line})
+	}
+	return lines
+}
+
+func buildHelmPreviewCommand(chartSource *appVariantChartSource, releaseName, namespace string) string {
+	if chartSource == nil {
+		return ""
+	}
+	base := fmt.Sprintf("helm --kubeconfig $KUBECONFIG upgrade --install %s", releaseName)
+	switch strings.TrimSpace(chartSource.Type) {
+	case "repo":
+		base = fmt.Sprintf("%s %s --repo %s", base, chartSource.ChartName, chartSource.RepoURL)
+	case "oci":
+		chartRef := strings.TrimSpace(chartSource.OCIURL)
+		if chartRef == "" {
+			chartRef = chartSource.ChartName
+		}
+		base = fmt.Sprintf("%s %s", base, chartRef)
+	case "upload":
+		base = fmt.Sprintf("%s ./chart", base)
+	default:
+		base = fmt.Sprintf("%s %s", base, chartSource.ChartName)
+	}
+	if version := strings.TrimSpace(chartSource.ChartVersion); version != "" {
+		base = fmt.Sprintf("%s --version %s", base, version)
+	}
+	return fmt.Sprintf("%s -n %s --create-namespace -f input_params_values.yaml", base, namespace)
+}
+
+func buildDirectAppPipelineConfig(version *models.StoreTemplateVersion, resource *models.Resource, parameters map[string]interface{}) (PipelineConfig, error) {
+	if version == nil || resource == nil {
+		return PipelineConfig{}, fmt.Errorf("部署上下文无效")
+	}
+	metadata := decodeAppVariantMetadata(version.DefaultConfig)
+	infraType := normalizeAppVariantInfra(metadata)
+	switch infraType {
+	case string(models.ResourceTypeVM):
+		if metadata.VM == nil || strings.TrimSpace(metadata.VM.CommandTemplate) == "" {
+			return PipelineConfig{}, fmt.Errorf("当前 VM 版本未配置命令模板")
+		}
+		script := renderTemplateCommand(metadata.VM.CommandTemplate, parameters)
+		host, portText := parseEndpointHostPort(resource.Endpoint)
+		nodeConfig := map[string]interface{}{
+			"host":   defaultIfEmpty(strings.TrimSpace(host), strings.TrimSpace(resource.Endpoint)),
+			"script": script,
+		}
+		if port, err := strconv.Atoi(strings.TrimSpace(portText)); err == nil && port > 0 {
+			nodeConfig["port"] = port
+		}
+		return PipelineConfig{
+			Version: "2.0",
+			Nodes: []PipelineNode{{
+				ID:     "app_store_vm_deploy",
+				Type:   "ssh",
+				Name:   "Deploy Application",
+				Config: nodeConfig,
+			}},
+			Edges: []PipelineEdge{},
+		}, nil
+	case string(models.ResourceTypeK8sCluster):
+		if metadata.K8s == nil || metadata.K8s.ChartSource == nil {
+			return PipelineConfig{}, fmt.Errorf("当前 K8s 版本未配置 chart 信息")
+		}
+		releaseName := defaultIfEmpty(strings.TrimSpace(convertToString(parameters["release_name"])), strings.ToLower(strings.ReplaceAll(version.Template.Name, " ", "-")))
+		namespace := defaultIfEmpty(strings.TrimSpace(convertToString(parameters["namespace"])), "default")
+		overrideYAML, err := buildK8sOverrideValuesYAML(parameters)
+		if err != nil {
+			return PipelineConfig{}, err
+		}
+		command := buildHelmDeployCommand(metadata.K8s.ChartSource, releaseName, namespace, overrideYAML)
+		return PipelineConfig{
+			Version: "2.0",
+			Nodes: []PipelineNode{{
+				ID:   "app_store_k8s_deploy",
+				Type: "kubernetes",
+				Name: "Deploy Application",
+				Config: map[string]interface{}{
+					"command": command,
+				},
+			}},
+			Edges: []PipelineEdge{},
+		}, nil
+	default:
+		return PipelineConfig{}, fmt.Errorf("当前版本 infra 配置无效")
+	}
+}
+
+func buildHelmDeployCommand(chartSource *appVariantChartSource, releaseName, namespace, overrideYAML string) string {
+	command := []string{"set -e"}
+	if strings.TrimSpace(overrideYAML) != "" {
+		command = append(command, "cat <<'EOF' > input_params_values.yaml")
+		command = append(command, strings.TrimRight(overrideYAML, "\n"))
+		command = append(command, "EOF")
+	} else {
+		command = append(command, ": > input_params_values.yaml")
+	}
+	command = append(command, buildHelmPreviewCommand(chartSource, releaseName, namespace))
+	return strings.Join(command, "\n")
 }
 
 func (h *LLMModelHandler) ListModels(c *gin.Context) {
@@ -902,6 +1772,129 @@ func (h *DeploymentHandler) GetDeploymentRequest(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": request})
 }
 
+func ensureHiddenAppVariantPipeline(tx *gorm.DB, template *models.StoreTemplate, version *models.StoreTemplateVersion, workspaceID, userID uint64, req createTemplateVersionRequest) (models.Pipeline, error) {
+	config, err := buildHiddenAppVariantPipelineConfig(req.InfraType)
+	if err != nil {
+		return models.Pipeline{}, err
+	}
+
+	if version != nil && version.PipelineID > 0 {
+		var existing models.Pipeline
+		if err := tx.Where("id = ? AND workspace_id = ?", version.PipelineID, workspaceID).First(&existing).Error; err == nil && existing.ManagementHidden {
+			existing.Name = buildHiddenAppVariantPipelineName(template, req.Version, req.InfraType)
+			existing.Description = buildHiddenAppVariantPipelineDescription(template, req.InfraType)
+			existing.Config = config
+			existing.OwnerID = userID
+			// Hidden app-store pipelines intentionally do not belong to a project.
+			// MySQL foreign keys accept NULL but reject 0, so omit project_id on persistence.
+			if err := tx.Omit("ProjectID").Save(&existing).Error; err != nil {
+				return models.Pipeline{}, err
+			}
+			return existing, nil
+		}
+	}
+
+	pipeline := models.Pipeline{
+		Name:             buildHiddenAppVariantPipelineName(template, req.Version, req.InfraType),
+		Description:      buildHiddenAppVariantPipelineDescription(template, req.InfraType),
+		Config:           config,
+		WorkspaceID:      workspaceID,
+		OwnerID:          userID,
+		Environment:      "development",
+		ManagementHidden: true,
+	}
+	if err := tx.Omit("ProjectID").Create(&pipeline).Error; err != nil {
+		return models.Pipeline{}, err
+	}
+	return pipeline, nil
+}
+
+func ensureDeploymentPipeline(tx *gorm.DB, template *models.StoreTemplate, version *models.StoreTemplateVersion, workspaceID, userID uint64) (models.Pipeline, error) {
+	if version != nil && version.PipelineID > 0 {
+		var existing models.Pipeline
+		if err := tx.Where("id = ? AND workspace_id = ?", version.PipelineID, workspaceID).First(&existing).Error; err == nil {
+			return existing, nil
+		}
+	}
+
+	infraType := ""
+	versionText := ""
+	if version != nil {
+		infraType = normalizeAppVariantInfra(decodeAppVariantMetadata(version.DefaultConfig))
+		versionText = version.Version
+	}
+	if infraType == "" {
+		return models.Pipeline{}, fmt.Errorf("应用版本 infra 类型无效")
+	}
+
+	pipeline, err := ensureHiddenAppVariantPipeline(tx, template, version, workspaceID, userID, createTemplateVersionRequest{
+		Version:   versionText,
+		InfraType: infraType,
+	})
+	if err != nil {
+		return models.Pipeline{}, err
+	}
+	if version != nil && version.PipelineID != pipeline.ID {
+		if err := tx.Model(version).Update("pipeline_id", pipeline.ID).Error; err != nil {
+			return models.Pipeline{}, err
+		}
+		version.PipelineID = pipeline.ID
+	}
+	return pipeline, nil
+}
+
+func buildHiddenAppVariantPipelineName(template *models.StoreTemplate, version, infraType string) string {
+	baseName := fmt.Sprintf("[app-store] %s %s %s", strings.TrimSpace(template.Name), strings.TrimSpace(version), strings.TrimSpace(strings.ToUpper(infraType)))
+	if len(baseName) <= 128 {
+		return baseName
+	}
+	return baseName[:128]
+}
+
+func buildHiddenAppVariantPipelineDescription(template *models.StoreTemplate, infraType string) string {
+	return fmt.Sprintf("应用商店 %s 版本的内部 %s 流水线，占位用于版本存储与系统兼容。", strings.TrimSpace(template.Name), strings.ToUpper(strings.TrimSpace(infraType)))
+}
+
+func buildHiddenAppVariantPipelineConfig(infraType string) (string, error) {
+	config := PipelineConfig{
+		Version: "2.0",
+		Edges:   []PipelineEdge{},
+	}
+	switch strings.TrimSpace(infraType) {
+	case string(models.ResourceTypeVM):
+		config.Nodes = []PipelineNode{{
+			ID:   "deploy",
+			Type: "docker-run",
+			Name: "Docker Deploy",
+			Config: map[string]interface{}{
+				"host":           "${inputs.resource_host}",
+				"port":           "${inputs.resource_port}",
+				"image_name":     "busybox",
+				"image_tag":      "latest",
+				"container_name": "noop",
+				"run_args":       "echo noop",
+			},
+		}}
+	case string(models.ResourceTypeK8sCluster):
+		config.Nodes = []PipelineNode{{
+			ID:   "deploy",
+			Type: "kubernetes",
+			Name: "Kubernetes Deploy",
+			Config: map[string]interface{}{
+				"manifest": "./k8s/deploy.yaml",
+			},
+		}}
+	default:
+		return "", fmt.Errorf("应用版本 infra 类型无效")
+	}
+
+	raw, err := json.Marshal(config)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
 func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 	workspaceID, workspaceRole := getRequestWorkspace(c)
 	userID, role := getRequestUser(c)
@@ -936,14 +1929,35 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "模板信息不存在"})
 		return
 	}
-	if version.Template.TargetResourceType != resource.Type {
+	targetResourceType := version.Template.TargetResourceType
+	if version.Template.TemplateType == models.StoreTemplateTypeApp {
+		if infraType := normalizeAppVariantInfra(decodeAppVariantMetadata(version.DefaultConfig)); infraType != "" {
+			switch infraType {
+			case string(models.ResourceTypeVM):
+				targetResourceType = models.ResourceTypeVM
+			case string(models.ResourceTypeK8sCluster):
+				targetResourceType = models.ResourceTypeK8sCluster
+			}
+		}
+	}
+	if targetResourceType != resource.Type {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "模板与资源类型不匹配"})
 		return
 	}
+	directAppDeployment := version.Template.TemplateType == models.StoreTemplateTypeApp && (version.PipelineID == 0 || version.DeploymentMode == "vm_command" || version.DeploymentMode == "k8s_chart")
+	var err error
 	var pipeline models.Pipeline
-	if err := h.DB.Where("id = ? AND workspace_id = ?", version.PipelineID, workspaceID).First(&pipeline).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "绑定流水线不存在"})
-		return
+	if !directAppDeployment {
+		if err := h.DB.Where("id = ? AND workspace_id = ?", version.PipelineID, workspaceID).First(&pipeline).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "绑定流水线不存在"})
+			return
+		}
+	} else {
+		pipeline, err = ensureDeploymentPipeline(h.DB, version.Template, &version, workspaceID, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "创建部署流水线失败: " + err.Error()})
+			return
+		}
 	}
 
 	var llmModel *models.LLMModelCatalog
@@ -970,10 +1984,19 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 		return
 	}
 
-	resolvedConfig, err := h.resolveDeploymentPipelineConfig(&pipeline, version.Template, &resource, llmModel, resolvedParameters)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "部署配置解析失败: " + err.Error()})
-		return
+	var resolvedConfig PipelineConfig
+	if directAppDeployment {
+		resolvedConfig, err = buildDirectAppPipelineConfig(&version, &resource, resolvedParameters)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "部署配置解析失败: " + err.Error()})
+			return
+		}
+	} else {
+		resolvedConfig, err = h.resolveDeploymentPipelineConfig(&pipeline, version.Template, &resource, llmModel, resolvedParameters)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "部署配置解析失败: " + err.Error()})
+			return
+		}
 	}
 	if err := h.applyResourceCredentialBindings(&resolvedConfig, &resource); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "部署资源凭据绑定无效: " + err.Error()})
@@ -1016,8 +2039,11 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 		request.LLMModelID = llmModel.ID
 	}
 	resourceEnv := resource.Environment
-	if resourceEnv == "" {
+	if resourceEnv == "" && !directAppDeployment {
 		resourceEnv = pipeline.Environment
+	}
+	if resourceEnv == "" {
+		resourceEnv = "production"
 	}
 
 	ph := &PipelineHandler{DB: h.DB}
@@ -1026,7 +2052,8 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "部署配置解析失败"})
 		return
 	}
-	run, buildNumber, err := ph.launchPipelineRun(models.Pipeline{BaseModel: pipeline.BaseModel, Name: pipeline.Name, Description: pipeline.Description, WorkspaceID: pipeline.WorkspaceID, ProjectID: pipeline.ProjectID, OwnerID: pipeline.OwnerID, Environment: resourceEnv}, runConfig, pipelineRunTriggerContext{
+	runPipeline := models.Pipeline{BaseModel: pipeline.BaseModel, Name: pipeline.Name, Description: pipeline.Description, WorkspaceID: pipeline.WorkspaceID, ProjectID: pipeline.ProjectID, OwnerID: pipeline.OwnerID, Environment: resourceEnv, ManagementHidden: pipeline.ManagementHidden}
+	run, buildNumber, err := ph.launchPipelineRun(runPipeline, runConfig, pipelineRunTriggerContext{
 		TriggerType:     "deployment_request",
 		TriggerUser:     triggerUsername,
 		TriggerUserID:   userID,
@@ -1039,7 +2066,11 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 	request.PipelineID = pipeline.ID
 	request.PipelineRunID = run.ID
 	request.Status = models.DeploymentRequestStatus(run.Status)
-	if err := h.DB.Create(&request).Error; err != nil {
+	createRequestDB := h.DB
+	if llmModel == nil {
+		createRequestDB = createRequestDB.Omit("LLMModelID")
+	}
+	if err := createRequestDB.Create(&request).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "创建部署请求失败"})
 		return
 	}

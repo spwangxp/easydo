@@ -234,6 +234,28 @@ func TestBuildNodeOutputs_WithError(t *testing.T) {
 	}
 }
 
+func TestBuildTaskResultPayload_PreservesActionableErrorMessage(t *testing.T) {
+	h := &TaskHandler{}
+	task := &Task{ID: 25, TaskType: "ssh"}
+	result := &agenttask.Result{
+		ExitCode: 5,
+		Stderr:   "Permission denied\nToo many authentication failures\n",
+		Error:    "command exited with code 5: Permission denied | Too many authentication failures",
+		Duration: time.Second,
+	}
+
+	payload, status, errorMsg := h.buildTaskResultPayload(task, result)
+	if status != "execute_failed" {
+		t.Fatalf("status=%s, want execute_failed", status)
+	}
+	if !strings.Contains(errorMsg, "Permission denied") {
+		t.Fatalf("errorMsg=%q, want actionable stderr", errorMsg)
+	}
+	if _, hasStdout := payload["stdout"]; hasStdout {
+		t.Fatalf("expected non-resource task payload not to embed stdout by default")
+	}
+}
+
 func TestBuildNodeOutputs_GitClone(t *testing.T) {
 	h := &TaskHandler{}
 	result := &agenttask.Result{

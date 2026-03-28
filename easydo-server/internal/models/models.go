@@ -205,6 +205,7 @@ func managedSchemaColumnSyncs() []columnSync {
 		{model: &InboxMessage{}, field: "EventType"},
 		{model: &NotificationDelivery{}, field: "NextRetryAt"},
 		{model: &NotificationPreference{}, field: "RuleKey"},
+		{model: &StoreTemplate{}, field: "Category"},
 	}
 }
 

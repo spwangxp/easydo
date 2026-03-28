@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -264,7 +265,7 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams) *Result {
 		ExitCode: getExitCode(err),
 		Stdout:   stdout,
 		Stderr:   stderr,
-		Error:    errToString(err),
+		Error:    errToString(err, stderr),
 		Duration: duration,
 	}
 }
@@ -380,19 +381,49 @@ func getExitCode(err error) int {
 	return -1
 }
 
-// errToString converts error to string, extracting exit code from exit errors
-func errToString(err error) string {
+func errToString(err error, stderr string) string {
 	if err == nil {
 		return ""
 	}
 
 	msg := err.Error()
-	// Extract exit code from exit errors for cleaner error messages
+	stderrSummary := summarizeStderr(stderr)
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		if code := exitErr.ExitCode(); code != 0 {
+			if stderrSummary != "" {
+				return fmt.Sprintf("command exited with code %d: %s", code, stderrSummary)
+			}
 			return fmt.Sprintf("command exited with code %d", code)
 		}
 	}
+	if stderrSummary != "" && !strings.Contains(msg, stderrSummary) {
+		return fmt.Sprintf("%s: %s", msg, stderrSummary)
+	}
 
 	return msg
+}
+
+func summarizeStderr(stderr string) string {
+	trimmed := strings.TrimSpace(stderr)
+	if trimmed == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(trimmed, func(r rune) bool { return r == '\n' || r == '\r' })
+	filtered := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		line := strings.TrimSpace(part)
+		if line == "" {
+			continue
+		}
+		if _, exists := seen[line]; exists {
+			continue
+		}
+		seen[line] = struct{}{}
+		filtered = append(filtered, line)
+		if len(filtered) == 3 {
+			break
+		}
+	}
+	return strings.Join(filtered, " | ")
 }

@@ -1,7 +1,7 @@
 <template>
-  <StoreTemplatePage store-kind="app" />
+  <AppStorePage />
 </template>
 
 <script setup>
-import StoreTemplatePage from './components/StoreTemplatePage.vue'
+import AppStorePage from './components/AppStorePage.vue'
 </script>

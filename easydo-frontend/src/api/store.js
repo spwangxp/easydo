@@ -53,6 +53,42 @@ export function createTemplateVersion(id, data) {
   })
 }
 
+export function updateTemplateVersion(templateId, versionId, data) {
+  return request({
+    url: `/store/templates/${templateId}/versions/${versionId}`,
+    method: 'put',
+    data
+  })
+}
+
+export function deleteTemplateVersion(templateId, versionId) {
+  return request({
+    url: `/store/templates/${templateId}/versions/${versionId}`,
+    method: 'delete'
+  })
+}
+
+export function previewTemplateVersion(templateId, versionId, data) {
+  return request({
+    url: `/store/templates/${templateId}/versions/${versionId}/preview`,
+    method: 'post',
+    data
+  })
+}
+
+export function uploadTemplateVersionChart(templateId, versionId, file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request({
+    url: `/store/templates/${templateId}/versions/${versionId}/chart/upload`,
+    method: 'post',
+    data: formData,
+    headers: {
+      'Content-Type': 'multipart/form-data'
+    }
+  })
+}
+
 export function getLocalLlmCatalog(params) {
   return request({
     url: '/store/llm-models',

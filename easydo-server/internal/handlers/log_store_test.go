@@ -1,6 +1,10 @@
 package handlers
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
 	"testing"
 	"time"
 
@@ -99,17 +103,40 @@ func TestTaskLogStoreQueryTaskLogs_IncludesPersistedChunkRowsAfterOwnerCrash(t *
 	models.DB = openHandlerTestDB(t)
 	store := newTaskLogStore()
 	now := time.Now().Unix()
+	store.objectStore = newMemoryTestObjectStore()
+	store.bucket = "logs"
 
-	chunks := []models.AgentLogChunk{
-		{TaskID: 31, PipelineRunID: 301, AgentID: 1, AgentSessionID: "session-a", Attempt: 1, Seq: 1, Stream: "stdout", Chunk: "start", Timestamp: now, UniqueKey: "31:1:1"},
-		{TaskID: 31, PipelineRunID: 301, AgentID: 1, AgentSessionID: "session-a", Attempt: 1, Seq: 2, Stream: "stdout", Chunk: "mid", Timestamp: now + 1, UniqueKey: "31:1:2"},
-		{TaskID: 31, PipelineRunID: 301, AgentID: 1, AgentSessionID: "session-b", Attempt: 1, Seq: 3, Stream: "stdout", Chunk: "done", Timestamp: now + 2, UniqueKey: "31:1:3"},
+	entries := []fileLogEntry{
+		{TaskID: 31, PipelineRunID: 301, AgentID: 1, Attempt: 1, Seq: 1, Source: "stdout", Message: "start", Level: "info", Timestamp: now},
+		{TaskID: 31, PipelineRunID: 301, AgentID: 1, Attempt: 1, Seq: 2, Source: "stdout", Message: "mid", Level: "info", Timestamp: now + 1},
+		{TaskID: 31, PipelineRunID: 301, AgentID: 1, Attempt: 1, Seq: 3, Source: "stdout", Message: "done", Level: "info", Timestamp: now + 2},
 	}
-	for _, chunk := range chunks {
-		copy := chunk
-		if err := models.DB.Create(&copy).Error; err != nil {
-			t.Fatalf("create log chunk failed: %v", err)
-		}
+	body, checksum, err := marshalCompressed(entries)
+	if err != nil {
+		t.Fatalf("marshal compressed log entries failed: %v", err)
+	}
+	objectKey := buildLogObjectKey(301, 31, 1, 1)
+	if _, err := store.objectStore.PutObject(context.Background(), objectKey, body, "application/gzip"); err != nil {
+		t.Fatalf("store object failed: %v", err)
+	}
+	segment := models.AgentLogSegment{
+		TaskID:        31,
+		PipelineRunID: 301,
+		AgentID:       1,
+		Attempt:       1,
+		SegmentNo:     1,
+		StartSeq:      1,
+		EndSeq:        3,
+		LineCount:     3,
+		ObjectKey:     objectKey,
+		ObjectBucket:  store.bucket,
+		ObjectSize:    int64(len(body)),
+		ContentType:   "application/gzip",
+		Checksum:      checksum,
+		Completed:     true,
+	}
+	if err := models.DB.Create(&segment).Error; err != nil {
+		t.Fatalf("create log segment failed: %v", err)
 	}
 
 	logs, err := store.QueryTaskLogs(301, 31, "")
@@ -128,10 +155,36 @@ func TestTaskLogStoreQueryTaskLogs_DedupesPersistedChunksAndLiveBuffer(t *testin
 	models.DB = openHandlerTestDB(t)
 	store := newTaskLogStore()
 	now := time.Now().Unix()
+	store.objectStore = newMemoryTestObjectStore()
+	store.bucket = "logs"
 
-	chunk := models.AgentLogChunk{TaskID: 41, PipelineRunID: 401, AgentID: 1, AgentSessionID: "session-a", Attempt: 1, Seq: 1, Stream: "stdout", Chunk: "only-once", Timestamp: now, UniqueKey: "41:1:1"}
-	if err := models.DB.Create(&chunk).Error; err != nil {
-		t.Fatalf("create log chunk failed: %v", err)
+	entries := []fileLogEntry{{TaskID: 41, PipelineRunID: 401, AgentID: 1, Attempt: 1, Seq: 1, Source: "stdout", Message: "only-once", Level: "info", Timestamp: now}}
+	body, checksum, err := marshalCompressed(entries)
+	if err != nil {
+		t.Fatalf("marshal compressed log entries failed: %v", err)
+	}
+	objectKey := buildLogObjectKey(401, 41, 1, 1)
+	if _, err := store.objectStore.PutObject(context.Background(), objectKey, body, "application/gzip"); err != nil {
+		t.Fatalf("store object failed: %v", err)
+	}
+	segment := models.AgentLogSegment{
+		TaskID:        41,
+		PipelineRunID: 401,
+		AgentID:       1,
+		Attempt:       1,
+		SegmentNo:     1,
+		StartSeq:      1,
+		EndSeq:        1,
+		LineCount:     1,
+		ObjectKey:     objectKey,
+		ObjectBucket:  store.bucket,
+		ObjectSize:    int64(len(body)),
+		ContentType:   "application/gzip",
+		Checksum:      checksum,
+		Completed:     true,
+	}
+	if err := models.DB.Create(&segment).Error; err != nil {
+		t.Fatalf("create log segment failed: %v", err)
 	}
 	if err := store.Append(fileLogEntry{AgentID: 1, TaskID: 41, PipelineRunID: 401, Level: "info", Message: "only-once", Source: "stdout", Timestamp: now, Attempt: 1, Seq: 1}); err != nil {
 		t.Fatalf("append live log failed: %v", err)
@@ -210,4 +263,34 @@ func TestQueryRunLogs_FiltersByTaskID(t *testing.T) {
 	if task20ErrorLogs[0].Level != "error" || task20ErrorLogs[0].TaskID != 20 {
 		t.Fatalf("unexpected log: %+v", task20ErrorLogs[0])
 	}
+}
+
+type memoryTestObjectStore struct {
+	objects map[string][]byte
+}
+
+func newMemoryTestObjectStore() *memoryTestObjectStore {
+	return &memoryTestObjectStore{objects: map[string][]byte{}}
+}
+
+func (s *memoryTestObjectStore) EnsureBucket(context.Context) error {
+	return nil
+}
+
+func (s *memoryTestObjectStore) PutObject(_ context.Context, objectKey string, body []byte, _ string) (int64, error) {
+	copied := append([]byte(nil), body...)
+	s.objects[objectKey] = copied
+	return int64(len(copied)), nil
+}
+
+func (s *memoryTestObjectStore) GetObject(_ context.Context, objectKey string) (io.ReadCloser, error) {
+	body, ok := s.objects[objectKey]
+	if !ok {
+		return nil, fmt.Errorf("object not found: %s", objectKey)
+	}
+	return io.NopCloser(bytes.NewReader(body)), nil
+}
+
+func (s *memoryTestObjectStore) Bucket() string {
+	return "logs"
 }

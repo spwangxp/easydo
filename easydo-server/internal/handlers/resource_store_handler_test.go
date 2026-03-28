@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"easydo-server/internal/config"
 	"easydo-server/internal/models"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -368,6 +369,7 @@ func TestStoreTemplateHandler_CreateListAndPermission(t *testing.T) {
 		"target_resource_type": string(models.ResourceTypeVM),
 		"source":               string(models.StoreTemplateSourceWorkspace),
 		"summary":              "deploy nginx to docker on vm",
+		"category":             "web-service",
 	})
 
 	forbidden := performResourceStoreRequest(t, h.CreateTemplate, developer.ID, "user", workspace.ID, models.WorkspaceRoleDeveloper, http.MethodPost, "/api/store/templates", body)
@@ -386,6 +388,66 @@ func TestStoreTemplateHandler_CreateListAndPermission(t *testing.T) {
 	}
 	if !bytes.Contains(list.Body.Bytes(), []byte("nginx-vm-template")) {
 		t.Fatalf("expected template in list response, got=%s", list.Body.String())
+	}
+	if !bytes.Contains(list.Body.Bytes(), []byte(`"category":"web-service"`)) {
+		t.Fatalf("expected template category in list response, got=%s", list.Body.String())
+	}
+}
+
+func TestStoreTemplateHandler_ListTemplatesIncludesSupportedInfra(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	maintainer, workspace := seedResourceStoreUserAndWorkspace(t, db, "template-infra-maintainer", models.WorkspaceRoleMaintainer)
+	viewer := seedResourceStoreMember(t, db, workspace.ID, "template-infra-viewer", models.WorkspaceRoleViewer)
+
+	template := models.StoreTemplate{
+		WorkspaceID:        workspace.ID,
+		Name:               "Redis",
+		Description:        "cache service",
+		TemplateType:       models.StoreTemplateTypeApp,
+		TargetResourceType: models.ResourceTypeVM,
+		Source:             models.StoreTemplateSourceWorkspace,
+		Status:             models.StoreTemplateStatusPublished,
+		Summary:            "in-memory cache",
+		Category:           "cache",
+		CreatedBy:          maintainer.ID,
+	}
+	if err := db.Create(&template).Error; err != nil {
+		t.Fatalf("create template failed: %v", err)
+	}
+	vmVersion := models.StoreTemplateVersion{
+		WorkspaceID:    workspace.ID,
+		TemplateID:     template.ID,
+		Version:        "7.2.0",
+		DeploymentMode: "vm_command",
+		DefaultConfig:  `{"schema_version":1,"infra_type":"vm","version_description":"VM variant","vm":{"command_template":"docker run redis:{{version}}"}}`,
+		Status:         models.StoreTemplateStatusPublished,
+		CreatedBy:      maintainer.ID,
+	}
+	k8sVersion := models.StoreTemplateVersion{
+		WorkspaceID:    workspace.ID,
+		TemplateID:     template.ID,
+		Version:        "7.2.0",
+		DeploymentMode: "k8s_chart",
+		DefaultConfig:  `{"schema_version":1,"infra_type":"k8s","version_description":"K8s variant","k8s":{"chart_source":{"type":"repo","repo_url":"https://charts.bitnami.com/bitnami","chart_name":"redis","chart_version":"19.6.0"},"base_values":"master:\n  count: 1\n"}}`,
+		Status:         models.StoreTemplateStatusPublished,
+		CreatedBy:      maintainer.ID,
+	}
+	if err := db.Create(&[]models.StoreTemplateVersion{vmVersion, k8sVersion}).Error; err != nil {
+		t.Fatalf("create template versions failed: %v", err)
+	}
+
+	h := NewStoreTemplateHandler()
+	resp := performResourceStoreRequest(t, h.ListTemplates, viewer.ID, "user", workspace.ID, models.WorkspaceRoleViewer, http.MethodGet, "/api/store/templates?template_type=app", nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected list templates success, got=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte(`"supported_infra":["k8s","vm"]`)) && !bytes.Contains(resp.Body.Bytes(), []byte(`"supported_infra":["vm","k8s"]`)) {
+		t.Fatalf("expected supported infra in list response, got=%s", resp.Body.String())
 	}
 }
 
@@ -980,6 +1042,594 @@ func TestStoreTemplateHandler_ListTemplateVersionsIncludesParameterMetadata(t *t
 	}
 	if !bytes.Contains(resp.Body.Bytes(), []byte("model_tag")) || !bytes.Contains(resp.Body.Bytes(), []byte("GPU Memory Utilization")) || !bytes.Contains(resp.Body.Bytes(), []byte("控制显存占用比例")) || !bytes.Contains(resp.Body.Bytes(), []byte(`"advanced":true`)) {
 		t.Fatalf("expected template version parameter metadata in response, got=%s", resp.Body.String())
+	}
+}
+
+func TestStoreTemplateHandler_ListTemplatesIncludesCategoryAndSupportedInfras(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	viewer, workspace := seedResourceStoreUserAndWorkspace(t, db, "template-list-category-viewer", models.WorkspaceRoleViewer)
+	template := models.StoreTemplate{
+		WorkspaceID:        workspace.ID,
+		Name:               "Redis",
+		Summary:            "cache service",
+		Description:        "redis app",
+		TemplateType:       models.StoreTemplateTypeApp,
+		TargetResourceType: models.ResourceTypeVM,
+		Source:             models.StoreTemplateSourceWorkspace,
+		Status:             models.StoreTemplateStatusPublished,
+		Category:           "cache",
+		CreatedBy:          viewer.ID,
+	}
+	if err := db.Create(&template).Error; err != nil {
+		t.Fatalf("create template failed: %v", err)
+	}
+	vmVersion := models.StoreTemplateVersion{
+		WorkspaceID:    workspace.ID,
+		TemplateID:     template.ID,
+		Version:        "7.2.0",
+		DeploymentMode: "vm_command",
+		DefaultConfig:  `{"schema_version":1,"infra_type":"vm","version_description":"vm variant","vm":{"command_template":"docker run redis:{{version}}"}}`,
+		Status:         models.StoreTemplateStatusPublished,
+		CreatedBy:      viewer.ID,
+	}
+	if err := db.Create(&vmVersion).Error; err != nil {
+		t.Fatalf("create vm version failed: %v", err)
+	}
+	k8sVersion := models.StoreTemplateVersion{
+		WorkspaceID:    workspace.ID,
+		TemplateID:     template.ID,
+		Version:        "7.2.0",
+		DeploymentMode: "k8s_chart",
+		DefaultConfig:  `{"schema_version":1,"infra_type":"k8s","version_description":"k8s variant","k8s":{"chart_source":{"type":"repo","repo_url":"https://charts.bitnami.com/bitnami","chart_name":"redis","chart_version":"19.6.0"},"base_values":"architecture: standalone\n"}}`,
+		Status:         models.StoreTemplateStatusPublished,
+		CreatedBy:      viewer.ID,
+	}
+	if err := db.Create(&k8sVersion).Error; err != nil {
+		t.Fatalf("create k8s version failed: %v", err)
+	}
+
+	h := NewStoreTemplateHandler()
+	resp := performResourceStoreRequest(t, h.ListTemplates, viewer.ID, "user", workspace.ID, models.WorkspaceRoleViewer, http.MethodGet, "/api/store/templates?template_type=app", nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected list templates success, got=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte(`"category":"cache"`)) {
+		t.Fatalf("expected category in list response, got=%s", resp.Body.String())
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte(`"supported_infras":["k8s","vm"]`)) && !bytes.Contains(resp.Body.Bytes(), []byte(`"supported_infras":["vm","k8s"]`)) {
+		t.Fatalf("expected supported_infras in list response, got=%s", resp.Body.String())
+	}
+}
+
+func TestStoreTemplateHandler_UpdateAndDeleteTemplateVersion(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	maintainer, workspace := seedResourceStoreUserAndWorkspace(t, db, "template-version-update-maintainer", models.WorkspaceRoleMaintainer)
+	template := models.StoreTemplate{
+		WorkspaceID:        workspace.ID,
+		Name:               "Redis",
+		TemplateType:       models.StoreTemplateTypeApp,
+		TargetResourceType: models.ResourceTypeVM,
+		Source:             models.StoreTemplateSourceWorkspace,
+		Status:             models.StoreTemplateStatusPublished,
+		Category:           "cache",
+		CreatedBy:          maintainer.ID,
+	}
+	if err := db.Create(&template).Error; err != nil {
+		t.Fatalf("create template failed: %v", err)
+	}
+	version := models.StoreTemplateVersion{
+		WorkspaceID:    workspace.ID,
+		TemplateID:     template.ID,
+		Version:        "7.2.0",
+		DeploymentMode: "vm_command",
+		DefaultConfig:  `{"schema_version":1,"infra_type":"vm","version_description":"old description","vm":{"command_template":"docker run redis:{{version}}"}}`,
+		Status:         models.StoreTemplateStatusDraft,
+		CreatedBy:      maintainer.ID,
+	}
+	if err := db.Create(&version).Error; err != nil {
+		t.Fatalf("create version failed: %v", err)
+	}
+	if err := db.Create(&models.TemplateParameter{TemplateVersionID: version.ID, Name: "version", Label: "Version", Type: "text", DefaultValue: "7.2.0", Required: true, SortOrder: 1}).Error; err != nil {
+		t.Fatalf("create version parameter failed: %v", err)
+	}
+
+	h := NewStoreTemplateHandler()
+	updateBody := mustJSON(t, map[string]interface{}{
+		"version":             "7.2.1",
+		"status":              string(models.StoreTemplateStatusPublished),
+		"infra_type":          "vm",
+		"version_description": "stable vm variant",
+		"command_template":    "docker run -d --name {{container_name}} redis:{{version}}",
+		"parameters": []map[string]interface{}{
+			{
+				"name":          "container_name",
+				"label":         "Container Name",
+				"type":          "text",
+				"default_value": "redis-main",
+				"required":      true,
+				"sort_order":    1,
+			},
+		},
+	})
+	updateResp := performResourceStoreRequest(
+		t,
+		h.UpdateTemplateVersion,
+		maintainer.ID,
+		"user",
+		workspace.ID,
+		models.WorkspaceRoleMaintainer,
+		http.MethodPut,
+		"/api/store/templates/1/versions/1",
+		updateBody,
+		pathTemplateVersionIDs(template.ID, version.ID),
+	)
+	if updateResp.Code != http.StatusOK {
+		t.Fatalf("expected update template version success, got=%d body=%s", updateResp.Code, updateResp.Body.String())
+	}
+
+	listResp := performResourceStoreRequest(t, h.ListTemplateVersions, maintainer.ID, "user", workspace.ID, models.WorkspaceRoleMaintainer, http.MethodGet, "/api/store/templates/1/versions", nil, pathResourceStoreID(template.ID))
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("expected list template versions success, got=%d body=%s", listResp.Code, listResp.Body.String())
+	}
+	if !bytes.Contains(listResp.Body.Bytes(), []byte(`"version_description":"stable vm variant"`)) {
+		t.Fatalf("expected version description in list response, got=%s", listResp.Body.String())
+	}
+	if !bytes.Contains(listResp.Body.Bytes(), []byte(`"infra_type":"vm"`)) {
+		t.Fatalf("expected infra_type in list response, got=%s", listResp.Body.String())
+	}
+	if !bytes.Contains(listResp.Body.Bytes(), []byte(`"command_template":"docker run -d --name {{container_name}} redis:{{version}}"`)) {
+		t.Fatalf("expected command template in list response, got=%s", listResp.Body.String())
+	}
+	if !bytes.Contains(listResp.Body.Bytes(), []byte(`"container_name"`)) {
+		t.Fatalf("expected rewritten parameters in list response, got=%s", listResp.Body.String())
+	}
+
+	deleteResp := performResourceStoreRequest(
+		t,
+		h.DeleteTemplateVersion,
+		maintainer.ID,
+		"user",
+		workspace.ID,
+		models.WorkspaceRoleMaintainer,
+		http.MethodDelete,
+		"/api/store/templates/1/versions/1",
+		nil,
+		pathTemplateVersionIDs(template.ID, version.ID),
+	)
+	if deleteResp.Code != http.StatusOK {
+		t.Fatalf("expected delete template version success, got=%d body=%s", deleteResp.Code, deleteResp.Body.String())
+	}
+	var count int64
+	if err := db.Model(&models.StoreTemplateVersion{}).Where("id = ?", version.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count template version failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected template version deleted, count=%d", count)
+	}
+}
+
+func TestStoreTemplateHandler_PreviewTemplateVersionVMCommand(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	maintainer, workspace := seedResourceStoreUserAndWorkspace(t, db, "template-preview-vm-maintainer", models.WorkspaceRoleMaintainer)
+	template := models.StoreTemplate{
+		WorkspaceID:        workspace.ID,
+		Name:               "Redis",
+		TemplateType:       models.StoreTemplateTypeApp,
+		TargetResourceType: models.ResourceTypeVM,
+		Source:             models.StoreTemplateSourceWorkspace,
+		Status:             models.StoreTemplateStatusPublished,
+		Category:           "cache",
+		CreatedBy:          maintainer.ID,
+	}
+	if err := db.Create(&template).Error; err != nil {
+		t.Fatalf("create template failed: %v", err)
+	}
+	version := models.StoreTemplateVersion{
+		WorkspaceID:    workspace.ID,
+		TemplateID:     template.ID,
+		Version:        "7.2.0",
+		DeploymentMode: "vm_command",
+		DefaultConfig:  `{"schema_version":1,"infra_type":"vm","version_description":"stable vm variant","vm":{"command_template":"docker run -d --name {{container_name}} -p {{vm_port}}:{{redis_port}} redis:{{version}}"}}`,
+		Status:         models.StoreTemplateStatusPublished,
+		CreatedBy:      maintainer.ID,
+	}
+	if err := db.Create(&version).Error; err != nil {
+		t.Fatalf("create version failed: %v", err)
+	}
+	parameters := []models.TemplateParameter{
+		{TemplateVersionID: version.ID, Name: "container_name", Label: "Container Name", Type: "text", DefaultValue: "redis-main", Required: true, SortOrder: 1},
+		{TemplateVersionID: version.ID, Name: "redis_port", Label: "Redis Port", Type: "number", DefaultValue: "6379", Required: true, SortOrder: 2},
+		{TemplateVersionID: version.ID, Name: "vm_port", Label: "VM Port", Type: "number", DefaultValue: "16379", Required: true, SortOrder: 3},
+		{TemplateVersionID: version.ID, Name: "version", Label: "Version", Type: "text", DefaultValue: "7.2.0", Required: true, SortOrder: 4},
+	}
+	if err := db.Create(&parameters).Error; err != nil {
+		t.Fatalf("create parameters failed: %v", err)
+	}
+	resource := models.Resource{WorkspaceID: workspace.ID, Name: "vm-01", Type: models.ResourceTypeVM, Environment: "production", Status: models.ResourceStatusOnline, Endpoint: "10.0.0.8:22", CreatedBy: maintainer.ID}
+	if err := db.Create(&resource).Error; err != nil {
+		t.Fatalf("create resource failed: %v", err)
+	}
+
+	h := NewStoreTemplateHandler()
+	body := mustJSON(t, map[string]interface{}{
+		"target_resource_id": resource.ID,
+		"parameters": map[string]interface{}{
+			"container_name": "redis-prod",
+			"vm_port":        26379,
+		},
+	})
+	resp := performResourceStoreRequest(
+		t,
+		h.PreviewTemplateVersion,
+		maintainer.ID,
+		"user",
+		workspace.ID,
+		models.WorkspaceRoleMaintainer,
+		http.MethodPost,
+		"/api/store/templates/1/versions/1/preview",
+		body,
+		pathTemplateVersionIDs(template.ID, version.ID),
+	)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected preview template version success, got=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte(`"infra_type":"vm"`)) {
+		t.Fatalf("expected vm infra preview response, got=%s", resp.Body.String())
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte(`docker run -d --name redis-prod -p 26379:6379 redis:7.2.0`)) {
+		t.Fatalf("expected rendered vm command in preview response, got=%s", resp.Body.String())
+	}
+
+	k8sResource := models.Resource{WorkspaceID: workspace.ID, Name: "cluster-01", Type: models.ResourceTypeK8sCluster, Environment: "production", Status: models.ResourceStatusOnline, Endpoint: "https://10.0.0.1:6443", CreatedBy: maintainer.ID}
+	if err := db.Create(&k8sResource).Error; err != nil {
+		t.Fatalf("create k8s resource failed: %v", err)
+	}
+	mismatchBody := mustJSON(t, map[string]interface{}{
+		"target_resource_id": k8sResource.ID,
+		"parameters":         map[string]interface{}{},
+	})
+	mismatchResp := performResourceStoreRequest(
+		t,
+		h.PreviewTemplateVersion,
+		maintainer.ID,
+		"user",
+		workspace.ID,
+		models.WorkspaceRoleMaintainer,
+		http.MethodPost,
+		"/api/store/templates/1/versions/1/preview",
+		mismatchBody,
+		pathTemplateVersionIDs(template.ID, version.ID),
+	)
+	if mismatchResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected mismatched resource preview to fail, got=%d body=%s", mismatchResp.Code, mismatchResp.Body.String())
+	}
+}
+
+func TestStoreTemplateHandler_PreviewTemplateVersionK8sHelmDiff(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	maintainer, workspace := seedResourceStoreUserAndWorkspace(t, db, "template-preview-k8s-maintainer", models.WorkspaceRoleMaintainer)
+	template := models.StoreTemplate{
+		WorkspaceID:        workspace.ID,
+		Name:               "Redis",
+		TemplateType:       models.StoreTemplateTypeApp,
+		TargetResourceType: models.ResourceTypeK8sCluster,
+		Source:             models.StoreTemplateSourceWorkspace,
+		Status:             models.StoreTemplateStatusPublished,
+		Category:           "cache",
+		CreatedBy:          maintainer.ID,
+	}
+	if err := db.Create(&template).Error; err != nil {
+		t.Fatalf("create template failed: %v", err)
+	}
+	version := models.StoreTemplateVersion{
+		WorkspaceID:    workspace.ID,
+		TemplateID:     template.ID,
+		Version:        "19.6.0",
+		DeploymentMode: "k8s_chart",
+		DefaultConfig:  `{"schema_version":1,"infra_type":"k8s","version_description":"stable k8s variant","k8s":{"chart_source":{"type":"repo","repo_url":"https://charts.bitnami.com/bitnami","chart_name":"redis","chart_version":"19.6.0"},"base_values":"architecture: standalone\nauth:\n  enabled: true\nmaster:\n  count: 1\n"}}`,
+		Status:         models.StoreTemplateStatusPublished,
+		CreatedBy:      maintainer.ID,
+	}
+	if err := db.Create(&version).Error; err != nil {
+		t.Fatalf("create version failed: %v", err)
+	}
+	parameters := []models.TemplateParameter{
+		{TemplateVersionID: version.ID, Name: "release_name", Label: "Release Name", Type: "text", DefaultValue: "redis", Required: true, SortOrder: 1},
+		{TemplateVersionID: version.ID, Name: "namespace", Label: "Namespace", Type: "text", DefaultValue: "default", Required: true, SortOrder: 2},
+		{TemplateVersionID: version.ID, Name: "auth.password", Label: "Password", Type: "text", DefaultValue: "", Required: true, SortOrder: 3},
+		{TemplateVersionID: version.ID, Name: "master.count", Label: "Master Count", Type: "number", DefaultValue: "1", Required: false, SortOrder: 4},
+	}
+	if err := db.Create(&parameters).Error; err != nil {
+		t.Fatalf("create parameters failed: %v", err)
+	}
+	resource := models.Resource{WorkspaceID: workspace.ID, Name: "cluster-01", Type: models.ResourceTypeK8sCluster, Environment: "production", Status: models.ResourceStatusOnline, Endpoint: "https://10.0.0.1:6443", CreatedBy: maintainer.ID}
+	if err := db.Create(&resource).Error; err != nil {
+		t.Fatalf("create k8s resource failed: %v", err)
+	}
+
+	h := NewStoreTemplateHandler()
+	body := mustJSON(t, map[string]interface{}{
+		"target_resource_id": resource.ID,
+		"parameters": map[string]interface{}{
+			"release_name":  "redis-prod",
+			"namespace":     "middleware",
+			"auth.password": "secret-pass",
+			"master.count":  2,
+		},
+	})
+	resp := performResourceStoreRequest(
+		t,
+		h.PreviewTemplateVersion,
+		maintainer.ID,
+		"user",
+		workspace.ID,
+		models.WorkspaceRoleMaintainer,
+		http.MethodPost,
+		"/api/store/templates/1/versions/1/preview",
+		body,
+		pathTemplateVersionIDs(template.ID, version.ID),
+	)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected preview template version success, got=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte(`"infra_type":"k8s"`)) {
+		t.Fatalf("expected k8s infra preview response, got=%s", resp.Body.String())
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte(`"override_values_yaml":"auth:`)) {
+		t.Fatalf("expected override values yaml in preview response, got=%s", resp.Body.String())
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte(`"diff_lines":[`)) {
+		t.Fatalf("expected diff lines in preview response, got=%s", resp.Body.String())
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte(`helm --kubeconfig`)) || !bytes.Contains(resp.Body.Bytes(), []byte(`install redis-prod`)) {
+		t.Fatalf("expected helm command preview in response, got=%s", resp.Body.String())
+	}
+}
+
+func TestDeploymentHandler_CreateDeploymentRequestBuildsDirectAppRuns(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	maintainer, workspace := seedResourceStoreUserAndWorkspace(t, db, "app-direct-deploy-maintainer", models.WorkspaceRoleMaintainer)
+	developer := seedResourceStoreMember(t, db, workspace.ID, "app-direct-deploy-developer", models.WorkspaceRoleDeveloper)
+
+	vmTemplate := models.StoreTemplate{
+		WorkspaceID:        workspace.ID,
+		Name:               "Redis",
+		TemplateType:       models.StoreTemplateTypeApp,
+		TargetResourceType: models.ResourceTypeVM,
+		Source:             models.StoreTemplateSourceWorkspace,
+		Status:             models.StoreTemplateStatusPublished,
+		Category:           "cache",
+		CreatedBy:          maintainer.ID,
+	}
+	if err := db.Create(&vmTemplate).Error; err != nil {
+		t.Fatalf("create vm template failed: %v", err)
+	}
+	vmVersion := models.StoreTemplateVersion{
+		WorkspaceID:    workspace.ID,
+		TemplateID:     vmTemplate.ID,
+		Version:        "7.2.0",
+		DeploymentMode: "vm_command",
+		DefaultConfig:  `{"schema_version":1,"infra_type":"vm","version_description":"stable vm variant","vm":{"command_template":"docker run -d --name {{container_name}} -p {{vm_port}}:{{redis_port}} redis:{{version}}"}}`,
+		Status:         models.StoreTemplateStatusPublished,
+		CreatedBy:      maintainer.ID,
+	}
+	if err := db.Create(&vmVersion).Error; err != nil {
+		t.Fatalf("create vm version failed: %v", err)
+	}
+	vmParams := []models.TemplateParameter{
+		{TemplateVersionID: vmVersion.ID, Name: "container_name", Label: "Container Name", Type: "text", DefaultValue: "redis-main", Required: true, SortOrder: 1},
+		{TemplateVersionID: vmVersion.ID, Name: "redis_port", Label: "Redis Port", Type: "number", DefaultValue: "6379", Required: true, SortOrder: 2},
+		{TemplateVersionID: vmVersion.ID, Name: "vm_port", Label: "VM Port", Type: "number", DefaultValue: "16379", Required: true, SortOrder: 3},
+		{TemplateVersionID: vmVersion.ID, Name: "version", Label: "Version", Type: "text", DefaultValue: "7.2.0", Required: true, SortOrder: 4},
+	}
+	if err := db.Create(&vmParams).Error; err != nil {
+		t.Fatalf("create vm parameters failed: %v", err)
+	}
+
+	encryption := NewCredentialHandler().encryptionService
+	passwordPayload, err := encryption.EncryptCredentialData(map[string]interface{}{"username": "root", "password": "secret123"})
+	if err != nil {
+		t.Fatalf("encrypt vm credential failed: %v", err)
+	}
+	vmCredential := models.Credential{
+		Name:             "vm-password-auth",
+		Type:             models.TypePassword,
+		Category:         models.CategoryCustom,
+		Scope:            models.ScopeWorkspace,
+		WorkspaceID:      workspace.ID,
+		OwnerID:          maintainer.ID,
+		EncryptedPayload: passwordPayload,
+		Status:           models.CredentialStatusActive,
+	}
+	if err := db.Create(&vmCredential).Error; err != nil {
+		t.Fatalf("create vm credential failed: %v", err)
+	}
+	vmResource := models.Resource{WorkspaceID: workspace.ID, Name: "vm-01", Type: models.ResourceTypeVM, Environment: "production", Status: models.ResourceStatusOnline, Endpoint: "10.0.0.8:22", CreatedBy: maintainer.ID}
+	if err := db.Create(&vmResource).Error; err != nil {
+		t.Fatalf("create vm resource failed: %v", err)
+	}
+	if err := db.Create(&models.ResourceCredentialBinding{WorkspaceID: workspace.ID, ResourceID: vmResource.ID, CredentialID: vmCredential.ID, Purpose: "primary", BoundBy: maintainer.ID}).Error; err != nil {
+		t.Fatalf("bind vm resource credential failed: %v", err)
+	}
+
+	config.Init()
+	config.Config.Set("server.public_url", "http://easydo.local")
+	k8sTemplate := models.StoreTemplate{
+		WorkspaceID:        workspace.ID,
+		Name:               "Redis K8s",
+		TemplateType:       models.StoreTemplateTypeApp,
+		TargetResourceType: models.ResourceTypeK8sCluster,
+		Source:             models.StoreTemplateSourceWorkspace,
+		Status:             models.StoreTemplateStatusPublished,
+		Category:           "cache",
+		CreatedBy:          maintainer.ID,
+	}
+	if err := db.Create(&k8sTemplate).Error; err != nil {
+		t.Fatalf("create k8s template failed: %v", err)
+	}
+	k8sVersion := models.StoreTemplateVersion{
+		WorkspaceID:    workspace.ID,
+		TemplateID:     k8sTemplate.ID,
+		Version:        "19.6.0",
+		DeploymentMode: "k8s_chart",
+		DefaultConfig:  `{"schema_version":1,"infra_type":"k8s","version_description":"stable k8s variant","k8s":{"chart_source":{"type":"upload","chart_name":"redis","chart_version":"19.6.0","chart_file_name":"redis-19.6.0.tgz","chart_object_key":"store/charts/workspace-1/app-1/release-19/variant-19/redis-19.6.0.tgz"},"base_values":"architecture: standalone\nauth:\n  enabled: true\n"}}`,
+		Status:         models.StoreTemplateStatusPublished,
+		CreatedBy:      maintainer.ID,
+	}
+	if err := db.Create(&k8sVersion).Error; err != nil {
+		t.Fatalf("create k8s version failed: %v", err)
+	}
+	k8sParams := []models.TemplateParameter{
+		{TemplateVersionID: k8sVersion.ID, Name: "release_name", Label: "Release Name", Type: "text", DefaultValue: "redis", Required: true, SortOrder: 1},
+		{TemplateVersionID: k8sVersion.ID, Name: "namespace", Label: "Namespace", Type: "text", DefaultValue: "default", Required: true, SortOrder: 2},
+		{TemplateVersionID: k8sVersion.ID, Name: "auth.password", Label: "Password", Type: "text", DefaultValue: "", Required: true, SortOrder: 3},
+	}
+	if err := db.Create(&k8sParams).Error; err != nil {
+		t.Fatalf("create k8s parameters failed: %v", err)
+	}
+	kubePayload, err := encryption.EncryptCredentialData(map[string]interface{}{
+		"server":     "https://10.0.0.1:6443",
+		"token":      "k8s-token",
+		"kubeconfig": "apiVersion: v1\nclusters: []\ncontexts: []\ncurrent-context: \"\"\nusers: []\n",
+	})
+	if err != nil {
+		t.Fatalf("encrypt k8s credential failed: %v", err)
+	}
+	k8sCredential := models.Credential{
+		Name:             "cluster-auth",
+		Type:             models.TypeToken,
+		Category:         models.CategoryKubernetes,
+		Scope:            models.ScopeWorkspace,
+		WorkspaceID:      workspace.ID,
+		OwnerID:          maintainer.ID,
+		EncryptedPayload: kubePayload,
+		Status:           models.CredentialStatusActive,
+	}
+	if err := db.Create(&k8sCredential).Error; err != nil {
+		t.Fatalf("create k8s credential failed: %v", err)
+	}
+	k8sResource := models.Resource{WorkspaceID: workspace.ID, Name: "cluster-01", Type: models.ResourceTypeK8sCluster, Environment: "production", Status: models.ResourceStatusOnline, Endpoint: "https://10.0.0.1:6443", CreatedBy: maintainer.ID}
+	if err := db.Create(&k8sResource).Error; err != nil {
+		t.Fatalf("create k8s resource failed: %v", err)
+	}
+	if err := db.Create(&models.ResourceCredentialBinding{WorkspaceID: workspace.ID, ResourceID: k8sResource.ID, CredentialID: k8sCredential.ID, Purpose: "cluster_auth", BoundBy: maintainer.ID}).Error; err != nil {
+		t.Fatalf("bind k8s resource credential failed: %v", err)
+	}
+
+	h := NewDeploymentHandler()
+	vmReqBody := mustJSON(t, map[string]interface{}{
+		"template_version_id": vmVersion.ID,
+		"target_resource_id":  vmResource.ID,
+		"parameters": map[string]interface{}{
+			"container_name": "redis-prod",
+			"vm_port":        26379,
+		},
+	})
+	vmResp := performResourceStoreRequest(t, h.CreateDeploymentRequest, developer.ID, "user", workspace.ID, models.WorkspaceRoleDeveloper, http.MethodPost, "/api/deployments/requests", vmReqBody)
+	if vmResp.Code != http.StatusOK {
+		t.Fatalf("expected vm direct deployment request success, got=%d body=%s", vmResp.Code, vmResp.Body.String())
+	}
+	var vmReq models.DeploymentRequest
+	if err := db.First(&vmReq, responseDataID(t, vmResp.Body.Bytes())).Error; err != nil {
+		t.Fatalf("load vm deployment request failed: %v", err)
+	}
+	if vmReq.PipelineID == 0 {
+		t.Fatalf("expected vm direct deployment request to persist hidden pipeline id")
+	}
+	if vmReq.LLMModelID != 0 {
+		t.Fatalf("expected vm app deployment request llm_model_id to remain unset, got=%d", vmReq.LLMModelID)
+	}
+	var vmRun models.PipelineRun
+	if err := db.First(&vmRun, vmReq.PipelineRunID).Error; err != nil {
+		t.Fatalf("load vm pipeline run failed: %v", err)
+	}
+	if vmRun.PipelineID != vmReq.PipelineID {
+		t.Fatalf("expected vm pipeline run to use deployment pipeline id=%d, got=%d", vmReq.PipelineID, vmRun.PipelineID)
+	}
+	var vmPipeline models.Pipeline
+	if err := db.First(&vmPipeline, vmReq.PipelineID).Error; err != nil {
+		t.Fatalf("load vm hidden pipeline failed: %v", err)
+	}
+	if !vmPipeline.ManagementHidden {
+		t.Fatalf("expected vm direct deployment pipeline to be management hidden")
+	}
+	if !bytes.Contains([]byte(vmRun.Config), []byte(`docker run -d --name redis-prod -p 26379:6379 redis:7.2.0`)) {
+		t.Fatalf("expected rendered vm command in pipeline run config, got=%s", vmRun.Config)
+	}
+	if !bytes.Contains([]byte(vmRun.Config), []byte(`"ssh_auth"`)) {
+		t.Fatalf("expected vm pipeline run config to inject ssh auth binding, got=%s", vmRun.Config)
+	}
+	if bytes.Contains([]byte(vmRun.Config), []byte(`"user":"root"`)) {
+		t.Fatalf("expected vm pipeline run config to avoid hardcoded root user, got=%s", vmRun.Config)
+	}
+
+	k8sReqBody := mustJSON(t, map[string]interface{}{
+		"template_version_id": k8sVersion.ID,
+		"target_resource_id":  k8sResource.ID,
+		"parameters": map[string]interface{}{
+			"release_name":  "redis-prod",
+			"namespace":     "middleware",
+			"auth.password": "secret-pass",
+		},
+	})
+	k8sResp := performResourceStoreRequest(t, h.CreateDeploymentRequest, developer.ID, "user", workspace.ID, models.WorkspaceRoleDeveloper, http.MethodPost, "/api/deployments/requests", k8sReqBody)
+	if k8sResp.Code != http.StatusOK {
+		t.Fatalf("expected k8s direct deployment request success, got=%d body=%s", k8sResp.Code, k8sResp.Body.String())
+	}
+	var k8sReq models.DeploymentRequest
+	if err := db.First(&k8sReq, responseDataID(t, k8sResp.Body.Bytes())).Error; err != nil {
+		t.Fatalf("load k8s deployment request failed: %v", err)
+	}
+	if k8sReq.PipelineID == 0 {
+		t.Fatalf("expected k8s direct deployment request to persist hidden pipeline id")
+	}
+	if k8sReq.LLMModelID != 0 {
+		t.Fatalf("expected k8s app deployment request llm_model_id to remain unset, got=%d", k8sReq.LLMModelID)
+	}
+	var k8sRun models.PipelineRun
+	if err := db.First(&k8sRun, k8sReq.PipelineRunID).Error; err != nil {
+		t.Fatalf("load k8s pipeline run failed: %v", err)
+	}
+	if k8sRun.PipelineID != k8sReq.PipelineID {
+		t.Fatalf("expected k8s pipeline run to use deployment pipeline id=%d, got=%d", k8sReq.PipelineID, k8sRun.PipelineID)
+	}
+	var k8sPipeline models.Pipeline
+	if err := db.First(&k8sPipeline, k8sReq.PipelineID).Error; err != nil {
+		t.Fatalf("load k8s hidden pipeline failed: %v", err)
+	}
+	if !k8sPipeline.ManagementHidden {
+		t.Fatalf("expected k8s direct deployment pipeline to be management hidden")
+	}
+	if !bytes.Contains([]byte(k8sRun.Config), []byte(`helm --kubeconfig`)) || !bytes.Contains([]byte(k8sRun.Config), []byte(`redis-prod`)) {
+		t.Fatalf("expected helm deploy command in pipeline run config, got=%s", k8sRun.Config)
+	}
+	if !bytes.Contains([]byte(k8sRun.Config), []byte(`cluster_auth`)) {
+		t.Fatalf("expected k8s pipeline run config to inject cluster auth binding, got=%s", k8sRun.Config)
 	}
 }
 
@@ -2437,6 +3087,15 @@ func performResourceStoreRequest(t *testing.T, handler gin.HandlerFunc, userID u
 func pathResourceStoreID(id uint64) func(*gin.Context) {
 	return func(c *gin.Context) {
 		c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(id, 10)}}
+	}
+}
+
+func pathTemplateVersionIDs(templateID, versionID uint64) func(*gin.Context) {
+	return func(c *gin.Context) {
+		c.Params = gin.Params{
+			{Key: "id", Value: strconv.FormatUint(templateID, 10)},
+			{Key: "version_id", Value: strconv.FormatUint(versionID, 10)},
+		}
 	}
 }
 

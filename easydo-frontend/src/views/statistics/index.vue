@@ -190,13 +190,14 @@ import {
 import { getStatsOverview, getStatsTrend, getTopPipelines } from '@/api/statistics'
 import { ElMessage } from 'element-plus'
 import { useUserStore } from '@/stores/user'
+import {
+  buildStatisticsDateParams,
+  getDefaultStatisticsDateRange
+} from './dateRange'
 
 const userStore = useUserStore()
 
-const dateRange = ref([
-  new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
-  new Date()
-])
+const dateRange = ref(getDefaultStatisticsDateRange())
 
 const loading = ref(false)
 
@@ -255,13 +256,11 @@ const failedDashOffset = computed(() => {
   return -((successRate / 100) * circumference)
 })
 
+const getStatisticsRequestParams = () => buildStatisticsDateParams(dateRange.value)
+
 const fetchOverview = async () => {
   try {
-    const params = {}
-    if (dateRange.value && dateRange.value[0] && dateRange.value[1]) {
-      params.start_date = formatDate(dateRange.value[0])
-      params.end_date = formatDate(dateRange.value[1])
-    }
+    const params = getStatisticsRequestParams()
     const res = await getStatsOverview(params)
     if (res.code === 200) {
       stats.value = {
@@ -278,8 +277,8 @@ const fetchOverview = async () => {
 
 const fetchTrend = async () => {
   try {
-    const days = 7
-    const res = await getStatsTrend({ days })
+    const params = getStatisticsRequestParams()
+    const res = await getStatsTrend(params)
     if (res.code === 200 && res.data.daily_runs) {
       trendData.value = res.data.daily_runs.map(day => ({
         date: day.date,
@@ -297,10 +296,9 @@ const fetchTrend = async () => {
 
 const fetchTopPipelines = async () => {
   try {
-    const params = { limit: 10 }
-    if (dateRange.value && dateRange.value[0] && dateRange.value[1]) {
-      params.start_date = formatDate(dateRange.value[0])
-      params.end_date = formatDate(dateRange.value[1])
+    const params = {
+      ...getStatisticsRequestParams(),
+      limit: 10
     }
     const res = await getTopPipelines(params)
     if (res.code === 200 && res.data.pipelines) {
@@ -327,12 +325,6 @@ const fetchAllData = async () => {
   } finally {
     loading.value = false
   }
-}
-
-const formatDate = (date) => {
-  if (!date) return ''
-  const d = new Date(date)
-  return d.toISOString().split('T')[0]
 }
 
 watch(dateRange, () => {

@@ -35,3 +35,4 @@ easydo-frontend/dist
 Thumbs.db
 
 docs/*
+.superpowers/

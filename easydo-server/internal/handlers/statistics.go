@@ -11,12 +11,68 @@ import (
 	"gorm.io/gorm"
 )
 
+const statisticsPipelineRunTriggerTypeDeploymentRequest = "deployment_request"
+
 type StatisticsHandler struct {
 	DB *gorm.DB
 }
 
+type statisticsDateRange struct {
+	Start time.Time
+	End   time.Time
+}
+
 func NewStatisticsHandler() *StatisticsHandler {
 	return &StatisticsHandler{DB: models.DB}
+}
+
+func regularStatisticsPipelineRunsQuery(db *gorm.DB) *gorm.DB {
+	return db.Where("(trigger_type IS NULL OR trigger_type = '' OR trigger_type <> ?)", statisticsPipelineRunTriggerTypeDeploymentRequest)
+}
+
+func parseStatisticsDateRange(c *gin.Context) (statisticsDateRange, bool) {
+	startDate := c.DefaultQuery("start_date", "")
+	endDate := c.DefaultQuery("end_date", "")
+
+	if startDate == "" && endDate == "" {
+		return statisticsDateRange{}, true
+	}
+	if startDate == "" || endDate == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "start_date and end_date are required together"})
+		return statisticsDateRange{}, false
+	}
+
+	startTime, err := time.Parse("2006-01-02", startDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid start_date"})
+		return statisticsDateRange{}, false
+	}
+
+	endTime, err := time.Parse("2006-01-02", endDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid end_date"})
+		return statisticsDateRange{}, false
+	}
+
+	if endTime.Before(startTime) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "end_date must be on or after start_date"})
+		return statisticsDateRange{}, false
+	}
+
+	return statisticsDateRange{
+		Start: startTime,
+		End:   endTime.Add(24 * time.Hour),
+	}, true
+}
+
+func applyStatisticsDateRange(query *gorm.DB, dateRange statisticsDateRange) *gorm.DB {
+	if !dateRange.Start.IsZero() {
+		query = query.Where("created_at >= ?", dateRange.Start)
+	}
+	if !dateRange.End.IsZero() {
+		query = query.Where("created_at < ?", dateRange.End)
+	}
+	return query
 }
 
 // OverviewResponse represents the overview statistics response
@@ -60,25 +116,16 @@ type TopPipelinesResponse struct {
 
 // GetOverview returns overall statistics
 func (h *StatisticsHandler) GetOverview(c *gin.Context) {
-	startDate := c.DefaultQuery("start_date", "")
-	endDate := c.DefaultQuery("end_date", "")
+	dateRange, ok := parseStatisticsDateRange(c)
+	if !ok {
+		return
+	}
 	workspaceID := c.GetUint64("workspace_id")
 
-	query := regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ?", workspaceID)
-
-	if startDate != "" {
-		startTime, err := time.Parse("2006-01-02", startDate)
-		if err == nil {
-			query = query.Where("created_at >= ?", startTime)
-		}
-	}
-	if endDate != "" {
-		endTime, err := time.Parse("2006-01-02", endDate)
-		if err == nil {
-			endTime = endTime.Add(24 * time.Hour)
-			query = query.Where("created_at < ?", endTime)
-		}
-	}
+	query := applyStatisticsDateRange(
+		regularStatisticsPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ?", workspaceID),
+		dateRange,
+	)
 
 	type overviewAggregate struct {
 		TotalRuns     int64
@@ -116,7 +163,7 @@ func (h *StatisticsHandler) GetOverview(c *gin.Context) {
 	today := time.Now()
 	todayStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
 	var todayRuns int64
-	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ? AND created_at >= ?", workspaceID, todayStart).Count(&todayRuns)
+	regularStatisticsPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ? AND created_at >= ?", workspaceID, todayStart).Count(&todayRuns)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -134,19 +181,18 @@ func (h *StatisticsHandler) GetOverview(c *gin.Context) {
 
 // GetTrend returns daily run statistics for trend chart
 func (h *StatisticsHandler) GetTrend(c *gin.Context) {
-	workspaceID := c.GetUint64("workspace_id")
-	// Get date range (default: last 7 days)
-	days := 7
-	if daysStr := c.DefaultQuery("days", "7"); daysStr != "" {
-		if d, err := strconv.Atoi(daysStr); err == nil && d > 0 {
-			days = d
-		}
+	dateRange, ok := parseStatisticsDateRange(c)
+	if !ok {
+		return
+	}
+	if dateRange.Start.IsZero() || dateRange.End.IsZero() {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "start_date and end_date are required"})
+		return
 	}
 
-	today := time.Now()
+	workspaceID := c.GetUint64("workspace_id")
+	days := int(dateRange.End.Sub(dateRange.Start).Hours()/24 + 0.5)
 	dailyRuns := make([]DailyRun, 0, days)
-	rangeStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location()).AddDate(0, 0, -(days - 1))
-	rangeEnd := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location()).Add(24 * time.Hour)
 
 	type trendRow struct {
 		Date    string
@@ -156,12 +202,12 @@ func (h *StatisticsHandler) GetTrend(c *gin.Context) {
 	}
 
 	var rows []trendRow
-	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).
+	regularStatisticsPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).
 		Select(`DATE(created_at) AS date,
 			COUNT(*) AS total,
 			SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
 			SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed`).
-		Where("workspace_id = ? AND created_at >= ? AND created_at < ?", workspaceID, rangeStart, rangeEnd).
+		Where("workspace_id = ? AND created_at >= ? AND created_at < ?", workspaceID, dateRange.Start, dateRange.End).
 		Group("DATE(created_at)").
 		Order("date ASC").
 		Scan(&rows)
@@ -171,8 +217,8 @@ func (h *StatisticsHandler) GetTrend(c *gin.Context) {
 		rowByDate[row.Date] = row
 	}
 
-	for i := days - 1; i >= 0; i-- {
-		date := today.AddDate(0, 0, -i)
+	for i := 0; i < days; i++ {
+		date := dateRange.Start.AddDate(0, 0, i)
 		dateKey := date.Format("2006-01-02")
 		row := rowByDate[dateKey]
 		successRate := float64(0)
@@ -199,6 +245,11 @@ func (h *StatisticsHandler) GetTrend(c *gin.Context) {
 
 // GetTopPipelines returns top pipelines by run count
 func (h *StatisticsHandler) GetTopPipelines(c *gin.Context) {
+	dateRange, ok := parseStatisticsDateRange(c)
+	if !ok {
+		return
+	}
+
 	workspaceID := c.GetUint64("workspace_id")
 	limit := 10
 	if limitStr := c.DefaultQuery("limit", "10"); limitStr != "" {
@@ -206,10 +257,6 @@ func (h *StatisticsHandler) GetTopPipelines(c *gin.Context) {
 			limit = l
 		}
 	}
-
-	// Get date range from query params
-	startDate := c.DefaultQuery("start_date", "")
-	endDate := c.DefaultQuery("end_date", "")
 
 	type topPipelineRow struct {
 		PipelineID    uint64
@@ -225,20 +272,14 @@ func (h *StatisticsHandler) GetTopPipelines(c *gin.Context) {
 			COUNT(pipeline_runs.id) AS run_count,
 			SUM(CASE WHEN pipeline_runs.status = 'success' THEN 1 ELSE 0 END) AS success_count,
 			COALESCE(SUM(CASE WHEN pipeline_runs.duration > 0 THEN pipeline_runs.duration ELSE 0 END), 0) AS total_duration`).
-		Joins(`LEFT JOIN pipeline_runs ON pipeline_runs.pipeline_id = pipelines.id AND pipeline_runs.workspace_id = pipelines.workspace_id AND (pipeline_runs.trigger_type IS NULL OR pipeline_runs.trigger_type <> ?)`, pipelineRunTriggerTypeDeploymentRequest).
+		Joins(`LEFT JOIN pipeline_runs ON pipeline_runs.pipeline_id = pipelines.id AND pipeline_runs.workspace_id = pipelines.workspace_id AND (pipeline_runs.trigger_type IS NULL OR pipeline_runs.trigger_type = '' OR pipeline_runs.trigger_type <> ?)`, statisticsPipelineRunTriggerTypeDeploymentRequest).
 		Where("pipelines.workspace_id = ?", workspaceID)
 
-	if startDate != "" {
-		startTime, err := time.Parse("2006-01-02", startDate)
-		if err == nil {
-			query = query.Where("pipeline_runs.created_at >= ?", startTime)
-		}
+	if !dateRange.Start.IsZero() {
+		query = query.Where("pipeline_runs.created_at >= ?", dateRange.Start)
 	}
-	if endDate != "" {
-		endTime, err := time.Parse("2006-01-02", endDate)
-		if err == nil {
-			query = query.Where("pipeline_runs.created_at < ?", endTime.Add(24*time.Hour))
-		}
+	if !dateRange.End.IsZero() {
+		query = query.Where("pipeline_runs.created_at < ?", dateRange.End)
 	}
 
 	var rows []topPipelineRow

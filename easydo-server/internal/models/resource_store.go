@@ -130,6 +130,7 @@ type StoreTemplate struct {
 	WorkspaceID        uint64              `gorm:"index" json:"workspace_id"`
 	Name               string              `gorm:"size:128;not null;index" json:"name"`
 	Description        string              `gorm:"type:text" json:"description"`
+	Category           string              `gorm:"size:64;default:'';index" json:"category"`
 	TemplateType       StoreTemplateType   `gorm:"size:32;not null;index" json:"template_type"`
 	TargetResourceType ResourceType        `gorm:"size:32;not null;index" json:"target_resource_type"`
 	Source             StoreTemplateSource `gorm:"size:32;not null;index" json:"source"`

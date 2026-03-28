@@ -247,6 +247,18 @@ func InitRouter() *gin.Engine {
 			storeTemplates.DELETE("/:id", storeTemplateHandler.DeleteTemplate)
 			storeTemplates.GET("/:id/versions", storeTemplateHandler.ListTemplateVersions)
 			storeTemplates.POST("/:id/versions", storeTemplateHandler.CreateTemplateVersion)
+			storeTemplates.PUT("/:id/versions/:version_id", storeTemplateHandler.UpdateTemplateVersion)
+			storeTemplates.DELETE("/:id/versions/:version_id", storeTemplateHandler.DeleteTemplateVersion)
+			storeTemplates.POST("/:id/versions/:version_id/preview", storeTemplateHandler.PreviewTemplateVersion)
+			storeTemplates.POST("/:id/versions/:version_id/chart/upload", storeTemplateHandler.UploadTemplateVersionChart)
+		}
+
+		appStore := api.Group("/store/apps")
+		appStore.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		{
+			storeTemplateHandler := handlers.NewStoreTemplateHandler()
+			appStore.GET("", storeTemplateHandler.ListAppCatalog)
+			appStore.POST("/:id/variants/:version_id/preview", storeTemplateHandler.PreviewAppVariant)
 		}
 
 		llmModels := api.Group("/store/llm-models")
