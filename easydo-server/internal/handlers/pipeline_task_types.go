@@ -503,9 +503,9 @@ else
   fi
 fi
 
-if [ -n "{{ def "" (dig "command") }}" ]; then
-  CMD={{ shq (def "" (dig "command")) }}
-  LOG_CMD={{ logq (def "" (dig "command")) }}
+CMD={{ shq (def "" (dig "command")) }}
+LOG_CMD={{ logq (def "" (dig "command")) }}
+if [ -n "$CMD" ]; then
   easydo_cmd "$LOG_CMD"
   eval "$CMD"
 else

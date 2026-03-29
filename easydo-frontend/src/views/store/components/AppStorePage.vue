@@ -230,6 +230,24 @@
               <span class="upload-hint">
                 {{ selectedChartFile ? selectedChartFile.name : (variantForm.chart_file_name || '未选择文件') }}
               </span>
+              <div v-if="chartResolveState.message" class="upload-status" :class="chartResolveState.status">
+                {{ chartResolveState.message }}
+              </div>
+            </div>
+            <div v-if="variantForm.chart_source_type !== 'upload'" class="chart-resolve-toolbar">
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                :loading="chartResolveState.status === 'resolving'"
+                :disabled="!canResolveRemoteChart()"
+                @click="resolveRemoteChartSource(true)"
+              >
+                解析 Chart
+              </el-button>
+              <span v-if="chartResolveState.message" class="upload-status" :class="chartResolveState.status">
+                {{ chartResolveState.message }}
+              </span>
             </div>
             <el-form-item label="Base values.yaml">
               <el-input v-model="variantForm.base_values_yaml" type="textarea" :rows="10" class="mono-input" placeholder="architecture: standalone&#10;auth:&#10;  enabled: true" />
@@ -309,6 +327,10 @@
                   :value="item.id"
                 />
               </el-select>
+            </el-form-item>
+
+            <el-form-item v-if="deployState.variant?.infra_type === 'k8s'" label="命名空间" required>
+              <el-input v-model="deployState.parameters.namespace" placeholder="default" />
             </el-form-item>
 
             <div class="parameter-stack" v-if="deployBasicParameters.length > 0">
@@ -443,16 +465,18 @@ import {
   getTemplateList,
   getTemplateVersions,
   previewTemplateVersion,
+  resolveTemplateChartSource,
   updateTemplate,
-  updateTemplateVersion,
-  uploadTemplateVersionChart
+  updateTemplateVersion
 } from '@/api/store'
 import {
-  buildChartSourcePayload,
   createParameterRow,
+  normalizeChartSourcePayload,
   normalizeParameterRows,
+  resolveUploadChart,
   splitParametersByAdvanced
 } from '../appStoreHelpers'
+import { applyNamespacePreset } from '@/views/resources/k8s/utils'
 
 const route = useRoute()
 const router = useRouter()
@@ -503,6 +527,13 @@ const apps = ref([])
 const variants = ref([])
 const selectedApp = ref(null)
 const selectedChartFile = ref(null)
+const resolvedChartFile = ref(null)
+const chartResolveState = reactive({
+  status: 'idle',
+  message: '',
+  resolvedFrom: '',
+  resolvedAt: 0
+})
 const deployResources = ref([])
 const deployPreview = ref(null)
 
@@ -561,6 +592,25 @@ watch(
     previewTimer = window.setTimeout(() => {
       refreshDeployPreview()
     }, 260)
+  }
+)
+
+watch(
+  () => [
+    dialogs.variant,
+    variantForm.infra_type,
+    variantForm.chart_source_type,
+    variantForm.chart_repo_url,
+    variantForm.chart_oci_url,
+    variantForm.chart_name,
+    variantForm.chart_version
+  ],
+  () => {
+    if (!dialogs.variant || variantForm.infra_type !== 'k8s') return
+    invalidateResolvedChart({ preserveValues: true })
+    if (variantForm.chart_source_type === 'repo' || variantForm.chart_source_type === 'oci') {
+      scheduleRemoteChartResolve()
+    }
   }
 )
 
@@ -712,6 +762,7 @@ async function removeApp(app) {
 
 function openVariantDialog(variant = null) {
   selectedChartFile.value = null
+  resetChartResolveState()
   Object.assign(variantForm, createEmptyVariantForm())
   if (variant) {
     Object.assign(variantForm, {
@@ -763,31 +814,132 @@ function removeParameterRow(index) {
 function handleChartFileChange(file) {
   selectedChartFile.value = file.raw
   variantForm.chart_file_name = file.name
+  variantForm.chart_name = variantForm.chart_name || file.name.replace(/(\.tar\.gz|\.tgz|\.zip)$/i, '')
+  invalidateResolvedChart({ preserveValues: false })
+  void resolveSelectedUploadChart()
 }
 
-async function submitVariant() {
-  if (!selectedApp.value?.id) return
-  if (!variantForm.version.trim()) {
-    ElMessage.warning('版本号不能为空')
+function resetChartResolveState() {
+  chartResolveState.status = 'idle'
+  chartResolveState.message = ''
+  chartResolveState.resolvedFrom = ''
+  chartResolveState.resolvedAt = 0
+}
+
+function invalidateResolvedChart({ preserveValues } = { preserveValues: false }) {
+  resolvedChartFile.value = null
+  resetChartResolveState()
+  if (!preserveValues) {
+    variantForm.base_values_yaml = ''
+  }
+}
+
+async function resolveSelectedUploadChart() {
+  if (variantForm.infra_type !== 'k8s' || variantForm.chart_source_type !== 'upload' || !selectedChartFile.value) {
+    resetChartResolveState()
     return
   }
-  if (variantForm.infra_type === 'vm' && !variantForm.command_template.trim()) {
-    ElMessage.warning('VM 版本必须提供命令模板')
-    return
+  chartResolveState.status = 'resolving'
+  chartResolveState.message = '正在解析 Chart 文件...'
+  try {
+    const resolved = await resolveChartSource({
+      sourceType: 'upload',
+      file: selectedChartFile.value
+    })
+    applyResolvedChartResult(resolved, 'upload', '已从上传的 Chart 中提取 values.yaml')
+  } catch (error) {
+    chartResolveState.status = 'error'
+    chartResolveState.message = error?.message || '解析 Chart 文件失败'
+    ElMessage.error(chartResolveState.message)
   }
-  if (variantForm.infra_type === 'k8s' && !variantForm.chart_name.trim() && variantForm.chart_source_type !== 'upload') {
-    ElMessage.warning('请填写 Chart 名称')
-    return
+}
+
+function applyResolvedChartResult(resolved, sourceType, successMessage) {
+  resolvedChartFile.value = resolved.chartFile || null
+  if (!variantForm.chart_name.trim() && resolved.chartName) {
+    variantForm.chart_name = resolved.chartName
   }
-  loading.submitVariant = true
-  const payload = {
+  if (resolved.chartVersion && !variantForm.chart_version.trim()) {
+    variantForm.chart_version = resolved.chartVersion
+  }
+  variantForm.chart_file_name = resolved.fileName || variantForm.chart_file_name
+  variantForm.base_values_yaml = resolved.valuesYAML || ''
+  chartResolveState.status = 'success'
+  chartResolveState.message = successMessage
+  chartResolveState.resolvedFrom = sourceType
+  chartResolveState.resolvedAt = Date.now()
+}
+
+function canResolveRemoteChart() {
+  if (variantForm.infra_type !== 'k8s') return false
+  if (variantForm.chart_source_type === 'repo') {
+    return Boolean(variantForm.chart_repo_url.trim() && variantForm.chart_name.trim() && variantForm.chart_version.trim())
+  }
+  if (variantForm.chart_source_type === 'oci') {
+    return Boolean(variantForm.chart_oci_url.trim() && variantForm.chart_version.trim())
+  }
+  return false
+}
+
+let chartResolveTimer = null
+
+function scheduleRemoteChartResolve() {
+  if (!canResolveRemoteChart()) return
+  clearTimeout(chartResolveTimer)
+  chartResolveTimer = window.setTimeout(() => {
+    void resolveRemoteChartSource(false)
+  }, 350)
+}
+
+async function resolveRemoteChartSource(showError = true) {
+  if (!canResolveRemoteChart() || !selectedApp.value?.id) return
+  chartResolveState.status = 'resolving'
+  chartResolveState.message = variantForm.chart_source_type === 'repo'
+    ? '正在从 Helm Repo 解析 Chart...'
+    : '正在从 OCI Registry 解析 Chart...'
+  try {
+    const response = await resolveTemplateChartSource(selectedApp.value.id, {
+      chart_source: normalizeChartSourcePayload(variantForm)
+    })
+    const resolved = response.data || {}
+    resolved.chartFile = resolved.chart_file_base64
+      ? new File(
+        [Uint8Array.from(atob(resolved.chart_file_base64), (char) => char.charCodeAt(0))],
+        resolved.chart_file_name || `${variantForm.chart_name || 'chart'}.tgz`,
+        { type: resolved.chart_content_type || 'application/gzip' }
+      )
+      : null
+    resolved.fileName = resolved.chart_file_name || resolved.resolved_chart?.file_name || ''
+    resolved.chartName = resolved.chart_source?.chart_name || variantForm.chart_name
+    resolved.chartVersion = resolved.chart_source?.chart_version || variantForm.chart_version
+    resolved.valuesYAML = resolved.base_values_yaml || ''
+    applyResolvedChartResult(
+      resolved,
+      variantForm.chart_source_type,
+      variantForm.chart_source_type === 'repo'
+        ? '已从 Helm Repo 获取 Chart 并提取 values.yaml'
+        : '已从 OCI Registry 获取 Chart 并提取 values.yaml'
+    )
+  } catch (error) {
+    resolvedChartFile.value = null
+    chartResolveState.status = 'error'
+    chartResolveState.message = error?.message || '解析 Chart 失败'
+    if (showError) {
+      ElMessage.error(chartResolveState.message)
+    }
+  }
+}
+
+function buildVariantPayload() {
+  const chartSource = normalizeChartSourcePayload(variantForm)
+  return {
     version: variantForm.version.trim(),
     status: variantForm.status,
     pipeline_id: variantForm.pipeline_id || 0,
     infra_type: variantForm.infra_type,
     version_description: variantForm.version_description.trim(),
     command_template: variantForm.infra_type === 'vm' ? variantForm.command_template : '',
-    chart_source: buildChartSourcePayload(variantForm),
+    chart_source: chartSource,
     base_values_yaml: variantForm.infra_type === 'k8s' ? variantForm.base_values_yaml : '',
     parameters: variantForm.parameters
       .map((row, index) => ({
@@ -805,19 +957,70 @@ async function submitVariant() {
       }))
       .filter((row) => row.name)
   }
+}
+
+function buildVariantRequestData(payload) {
+  if (variantForm.infra_type === 'k8s' && resolvedChartFile.value) {
+    const formData = new FormData()
+    formData.append('payload', JSON.stringify(payload))
+    formData.append('chart_file', resolvedChartFile.value, resolvedChartFile.value.name)
+    return formData
+  }
+  return payload
+}
+
+async function submitVariant() {
+  if (!selectedApp.value?.id) return
+  if (!variantForm.version.trim()) {
+    ElMessage.warning('版本号不能为空')
+    return
+  }
+  if (variantForm.infra_type === 'vm' && !variantForm.command_template.trim()) {
+    ElMessage.warning('VM 版本必须提供命令模板')
+    return
+  }
+  const chartSource = normalizeChartSourcePayload(variantForm)
+  if (variantForm.infra_type === 'k8s') {
+    const validationMessage = chartSource?.type === 'repo'
+      ? (!chartSource.repo_url ? '请填写 Repo URL' : (!chartSource.chart_name ? '请填写 Chart 名称' : ''))
+      : chartSource?.type === 'oci'
+        ? (!chartSource.oci_url ? '请填写 OCI URL' : (!chartSource.chart_name ? '请填写 Chart 名称' : (!chartSource.chart_version ? '请填写 Chart Version' : '')))
+        : chartSource?.type === 'upload'
+          ? (!chartSource.file_name ? '请先选择 Chart 文件' : '')
+          : 'Chart 来源配置无效'
+    if (validationMessage) {
+      ElMessage.warning(validationMessage)
+      return
+    }
+    if (variantForm.chart_source_type === 'upload' && selectedChartFile.value && chartResolveState.status !== 'success') {
+      await resolveSelectedUploadChart()
+      if (chartResolveState.status !== 'success') {
+        return
+      }
+    }
+    if ((variantForm.chart_source_type === 'repo' || variantForm.chart_source_type === 'oci') && chartResolveState.status !== 'success') {
+      await resolveRemoteChartSource(true)
+      if (chartResolveState.status !== 'success') {
+        return
+      }
+    }
+    if (!resolvedChartFile.value) {
+      ElMessage.warning('请先解析 Chart 并确认 values.yaml')
+      return
+    }
+  }
+  loading.submitVariant = true
+  const payload = buildVariantPayload()
+  const requestData = buildVariantRequestData(payload)
 
   try {
     let savedVariant
     if (variantForm.id) {
-      const response = await updateTemplateVersion(selectedApp.value.id, variantForm.id, payload)
+      const response = await updateTemplateVersion(selectedApp.value.id, variantForm.id, requestData)
       savedVariant = response.data
     } else {
-      const response = await createTemplateVersion(selectedApp.value.id, payload)
+      const response = await createTemplateVersion(selectedApp.value.id, requestData)
       savedVariant = response.data
-    }
-
-    if (variantForm.infra_type === 'k8s' && variantForm.chart_source_type === 'upload' && selectedChartFile.value) {
-      await uploadTemplateVersionChart(selectedApp.value.id, savedVariant.id, selectedChartFile.value)
     }
 
     dialogs.variant = false
@@ -844,6 +1047,9 @@ async function openDeployDialog(variant) {
   deployState.parameters = Object.fromEntries(
     normalizeParameterRows(variant.parameters || []).map((item) => [item.name, normalizeDeployDefaultValue(item)])
   )
+  if (variant.infra_type === 'k8s') {
+    deployState.parameters.namespace = String(deployState.parameters.namespace || '').trim() || 'default'
+  }
   deployState.target_resource_id = null
   dialogs.deploy = true
   await loadDeployResources(variant.infra_type)
@@ -852,6 +1058,12 @@ async function openDeployDialog(variant) {
     deployState.target_resource_id = routeResourceId
   } else if (deployResources.value.length === 1) {
     deployState.target_resource_id = deployResources.value[0].id
+  }
+  if (variant.infra_type === 'k8s') {
+    const selectedResource = deployResources.value.find((item) => item.id === deployState.target_resource_id)
+    const presetNamespace = String(route.query.namespace || selectedResource?.namespace || '').trim()
+    applyNamespacePreset(deployState.parameters, deployParameterFields.value, presetNamespace || 'default')
+    deployState.parameters.namespace = String(deployState.parameters.namespace || '').trim() || presetNamespace || 'default'
   }
   await refreshDeployPreview()
 }
@@ -965,6 +1177,26 @@ function formatDiffText(line) {
 .parameter-field small,
 .upload-hint {
   color: var(--text-secondary);
+}
+
+.upload-status {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.chart-resolve-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.upload-status.success {
+  color: var(--color-success);
+}
+
+.upload-status.error {
+  color: var(--color-danger);
 }
 
 .page-subtitle {

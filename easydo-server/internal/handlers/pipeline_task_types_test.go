@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -283,6 +285,101 @@ func TestRenderPipelineAgentScript_KubernetesCredentialIntegration(t *testing.T)
 	}
 	if !strings.Contains(script, "EASYDO_CRED_CLUSTER_AUTH_TOKEN") {
 		t.Fatalf("expected script to use cluster auth token env")
+	}
+}
+
+func TestRenderPipelineAgentScript_KubernetesComplexCommandIsShellParsable(t *testing.T) {
+	_, script, err := renderPipelineAgentScript("kubernetes", map[string]interface{}{
+		"command": strings.Join([]string{
+			"set -e",
+			"cat <<\"EOF\" > input_params_values.yaml",
+			"image:",
+			"  tag: '8.0'",
+			"EOF",
+			"mkdir -p chart",
+			"wget -O /tmp/resolved-chart.tgz --header \"X-EasyDo-Internal-Token:$EASYDO_INTERNAL_SERVER_TOKEN\" \"$EASYDO_INTERNAL_SERVER_URL/internal/store/chart-artifact?object_key=$EASYDO_CHART_OBJECT_KEY&file_name=$EASYDO_CHART_FILE_NAME\"",
+			"tar -xzf /tmp/resolved-chart.tgz -C chart",
+			"helm --kubeconfig $KUBECONFIG upgrade --install mysql ./chart -n middleware --create-namespace -f input_params_values.yaml",
+		}, "\n"),
+	})
+	if err != nil {
+		t.Fatalf("expected kubernetes script render success, got err: %v", err)
+	}
+
+	tempFile, err := os.CreateTemp(t.TempDir(), "k8s-script-*.sh")
+	if err != nil {
+		t.Fatalf("create temp script failed: %v", err)
+	}
+	defer tempFile.Close()
+	if _, err := tempFile.WriteString(script); err != nil {
+		t.Fatalf("write temp script failed: %v", err)
+	}
+
+	cmd := exec.Command("/bin/sh", "-n", tempFile.Name())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected rendered kubernetes script to be shell-parseable, got err=%v output=%s\nscript=%s", err, string(output), script)
+	}
+	if !strings.Contains(script, "if [ -n \"$CMD\" ]; then") {
+		t.Fatalf("expected kubernetes script to branch on quoted CMD variable, got script=%s", script)
+	}
+}
+
+func TestRenderPipelineAgentScript_KubernetesComplexCommandExecutesWithoutWrapperSyntaxError(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := tmpDir + "/bin"
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin dir failed: %v", err)
+	}
+	writeStub := func(name, body string) {
+		path := binDir + "/" + name
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatalf("write stub %s failed: %v", name, err)
+		}
+	}
+	writeStub("kubectl", "#!/bin/sh\nexit 0\n")
+	writeStub("wget", "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-O\" ]; then\n    shift\n    outfile=\"$1\"\n  fi\n  shift\ndone\nprintf test > \"$outfile\"\n")
+	writeStub("tar", "#!/bin/sh\nexit 0\n")
+	writeStub("helm", "#!/bin/sh\nexit 0\n")
+
+	_, script, err := renderPipelineAgentScript("kubernetes", map[string]interface{}{
+		"command": strings.Join([]string{
+			"set -e",
+			"cat <<\"EOF\" > input_params_values.yaml",
+			"image:",
+			"  tag: '8.0'",
+			"EOF",
+			"mkdir -p chart",
+			"wget -O /tmp/resolved-chart.tgz --header \"X-EasyDo-Internal-Token:$EASYDO_INTERNAL_SERVER_TOKEN\" \"$EASYDO_INTERNAL_SERVER_URL/internal/store/chart-artifact?object_key=$EASYDO_CHART_OBJECT_KEY&file_name=$EASYDO_CHART_FILE_NAME\"",
+			"tar -xzf /tmp/resolved-chart.tgz -C chart",
+			"helm --kubeconfig $KUBECONFIG upgrade --install mysql ./chart -n middleware --create-namespace -f input_params_values.yaml",
+		}, "\n"),
+	})
+	if err != nil {
+		t.Fatalf("expected kubernetes script render success, got err: %v", err)
+	}
+
+	tempFile, err := os.CreateTemp(tmpDir, "k8s-runtime-*.sh")
+	if err != nil {
+		t.Fatalf("create temp script failed: %v", err)
+	}
+	defer tempFile.Close()
+	if _, err := tempFile.WriteString(script); err != nil {
+		t.Fatalf("write temp script failed: %v", err)
+	}
+
+	cmd := exec.Command("/bin/sh", tempFile.Name())
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"EASYDO_INTERNAL_SERVER_URL=http://server",
+		"EASYDO_INTERNAL_SERVER_TOKEN=test-token",
+		"EASYDO_CHART_OBJECT_KEY=store/charts/demo.tgz",
+		"EASYDO_CHART_FILE_NAME=mysql-14.0.3.tgz",
+		"EASYDO_CRED_CLUSTER_AUTH_KUBECONFIG=apiVersion: v1",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected rendered kubernetes script to execute without wrapper syntax error, got err=%v output=%s\nscript=%s", err, string(output), script)
 	}
 }
 

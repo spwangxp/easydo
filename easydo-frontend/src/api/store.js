@@ -46,6 +46,16 @@ export function getTemplateVersions(id) {
 }
 
 export function createTemplateVersion(id, data) {
+  if (data instanceof FormData) {
+    return request({
+      url: `/store/templates/${id}/versions`,
+      method: 'post',
+      data,
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      }
+    })
+  }
   return request({
     url: `/store/templates/${id}/versions`,
     method: 'post',
@@ -54,6 +64,16 @@ export function createTemplateVersion(id, data) {
 }
 
 export function updateTemplateVersion(templateId, versionId, data) {
+  if (data instanceof FormData) {
+    return request({
+      url: `/store/templates/${templateId}/versions/${versionId}`,
+      method: 'put',
+      data,
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      }
+    })
+  }
   return request({
     url: `/store/templates/${templateId}/versions/${versionId}`,
     method: 'put',
@@ -71,6 +91,14 @@ export function deleteTemplateVersion(templateId, versionId) {
 export function previewTemplateVersion(templateId, versionId, data) {
   return request({
     url: `/store/templates/${templateId}/versions/${versionId}/preview`,
+    method: 'post',
+    data
+  })
+}
+
+export function resolveTemplateChartSource(templateId, data) {
+  return request({
+    url: `/store/templates/${templateId}/chart/resolve`,
     method: 'post',
     data
   })

@@ -1,7 +1,11 @@
 package handlers
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +23,7 @@ import (
 	"easydo-server/internal/models"
 	"easydo-server/internal/services"
 	"easydo-server/pkg/storage"
+	"easydo-server/pkg/utils"
 	"github.com/gin-gonic/gin"
 	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
@@ -32,6 +37,8 @@ type StoreTemplateHandler struct {
 	DB                 *gorm.DB
 	objectStoreFactory func() (storage.ObjectStore, error)
 }
+
+var chartResolveHTTPClient = &http.Client{Timeout: 20 * time.Second}
 
 type DeploymentHandler struct {
 	DB *gorm.DB
@@ -502,6 +509,19 @@ type previewTemplateVersionRequest struct {
 	Parameters       map[string]interface{} `json:"parameters"`
 }
 
+type resolveChartSourceRequest struct {
+	ChartSource *appVariantChartSource `json:"chart_source"`
+}
+
+type resolvedChartSourceResponse struct {
+	ChartSource      *appVariantChartSource `json:"chart_source,omitempty"`
+	ResolvedChart    *appVariantChartSource `json:"resolved_chart,omitempty"`
+	BaseValuesYAML   string                 `json:"base_values_yaml,omitempty"`
+	ChartFileBase64  string                 `json:"chart_file_base64,omitempty"`
+	ChartFileName    string                 `json:"chart_file_name,omitempty"`
+	ChartContentType string                 `json:"chart_content_type,omitempty"`
+}
+
 type appVariantChartSource struct {
 	Type         string `json:"type,omitempty"`
 	RepoURL      string `json:"repo_url,omitempty"`
@@ -512,12 +532,20 @@ type appVariantChartSource struct {
 	FileName     string `json:"file_name,omitempty"`
 }
 
+type uploadedChartArtifact struct {
+	FileName    string
+	Body        []byte
+	ObjectKey   string
+	ContentType string
+}
+
 type appVariantVMMetadata struct {
 	CommandTemplate string `json:"command_template,omitempty"`
 }
 
 type appVariantK8sMetadata struct {
 	ChartSource    *appVariantChartSource `json:"chart_source,omitempty"`
+	ResolvedChart  *appVariantChartSource `json:"resolved_chart,omitempty"`
 	BaseValuesYAML string                 `json:"base_values_yaml,omitempty"`
 }
 
@@ -563,6 +591,7 @@ type templateVersionResponse struct {
 	VersionDescription string                     `json:"version_description,omitempty"`
 	CommandTemplate    string                     `json:"command_template,omitempty"`
 	ChartSource        *appVariantChartSource     `json:"chart_source,omitempty"`
+	ResolvedChart      *appVariantChartSource     `json:"resolved_chart,omitempty"`
 	BaseValuesYAML     string                     `json:"base_values_yaml,omitempty"`
 }
 
@@ -804,8 +833,8 @@ func (h *StoreTemplateHandler) CreateTemplateVersion(c *gin.Context) {
 		return
 	}
 
-	var req createTemplateVersionRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	req, uploadedChart, err := parseTemplateVersionRequest(c)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
 		return
 	}
@@ -813,7 +842,7 @@ func (h *StoreTemplateHandler) CreateTemplateVersion(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "版本号不能为空"})
 		return
 	}
-	if req.PipelineID == 0 && !isAppVariantCreateRequest(req) {
+	if req.PipelineID == 0 && !isAppVariantCreateRequest(*req) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "必须绑定流水线"})
 		return
 	}
@@ -828,8 +857,11 @@ func (h *StoreTemplateHandler) CreateTemplateVersion(c *gin.Context) {
 			return
 		}
 	}
-	if isAppVariantCreateRequest(req) {
-		defaultConfig, deploymentMode, err := buildAppVariantMetadataConfig(req)
+	if uploadedChart != nil && req.ChartSource != nil {
+		req.ChartSource.FileName = uploadedChart.FileName
+	}
+	if isAppVariantCreateRequest(*req) {
+		defaultConfig, deploymentMode, err := buildAppVariantMetadataConfig(*req)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
 			return
@@ -859,8 +891,8 @@ func (h *StoreTemplateHandler) CreateTemplateVersion(c *gin.Context) {
 		return
 	}
 	if err := h.DB.Transaction(func(tx *gorm.DB) error {
-		if isAppVariantCreateRequest(req) && pipeline.ID == 0 {
-			hiddenPipeline, err := ensureHiddenAppVariantPipeline(tx, &template, nil, workspaceID, userID, req)
+		if isAppVariantCreateRequest(*req) && pipeline.ID == 0 {
+			hiddenPipeline, err := ensureHiddenAppVariantPipeline(tx, &template, nil, workspaceID, userID, *req)
 			if err != nil {
 				return err
 			}
@@ -875,6 +907,11 @@ func (h *StoreTemplateHandler) CreateTemplateVersion(c *gin.Context) {
 		}
 		if len(parameters) > 0 {
 			if err := tx.Create(&parameters).Error; err != nil {
+				return err
+			}
+		}
+		if uploadedChart != nil {
+			if err := h.persistUploadedChartArtifact(c, tx, &version, uploadedChart); err != nil {
 				return err
 			}
 		}
@@ -906,8 +943,8 @@ func (h *StoreTemplateHandler) UpdateTemplateVersion(c *gin.Context) {
 		return
 	}
 
-	var req createTemplateVersionRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	req, uploadedChart, err := parseTemplateVersionRequest(c)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
 		return
 	}
@@ -915,8 +952,11 @@ func (h *StoreTemplateHandler) UpdateTemplateVersion(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "版本号不能为空"})
 		return
 	}
-	if isAppVariantCreateRequest(req) {
-		defaultConfig, deploymentMode, err := buildAppVariantMetadataConfig(req)
+	if uploadedChart != nil && req.ChartSource != nil {
+		req.ChartSource.FileName = uploadedChart.FileName
+	}
+	if isAppVariantCreateRequest(*req) {
+		defaultConfig, deploymentMode, err := buildAppVariantMetadataConfig(*req)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
 			return
@@ -940,12 +980,12 @@ func (h *StoreTemplateHandler) UpdateTemplateVersion(c *gin.Context) {
 	}
 
 	if err := h.DB.Transaction(func(tx *gorm.DB) error {
-		if isAppVariantCreateRequest(req) && req.PipelineID == 0 {
+		if isAppVariantCreateRequest(*req) && req.PipelineID == 0 {
 			var template models.StoreTemplate
 			if err := tx.First(&template, version.TemplateID).Error; err != nil {
 				return err
 			}
-			hiddenPipeline, err := ensureHiddenAppVariantPipeline(tx, &template, &version, workspaceID, userID, req)
+			hiddenPipeline, err := ensureHiddenAppVariantPipeline(tx, &template, &version, workspaceID, userID, *req)
 			if err != nil {
 				return err
 			}
@@ -965,6 +1005,11 @@ func (h *StoreTemplateHandler) UpdateTemplateVersion(c *gin.Context) {
 				return err
 			}
 		}
+		if uploadedChart != nil {
+			if err := h.persistUploadedChartArtifact(c, tx, &version, uploadedChart); err != nil {
+				return err
+			}
+		}
 		return nil
 	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "修改模板版本失败"})
@@ -972,6 +1017,114 @@ func (h *StoreTemplateHandler) UpdateTemplateVersion(c *gin.Context) {
 	}
 	version.Parameters = parameters
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": h.buildTemplateVersionResponses([]models.StoreTemplateVersion{version})[0]})
+}
+
+func parseTemplateVersionRequest(c *gin.Context) (*createTemplateVersionRequest, *uploadedChartArtifact, error) {
+	if strings.HasPrefix(c.GetHeader("Content-Type"), "multipart/form-data") {
+		payload := strings.TrimSpace(c.PostForm("payload"))
+		if payload == "" {
+			return nil, nil, fmt.Errorf("payload is required")
+		}
+		var req createTemplateVersionRequest
+		if err := json.Unmarshal([]byte(payload), &req); err != nil {
+			return nil, nil, err
+		}
+		uploadedChart, err := readUploadedChartArtifact(c, "chart_file")
+		if err != nil {
+			return nil, nil, err
+		}
+		return &req, uploadedChart, nil
+	}
+	var req createTemplateVersionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		return nil, nil, err
+	}
+	return &req, nil, nil
+}
+
+func readUploadedChartArtifact(c *gin.Context, field string) (*uploadedChartArtifact, error) {
+	fileHeader, err := c.FormFile(field)
+	if err != nil {
+		if errors.Is(err, http.ErrMissingFile) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	file, err := fileHeader.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	body, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("chart file is empty")
+	}
+	fileName := filepath.Base(strings.TrimSpace(fileHeader.Filename))
+	if fileName == "" || fileName == "." || fileName == "/" {
+		fileName = fmt.Sprintf("chart-%d.tgz", time.Now().Unix())
+	}
+	return &uploadedChartArtifact{
+		FileName:    fileName,
+		Body:        body,
+		ContentType: fileHeader.Header.Get("Content-Type"),
+	}, nil
+}
+
+func (h *StoreTemplateHandler) persistUploadedChartArtifact(c *gin.Context, tx *gorm.DB, version *models.StoreTemplateVersion, uploadedChart *uploadedChartArtifact) error {
+	if uploadedChart == nil || version == nil {
+		return nil
+	}
+	if h.objectStoreFactory == nil {
+		h.objectStoreFactory = storage.NewObjectStore
+	}
+	objectStore, err := h.objectStoreFactory()
+	if err != nil {
+		return fmt.Errorf("对象存储未配置")
+	}
+	if err := objectStore.EnsureBucket(c.Request.Context()); err != nil {
+		return fmt.Errorf("初始化对象存储失败")
+	}
+	objectKey := fmt.Sprintf(
+		"store/charts/workspace-%d/template-%s/version-%d/%d-%s",
+		version.WorkspaceID,
+		c.Param("id"),
+		version.ID,
+		time.Now().Unix(),
+		uploadedChart.FileName,
+	)
+	if _, err := objectStore.PutObject(c.Request.Context(), objectKey, uploadedChart.Body, uploadedChart.ContentType); err != nil {
+		return fmt.Errorf("上传 chart 文件失败")
+	}
+	metadata := decodeAppVariantMetadata(version.DefaultConfig)
+	if metadata.SchemaVersion == 0 {
+		metadata.SchemaVersion = 1
+	}
+	metadata.InfraType = string(models.ResourceTypeK8sCluster)
+	if metadata.K8s == nil {
+		metadata.K8s = &appVariantK8sMetadata{}
+	}
+	if metadata.K8s.ChartSource == nil {
+		metadata.K8s.ChartSource = &appVariantChartSource{}
+	}
+	metadata.K8s.ResolvedChart = &appVariantChartSource{
+		Type:         "upload",
+		ChartName:    strings.TrimSpace(metadata.K8s.ChartSource.ChartName),
+		ChartVersion: strings.TrimSpace(metadata.K8s.ChartSource.ChartVersion),
+		ObjectKey:    objectKey,
+		FileName:     uploadedChart.FileName,
+	}
+	rawMetadata, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("保存 chart 信息失败")
+	}
+	version.DefaultConfig = string(rawMetadata)
+	if err := tx.Model(version).Update("default_config", version.DefaultConfig).Error; err != nil {
+		return fmt.Errorf("保存 chart 信息失败")
+	}
+	return nil
 }
 
 func (h *StoreTemplateHandler) DeleteTemplateVersion(c *gin.Context) {
@@ -1088,6 +1241,57 @@ func (h *StoreTemplateHandler) PreviewAppVariant(c *gin.Context) {
 	h.previewTemplateVersionInternal(c)
 }
 
+func (h *StoreTemplateHandler) ResolveChartSource(c *gin.Context) {
+	workspaceID, _ := getRequestWorkspace(c)
+	userID, role := getRequestUser(c)
+	if workspaceID == 0 || !userCanManageWorkspace(h.DB, workspaceID, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "无权解析 chart 来源"})
+		return
+	}
+	var req resolveChartSourceRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.ChartSource == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
+		return
+	}
+	resolved, err := resolveRemoteChartSource(req.ChartSource)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": resolved})
+}
+
+func (h *StoreTemplateHandler) DownloadResolvedChartInternal(c *gin.Context) {
+	objectKey := strings.TrimSpace(c.Query("object_key"))
+	fileName := strings.TrimSpace(c.Query("file_name"))
+	if objectKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "object_key 不能为空"})
+		return
+	}
+	objectStore, err := h.objectStoreFactory()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "对象存储未配置"})
+		return
+	}
+	reader, err := objectStore.GetObject(c.Request.Context(), objectKey)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "chart 文件不存在"})
+		return
+	}
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "读取 chart 文件失败"})
+		return
+	}
+	if fileName == "" {
+		fileName = filepath.Base(objectKey)
+	}
+	c.Header("Content-Type", "application/gzip")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileName))
+	c.Data(http.StatusOK, "application/gzip", body)
+}
+
 func (h *StoreTemplateHandler) UploadTemplateVersionChart(c *gin.Context) {
 	workspaceID, _ := getRequestWorkspace(c)
 	userID, role := getRequestUser(c)
@@ -1160,9 +1364,13 @@ func (h *StoreTemplateHandler) UploadTemplateVersionChart(c *gin.Context) {
 	if metadata.K8s.ChartSource == nil {
 		metadata.K8s.ChartSource = &appVariantChartSource{}
 	}
-	metadata.K8s.ChartSource.Type = "upload"
-	metadata.K8s.ChartSource.ObjectKey = objectKey
-	metadata.K8s.ChartSource.FileName = fileName
+	metadata.K8s.ResolvedChart = &appVariantChartSource{
+		Type:         "upload",
+		ChartName:    strings.TrimSpace(metadata.K8s.ChartSource.ChartName),
+		ChartVersion: strings.TrimSpace(metadata.K8s.ChartSource.ChartVersion),
+		ObjectKey:    objectKey,
+		FileName:     fileName,
+	}
 	rawMetadata, err := json.Marshal(metadata)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "保存 chart 信息失败"})
@@ -1176,6 +1384,282 @@ func (h *StoreTemplateHandler) UploadTemplateVersionChart(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": gin.H{
 		"chart_source": metadata.K8s.ChartSource,
 	}})
+}
+
+func resolveRemoteChartSource(chartSource *appVariantChartSource) (*resolvedChartSourceResponse, error) {
+	if chartSource == nil {
+		return nil, fmt.Errorf("chart 来源不能为空")
+	}
+	resolvedInput := cloneChartSource(chartSource)
+	var chartBody []byte
+	var fileName string
+	switch strings.TrimSpace(chartSource.Type) {
+	case "repo":
+		var err error
+		chartBody, fileName, err = downloadRepoChartArchive(chartSource)
+		if err != nil {
+			return nil, err
+		}
+	case "oci":
+		var err error
+		chartBody, fileName, err = downloadOCIChartArchive(chartSource)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("仅支持解析 repo / oci chart 来源")
+	}
+	values, err := extractValuesYAMLFromChartArchive(chartBody)
+	if err != nil {
+		return nil, err
+	}
+	resolvedChart := &appVariantChartSource{
+		Type:         "upload",
+		ChartName:    strings.TrimSpace(chartSource.ChartName),
+		ChartVersion: strings.TrimSpace(chartSource.ChartVersion),
+		FileName:     fileName,
+	}
+	return &resolvedChartSourceResponse{
+		ChartSource:      resolvedInput,
+		ResolvedChart:    resolvedChart,
+		BaseValuesYAML:   values,
+		ChartFileBase64:  base64.StdEncoding.EncodeToString(chartBody),
+		ChartFileName:    fileName,
+		ChartContentType: "application/gzip",
+	}, nil
+}
+
+func cloneChartSource(source *appVariantChartSource) *appVariantChartSource {
+	if source == nil {
+		return nil
+	}
+	clone := *source
+	return &clone
+}
+
+func downloadRepoChartArchive(chartSource *appVariantChartSource) ([]byte, string, error) {
+	repoURL := strings.TrimRight(strings.TrimSpace(chartSource.RepoURL), "/")
+	chartName := strings.TrimSpace(chartSource.ChartName)
+	chartVersion := strings.TrimSpace(chartSource.ChartVersion)
+	if repoURL == "" || chartName == "" || chartVersion == "" {
+		return nil, "", fmt.Errorf("Repo Chart 参数不完整")
+	}
+	indexResp, err := chartResolveHTTPClient.Get(repoURL + "/index.yaml")
+	if err != nil {
+		return nil, "", fmt.Errorf("获取 Helm Repo index.yaml 失败: %v", err)
+	}
+	defer indexResp.Body.Close()
+	if indexResp.StatusCode < 200 || indexResp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("获取 Helm Repo index.yaml 失败")
+	}
+	indexBody, err := io.ReadAll(indexResp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("读取 Helm Repo index.yaml 失败")
+	}
+	archiveURL, err := extractRepoChartURL(indexBody, repoURL, chartName, chartVersion)
+	if err != nil {
+		return nil, "", err
+	}
+	archiveResp, err := chartResolveHTTPClient.Get(archiveURL)
+	if err != nil {
+		return nil, "", fmt.Errorf("下载 Repo Chart 失败: %v", err)
+	}
+	defer archiveResp.Body.Close()
+	if archiveResp.StatusCode < 200 || archiveResp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("下载 Repo Chart 失败")
+	}
+	body, err := io.ReadAll(archiveResp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("读取 Repo Chart 包失败")
+	}
+	return body, buildArchiveFileName(archiveURL, fmt.Sprintf("%s-%s.tgz", chartName, chartVersion)), nil
+}
+
+func extractRepoChartURL(indexBody []byte, repoURL, chartName, chartVersion string) (string, error) {
+	var payload struct {
+		Entries map[string][]struct {
+			Version string   `yaml:"version"`
+			URLs    []string `yaml:"urls"`
+		} `yaml:"entries"`
+	}
+	if err := yaml.Unmarshal(indexBody, &payload); err != nil {
+		return "", fmt.Errorf("解析 Helm Repo index.yaml 失败")
+	}
+	entries := payload.Entries[chartName]
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.Version) != chartVersion {
+			continue
+		}
+		for _, rawURL := range entry.URLs {
+			if strings.TrimSpace(rawURL) == "" {
+				continue
+			}
+			parsed, err := url.Parse(rawURL)
+			if err == nil && parsed.IsAbs() {
+				return parsed.String(), nil
+			}
+			base, err := url.Parse(repoURL + "/")
+			if err != nil {
+				return "", fmt.Errorf("Repo URL 无效")
+			}
+			relative, err := url.Parse(rawURL)
+			if err != nil {
+				return "", fmt.Errorf("Chart 下载地址无效")
+			}
+			return base.ResolveReference(relative).String(), nil
+		}
+		break
+	}
+	return "", fmt.Errorf("Repo 中未找到指定 Chart 版本")
+}
+
+func downloadOCIChartArchive(chartSource *appVariantChartSource) ([]byte, string, error) {
+	registry, repository, chartName, reference, err := parseOCIReference(chartSource)
+	if err != nil {
+		return nil, "", err
+	}
+	token, err := resolveOCIRegistryToken(registry, repository)
+	if err != nil {
+		return nil, "", err
+	}
+	manifestURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, reference)
+	manifestReq, _ := http.NewRequest(http.MethodGet, manifestURL, nil)
+	setOCIHeaders(manifestReq, token)
+	manifestResp, err := chartResolveHTTPClient.Do(manifestReq)
+	if err != nil {
+		return nil, "", fmt.Errorf("获取 OCI Chart manifest 失败: %v", err)
+	}
+	defer manifestResp.Body.Close()
+	if manifestResp.StatusCode < 200 || manifestResp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("获取 OCI Chart manifest 失败")
+	}
+	var manifest struct {
+		Layers []struct {
+			MediaType string `json:"mediaType"`
+			Digest    string `json:"digest"`
+		} `json:"layers"`
+	}
+	if err := json.NewDecoder(manifestResp.Body).Decode(&manifest); err != nil {
+		return nil, "", fmt.Errorf("解析 OCI Chart manifest 失败")
+	}
+	chartDigest := ""
+	for _, layer := range manifest.Layers {
+		if strings.TrimSpace(layer.MediaType) == "application/vnd.cncf.helm.chart.content.v1.tar+gzip" {
+			chartDigest = strings.TrimSpace(layer.Digest)
+			break
+		}
+	}
+	if chartDigest == "" {
+		return nil, "", fmt.Errorf("OCI manifest 中未找到 Helm Chart layer")
+	}
+	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", registry, repository, chartDigest)
+	blobReq, _ := http.NewRequest(http.MethodGet, blobURL, nil)
+	setOCIHeaders(blobReq, token)
+	blobResp, err := chartResolveHTTPClient.Do(blobReq)
+	if err != nil {
+		return nil, "", fmt.Errorf("下载 OCI Chart blob 失败: %v", err)
+	}
+	defer blobResp.Body.Close()
+	if blobResp.StatusCode < 200 || blobResp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("下载 OCI Chart blob 失败")
+	}
+	body, err := io.ReadAll(blobResp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("读取 OCI Chart blob 失败")
+	}
+	return body, fmt.Sprintf("%s-%s.tgz", chartName, reference), nil
+}
+
+func parseOCIReference(chartSource *appVariantChartSource) (string, string, string, string, error) {
+	normalized := strings.TrimPrefix(strings.TrimSpace(chartSource.OCIURL), "oci://")
+	segments := strings.Split(normalized, "/")
+	if len(segments) < 2 {
+		return "", "", "", "", fmt.Errorf("OCI URL 无效")
+	}
+	registry := segments[0]
+	repository := strings.Join(segments[1:], "/")
+	chartName := strings.TrimSpace(chartSource.ChartName)
+	if chartName == "" {
+		chartName = segments[len(segments)-1]
+	}
+	reference := strings.TrimSpace(chartSource.ChartVersion)
+	if reference == "" {
+		return "", "", "", "", fmt.Errorf("OCI Chart Version 不能为空")
+	}
+	return registry, repository, chartName, reference, nil
+}
+
+func resolveOCIRegistryToken(registry, repository string) (string, error) {
+	if registry != "registry-1.docker.io" {
+		return "", nil
+	}
+	tokenURL := fmt.Sprintf("https://auth.docker.io/token?service=registry.docker.io&scope=repository:%s:pull", repository)
+	resp, err := chartResolveHTTPClient.Get(tokenURL)
+	if err != nil {
+		return "", fmt.Errorf("获取 OCI Registry Token 失败: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("获取 OCI Registry Token 失败")
+	}
+	var payload map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("解析 OCI Registry Token 失败")
+	}
+	if token := strings.TrimSpace(convertToString(payload["token"])); token != "" {
+		return token, nil
+	}
+	if token := strings.TrimSpace(convertToString(payload["access_token"])); token != "" {
+		return token, nil
+	}
+	return "", fmt.Errorf("OCI Registry Token 为空")
+}
+
+func setOCIHeaders(req *http.Request, token string) {
+	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.cncf.helm.chart.content.v1.tar+gzip")
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+func extractValuesYAMLFromChartArchive(chartBody []byte) (string, error) {
+	gzReader, err := gzip.NewReader(bytes.NewReader(chartBody))
+	if err != nil {
+		return "", fmt.Errorf("解析 Chart gzip 失败")
+	}
+	defer gzReader.Close()
+	tarReader := tar.NewReader(gzReader)
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("解析 Chart tar 失败")
+		}
+		name := strings.TrimSpace(header.Name)
+		if !strings.HasSuffix(name, "/values.yaml") && name != "values.yaml" {
+			continue
+		}
+		body, err := io.ReadAll(tarReader)
+		if err != nil {
+			return "", fmt.Errorf("读取 values.yaml 失败")
+		}
+		return string(body), nil
+	}
+	return "", fmt.Errorf("Chart 包中未找到 values.yaml")
+}
+
+func buildArchiveFileName(rawURL, fallback string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fallback
+	}
+	base := filepath.Base(parsed.Path)
+	if base == "." || base == "/" || strings.TrimSpace(base) == "" {
+		return fallback
+	}
+	return base
 }
 
 func (h *StoreTemplateHandler) previewTemplateVersionInternal(c *gin.Context) {
@@ -1310,6 +1794,7 @@ func (h *StoreTemplateHandler) buildTemplateVersionResponses(versions []models.S
 		}
 		if metadata.K8s != nil {
 			resp.ChartSource = metadata.K8s.ChartSource
+			resp.ResolvedChart = metadata.K8s.ResolvedChart
 			resp.BaseValuesYAML = metadata.K8s.BaseValuesYAML
 		}
 		responses = append(responses, resp)
@@ -1455,11 +1940,12 @@ func buildAppVariantPreview(resource *models.Resource, parameters map[string]int
 		diffLines := buildPreviewDiffLines(strings.TrimSpace(metadata.K8s.BaseValuesYAML), strings.TrimSpace(overrideYAML))
 		releaseName := defaultIfEmpty(strings.TrimSpace(convertToString(parameters["release_name"])), "app-release")
 		namespace := defaultIfEmpty(strings.TrimSpace(convertToString(parameters["namespace"])), "default")
-		command := buildHelmPreviewCommand(metadata.K8s.ChartSource, releaseName, namespace)
+		command := buildHelmPreviewCommand(resolveEffectiveChartSource(metadata.K8s), releaseName, namespace)
 		return gin.H{
 			"infra_type":           infraType,
 			"target_resource":      buildResourceResponse(*resource),
 			"chart_source":         metadata.K8s.ChartSource,
+			"resolved_chart":       metadata.K8s.ResolvedChart,
 			"base_values_yaml":     strings.TrimSpace(metadata.K8s.BaseValuesYAML),
 			"override_values_yaml": strings.TrimSpace(overrideYAML),
 			"diff_lines":           diffLines,
@@ -1595,7 +2081,7 @@ func buildDirectAppPipelineConfig(version *models.StoreTemplateVersion, resource
 		if err != nil {
 			return PipelineConfig{}, err
 		}
-		command := buildHelmDeployCommand(metadata.K8s.ChartSource, releaseName, namespace, overrideYAML)
+		command := buildHelmDeployCommand(resolveEffectiveChartSource(metadata.K8s), releaseName, namespace, overrideYAML)
 		return PipelineConfig{
 			Version: "2.0",
 			Nodes: []PipelineNode{{
@@ -1604,6 +2090,7 @@ func buildDirectAppPipelineConfig(version *models.StoreTemplateVersion, resource
 				Name: "Deploy Application",
 				Config: map[string]interface{}{
 					"command": command,
+					"env":     buildResolvedChartRuntimeEnv(metadata.K8s),
 				},
 			}},
 			Edges: []PipelineEdge{},
@@ -1616,14 +2103,47 @@ func buildDirectAppPipelineConfig(version *models.StoreTemplateVersion, resource
 func buildHelmDeployCommand(chartSource *appVariantChartSource, releaseName, namespace, overrideYAML string) string {
 	command := []string{"set -e"}
 	if strings.TrimSpace(overrideYAML) != "" {
-		command = append(command, "cat <<'EOF' > input_params_values.yaml")
+		command = append(command, "cat <<\"EOF\" > input_params_values.yaml")
 		command = append(command, strings.TrimRight(overrideYAML, "\n"))
 		command = append(command, "EOF")
 	} else {
 		command = append(command, ": > input_params_values.yaml")
 	}
+	if chartSource != nil && strings.TrimSpace(chartSource.ObjectKey) != "" {
+		command = append(command,
+			"rm -rf chart && mkdir -p chart",
+			"wget -O /tmp/resolved-chart.tgz --header \"X-EasyDo-Internal-Token:$EASYDO_INTERNAL_SERVER_TOKEN\" \"$EASYDO_INTERNAL_SERVER_URL/internal/store/chart-artifact?object_key=$EASYDO_CHART_OBJECT_KEY&file_name=$EASYDO_CHART_FILE_NAME\"",
+			"mkdir -p /tmp/resolved-chart-src && rm -rf /tmp/resolved-chart-src/*",
+			"tar -xzf /tmp/resolved-chart.tgz -C /tmp/resolved-chart-src",
+			"CHART_ROOT=$(find /tmp/resolved-chart-src -mindepth 1 -maxdepth 2 -type f -name Chart.yaml | head -n 1 | xargs -I{} dirname \"{}\")",
+			"if [ -z \"$CHART_ROOT\" ]; then echo \"resolved chart root not found\" >&2; exit 1; fi",
+			"cp -R \"$CHART_ROOT\"/. chart/",
+		)
+	}
 	command = append(command, buildHelmPreviewCommand(chartSource, releaseName, namespace))
 	return strings.Join(command, "\n")
+}
+
+func buildResolvedChartRuntimeEnv(metadata *appVariantK8sMetadata) map[string]interface{} {
+	if metadata == nil || metadata.ResolvedChart == nil || strings.TrimSpace(metadata.ResolvedChart.ObjectKey) == "" {
+		return nil
+	}
+	return map[string]interface{}{
+		"EASYDO_INTERNAL_SERVER_URL":   utils.ServerInternalURL(),
+		"EASYDO_INTERNAL_SERVER_TOKEN": utils.ServerInternalToken(),
+		"EASYDO_CHART_OBJECT_KEY":      strings.TrimSpace(metadata.ResolvedChart.ObjectKey),
+		"EASYDO_CHART_FILE_NAME":       strings.TrimSpace(metadata.ResolvedChart.FileName),
+	}
+}
+
+func resolveEffectiveChartSource(metadata *appVariantK8sMetadata) *appVariantChartSource {
+	if metadata == nil {
+		return nil
+	}
+	if metadata.ResolvedChart != nil {
+		return metadata.ResolvedChart
+	}
+	return metadata.ChartSource
 }
 
 func (h *LLMModelHandler) ListModels(c *gin.Context) {
@@ -2431,6 +2951,13 @@ func resolveDeploymentParameters(version *models.StoreTemplateVersion, submitted
 		if _, ok := known[key]; ok {
 			continue
 		}
+		if version != nil && version.Template != nil && version.Template.TemplateType == models.StoreTemplateTypeApp && isImplicitAppDeploymentParameter(key) {
+			trimmed := strings.TrimSpace(convertToString(value))
+			if trimmed != "" {
+				resolved[key] = trimmed
+			}
+			continue
+		}
 		if key == "model_path" {
 			trimmed := strings.TrimSpace(convertToString(value))
 			if trimmed != "" {
@@ -2447,6 +2974,15 @@ func resolveDeploymentParameters(version *models.StoreTemplateVersion, submitted
 		return nil, fmt.Errorf("不支持的参数 %s", key)
 	}
 	return resolved, nil
+}
+
+func isImplicitAppDeploymentParameter(key string) bool {
+	switch strings.TrimSpace(key) {
+	case "namespace", "release_name":
+		return true
+	default:
+		return false
+	}
 }
 
 func isImplicitLLMGPUParameter(key string) bool {

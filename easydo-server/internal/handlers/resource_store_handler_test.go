@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"easydo-server/internal/config"
 	"easydo-server/internal/models"
+	"easydo-server/pkg/storage"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -1215,6 +1217,176 @@ func TestStoreTemplateHandler_UpdateAndDeleteTemplateVersion(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected template version deleted, count=%d", count)
+	}
+}
+
+func TestStoreTemplateHandler_CreateTemplateVersionWithUploadedChartInMultipartSave(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	maintainer, workspace := seedResourceStoreUserAndWorkspace(t, db, "template-upload-create-maintainer", models.WorkspaceRoleMaintainer)
+	template := models.StoreTemplate{
+		WorkspaceID:        workspace.ID,
+		Name:               "MySQL",
+		TemplateType:       models.StoreTemplateTypeApp,
+		TargetResourceType: models.ResourceTypeK8sCluster,
+		Source:             models.StoreTemplateSourceWorkspace,
+		Status:             models.StoreTemplateStatusPublished,
+		Category:           "database",
+		CreatedBy:          maintainer.ID,
+	}
+	if err := db.Create(&template).Error; err != nil {
+		t.Fatalf("create template failed: %v", err)
+	}
+
+	store := newMemoryTestObjectStore()
+	h := NewStoreTemplateHandler()
+	h.objectStoreFactory = func() (storage.ObjectStore, error) { return store, nil }
+
+	payload := map[string]interface{}{
+		"version":             "14.0.3",
+		"status":              string(models.StoreTemplateStatusPublished),
+		"infra_type":          "k8s",
+		"version_description": "mysql upload variant",
+		"chart_source": map[string]interface{}{
+			"type":          "upload",
+			"chart_name":    "mysql",
+			"chart_version": "14.0.3",
+			"file_name":     "mysql-14.0.3.tgz",
+		},
+		"base_values_yaml": "auth:\n  enabled: true\n",
+	}
+	resp := performMultipartResourceStoreRequest(
+		t,
+		h.CreateTemplateVersion,
+		maintainer.ID,
+		"user",
+		workspace.ID,
+		models.WorkspaceRoleMaintainer,
+		http.MethodPost,
+		"/api/store/templates/1/versions",
+		payload,
+		"chart_file",
+		"mysql-14.0.3.tgz",
+		[]byte("fake-chart-body"),
+		pathResourceStoreID(template.ID),
+	)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected multipart create template version success, got=%d body=%s", resp.Code, resp.Body.String())
+	}
+
+	body := resp.Body.Bytes()
+	if !bytes.Contains(body, []byte(`"type":"upload"`)) {
+		t.Fatalf("expected upload chart source in response, got=%s", string(body))
+	}
+	if !bytes.Contains(body, []byte(`"file_name":"mysql-14.0.3.tgz"`)) {
+		t.Fatalf("expected uploaded file name in response, got=%s", string(body))
+	}
+	if !bytes.Contains(body, []byte(`"object_key":"store/charts/`)) {
+		t.Fatalf("expected object key in response, got=%s", string(body))
+	}
+	if len(store.objects) != 1 {
+		t.Fatalf("expected object store to contain uploaded chart, got=%d", len(store.objects))
+	}
+	for _, saved := range store.objects {
+		if string(saved) != "fake-chart-body" {
+			t.Fatalf("expected uploaded chart body persisted, got=%q", string(saved))
+		}
+	}
+	versionID := responseDataID(t, body)
+	var version models.StoreTemplateVersion
+	if err := db.First(&version, versionID).Error; err != nil {
+		t.Fatalf("load created version failed: %v", err)
+	}
+	if !bytes.Contains([]byte(version.DefaultConfig), []byte(`"object_key":"store/charts/`)) {
+		t.Fatalf("expected persisted object key in default config, got=%s", version.DefaultConfig)
+	}
+}
+
+func TestStoreTemplateHandler_UpdateTemplateVersionWithUploadedChartInMultipartSave(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	maintainer, workspace := seedResourceStoreUserAndWorkspace(t, db, "template-upload-update-maintainer", models.WorkspaceRoleMaintainer)
+	template := models.StoreTemplate{
+		WorkspaceID:        workspace.ID,
+		Name:               "MySQL",
+		TemplateType:       models.StoreTemplateTypeApp,
+		TargetResourceType: models.ResourceTypeK8sCluster,
+		Source:             models.StoreTemplateSourceWorkspace,
+		Status:             models.StoreTemplateStatusPublished,
+		Category:           "database",
+		CreatedBy:          maintainer.ID,
+	}
+	if err := db.Create(&template).Error; err != nil {
+		t.Fatalf("create template failed: %v", err)
+	}
+	version := models.StoreTemplateVersion{
+		WorkspaceID:    workspace.ID,
+		TemplateID:     template.ID,
+		Version:        "14.0.2",
+		DeploymentMode: "k8s_chart",
+		DefaultConfig:  `{"schema_version":1,"infra_type":"k8s","version_description":"old","k8s":{"chart_source":{"type":"upload","chart_name":"mysql","chart_version":"14.0.2","file_name":"mysql-14.0.2.tgz"},"base_values_yaml":"auth:\n  enabled: false\n"}}`,
+		Status:         models.StoreTemplateStatusDraft,
+		CreatedBy:      maintainer.ID,
+	}
+	if err := db.Create(&version).Error; err != nil {
+		t.Fatalf("create version failed: %v", err)
+	}
+
+	store := newMemoryTestObjectStore()
+	h := NewStoreTemplateHandler()
+	h.objectStoreFactory = func() (storage.ObjectStore, error) { return store, nil }
+
+	payload := map[string]interface{}{
+		"version":             "14.0.3",
+		"status":              string(models.StoreTemplateStatusPublished),
+		"infra_type":          "k8s",
+		"version_description": "mysql upload variant updated",
+		"chart_source": map[string]interface{}{
+			"type":          "upload",
+			"chart_name":    "mysql",
+			"chart_version": "14.0.3",
+			"file_name":     "mysql-14.0.3.tgz",
+		},
+		"base_values_yaml": "auth:\n  enabled: true\n",
+	}
+	resp := performMultipartResourceStoreRequest(
+		t,
+		h.UpdateTemplateVersion,
+		maintainer.ID,
+		"user",
+		workspace.ID,
+		models.WorkspaceRoleMaintainer,
+		http.MethodPut,
+		"/api/store/templates/1/versions/1",
+		payload,
+		"chart_file",
+		"mysql-14.0.3.tgz",
+		[]byte("updated-chart-body"),
+		pathTemplateVersionIDs(template.ID, version.ID),
+	)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected multipart update template version success, got=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if len(store.objects) != 1 {
+		t.Fatalf("expected object store upload during update, got=%d", len(store.objects))
+	}
+	var updated models.StoreTemplateVersion
+	if err := db.First(&updated, version.ID).Error; err != nil {
+		t.Fatalf("load updated version failed: %v", err)
+	}
+	if updated.Version != "14.0.3" {
+		t.Fatalf("expected updated version number, got=%s", updated.Version)
+	}
+	if !bytes.Contains([]byte(updated.DefaultConfig), []byte(`"file_name":"mysql-14.0.3.tgz"`)) {
+		t.Fatalf("expected updated uploaded chart metadata, got=%s", updated.DefaultConfig)
 	}
 }
 
@@ -3073,6 +3245,45 @@ func performResourceStoreRequest(t *testing.T, handler gin.HandlerFunc, userID u
 	}
 	c.Request = httptest.NewRequest(method, url, reader)
 	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user_id", userID)
+	c.Set("role", role)
+	c.Set("workspace_id", workspaceID)
+	c.Set("workspace_role", workspaceRole)
+	for _, setParam := range pathParams {
+		setParam(c)
+	}
+	handler(c)
+	return w
+}
+
+func performMultipartResourceStoreRequest(t *testing.T, handler gin.HandlerFunc, userID uint64, role string, workspaceID uint64, workspaceRole string, method, url string, payload map[string]interface{}, fileField, fileName string, fileBody []byte, pathParams ...func(*gin.Context)) *httptest.ResponseRecorder {
+	t.Helper()
+	buffer := &bytes.Buffer{}
+	writer := multipart.NewWriter(buffer)
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal multipart payload failed: %v", err)
+	}
+	if err := writer.WriteField("payload", string(payloadJSON)); err != nil {
+		t.Fatalf("write multipart payload failed: %v", err)
+	}
+	if fileField != "" {
+		part, err := writer.CreateFormFile(fileField, fileName)
+		if err != nil {
+			t.Fatalf("create multipart file failed: %v", err)
+		}
+		if _, err := part.Write(fileBody); err != nil {
+			t.Fatalf("write multipart file body failed: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(method, url, bytes.NewReader(buffer.Bytes()))
+	c.Request.Header.Set("Content-Type", writer.FormDataContentType())
 	c.Set("user_id", userID)
 	c.Set("role", role)
 	c.Set("workspace_id", workspaceID)

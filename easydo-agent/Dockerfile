@@ -33,6 +33,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
   -o easydo-agent ./cmd/main.go
 
 FROM moby/buildkit:rootless AS buildkit
+FROM alpine/helm:4 AS helm
 
 # Production image
 FROM alpine:3.19
@@ -41,11 +42,12 @@ FROM alpine:3.19
 RUN addgroup -g 1000 appgroup && \
     adduser -u 1000 -G appgroup -s /bin/sh -D appuser
 
-RUN apk add --no-cache git docker-cli openssh-client-default sshpass kubectl runc
+RUN apk add --no-cache git docker-cli openssh-client-default sshpass kubectl runc python3
 
 COPY --from=buildkit /usr/bin/buildctl /usr/local/bin/buildctl
 COPY --from=buildkit /usr/bin/buildkitd /usr/local/bin/buildkitd
 COPY --from=buildkit /usr/bin/rootlesskit /usr/local/bin/rootlesskit
+COPY --from=helm /usr/bin/helm /usr/local/bin/helm
 
 # Create directories for agent data
 RUN mkdir -p /data/agent && \

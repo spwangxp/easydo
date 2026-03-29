@@ -44,6 +44,7 @@ func InitRouter() *gin.Engine {
 		internal := router.Group("/internal")
 		internal.Use(middleware.InternalServerAuth())
 		internal.GET("/tasks/:id/live-logs", handlers.NewTaskHandler().GetTaskLiveLogsInternal)
+		internal.GET("/store/chart-artifact", handlers.NewStoreTemplateHandler().DownloadResolvedChartInternal)
 
 		// Debug endpoint - test raw body reading
 		router.POST("/api/debug/body", func(c *gin.Context) {
@@ -249,6 +250,7 @@ func InitRouter() *gin.Engine {
 			storeTemplates.POST("/:id/versions", storeTemplateHandler.CreateTemplateVersion)
 			storeTemplates.PUT("/:id/versions/:version_id", storeTemplateHandler.UpdateTemplateVersion)
 			storeTemplates.DELETE("/:id/versions/:version_id", storeTemplateHandler.DeleteTemplateVersion)
+			storeTemplates.POST("/:id/chart/resolve", storeTemplateHandler.ResolveChartSource)
 			storeTemplates.POST("/:id/versions/:version_id/preview", storeTemplateHandler.PreviewTemplateVersion)
 			storeTemplates.POST("/:id/versions/:version_id/chart/upload", storeTemplateHandler.UploadTemplateVersionChart)
 		}
