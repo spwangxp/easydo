@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "easydo.serverFullname" . }}
+  labels:
+    {{- include "easydo.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.server.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "easydo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "easydo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: server
+          image: "{{ .Values.server.image.repository }}:{{ .Values.server.image.tag }}"
+          imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.server.service.port }}
+          env:
+            - name: SERVER_PORT
+              value: {{ .Values.server.service.port | quote }}
+            - name: SERVER_MODE
+              value: {{ .Values.server.env.serverMode | quote }}
+            - name: SERVER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SERVER_PUBLIC_URL
+              value: {{ .Values.server.env.serverPublicURL | quote }}
+            - name: SERVER_INTERNAL_URL
+              value: "http://$(SERVER_ID):{{ .Values.server.service.port }}"
+            - name: SERVER_INTERNAL_TOKEN
+              value: {{ .Values.server.env.serverInternalToken | quote }}
+            - name: DB_HOST
+              value: {{ include "easydo.mariadbFullname" . | quote }}
+            - name: DB_PORT
+              value: {{ .Values.mariadb.service.port | quote }}
+            - name: DB_USERNAME
+              value: root
+            - name: DB_PASSWORD
+              value: {{ .Values.mariadb.auth.rootPassword | quote }}
+            - name: DB_NAME
+              value: {{ .Values.mariadb.auth.database | quote }}
+            - name: REDIS_HOST
+              value: {{ include "easydo.redisFullname" . | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.redis.service.port | quote }}
+            - name: REDIS_PASSWORD
+              value: ""
+            - name: REDIS_DB
+              value: "0"
+            - name: JWT_SECRET
+              value: {{ .Values.server.env.jwtSecret | quote }}
+            - name: AUTH_TOKEN_TTL
+              value: {{ .Values.server.env.authTokenTTL | quote }}
+            - name: AUTH_REFRESH_INTERVAL
+              value: {{ .Values.server.env.authRefreshInterval | quote }}
+            - name: OBJECT_STORAGE_PROVIDER
+              value: s3
+            - name: OBJECT_STORAGE_ENDPOINT
+              value: "{{ include "easydo.minioFullname" . }}:{{ .Values.minio.service.apiPort }}"
+            - name: OBJECT_STORAGE_BUCKET
+              value: {{ .Values.storage.bucket | quote }}
+            - name: OBJECT_STORAGE_USE_SSL
+              value: "false"
+            - name: OBJECT_STORAGE_ACCESS_KEY
+              value: {{ .Values.minio.auth.rootUser | quote }}
+            - name: OBJECT_STORAGE_SECRET_KEY
+              value: {{ .Values.minio.auth.rootPassword | quote }}
+            - name: OBJECT_STORAGE_REGION
+              value: {{ .Values.storage.region | quote }}
+            - name: NOTIFICATION_SMTP_ENABLED
+              value: {{ .Values.server.env.smtpEnabled | quote }}
+            - name: NOTIFICATION_SMTP_HOST
+              value: {{ .Values.server.env.smtpHost | quote }}
+            - name: NOTIFICATION_SMTP_PORT
+              value: {{ .Values.server.env.smtpPort | quote }}
+            - name: NOTIFICATION_SMTP_FROM_ADDRESS
+              value: {{ .Values.server.env.smtpFromAddress | quote }}
+            - name: NOTIFICATION_SMTP_FROM_NAME
+              value: {{ .Values.server.env.smtpFromName | quote }}

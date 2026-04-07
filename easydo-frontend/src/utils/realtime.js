@@ -5,6 +5,22 @@
 
 import { ElMessage } from 'element-plus'
 
+export const resolveRealtimeBaseURL = ({
+  dev = false,
+  wsPort = '8080',
+  location = {}
+} = {}) => {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const hostname = location.hostname || 'localhost'
+  const host = location.host || hostname
+
+  if (dev) {
+    return `${protocol}//${hostname}:${wsPort}`
+  }
+
+  return `${protocol}//${host}`
+}
+
 // RealtimeClient drives the pipeline detail page's transport-level state machine.
 //
 // The backend can fail over between replicas, and the browser can lose WS while
@@ -22,8 +38,14 @@ class RealtimeClient {
     this.reconnectDelay = 3000
     this.messageHandlers = new Map()
     this.isConnected = false
+    // Tracks if onopen ever fired for the current run — used to distinguish
+    // initial connection failures (pre-connect errors) from true disconnects.
+    this.hasEverConnected = false
     this.token = localStorage.getItem('token')
     this.connectionState = 'idle'
+    this.connectionSerial = 0
+    this.activeConnectionSerial = 0
+    this.reconnectTimer = null
   }
 
   /**
@@ -31,23 +53,36 @@ class RealtimeClient {
    * @param {string} runID - Pipeline run ID to subscribe to
    */
   connect(runID) {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+
     if (this.ws) {
       this.disconnect()
     }
 
     this.runID = runID
+    const socketRunID = runID
     this.token = localStorage.getItem('token')
     const previousState = this.connectionState
     this.connectionState = this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting'
+    const connectionSerial = ++this.connectionSerial
+    this.activeConnectionSerial = connectionSerial
 
     const wsURL = this.buildWebSocketURL(runID)
     
     try {
-      this.ws = new WebSocket(wsURL)
-      this.setupEventHandlers(previousState)
+      const socket = new WebSocket(wsURL)
+      this.ws = socket
+      this.setupEventHandlers(socket, {
+        previousState,
+        runID: socketRunID,
+        connectionSerial
+      })
     } catch (error) {
       console.error('WebSocket connection failed:', error)
-      this.handleConnectionError(error)
+      this.handleConnectionError(error, { runID: socketRunID })
     }
   }
 
@@ -64,17 +99,11 @@ class RealtimeClient {
    * Get WebSocket base URL based on current environment
    */
   getBaseURL() {
-    const hostname = window.location.hostname
-    const port = import.meta.env.VITE_WS_PORT || '8080'
-    
-    // Check if running in development
-    if (import.meta.env.DEV || hostname === 'localhost') {
-      return `ws://${hostname}:${port}`
-    }
-    
-    // Production: use current host
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${protocol}//${window.location.host}`
+    return resolveRealtimeBaseURL({
+      dev: import.meta.env.DEV,
+      wsPort: import.meta.env.VITE_WS_PORT || '8080',
+      location: window.location
+    })
   }
 
   /**
@@ -85,32 +114,41 @@ class RealtimeClient {
   //
   // `previousState` matters because a successful `onopen` after polling or
   // reconnecting is semantically different from the initial first connection.
-  setupEventHandlers(previousState = 'idle') {
-    this.ws.onopen = () => {
+  setupEventHandlers(socket, context = {}) {
+    const {
+      previousState = 'idle',
+      runID: socketRunID,
+      connectionSerial
+    } = context
+
+    socket.onopen = () => {
+      if (!this.isActiveSocket(socket, connectionSerial)) return
       console.log('WebSocket connected')
       this.isConnected = true
+      this.hasEverConnected = true
       this.reconnectAttempts = 0
       const recovered = previousState === 'reconnecting' || previousState === 'polling'
       this.connectionState = 'connected'
       if (recovered) {
-        this.emit('recovered', { runID: this.runID })
+        this.emit('recovered', { runID: socketRunID })
       }
-      this.emit('connected', { runID: this.runID })
+      this.emit('connected', { runID: socketRunID })
     }
 
-    this.ws.onclose = (event) => {
+    socket.onclose = (event) => {
+      if (!this.isActiveSocket(socket, connectionSerial)) return
       console.log('WebSocket closed:', event.code, event.reason)
       this.isConnected = false
-      this.emit('disconnected', { runID: this.runID })
+      this.emit('disconnected', { runID: socketRunID })
       
       if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
         this.connectionState = 'reconnecting'
         this.emit('reconnecting', {
-          runID: this.runID,
+          runID: socketRunID,
           attempt: this.reconnectAttempts + 1,
           maxAttempts: this.maxReconnectAttempts
         })
-        this.scheduleReconnect()
+        this.scheduleReconnect(socketRunID, connectionSerial)
         return
       }
 
@@ -121,14 +159,20 @@ class RealtimeClient {
       }
     }
 
-    this.ws.onerror = (error) => {
+    socket.onerror = (error) => {
+      if (!this.isActiveSocket(socket, connectionSerial)) return
       console.error('WebSocket error:', error)
-      this.handleConnectionError(error)
+      this.handleConnectionError(error, { runID: socketRunID })
     }
 
-    this.ws.onmessage = (event) => {
+    socket.onmessage = (event) => {
+      if (!this.isActiveSocket(socket, connectionSerial)) return
       this.handleMessage(event.data)
     }
+  }
+
+  isActiveSocket(socket, connectionSerial) {
+    return this.ws === socket && this.activeConnectionSerial === connectionSerial
   }
 
   /**
@@ -187,16 +231,17 @@ class RealtimeClient {
   // scheduleReconnect uses a bounded linear backoff. Once attempts are exhausted,
   // the caller degrades to polling instead of leaving the page stuck in a
   // permanent reconnect loop.
-  scheduleReconnect() {
+  scheduleReconnect(runID, connectionSerial) {
     this.reconnectAttempts++
     const delay = this.reconnectDelay * this.reconnectAttempts
     
     console.log(`Scheduling reconnection attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`)
     
-    setTimeout(() => {
-      if (this.runID) {
-        this.connect(this.runID)
+    this.reconnectTimer = setTimeout(() => {
+      if (this.activeConnectionSerial === connectionSerial && this.runID && Number(this.runID) === Number(runID)) {
+        this.connect(runID)
       }
+      this.reconnectTimer = null
     }, delay)
   }
 
@@ -214,26 +259,38 @@ class RealtimeClient {
   /**
    * Handle connection errors
    */
-  handleConnectionError(error) {
-    this.emit('error', { error })
+  handleConnectionError(error, context = {}) {
+    const { runID = this.runID } = context
+    this.emit('error', { error, runID })
     if (!this.isConnected && this.reconnectAttempts >= this.maxReconnectAttempts) {
       this.enterPollingMode()
     }
-    ElMessage.error('实时连接断开，正在尝试重连...')
+    // Only show disconnect toast when a connection that was previously
+    // established is lost. Pre-connect errors (hasEverConnected === false)
+    // should not trigger the toast.
+    if (this.hasEverConnected) {
+      ElMessage.error('实时连接断开，正在尝试重连...')
+    }
   }
 
   /**
    * Disconnect from WebSocket server
    */
   disconnect() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
     if (this.ws) {
       this.ws.close(1000, 'Client disconnect')
       this.ws = null
     }
     this.isConnected = false
+    this.hasEverConnected = false
     this.runID = null
     this.reconnectAttempts = 0
     this.connectionState = 'idle'
+    this.activeConnectionSerial = 0
   }
 
   /**

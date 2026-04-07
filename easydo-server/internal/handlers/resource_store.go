@@ -852,7 +852,7 @@ func (h *StoreTemplateHandler) CreateTemplateVersion(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "绑定流水线不存在"})
 			return
 		}
-		if ok, msg := validateTemplatePipelineCompatibility(template.TargetResourceType, pipeline.Config); !ok {
+		if ok, msg := validateTemplatePipelineCompatibility(template.TargetResourceType, pipelineDefinitionPayload(pipeline)); !ok {
 			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": msg})
 			return
 		}
@@ -2306,7 +2306,7 @@ func ensureHiddenAppVariantPipeline(tx *gorm.DB, template *models.StoreTemplate,
 			existing.Config = config
 			existing.OwnerID = userID
 			// Hidden app-store pipelines intentionally do not belong to a project.
-			// MySQL foreign keys accept NULL but reject 0, so omit project_id on persistence.
+			// MariaDB foreign keys accept NULL but reject 0, so omit project_id on persistence.
 			if err := tx.Omit("ProjectID").Save(&existing).Error; err != nil {
 				return models.Pipeline{}, err
 			}
@@ -2504,6 +2504,7 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 		return
 	}
 
+	authoredConfig := PipelineConfig{}
 	var resolvedConfig PipelineConfig
 	if directAppDeployment {
 		resolvedConfig, err = buildDirectAppPipelineConfig(&version, &resource, resolvedParameters)
@@ -2511,7 +2512,13 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "部署配置解析失败: " + err.Error()})
 			return
 		}
+		authoredConfig = clonePipelineConfig(resolvedConfig)
 	} else {
+		authoredConfig, err = (&PipelineHandler{DB: h.DB}).loadPipelineDefinitionConfig(h.DB, pipeline)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "绑定流水线配置解析失败: " + err.Error()})
+			return
+		}
 		resolvedConfig, err = h.resolveDeploymentPipelineConfig(&pipeline, version.Template, &resource, llmModel, resolvedParameters)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "部署配置解析失败: " + err.Error()})
@@ -2520,11 +2527,6 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 	}
 	if err := h.applyResourceCredentialBindings(&resolvedConfig, &resource); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "部署资源凭据绑定无效: " + err.Error()})
-		return
-	}
-	configJSON, err := json.Marshal(resolvedConfig)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "部署配置序列化失败"})
 		return
 	}
 
@@ -2567,25 +2569,31 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 	}
 
 	ph := &PipelineHandler{DB: h.DB}
-	var runConfig PipelineConfig
-	if err := json.Unmarshal(configJSON, &runConfig); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "部署配置解析失败"})
-		return
-	}
+	runtimeInputs := buildDeploymentRuntimeInputs(authoredConfig, &resource, llmModel, resolvedParameters)
 	runPipeline := models.Pipeline{BaseModel: pipeline.BaseModel, Name: pipeline.Name, Description: pipeline.Description, WorkspaceID: pipeline.WorkspaceID, ProjectID: pipeline.ProjectID, OwnerID: pipeline.OwnerID, Environment: resourceEnv, ManagementHidden: pipeline.ManagementHidden}
-	run, buildNumber, err := ph.launchPipelineRun(runPipeline, runConfig, pipelineRunTriggerContext{
+	run, buildNumber, err := ph.launchPipelineRun(runPipeline, authoredConfig, pipelineRunTriggerContext{
 		TriggerType:     "deployment_request",
 		TriggerUser:     triggerUsername,
 		TriggerUserID:   userID,
 		TriggerUserRole: workspaceRole,
+		RunConfig: models.PipelineRunConfigSnapshot{
+			Inputs: runtimeInputs,
+		},
+		AuthoredConfig:  &authoredConfig,
+		ExecutionConfig: &resolvedConfig,
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "创建部署运行失败: " + err.Error()})
 		return
 	}
+	requestStatus, ok := deploymentRequestStatusFromRunStatus(run.Status)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "部署运行状态无法映射到部署请求状态"})
+		return
+	}
 	request.PipelineID = pipeline.ID
 	request.PipelineRunID = run.ID
-	request.Status = models.DeploymentRequestStatus(run.Status)
+	request.Status = requestStatus
 	createRequestDB := h.DB
 	if llmModel == nil {
 		createRequestDB = createRequestDB.Omit("LLMModelID")
@@ -2598,7 +2606,7 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 		WorkspaceID:   workspaceID,
 		RequestID:     request.ID,
 		PipelineRunID: run.ID,
-		Status:        models.DeploymentRequestStatus(run.Status),
+		Status:        requestStatus,
 		AuditSummary:  "deployment request created",
 		ResultSummary: "build number " + convertToString(buildNumber),
 	}
@@ -2611,8 +2619,8 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 }
 
 func (h *DeploymentHandler) resolveDeploymentPipelineConfig(pipeline *models.Pipeline, template *models.StoreTemplate, resource *models.Resource, llmModel *models.LLMModelCatalog, parameters map[string]interface{}) (PipelineConfig, error) {
-	var config PipelineConfig
-	if err := json.Unmarshal([]byte(pipeline.Config), &config); err != nil {
+	config, err := (&PipelineHandler{DB: h.DB}).loadPipelineDefinitionConfig(h.DB, *pipeline)
+	if err != nil {
 		return PipelineConfig{}, err
 	}
 	resolver := NewVariableResolver()
@@ -2625,6 +2633,7 @@ func (h *DeploymentHandler) resolveDeploymentPipelineConfig(pipeline *models.Pip
 			resolved = sanitizeResolvedVLLMVMScript(template, resolved)
 			resolved = applyPlatformLLMGPUSelection(template, resource, llmModel, parameters, resolved)
 			config.Nodes[i].Config = resolved
+			config.Nodes[i].DefinitionParams = nil
 			config.Nodes[i].Params = nil
 		}
 	}
@@ -2635,6 +2644,18 @@ func (h *DeploymentHandler) resolveDeploymentPipelineConfig(pipeline *models.Pip
 		return PipelineConfig{}, fmt.Errorf(msg)
 	}
 	return config, nil
+}
+
+func buildDeploymentRuntimeInputs(config PipelineConfig, resource *models.Resource, llmModel *models.LLMModelCatalog, parameters map[string]interface{}) map[string]map[string]interface{} {
+	baseInputs := buildDeploymentInputs(resource, llmModel, parameters)
+	if len(baseInputs) == 0 {
+		return nil
+	}
+	runtimeInputs := make(map[string]map[string]interface{}, len(config.Nodes))
+	for _, node := range config.Nodes {
+		runtimeInputs[node.ID] = cloneMap(baseInputs)
+	}
+	return runtimeInputs
 }
 
 var resolvedVLLMSwapSpacePattern = regexp.MustCompile(`if \[ -n "[^"]*" \]; then(?: |\n  )VLLM_ARGS="\$VLLM_ARGS --swap-space [^"]*";? fi\n?`)
@@ -4630,6 +4651,7 @@ func (h *DeploymentHandler) applyResourceCredentialBindings(config *PipelineConf
 			slotName = "ssh_auth"
 		default:
 			node.Config = nodeCfg
+			node.DefinitionParams = nil
 			node.Params = nil
 			node.Type = canonical
 			continue
@@ -4641,6 +4663,7 @@ func (h *DeploymentHandler) applyResourceCredentialBindings(config *PipelineConf
 		}
 		credentials[slotName] = map[string]interface{}{"credential_id": resourceCredentialID}
 		node.Config = nodeCfg
+		node.DefinitionParams = nil
 		node.Params = nil
 		node.Type = canonical
 	}
@@ -4657,8 +4680,8 @@ func normalizeTaskTypeForConfig(taskType string) string {
 }
 
 func validateTemplatePipelineCompatibility(resourceType models.ResourceType, rawConfig string) (bool, string) {
-	var config PipelineConfig
-	if err := json.Unmarshal([]byte(rawConfig), &config); err != nil {
+	config, err := parsePipelineConfigJSON(rawConfig)
+	if err != nil {
 		return false, "流水线配置解析失败"
 	}
 	hasSSH := false

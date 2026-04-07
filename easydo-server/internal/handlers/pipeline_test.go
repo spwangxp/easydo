@@ -458,7 +458,7 @@ func TestValidateDAG(t *testing.T) {
 			expectErr:   "流水线配置无效：节点列表为空",
 		},
 		{
-			name: "invalid - multiple disconnected nodes",
+			name: "invalid - multiple nodes without edges",
 			config: PipelineConfig{
 				Version: "2.0",
 				Nodes: []PipelineNode{
@@ -544,7 +544,7 @@ func TestValidateDAG(t *testing.T) {
 			expectErr:   "流水线配置无效：存在孤立节点（未连接到依赖图）: [3]",
 		},
 		{
-			name: "invalid - disconnected components without edges",
+			name: "invalid - disconnected components",
 			config: PipelineConfig{
 				Version: "2.0",
 				Nodes: []PipelineNode{
@@ -692,9 +692,7 @@ func TestValidatePipelineCredentialBindings_UnknownSlot(t *testing.T) {
 				Type: "git_clone",
 				Name: "Clone",
 				Config: map[string]interface{}{
-					"repository": map[string]interface{}{
-						"url": "https://example.com/repo.git",
-					},
+					"git_repo_url": "https://example.com/repo.git",
 					"credentials": map[string]interface{}{
 						"unknown_slot": map[string]interface{}{
 							"credential_id": 1,
@@ -748,7 +746,7 @@ func TestValidatePipelineCredentialBindings_CategoryMismatch(t *testing.T) {
 			Type: "git_clone",
 			Name: "Clone",
 			Config: map[string]interface{}{
-				"repository": map[string]interface{}{"url": "https://example.com/repo.git"},
+				"git_repo_url": "https://example.com/repo.git",
 				"credentials": map[string]interface{}{
 					"repo_auth": map[string]interface{}{"credential_id": credential.ID},
 				},
@@ -784,7 +782,6 @@ func TestValidatePipelineCredentialBindings_RejectsMissingPayloadForType(t *test
 		WorkspaceID:      workspace.ID,
 		OwnerID:          user.ID,
 		EncryptedPayload: encrypted,
-		Status:           models.CredentialStatusActive,
 	}
 	if err := db.Create(&credential).Error; err != nil {
 		t.Fatalf("create credential failed: %v", err)
@@ -798,7 +795,7 @@ func TestValidatePipelineCredentialBindings_RejectsMissingPayloadForType(t *test
 			Type: "git_clone",
 			Name: "Clone",
 			Config: map[string]interface{}{
-				"repository": map[string]interface{}{"url": "https://example.com/repo.git"},
+				"git_repo_url": "https://example.com/repo.git",
 				"credentials": map[string]interface{}{
 					"repo_auth": map[string]interface{}{"credential_id": credential.ID},
 				},
@@ -814,12 +811,78 @@ func TestValidatePipelineCredentialBindings_RejectsMissingPayloadForType(t *test
 	}
 }
 
+// Regression test: validatePipelineCredentialBindings must process flat-key bindings
+// (e.g. "credentials.repo_auth.credential_id") correctly. Before the fix, the flat
+// keys were never expanded, causing the validation to find no bindings at all and
+// skip required slot checks.
+func TestValidatePipelineCredentialBindings_FlatKeyBindings(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "flat-key-validate-user", models.WorkspaceRoleDeveloper)
+	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{
+		"token":      "ghp_flat_key_validation",
+		"token_type": "bearer",
+		"username":   "oauth2",
+	})
+	if err != nil {
+		t.Fatalf("encrypt payload failed: %v", err)
+	}
+	credential := models.Credential{
+		Name:             "flat-key-validation-repo-auth",
+		Type:             models.TypeToken,
+		Category:         models.CategoryGitHub,
+		Scope:            models.ScopeWorkspace,
+		WorkspaceID:      workspace.ID,
+		OwnerID:          user.ID,
+		EncryptedPayload: encrypted,
+		Status:           models.CredentialStatusActive,
+	}
+	if err := db.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential failed: %v", err)
+	}
+
+	handler := &PipelineHandler{DB: db}
+	// Flat-key format: this is the EXACT DB shape that previously caused the
+	// expandFlatCredentialBindings bug to bypass all validation.
+	config := PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{{
+			ID:   "1",
+			Type: "git_clone",
+			Name: "Clone",
+			Config: map[string]interface{}{
+				"git_repo_url": "https://example.com/repo.git",
+				// Flat key format — NOT nested
+				"credentials.repo_auth.credential_id": credential.ID,
+			},
+		}},
+	}
+
+	refs, err := handler.validatePipelineCredentialBindings(&config, user.ID, "user", 0, workspace.ID)
+	if err != nil {
+		t.Fatalf("validatePipelineCredentialBindings failed with flat keys: %v", err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 credential ref, got %d", len(refs))
+	}
+	if refs[0].CredentialSlot != "repo_auth" {
+		t.Fatalf("expected slot repo_auth, got %s", refs[0].CredentialSlot)
+	}
+	if refs[0].CredentialID != credential.ID {
+		t.Fatalf("expected credential_id=%d, got %d", credential.ID, refs[0].CredentialID)
+	}
+}
+
 func TestParseAndValidatePipelineConfig_NormalizesTaskType(t *testing.T) {
 	handler := &PipelineHandler{}
 	raw := `{
 		"version":"2.0",
 		"nodes":[
-			{"id":"1","type":"github","name":"Clone","config":{"repository":{"url":"https://example.com/repo.git"}}}
+			{"id":"1","type":"github","name":"Clone","task_version":1,"params":[{"key":"git_repo_url","label":"Repo","value":"https://example.com/repo.git","is_flexible":false}]}
 		],
 		"edges":[]
 	}`
@@ -836,6 +899,391 @@ func TestParseAndValidatePipelineConfig_NormalizesTaskType(t *testing.T) {
 	}
 	if config.Nodes[0].Type != "git_clone" {
 		t.Fatalf("expected normalized type git_clone, got %s", config.Nodes[0].Type)
+	}
+	if config.Nodes[0].TaskKey != "git_clone" {
+		t.Fatalf("expected normalized task_key git_clone, got %s", config.Nodes[0].TaskKey)
+	}
+	if config.Nodes[0].TaskVersion != 1 {
+		t.Fatalf("expected task_version=1, got %d", config.Nodes[0].TaskVersion)
+	}
+	if len(config.Nodes[0].DefinitionParams) != 1 {
+		t.Fatalf("expected definition params preserved, got %#v", config.Nodes[0].DefinitionParams)
+	}
+}
+
+func TestParseAndValidatePipelineConfig_RejectsUnknownParamKey(t *testing.T) {
+	handler := &PipelineHandler{}
+	raw := `{
+		"version":"2.0",
+		"nodes":[
+			{"id":"1","type":"git_clone","name":"Clone","task_version":1,"params":[{"key":"unknown_param","label":"Unknown","value":"x","is_flexible":false}]}
+		],
+		"edges":[]
+	}`
+
+	_, _, errMsg, err := handler.parseAndValidatePipelineConfig(raw, 0, "", 0, 0)
+	if err == nil {
+		t.Fatalf("expected validation failure for unknown param key")
+	}
+	if !strings.Contains(errMsg, "参数 key 'unknown_param'") {
+		t.Fatalf("unexpected error message: %s", errMsg)
+	}
+}
+
+func TestCreatePipelineRunRecordWithSnapshot_StoresNewRunContractSnapshots(t *testing.T) {
+	db := openHandlerTestDB(t)
+	handler := &PipelineHandler{DB: db}
+	pipeline := models.Pipeline{
+		Name:        "typed-pipeline",
+		WorkspaceID: 99,
+		OwnerID:     7,
+		Definition:  `{"nodes":[{"node_id":"node_1"}]}`,
+		Version:     3,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	config := PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{{
+			ID:          "node_1",
+			Type:        "shell",
+			TaskKey:     "shell",
+			TaskVersion: 1,
+			Name:        "Shell",
+			DefinitionParams: []models.PipelineDefinitionParam{{
+				Key:        "script",
+				Label:      "脚本",
+				Value:      "echo hi",
+				IsFlexible: true,
+			}},
+		}},
+	}
+
+	run, _, err := handler.createPipelineRunRecordWithSnapshot(db, pipeline, config, pipelineRunTriggerContext{
+		TriggerType:     "manual",
+		TriggerSource:   "pipeline_detail",
+		TriggerUser:     "admin",
+		TriggerUserID:   7,
+		TriggerUserRole: "admin",
+		RunConfig: models.PipelineRunConfigSnapshot{
+			Trigger: models.PipelineRunTriggerSnapshot{Type: "manual", Source: "pipeline_detail", Operator: "admin"},
+			Inputs: map[string]map[string]interface{}{
+				"node_1": {"script": "echo override"},
+			},
+			Options: map[string]interface{}{"dry_run": false},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	if run.RunConfig == "" || run.PipelineSnapshot == "" || run.ResolvedNodes == "" || run.Outputs == "" || run.Events == "" {
+		t.Fatalf("expected new run snapshot columns to be populated, got run=%+v", run)
+	}
+	if run.Config == "" || run.Config == run.PipelineSnapshot {
+		t.Fatalf("expected legacy execution config snapshot to be populated separately from authored pipeline snapshot")
+	}
+
+	var runConfigSnapshot models.PipelineRunConfigSnapshot
+	if err := json.Unmarshal([]byte(run.RunConfig), &runConfigSnapshot); err != nil {
+		t.Fatalf("unmarshal run config failed: %v", err)
+	}
+	if runConfigSnapshot.Trigger.Type != "manual" {
+		t.Fatalf("expected trigger type manual, got %+v", runConfigSnapshot.Trigger)
+	}
+	if runConfigSnapshot.Inputs["node_1"]["script"] != "echo override" {
+		t.Fatalf("expected node-scoped inputs to be stored, got %#v", runConfigSnapshot.Inputs)
+	}
+
+	var pipelineSnapshot PipelineConfig
+	if err := json.Unmarshal([]byte(run.PipelineSnapshot), &pipelineSnapshot); err != nil {
+		t.Fatalf("unmarshal pipeline snapshot failed: %v", err)
+	}
+	if len(pipelineSnapshot.Nodes) != 1 || pipelineSnapshot.Nodes[0].TaskKey != "shell" {
+		t.Fatalf("expected pipeline snapshot to preserve task key, got %#v", pipelineSnapshot.Nodes)
+	}
+}
+
+func TestCreatePipelineRunRecordWithSnapshot_DeploymentExecutionConfigDoesNotMutateAuthoredSnapshot(t *testing.T) {
+	db := openHandlerTestDB(t)
+	handler := &PipelineHandler{DB: db}
+	pipeline := models.Pipeline{
+		Name:        "deployment-authored-snapshot",
+		WorkspaceID: 77,
+		OwnerID:     9,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	authored := PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{{
+			ID:      "deploy",
+			Type:    "shell",
+			TaskKey: "shell",
+			Name:    "Deploy",
+			Config: map[string]interface{}{
+				"script": "echo ${inputs.app_name}",
+				"host":   "${inputs.resource_host}",
+			},
+		}},
+	}
+	execution := clonePipelineConfig(authored)
+	execution.Nodes[0].Config["script"] = "echo nginx-web"
+	execution.Nodes[0].Config["host"] = "10.0.0.8"
+
+	run, _, err := handler.createPipelineRunRecordWithSnapshot(db, pipeline, authored, pipelineRunTriggerContext{
+		TriggerType:     pipelineRunTriggerTypeDeploymentRequest,
+		TriggerUser:     "release-bot",
+		TriggerUserID:   9,
+		TriggerUserRole: "developer",
+		RunConfig: models.PipelineRunConfigSnapshot{
+			Inputs: map[string]map[string]interface{}{
+				"deploy": {
+					"app_name":      "nginx-web",
+					"resource_host": "10.0.0.8",
+				},
+			},
+		},
+		ExecutionConfig: &execution,
+	})
+	if err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	var snapshot PipelineConfig
+	if err := json.Unmarshal([]byte(run.PipelineSnapshot), &snapshot); err != nil {
+		t.Fatalf("unmarshal pipeline snapshot failed: %v", err)
+	}
+	if got := snapshot.Nodes[0].Config["script"]; got != "echo ${inputs.app_name}" {
+		t.Fatalf("expected authored snapshot script, got %#v", got)
+	}
+	if got := snapshot.Nodes[0].Config["host"]; got != "${inputs.resource_host}" {
+		t.Fatalf("expected authored snapshot host, got %#v", got)
+	}
+
+	var legacyExecution PipelineConfig
+	if err := json.Unmarshal([]byte(run.Config), &legacyExecution); err != nil {
+		t.Fatalf("unmarshal execution config failed: %v", err)
+	}
+	if got := legacyExecution.Nodes[0].Config["script"]; got != "echo nginx-web" {
+		t.Fatalf("expected resolved execution script, got %#v", got)
+	}
+	if got := legacyExecution.Nodes[0].Config["host"]; got != "10.0.0.8" {
+		t.Fatalf("expected resolved execution host, got %#v", got)
+	}
+}
+
+func TestCreatePipelineRunRecordWithSnapshot_PopulatesBindingsResolvedNodesAndLifecycleEvents(t *testing.T) {
+	db := openHandlerTestDB(t)
+	handler := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "run-contract-user", models.WorkspaceRoleDeveloper)
+
+	encrypted, err := NewCredentialHandler().encryptionService.EncryptCredentialData(map[string]interface{}{
+		"token":      "ghp_pipeline_token",
+		"token_type": "bearer",
+		"username":   "oauth2",
+	})
+	if err != nil {
+		t.Fatalf("encrypt payload failed: %v", err)
+	}
+	credential := models.Credential{
+		Name:             "repo-auth",
+		Type:             models.TypeToken,
+		Category:         models.CategoryGitHub,
+		Scope:            models.ScopeWorkspace,
+		WorkspaceID:      workspace.ID,
+		OwnerID:          user.ID,
+		EncryptedPayload: encrypted,
+		Status:           models.CredentialStatusActive,
+	}
+	if err := db.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential failed: %v", err)
+	}
+
+	resource := models.Resource{
+		WorkspaceID: workspace.ID,
+		Name:        "prod-vm-01",
+		Type:        models.ResourceTypeVM,
+		Environment: "production",
+		Status:      models.ResourceStatusOnline,
+		Endpoint:    "10.0.0.8:22",
+		CreatedBy:   user.ID,
+	}
+	if err := db.Create(&resource).Error; err != nil {
+		t.Fatalf("create resource failed: %v", err)
+	}
+
+	pipeline := models.Pipeline{
+		Name:        "run-contract-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Version:     5,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	config := PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{
+				ID:          "node_1",
+				Name:        "Clone",
+				Type:        "git_clone",
+				TaskKey:     "git_clone",
+				TaskVersion: 1,
+				DefinitionParams: []models.PipelineDefinitionParam{
+					{Key: "git_repo_url", Value: "https://example.com/repo.git", IsFlexible: false},
+					{Key: "git_ref", Value: "main", IsFlexible: true},
+				},
+				CredentialBindings: map[string]uint64{"repo_auth": credential.ID},
+				Metadata:           map[string]interface{}{"x": 100.0, "y": 120.0},
+			},
+			{
+				ID:          "node_2",
+				Name:        "Deploy",
+				Type:        "docker-run",
+				TaskKey:     "docker-run",
+				TaskVersion: 1,
+				DefinitionParams: []models.PipelineDefinitionParam{
+					{Key: "image", Value: "nginx:latest", IsFlexible: false},
+					{Key: "target_resource_id", Value: resource.ID, IsFlexible: false},
+				},
+				ResourceBindings: map[string]uint64{"target_resource_id": resource.ID},
+				Metadata:         map[string]interface{}{"x": 420.0, "y": 120.0},
+			},
+		},
+		Edges: []PipelineEdge{{From: "node_1", To: "node_2"}},
+		Triggers: []map[string]interface{}{
+			{"type": "manual", "enabled": true},
+		},
+		Metadata: map[string]interface{}{"version": "2.0"},
+	}
+
+	run, _, err := handler.createPipelineRunRecordWithSnapshot(db, pipeline, config, pipelineRunTriggerContext{
+		TriggerType:     "manual",
+		TriggerSource:   "pipeline_detail",
+		TriggerUser:     "admin",
+		TriggerUserID:   user.ID,
+		TriggerUserRole: "developer",
+		RunConfig: models.PipelineRunConfigSnapshot{
+			Trigger: models.PipelineRunTriggerSnapshot{Type: "manual", Source: "pipeline_detail", Operator: "admin"},
+			Inputs: map[string]map[string]interface{}{
+				"node_1": {"git_ref": "release/2026.04"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	var resolvedNodes []map[string]interface{}
+	if err := json.Unmarshal([]byte(run.ResolvedNodes), &resolvedNodes); err != nil {
+		t.Fatalf("unmarshal resolved nodes failed: %v", err)
+	}
+	if len(resolvedNodes) != 2 {
+		t.Fatalf("expected resolved node skeletons for all nodes, got %#v", resolvedNodes)
+	}
+	if resolvedNodes[0]["task_key"] == nil || resolvedNodes[0]["status"] == nil {
+		t.Fatalf("expected resolved node skeleton to include task_key and status, got %#v", resolvedNodes[0])
+	}
+
+	var bindings map[string]interface{}
+	if err := json.Unmarshal([]byte(run.BindingsSnapshot), &bindings); err != nil {
+		t.Fatalf("unmarshal bindings snapshot failed: %v", err)
+	}
+	credentials, _ := bindings["credentials"].(map[string]interface{})
+	nodeCredentials, _ := credentials["node_1"].(map[string]interface{})
+	repoAuth, _ := nodeCredentials["repo_auth"].(map[string]interface{})
+	if repoAuth["credential_id"] != float64(credential.ID) || repoAuth["credential_name"] != credential.Name {
+		t.Fatalf("expected credential binding snapshot for node_1, got %#v", repoAuth)
+	}
+	resources, _ := bindings["resources"].(map[string]interface{})
+	nodeResources, _ := resources["node_2"].(map[string]interface{})
+	targetResource, _ := nodeResources["target_resource_id"].(map[string]interface{})
+	if targetResource["resource_id"] != float64(resource.ID) || targetResource["resource_name"] != resource.Name {
+		t.Fatalf("expected resource binding snapshot for node_2, got %#v", targetResource)
+	}
+
+	var events []map[string]interface{}
+	if err := json.Unmarshal([]byte(run.Events), &events); err != nil {
+		t.Fatalf("unmarshal events failed: %v", err)
+	}
+	if len(events) < 2 {
+		t.Fatalf("expected lifecycle events to include run_created and run_started/run_queued, got %#v", events)
+	}
+	if events[0]["event_type"] != "run_created" {
+		t.Fatalf("expected first event run_created, got %#v", events)
+	}
+}
+
+func TestGetRunDetail_PrefersRunRecordResolvedNodesAndOutputs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "run-detail-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{
+		Name:        "run-detail-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Config:      `{"version":"2.0","nodes":[{"id":"node_1","type":"shell","name":"Build","config":{"script":"echo hi"}}],"edges":[]}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	resolvedNodesJSON := `[{"node_id":"node_1","task_type":"shell","name":"Build","config":{"script":"echo resolved"}}]`
+	outputsJSON := `{"node_1":{"status":"execute_success","exit_code":0,"commit_sha":"run-record-commit"}}`
+	run := models.PipelineRun{
+		WorkspaceID:      workspace.ID,
+		PipelineID:       pipeline.ID,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusSuccess,
+		TriggerType:      "manual",
+		Config:           pipeline.Config,
+		PipelineSnapshot: pipeline.Config,
+		ResolvedNodes:    resolvedNodesJSON,
+		Outputs:          outputsJSON,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	task := models.AgentTask{
+		WorkspaceID:   workspace.ID,
+		AgentID:       1,
+		PipelineRunID: run.ID,
+		NodeID:        "node_1",
+		TaskType:      "shell",
+		Name:          "Build",
+		Status:        models.TaskStatusExecuteSuccess,
+		ResultData:    `{"commit_sha":"task-row-commit"}`,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/pipelines/1/runs/1", nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}, {Key: "run_id", Value: strconv.FormatUint(run.ID, 10)}}
+	c.Set("workspace_id", workspace.ID)
+
+	h.GetRunDetail(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"resolved_nodes_json":[{"config":{"script":"echo resolved"},"name":"Build","node_id":"node_1","task_type":"shell"}]`)) {
+		t.Fatalf("expected resolved_nodes_json response to use run record payload, got %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"outputs_json":{"node_1":{"commit_sha":"run-record-commit","exit_code":0,"status":"execute_success"}}`)) {
+		t.Fatalf("expected outputs_json response to use run record payload, got %s", w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("task-row-commit")) {
+		t.Fatalf("expected run detail to avoid task result_data as truth, got %s", w.Body.String())
 	}
 }
 
@@ -919,6 +1367,58 @@ func TestCreatePipeline_WithoutProjectIDStoresNullProject(t *testing.T) {
 	}
 	if projectID.Valid {
 		t.Fatalf("expected project_id to be NULL, got %d", projectID.Int64)
+	}
+}
+
+func TestCreatePipeline_PersistsDefinitionJSONAsSourceOfTruth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "create-definition-pipeline", models.WorkspaceRoleDeveloper)
+
+	body := bytes.NewBufferString(`{
+		"name":"definition-pipeline",
+		"environment":"development",
+		"config":"{\"version\":\"2.0\",\"nodes\":[{\"id\":\"legacy\",\"type\":\"shell\",\"name\":\"Legacy\",\"config\":{\"script\":\"echo legacy\"}}],\"edges\":[]}",
+		"definition_json":"{\"version\":\"2.0\",\"nodes\":[{\"node_id\":\"node_1\",\"node_name\":\"Build\",\"task_key\":\"shell\",\"task_version\":1,\"params\":[{\"key\":\"script\",\"label\":\"脚本\",\"value\":\"echo definition\",\"is_flexible\":true}],\"credential_bindings\":{},\"resource_bindings\":{},\"metadata\":{\"x\":120,\"y\":220}}],\"edges\":[],\"triggers\":[],\"metadata\":{\"version\":\"2.0\"}}"
+	}`)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/pipelines", body)
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+	c.Set("workspace_id", workspace.ID)
+
+	h.CreatePipeline(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var pipeline models.Pipeline
+	if err := db.Where("name = ?", "definition-pipeline").First(&pipeline).Error; err != nil {
+		t.Fatalf("load pipeline failed: %v", err)
+	}
+	if strings.TrimSpace(pipeline.Definition) == "" {
+		t.Fatalf("expected definition_json to be persisted")
+	}
+
+	var definition PipelineConfig
+	if err := json.Unmarshal([]byte(pipeline.Definition), &definition); err != nil {
+		t.Fatalf("unmarshal definition failed: %v", err)
+	}
+	if len(definition.Nodes) != 1 {
+		t.Fatalf("expected one definition node, got %#v", definition.Nodes)
+	}
+	if definition.Nodes[0].ID != "node_1" {
+		t.Fatalf("expected node_id to normalize to node_1, got %#v", definition.Nodes[0].ID)
+	}
+	if definition.Nodes[0].TaskKey != "shell" {
+		t.Fatalf("expected task_key=shell, got %#v", definition.Nodes[0].TaskKey)
+	}
+	if len(definition.Nodes[0].DefinitionParams) != 1 || definition.Nodes[0].DefinitionParams[0].Value != "echo definition" {
+		t.Fatalf("expected authored params to be preserved, got %#v", definition.Nodes[0].DefinitionParams)
 	}
 }
 
@@ -1385,16 +1885,44 @@ func TestHandleGitLabWebhook_PushCreatesQueuedWebhookRun(t *testing.T) {
 		t.Fatalf("trigger_source=%s, want gitlab:push metadata", run.TriggerSource)
 	}
 
-	var configSnapshot PipelineConfig
-	if err := json.Unmarshal([]byte(run.Config), &configSnapshot); err != nil {
+	var runConfig models.PipelineRunConfigSnapshot
+	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
 		t.Fatalf("unmarshal run config failed: %v", err)
 	}
-	repo, _ := configSnapshot.Nodes[0].Config["repository"].(map[string]interface{})
-	if repo["branch"] != "main" {
-		t.Fatalf("branch override=%v, want main", repo["branch"])
+	if runConfig.Inputs["1"]["git_ref"] != "main" {
+		t.Fatalf("expected webhook git_ref runtime input, got %#v", runConfig.Inputs)
 	}
-	if repo["commit_id"] != "abc123def456" {
-		t.Fatalf("commit override=%v, want abc123def456", repo["commit_id"])
+	if runConfig.Inputs["1"]["git_commit"] != "abc123def456" {
+		t.Fatalf("expected webhook git_commit runtime input, got %#v", runConfig.Inputs)
+	}
+
+	var pipelineSnapshot PipelineConfig
+	if err := json.Unmarshal([]byte(run.PipelineSnapshot), &pipelineSnapshot); err != nil {
+		t.Fatalf("unmarshal pipeline snapshot failed: %v", err)
+	}
+	if len(pipelineSnapshot.Nodes[0].DefinitionParams) == 0 {
+		t.Fatalf("expected pipeline snapshot to preserve authored params, got %#v", pipelineSnapshot.Nodes[0])
+	}
+	authoredParams := map[string]interface{}{}
+	for _, param := range pipelineSnapshot.Nodes[0].DefinitionParams {
+		authoredParams[param.Key] = param.Value
+	}
+	if authoredParams["git_ref"] != "main" {
+		t.Fatalf("pipeline snapshot git_ref=%v, want authored main", authoredParams["git_ref"])
+	}
+	if _, exists := authoredParams["git_commit"]; exists && strings.TrimSpace(toString(authoredParams["git_commit"])) != "" {
+		t.Fatalf("expected pipeline snapshot to avoid patched git_commit, got %#v", authoredParams)
+	}
+
+	var executionConfig PipelineConfig
+	if err := json.Unmarshal([]byte(run.Config), &executionConfig); err != nil {
+		t.Fatalf("unmarshal execution config failed: %v", err)
+	}
+	if executionConfig.Nodes[0].Config["git_ref"] != "main" {
+		t.Fatalf("execution git_ref=%v, want main", executionConfig.Nodes[0].Config["git_ref"])
+	}
+	if executionConfig.Nodes[0].Config["git_commit"] != "abc123def456" {
+		t.Fatalf("execution commit=%v, want abc123def456", executionConfig.Nodes[0].Config["git_commit"])
 	}
 }
 

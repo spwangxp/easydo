@@ -21,7 +21,7 @@ func Init() {
 	Config.SetDefault("server.public_url", "")
 	Config.SetDefault("server.internal_url", "")
 	Config.SetDefault("server.internal_token", "")
-	Config.SetDefault("database.driver", "mysql")
+	Config.SetDefault("database.driver", "mariadb")
 	Config.SetDefault("database.port", 3306)
 	Config.SetDefault("database.max_open_conns", 100)
 	Config.SetDefault("database.max_idle_conns", 10)

@@ -11,7 +11,7 @@ import (
 // =============================================================================
 // 方式名称        | 核心原理              | 适用场景                    | 代表系统
 // ---------------|----------------------|---------------------------|---------------------------
-// 密码           | 知识因素             | 网页登录、旧版数据库       | GitLab, MySQL, Windows
+// 密码           | 知识因素             | 网页登录、旧版数据库       | GitLab, MariaDB, Windows
 // SSH 密钥       | 非对称加密           | 远程登录、Git 推送         | GitLab, GitHub, Linux Server
 // 个人访问令牌   | 短期/长期 Token      | API 调用、插件接入         | GitHub, GitLab, Jira, ADO
 // OAuth2/OIDC    | 代理授权/身份层      | 第三方登录、微服务交互     | Google, GitHub, AWS, Okta
@@ -31,7 +31,7 @@ const (
 	// TypePassword - 密码认证
 	// 核心原理：基于用户名+密码的知识因素认证
 	// 适用场景：传统数据库登录、旧系统集成、内部服务认证
-	// 典型系统：GitLab, MySQL, Windows Server, 企业内部系统
+	// 典型系统：GitLab, MariaDB, Windows Server, 企业内部系统
 	TypePassword CredentialType = "PASSWORD"
 
 	// TypeSSHKey - SSH 密钥对认证
@@ -265,7 +265,7 @@ type PasswordPayload struct {
 	Domain string `json:"domain,omitempty" validate:"max=256"`
 
 	// Port - 服务端口（可选）
-	// 用于指定特定的服务端口，如 MySQL(3306), PostgreSQL(5432)
+	// 用于指定特定的服务端口，如 MariaDB(3306), PostgreSQL(5432)
 	Port int `json:"port,omitempty" validate:"min=1,max=65535"`
 }
 

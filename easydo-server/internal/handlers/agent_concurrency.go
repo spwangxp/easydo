@@ -35,6 +35,9 @@ func selectAgentWithPipelineCapacity(db *gorm.DB, workspaceID uint64) uint64 {
 			models.AgentRegistrationStatusApproved,
 			[]string{models.AgentStatusOnline, models.AgentStatusBusy},
 		)
+	if workspaceID == 0 {
+		query = query.Where("agents.scope_type = ?", models.AgentScopePlatform)
+	}
 	if workspaceID > 0 {
 		query = query.Where("agents.scope_type = ? OR (agents.scope_type = ? AND agents.workspace_id = ?)", models.AgentScopePlatform, models.AgentScopeWorkspace, workspaceID)
 	}

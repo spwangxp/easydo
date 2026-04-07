@@ -10,9 +10,9 @@ func TestVariableResolver_ResolveVariables(t *testing.T) {
 
 	// Set up test data
 	resolver.SetTaskOutput("node1", map[string]interface{}{
-		"commit_id":       "abc123",
-		"short_commit_id": "abc123d",
-		"branch":          "main",
+		"git_commit":       "abc123",
+		"git_commit_short": "abc123d",
+		"git_ref":          "main",
 	})
 
 	resolver.SetEnvVars(map[string]string{
@@ -21,7 +21,7 @@ func TestVariableResolver_ResolveVariables(t *testing.T) {
 	})
 
 	resolver.SetInputs(map[string]interface{}{
-		"repository_url": "git@github.com:test/repo.git",
+		"git_repo_url": "git@github.com:test/repo.git",
 	})
 
 	resolver.SetSecrets(map[string]string{
@@ -35,7 +35,7 @@ func TestVariableResolver_ResolveVariables(t *testing.T) {
 	}{
 		{
 			name:     "output variable",
-			input:    "Commit: ${outputs.node1.commit_id}",
+			input:    "Commit: ${outputs.node1.git_commit}",
 			expected: "Commit: abc123",
 		},
 		{
@@ -45,7 +45,7 @@ func TestVariableResolver_ResolveVariables(t *testing.T) {
 		},
 		{
 			name:     "input variable",
-			input:    "Repo: ${inputs.repository_url}",
+			input:    "Repo: ${inputs.git_repo_url}",
 			expected: "Repo: git@github.com:test/repo.git",
 		},
 		{
@@ -55,7 +55,7 @@ func TestVariableResolver_ResolveVariables(t *testing.T) {
 		},
 		{
 			name:     "multiple variables",
-			input:    "Build #${env.BUILD_NUMBER} commit ${outputs.node1.short_commit_id}",
+			input:    "Build #${env.BUILD_NUMBER} commit ${outputs.node1.git_commit_short}",
 			expected: "Build #42 commit abc123d",
 		},
 		{
@@ -88,8 +88,8 @@ func TestVariableResolver_ResolveNodeConfig(t *testing.T) {
 	resolver := NewVariableResolver()
 
 	resolver.SetTaskOutput("git_clone", map[string]interface{}{
-		"commit_id":       "abc123def",
-		"short_commit_id": "abc123d",
+		"git_commit":       "abc123def",
+		"git_commit_short": "abc123d",
 	})
 
 	resolver.SetEnvVars(map[string]string{
@@ -98,9 +98,9 @@ func TestVariableResolver_ResolveNodeConfig(t *testing.T) {
 
 	config := map[string]interface{}{
 		"image_name": "myapp",
-		"image_tag":  "${outputs.git_clone.short_commit_id}",
+		"image_tag":  "${outputs.git_clone.git_commit_short}",
 		"build_args": map[string]interface{}{
-			"COMMIT_ID":    "${outputs.git_clone.commit_id}",
+			"COMMIT_ID":    "${outputs.git_clone.git_commit}",
 			"BUILD_NUMBER": "${env.BUILD_NUMBER}",
 		},
 	}

@@ -352,10 +352,18 @@ func (h *TaskHandler) GetTaskLogs(c *gin.Context) {
 	workspaceID := c.GetUint64("workspace_id")
 
 	var task models.AgentTask
-	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&task, id).Error; err != nil {
+	if err := h.DB.First(&task, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    404,
 			"message": "任务不存在",
+		})
+		return
+	}
+
+	if task.WorkspaceID != workspaceID {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "无权访问此任务",
 		})
 		return
 	}

@@ -1,0 +1,58 @@
+{{- if .Values.mariadb.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "easydo.mariadbFullname" . }}-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.mariadb.persistence.size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "easydo.mariadbFullname" . }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "easydo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mariadb
+  template:
+    metadata:
+      labels:
+        {{- include "easydo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mariadb
+    spec:
+      containers:
+        - name: mariadb
+          image: "{{ .Values.mariadb.image.repository }}:{{ .Values.mariadb.image.tag }}"
+          imagePullPolicy: {{ .Values.mariadb.image.pullPolicy }}
+          env:
+            - name: MARIADB_ROOT_PASSWORD
+              value: {{ .Values.mariadb.auth.rootPassword | quote }}
+            - name: MARIADB_DATABASE
+              value: {{ .Values.mariadb.auth.database | quote }}
+          ports:
+            - containerPort: {{ .Values.mariadb.service.port }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "easydo.mariadbFullname" . }}-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "easydo.mariadbFullname" . }}
+spec:
+  selector:
+    {{- include "easydo.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mariadb
+  ports:
+    - port: {{ .Values.mariadb.service.port }}
+      targetPort: {{ .Values.mariadb.service.port }}
+{{- end }}

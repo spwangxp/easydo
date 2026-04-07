@@ -2,10 +2,17 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestProxyClient_SubscribeUnsubscribe(t *testing.T) {
@@ -13,9 +20,9 @@ func TestProxyClient_SubscribeUnsubscribe(t *testing.T) {
 	client := &proxyClient{
 		targetServerID:  "srv-remote-1",
 		targetServerURL: "http://192.168.1.100:8080",
-		selfID:         "srv-local",
-		selfURL:        "http://192.168.1.1:8080",
-		subscriptions:  make(map[uint64]map[string]bool),
+		selfID:          "srv-local",
+		selfURL:         "http://192.168.1.1:8080",
+		subscriptions:   make(map[uint64]map[string]bool),
 	}
 
 	// Test initial state
@@ -23,7 +30,7 @@ func TestProxyClient_SubscribeUnsubscribe(t *testing.T) {
 	assert.Empty(t, client.subscriptions)
 
 	// Test Subscribe
-	err := client.Subscribe(nil, 100, "frontend-client-1")
+	err := client.Subscribe(context.TODO(), 100, "frontend-client-1")
 	assert.NoError(t, err)
 
 	client.subMu.RLock()
@@ -34,8 +41,8 @@ func TestProxyClient_SubscribeUnsubscribe(t *testing.T) {
 	assert.Equal(t, 1, client.refCount)
 	client.refCountMu.Unlock()
 
-	// Subscribe same task, different frontend
-	err = client.Subscribe(nil, 100, "frontend-client-2")
+	// Subscribe same run, different frontend
+	err = client.Subscribe(context.TODO(), 100, "frontend-client-2")
 	assert.NoError(t, err)
 
 	client.subMu.RLock()
@@ -46,16 +53,16 @@ func TestProxyClient_SubscribeUnsubscribe(t *testing.T) {
 	assert.Equal(t, 2, client.refCount)
 	client.refCountMu.Unlock()
 
-	// Subscribe different task
-	err = client.Subscribe(nil, 200, "frontend-client-1")
+	// Subscribe different run
+	err = client.Subscribe(context.TODO(), 200, "frontend-client-1")
 	assert.NoError(t, err)
 
 	client.refCountMu.Lock()
 	assert.Equal(t, 3, client.refCount)
 	client.refCountMu.Unlock()
 
-	// Test Unsubscribe - remove one frontend from task 100
-	client.Unsubscribe(nil, 100, "frontend-client-1")
+	// Test Unsubscribe - remove one frontend from run 100
+	client.Unsubscribe(context.TODO(), 100, "frontend-client-1")
 
 	client.subMu.RLock()
 	assert.Len(t, client.subscriptions[100], 1)
@@ -66,15 +73,15 @@ func TestProxyClient_SubscribeUnsubscribe(t *testing.T) {
 	assert.Equal(t, 2, client.refCount)
 	client.refCountMu.Unlock()
 
-	// Unsubscribe remaining frontend from task 100 - task should be removed
-	client.Unsubscribe(nil, 100, "frontend-client-2")
+	// Unsubscribe remaining frontend from run 100 - run should be removed
+	client.Unsubscribe(context.TODO(), 100, "frontend-client-2")
 
 	client.subMu.RLock()
 	_, exists := client.subscriptions[100]
 	assert.False(t, exists)
 	client.subMu.RUnlock()
 
-	// refCount should be 1 now (only task 200 remains)
+	// refCount should be 1 now (only run 200 remains)
 	client.refCountMu.Lock()
 	assert.Equal(t, 1, client.refCount)
 	client.refCountMu.Unlock()
@@ -84,8 +91,8 @@ func TestProxyClient_CloseTimer(t *testing.T) {
 	client := &proxyClient{
 		targetServerID:  "srv-remote-1",
 		targetServerURL: "http://192.168.1.100:8080",
-		subscriptions:  make(map[uint64]map[string]bool),
-		refCount:       1,
+		subscriptions:   make(map[uint64]map[string]bool),
+		refCount:        1,
 	}
 
 	// Start close timer
@@ -133,7 +140,7 @@ func TestProxyClient_Close(t *testing.T) {
 	client := &proxyClient{
 		targetServerID:  "srv-remote-1",
 		targetServerURL: "http://192.168.1.100:8080",
-		subscriptions:  make(map[uint64]map[string]bool),
+		subscriptions:   make(map[uint64]map[string]bool),
 		onDisconnect: func(serverID string) {
 			assert.Equal(t, "srv-remote-1", serverID)
 			disconnected = true
@@ -170,46 +177,141 @@ func TestBroadcastToProxyFrontends_Empty(t *testing.T) {
 	handler.proxyFrontends = make(map[string]map[string]*proxyFrontendClient)
 
 	// Should not panic with empty proxy frontends
-	handler.broadcastToProxyFrontends(123, 456, map[string]interface{}{
+	handler.broadcastToProxyFrontends(456, "task_log", map[string]any{
 		"task_id": 123,
 		"run_id":  456,
 		"message": "test log",
 	})
 }
 
-func TestProxyFrontendClient_TasksMap(t *testing.T) {
-	client := &proxyFrontendClient{
-		originServer: "srv-remote-1",
-		originURL:    "http://192.168.1.100:8080",
-		tasks:       make(map[uint64]bool),
+func TestProxyFrontendClient_RunsMap(t *testing.T) {
+	client := &proxyFrontendClient{runs: make(map[uint64]bool)}
+
+	// Initially no runs
+	client.runsMu.RLock()
+	assert.Empty(t, client.runs)
+	client.runsMu.RUnlock()
+
+	// Add runs
+	client.runsMu.Lock()
+	client.runs[100] = true
+	client.runs[200] = true
+	client.runsMu.Unlock()
+
+	client.runsMu.RLock()
+	assert.True(t, client.runs[100])
+	assert.True(t, client.runs[200])
+	assert.Len(t, client.runs, 2)
+	client.runsMu.RUnlock()
+
+	// Remove run
+	client.runsMu.Lock()
+	delete(client.runs, 100)
+	client.runsMu.Unlock()
+
+	client.runsMu.RLock()
+	assert.False(t, client.runs[100])
+	assert.True(t, client.runs[200])
+	client.runsMu.RUnlock()
+}
+
+func TestProxyClient_RouteRunScopedMessage(t *testing.T) {
+	serverConn, clientConn := newWebSocketPair(t)
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	handler := &WebSocketHandler{
+		frontends: map[string]map[string]*frontendClient{
+			"456": {
+				"frontend-client-1": {conn: serverConn, runID: "456"},
+			},
+		},
+	}
+	proxy := &proxyClient{
+		handlers:      handler,
+		subscriptions: map[uint64]map[string]bool{456: {"frontend-client-1": true}},
 	}
 
-	// Initially no tasks
-	client.tasksMu.RLock()
-	assert.Empty(t, client.tasks)
-	client.tasksMu.RUnlock()
+	proxy.routeRunScopedMessage("run_status", map[string]any{
+		"run_id": 456,
+		"status": "running",
+	})
 
-	// Add tasks
-	client.tasksMu.Lock()
-	client.tasks[100] = true
-	client.tasks[200] = true
-	client.tasksMu.Unlock()
+	_, raw, err := clientConn.ReadMessage()
+	require.NoError(t, err)
 
-	client.tasksMu.RLock()
-	assert.True(t, client.tasks[100])
-	assert.True(t, client.tasks[200])
-	assert.Len(t, client.tasks, 2)
-	client.tasksMu.RUnlock()
+	var msg WebSocketMessage
+	require.NoError(t, json.Unmarshal(raw, &msg))
+	assert.Equal(t, "run_status", msg.Type)
+	assert.Equal(t, float64(456), msg.Payload["run_id"])
+	assert.Equal(t, "running", msg.Payload["status"])
+}
 
-	// Remove task
-	client.tasksMu.Lock()
-	delete(client.tasks, 100)
-	client.tasksMu.Unlock()
+func TestBroadcastToProxyFrontends_RunScoped(t *testing.T) {
+	serverConn1, clientConn1 := newWebSocketPair(t)
+	defer serverConn1.Close()
+	defer clientConn1.Close()
 
-	client.tasksMu.RLock()
-	assert.False(t, client.tasks[100])
-	assert.True(t, client.tasks[200])
-	client.tasksMu.RUnlock()
+	serverConn2, clientConn2 := newWebSocketPair(t)
+	defer serverConn2.Close()
+	defer clientConn2.Close()
+
+	handler := &WebSocketHandler{
+		proxyFrontends: map[string]map[string]*proxyFrontendClient{
+			"srv-1": {
+				"proxy-1": {conn: serverConn1, runs: map[uint64]bool{456: true}},
+			},
+			"srv-2": {
+				"proxy-2": {conn: serverConn2, runs: map[uint64]bool{999: true}},
+			},
+		},
+	}
+
+	handler.broadcastToProxyFrontends(456, "task_status", map[string]any{
+		"run_id":  456,
+		"task_id": 123,
+		"status":  "running",
+	})
+
+	_, raw, err := clientConn1.ReadMessage()
+	require.NoError(t, err)
+
+	var msg WebSocketMessage
+	require.NoError(t, json.Unmarshal(raw, &msg))
+	assert.Equal(t, "task_status", msg.Type)
+	assert.Equal(t, float64(456), msg.Payload["run_id"])
+	assert.Equal(t, float64(123), msg.Payload["task_id"])
+
+	_ = clientConn2.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	_, _, err = clientConn2.ReadMessage()
+	assert.Error(t, err)
+}
+
+func newWebSocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn) {
+	t.Helper()
+
+	serverConnCh := make(chan *websocket.Conn, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		require.NoError(t, err)
+		serverConnCh <- conn
+	}))
+	t.Cleanup(server.Close)
+
+	wsURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	wsURL.Scheme = "ws"
+
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
+	require.NoError(t, err)
+
+	select {
+	case serverConn := <-serverConnCh:
+		return serverConn, clientConn
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for websocket pair")
+		return nil, nil
+	}
 }
 
 func TestFindAgentServer_InvalidAgent(t *testing.T) {
@@ -229,4 +331,111 @@ func TestHandleProxyConnection_InvalidParams(t *testing.T) {
 	// Test HandleProxyConnection with invalid/missing parameters
 	// This is a handler function, so we can't easily unit test without HTTP request
 	// We just verify the function exists and has correct signature
+}
+
+func TestProxyClientOutgoingHeartbeatSendsPing(t *testing.T) {
+	originalInterval := proxyHeartbeatPingInterval
+	originalWait := proxyHeartbeatPongWait
+	proxyHeartbeatPingInterval = 25 * time.Millisecond
+	proxyHeartbeatPongWait = 100 * time.Millisecond
+	defer func() {
+		proxyHeartbeatPingInterval = originalInterval
+		proxyHeartbeatPongWait = originalWait
+	}()
+
+	pingReceived := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		conn.SetPingHandler(func(appData string) error {
+			select {
+			case pingReceived <- struct{}{}:
+			default:
+			}
+			return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+		})
+
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	client := &proxyClient{
+		targetServerID:  "srv-remote-1",
+		targetServerURL: server.URL,
+		selfID:          "srv-local",
+		selfURL:         "http://127.0.0.1:8080",
+		subscriptions:   make(map[uint64]map[string]bool),
+	}
+
+	err := client.dial(context.Background(), client.selfID, client.selfURL)
+	require.NoError(t, err)
+	defer client.close()
+
+	select {
+	case <-pingReceived:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected outgoing proxy heartbeat ping")
+	}
+}
+
+func TestHandleProxyConnectionHeartbeatSendsPing(t *testing.T) {
+	originalInterval := proxyHeartbeatPingInterval
+	originalWait := proxyHeartbeatPongWait
+	proxyHeartbeatPingInterval = 25 * time.Millisecond
+	proxyHeartbeatPongWait = 100 * time.Millisecond
+	defer func() {
+		proxyHeartbeatPingInterval = originalInterval
+		proxyHeartbeatPongWait = originalWait
+	}()
+
+	gin.SetMode(gin.TestMode)
+	handler := &WebSocketHandler{}
+	pingReceived := make(chan struct{}, 1)
+
+	router := gin.New()
+	router.GET("/ws/proxy", handler.HandleProxyConnection)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	wsURL.Scheme = "ws"
+	wsURL.Path = "/ws/proxy"
+	query := wsURL.Query()
+	query.Set("proxy", "true")
+	query.Set("origin_server", "srv-origin")
+	query.Set("origin_url", "http://origin.internal")
+	wsURL.RawQuery = query.Encode()
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	conn.SetPingHandler(func(appData string) error {
+		select {
+		case pingReceived <- struct{}{}:
+		default:
+		}
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+	})
+
+	go func() {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-pingReceived:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected incoming proxy heartbeat ping")
+	}
 }

@@ -298,26 +298,29 @@
             <template v-for="param in getNodeParams(selectedNode.type)" :key="param.key">
               <el-form-item 
                 :label="param.label" 
-                v-if="!param.show_if || selectedNode.params[param.show_if.key] === param.show_if.value"
+                v-if="isParamVisible(param, selectedNode)"
               >
                 <el-input 
                   v-if="param.type === 'text'"
-                  v-model="selectedNode.params[param.key]"
+                  :model-value="getNodeParamValue(selectedNode, param.key)"
                   :placeholder="param.placeholder"
+                  @update:model-value="setNodeParamValue(selectedNode, param.key, $event, param.label)"
                   @change="updateNode(selectedNode)"
                 />
                 <el-input 
                   v-else-if="param.type === 'textarea'"
-                  v-model="selectedNode.params[param.key]"
+                  :model-value="getNodeParamValue(selectedNode, param.key)"
                   type="textarea"
                   :rows="4"
                   :placeholder="param.placeholder"
+                  @update:model-value="setNodeParamValue(selectedNode, param.key, $event, param.label)"
                   @change="updateNode(selectedNode)"
                 />
                 <el-select 
                   v-else-if="param.type === 'select'"
-                  v-model="selectedNode.params[param.key]"
+                  :model-value="getNodeParamValue(selectedNode, param.key)"
                   :placeholder="param.placeholder"
+                  @update:model-value="setNodeParamValue(selectedNode, param.key, $event, param.label)"
                   @change="updateNode(selectedNode)"
                 >
                   <el-option 
@@ -329,19 +332,22 @@
                 </el-select>
                 <el-switch 
                   v-else-if="param.type === 'boolean'"
-                  v-model="selectedNode.params[param.key]"
+                  :model-value="Boolean(getNodeParamValue(selectedNode, param.key))"
+                  @update:model-value="setNodeParamValue(selectedNode, param.key, $event, param.label)"
                   @change="updateNode(selectedNode)"
                 />
                 <el-input-number 
                   v-else-if="param.type === 'number'"
-                  v-model="selectedNode.params[param.key]"
+                  :model-value="Number(getNodeParamValue(selectedNode, param.key) || 0)"
                   :min="param.min"
                   :max="param.max"
+                  @update:model-value="setNodeParamValue(selectedNode, param.key, $event, param.label)"
                   @change="updateNode(selectedNode)"
                 />
                 <el-checkbox-group
                   v-else-if="param.type === 'checkbox_group'"
-                  v-model="selectedNode.params[param.key]"
+                  :model-value="Array.isArray(getNodeParamValue(selectedNode, param.key)) ? getNodeParamValue(selectedNode, param.key) : []"
+                  @update:model-value="setNodeParamValue(selectedNode, param.key, $event, param.label)"
                   @change="updateNode(selectedNode)"
                 >
                   <el-checkbox
@@ -354,10 +360,11 @@
                 </el-checkbox-group>
                 <el-select
                   v-else-if="param.type === 'resource_selector'"
-                  v-model="selectedNode.params[param.key]"
+                  :model-value="getNodeParamValue(selectedNode, param.key)"
                   filterable
                   clearable
                   :placeholder="param.placeholder || '选择资源'"
+                  @update:model-value="setNodeParamValue(selectedNode, param.key, $event, param.label)"
                   @change="updateNode(selectedNode)"
                 >
                   <el-option
@@ -369,12 +376,22 @@
                 </el-select>
                 <CredentialSelector
                   v-else-if="param.type === 'credential_selector'"
-                  v-model="selectedNode.params[param.key]"
+                  :model-value="getNodeParamValue(selectedNode, param.key)"
                   :credential-type="param.credential_type"
                   :credential-category="param.credential_category"
+                  @update:model-value="setNodeParamValue(selectedNode, param.key, $event, param.label)"
                   @invalid-selection="handleInvalidCredentialSelection(param.label, $event)"
                   @change="updateNode(selectedNode)"
                 />
+                <div class="param-flex-row">
+                  <el-checkbox
+                    :model-value="isNodeParamFlexible(selectedNode, param.key)"
+                    @update:model-value="setNodeParamFlexible(selectedNode, param.key, $event, param.label)"
+                    @change="updateNode(selectedNode)"
+                  >
+                    手动运行可覆盖
+                  </el-checkbox>
+                </div>
               </el-form-item>
             </template>
           </el-form>
@@ -405,7 +422,7 @@
                     @click="copyToClipboard('${outputs.' + selectedNode.id + '.' + field.key + '}')"
                   >
                     <code class="output-key">${outputs.{{ selectedNode.id }}.{{ field.key }}}</code>
-                    <span class="output-desc">{{ field.desc }}</span>
+                     <span class="output-desc">{{ field.label || field.desc || '-' }}</span>
                   </div>
                 </div>
                 <div class="outputs-hint">
@@ -422,14 +439,15 @@
           <el-form label-position="top" size="small">
             <el-form-item
               v-for="slot in getNodeCredentialSlots(selectedNode.type)"
-              :key="slot.slot"
-              :label="`${slot.label || slot.slot}${slot.required ? '（必填）' : ''}`"
+              :key="slot.slot_key"
+              :label="`${slot.label || slot.slot_key}${slot.required ? '（必填）' : ''}`"
             >
               <CredentialSelector
-                v-model="selectedNode.params[`credentials.${slot.slot}.credential_id`]"
+                :model-value="getNodeParamValue(selectedNode, `credentials.${slot.slot_key}.credential_id`)"
                 :credential-types="slot.allowed_types || []"
                 :credential-categories="slot.allowed_categories || []"
-                @invalid-selection="handleInvalidCredentialSelection(slot.label || slot.slot, $event)"
+                @update:model-value="setNodeParamValue(selectedNode, `credentials.${slot.slot_key}.credential_id`, $event, slot.label || slot.slot_key)"
+                @invalid-selection="handleInvalidCredentialSelection(slot.label || slot.slot_key, $event)"
                 @change="updateNode(selectedNode)"
               />
             </el-form-item>
@@ -563,9 +581,16 @@ import { updatePipeline, getPipelineDetail, getPipelineTaskTypes } from '@/api/p
 import { buildConnectionPath } from './connectionGeometry'
 
 const route = useRoute()
+const emit = defineEmits(['saved'])
 const pipelineId = computed(() => parseInt(route.params.id))
 const taskTypeDefinitions = ref({})
 const loadedCredentialBindingSnapshot = ref([])
+const loadedDefinition = ref({
+  triggers: [],
+  metadata: {
+    version: '2.0'
+  }
+})
 const availableResources = ref([])
 
 // 画布状态
@@ -599,68 +624,82 @@ const historyIndex = ref(-1)
 const nodes = ref([])
 const connections = ref([])
 
-// 组件类别
-const componentCategories = [
-  {
-    name: 'source',
-    label: '代码源',
-    components: [
-      { type: 'git_clone', name: 'Git 检出', description: 'Git 代码仓库检出', icon: 'Connection', color: '#67C23A', inputs: [], outputs: [{ label: '代码', key: 'code' }] }
-    ]
-  },
-  {
-    name: 'build',
-    label: '构建',
-    components: [
-      { type: 'npm', name: 'NPM 构建', description: 'NPM 包构建', icon: 'Box', color: '#E6A23C', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '产物', key: 'artifact' }] },
-      { type: 'maven', name: 'Maven 构建', description: 'Maven 项目构建', icon: 'Box', color: '#E6A23C', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '产物', key: 'artifact' }] },
-      { type: 'gradle', name: 'Gradle 构建', description: 'Gradle 项目构建', icon: 'Box', color: '#E6A23C', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '产物', key: 'artifact' }] },
-      { type: 'docker', name: 'Docker 构建', description: 'Docker 镜像构建', icon: 'Box', color: '#E6A23C', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '镜像', key: 'image' }] },
-      { type: 'artifact_publish', name: '制品归档', description: '归档构建产物', icon: 'UploadFilled', color: '#E6A23C', inputs: [{ label: '产物', key: 'artifact' }], outputs: [{ label: '结果', key: 'result' }] }
-    ]
-  },
-  {
-    name: 'test',
-    label: '测试',
-    components: [
-      { type: 'unit', name: '单元测试', description: '执行单元测试', icon: 'Document', color: '#409EFF', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '报告', key: 'report' }] },
-      { type: 'integration', name: '集成测试', description: '执行集成测试', icon: 'Document', color: '#409EFF', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '报告', key: 'report' }] },
-      { type: 'e2e', name: 'E2E 测试', description: '端到端测试', icon: 'Document', color: '#409EFF', inputs: [{ label: '应用', key: 'app' }], outputs: [{ label: '结果', key: 'result' }] },
-      { type: 'coverage', name: '代码覆盖率', description: '代码覆盖率分析', icon: 'DataAnalysis', color: '#409EFF', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '报告', key: 'report' }] },
-      { type: 'lint', name: '代码检查', description: '静态检查/格式检查', icon: 'Warning', color: '#409EFF', inputs: [{ label: '代码', key: 'code' }], outputs: [{ label: '结果', key: 'result' }] }
-    ]
-  },
-  {
-    name: 'deploy',
-    label: '部署',
-    components: [
-      { type: 'ssh', name: 'SSH 部署', description: '通过 SSH 部署', icon: 'Promotion', color: '#F56C6C', inputs: [{ label: '产物', key: 'artifact' }], outputs: [{ label: '结果', key: 'result' }] },
-      { type: 'kubernetes', name: 'K8s 部署', description: 'Kubernetes 部署', icon: 'Promotion', color: '#F56C6C', inputs: [{ label: '镜像', key: 'image' }], outputs: [{ label: '结果', key: 'result' }] },
-      { type: 'docker-run', name: 'Docker 运行', description: 'Docker 容器运行', icon: 'Promotion', color: '#F56C6C', inputs: [{ label: '镜像', key: 'image' }], outputs: [{ label: '结果', key: 'result' }] }
-    ]
-  },
-  {
-    name: 'notify',
-    label: '通知',
-    components: [
-      { type: 'email', name: '邮件通知', description: '邮件通知', icon: 'Message', color: 'var(--text-muted)', inputs: [{ label: '消息', key: 'message' }], outputs: [] },
-      { type: 'webhook', name: 'Webhook', description: 'Webhook 回调', icon: 'Link', color: 'var(--text-muted)', inputs: [{ label: '数据', key: 'data' }], outputs: [] },
-      { type: 'in_app', name: '站内信', description: '发送站内通知消息', icon: 'Bell', color: 'var(--text-muted)', inputs: [{ label: '消息', key: 'message' }], outputs: [] }
-    ]
-  },
-  {
-    name: 'utils',
-    label: '工具',
-    components: [
-      { type: 'shell', name: 'Shell 脚本', description: '执行 Shell 脚本', icon: 'Terminal', color: '#8c33fe', inputs: [{ label: '输入', key: 'input' }], outputs: [{ label: '输出', key: 'output' }] },
-      { type: 'sleep', name: '等待', description: '暂停等待', icon: 'Clock', color: '#8c33fe', inputs: [], outputs: [] }
-    ]
+// 组件类别（由后端 task_definition 驱动）
+const categoryMetaMap = {
+  source: { label: '代码源', icon: 'Connection', color: '#67C23A' },
+  build: { label: '构建', icon: 'Box', color: '#E6A23C' },
+  test: { label: '测试', icon: 'Document', color: '#409EFF' },
+  artifact: { label: '制品', icon: 'UploadFilled', color: '#36B8A6' },
+  deploy: { label: '部署', icon: 'Promotion', color: '#F56C6C' },
+  notify: { label: '通知', icon: 'Bell', color: 'var(--text-muted)' },
+  utility: { label: '工具', icon: 'Tools', color: '#8c33fe' },
+  custom: { label: '自定义', icon: 'Setting', color: '#909399' },
+  default: { label: '其它', icon: 'Box', color: '#909399' }
+}
+
+const getCategoryMeta = (category) => {
+  return categoryMetaMap[String(category || '').toLowerCase()] || categoryMetaMap.default
+}
+
+const getTaskDefinitionByType = (type) => {
+  const normalized = normalizeTaskType(type)
+  return taskTypeDefinitions.value[normalized] || null
+}
+
+const getNodePorts = (taskType, direction) => {
+  const def = getTaskDefinitionByType(taskType)
+  if (!def) {
+    if (direction === 'input') return [{ label: '输入', key: 'input' }]
+    return [{ label: '输出', key: 'output' }]
   }
-]
+
+  const category = String(def.category || '').toLowerCase()
+  if (direction === 'input') {
+    if (category === 'source') return []
+    return [{ label: '输入', key: 'input' }]
+  }
+
+  if (Array.isArray(def.outputs_schema) && def.outputs_schema.length > 0) {
+    return [{ label: '输出', key: 'output' }]
+  }
+  return []
+}
+
+const componentCategories = computed(() => {
+  const grouped = new Map()
+
+  Object.values(taskTypeDefinitions.value).forEach((def) => {
+    const categoryKey = String(def.category || 'custom').toLowerCase()
+    if (!grouped.has(categoryKey)) {
+      const meta = getCategoryMeta(categoryKey)
+      grouped.set(categoryKey, {
+        name: categoryKey,
+        label: meta.label,
+        components: []
+      })
+    }
+
+    const meta = getCategoryMeta(categoryKey)
+    grouped.get(categoryKey).components.push({
+      type: def.type,
+      name: def.name || def.task_key || def.type,
+      description: def.description || '',
+      icon: meta.icon,
+      color: meta.color,
+      inputs: getNodePorts(def.type, 'input'),
+      outputs: getNodePorts(def.type, 'output')
+    })
+  })
+
+  return Array.from(grouped.values()).map(category => ({
+    ...category,
+    components: category.components.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+  }))
+})
 
 // 获取类别组件数量
 const getCategoryCount = (categoryName) => {
-  const category = componentCategories.find(c => c.name === categoryName)
+  const category = componentCategories.value.find(c => c.name === categoryName)
   return category ? category.components.length : 0
 }
 
@@ -676,7 +715,7 @@ const toggleCategory = (categoryName) => {
 
 // 获取节点类型标签
 const getNodeTypeLabel = (type) => {
-  for (const cat of componentCategories) {
+  for (const cat of componentCategories.value) {
     const comp = cat.components.find(c => c.type === type)
     if (comp) return comp.name
   }
@@ -685,7 +724,7 @@ const getNodeTypeLabel = (type) => {
 
 // 获取节点图标
 const getNodeIcon = (type) => {
-  for (const cat of componentCategories) {
+  for (const cat of componentCategories.value) {
     const comp = cat.components.find(c => c.type === type)
     if (comp) return comp.icon
   }
@@ -694,207 +733,217 @@ const getNodeIcon = (type) => {
 
 // 获取节点颜色
 const getNodeColor = (type) => {
-  for (const cat of componentCategories) {
+  for (const cat of componentCategories.value) {
     const comp = cat.components.find(c => c.type === type)
     if (comp) return comp.color
   }
   return '#409EFF'
 }
 
-const taskTypeAliasMap = {
-  github: 'git_clone',
-  gitee: 'git_clone',
-  agent: 'shell',
-  custom: 'shell',
-  script: 'shell',
-  dingtalk: 'webhook',
-  wechat: 'webhook'
-}
-
 const normalizeTaskType = (type) => {
   if (!type) return ''
-  const normalized = String(type).trim().toLowerCase()
-  return taskTypeAliasMap[normalized] || normalized
+  return String(type).trim().toLowerCase()
 }
 
 const getNodeCredentialSlots = (type) => {
-  const normalized = normalizeTaskType(type)
-  const def = taskTypeDefinitions.value[normalized]
+  const def = getTaskDefinitionByType(type)
   if (!def || !Array.isArray(def.credential_slots)) {
     return []
   }
-  return getVisibleCredentialSlots(normalized, def.credential_slots)
+  return getVisibleCredentialSlots(normalizeTaskType(type), def.credential_slots)
 }
 
-// 获取节点参数定义
+const mapFieldTypeToFormType = (field = {}) => {
+  const fieldType = String(field.type || '').toLowerCase()
+  const ui = String(field.ui_component || '').toLowerCase()
+
+  if (fieldType === 'boolean') return 'boolean'
+  if (fieldType === 'number') return 'number'
+  if (fieldType === 'text') return 'textarea'
+  if (fieldType === 'select') return 'select'
+  if (fieldType === 'multiselect') return 'checkbox_group'
+  if (fieldType === 'resource') return 'resource_selector'
+  if (fieldType === 'credential') return 'credential_selector'
+  if (fieldType === 'json' || fieldType === 'object' || fieldType === 'array') return 'textarea'
+
+  if (ui === 'textarea') return 'textarea'
+  if (ui === 'switch') return 'boolean'
+  if (ui === 'select') return 'select'
+
+  return 'text'
+}
+
+const getFieldDefaultValue = (field = {}) => {
+  if (field.default !== undefined) return field.default
+  const fieldType = String(field.type || '').toLowerCase()
+  if (fieldType === 'boolean') return false
+  if (fieldType === 'number') return 0
+  if (fieldType === 'multiselect') return []
+  return ''
+}
+
+const normalizeFieldOptions = (options) => {
+  if (!Array.isArray(options)) return []
+  return options.map((item) => {
+    if (item && typeof item === 'object') {
+      const value = item.value ?? item.key ?? item.id ?? item.label
+      return {
+        label: String(item.label ?? value ?? ''),
+        value
+      }
+    }
+    return {
+      label: String(item ?? ''),
+      value: item
+    }
+  })
+}
+
 const getNodeParams = (type) => {
-  const paramDefs = {
-    git_clone: [
-      { key: 'repository.url', label: '仓库地址', type: 'text', placeholder: 'git@github.com:company/app.git 或 https://github.com/company/app.git' },
-      { key: 'repository.branch', label: '分支', type: 'text', placeholder: 'main', value: 'main' },
-      { key: 'repository.target_dir', label: '目标目录', type: 'text', placeholder: './app', value: './app' },
-      { key: 'repository.commit_id', label: '指定提交（可选）', type: 'text', placeholder: '留空则检出最新提交' },
-      { key: 'repository.depth', label: '克隆深度', type: 'number', min: 1, value: 10 },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 60, value: 300 }
-    ],
-    npm: [
-      { key: 'command', label: '构建命令', type: 'text', placeholder: 'npm run build' },
-      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
-    ],
-    maven: [
-      { key: 'command', label: '构建命令', type: 'text', placeholder: 'mvn -B clean package' },
-      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
-    ],
-    gradle: [
-      { key: 'command', label: '构建命令', type: 'text', placeholder: './gradlew build' },
-      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
-    ],
-    docker: [
-      { key: 'image_name', label: '镜像名称', type: 'text', placeholder: 'myapp' },
-      { key: 'image_tag', label: '镜像标签', type: 'text', placeholder: 'latest' },
-      { key: 'dockerfile', label: 'Dockerfile 路径', type: 'text', placeholder: './Dockerfile', value: './Dockerfile' },
-      { key: 'context', label: '构建上下文', type: 'text', placeholder: '.', value: '.' },
-      { key: 'architectures', label: '目标架构', type: 'checkbox_group', options: [
-        { label: 'Linux AMD64 (x86_64)', value: 'linux/amd64' },
-        { label: 'Linux ARM64', value: 'linux/arm64' }
-      ], value: ['linux/amd64', 'linux/arm64'] },
-      { key: 'push', label: '构建后推送', type: 'boolean', value: true },
-      { key: 'registry', label: '仓库地址', type: 'text', placeholder: 'registry.example.com' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 60, value: 600 }
-    ],
-    artifact_publish: [
-      { key: 'artifact_path', label: '产物路径', type: 'text', placeholder: './dist' },
-      { key: 'target_dir', label: '归档目标目录', type: 'text', placeholder: './artifacts' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 60, value: 300 }
-    ],
-    unit: [
-      { key: 'command', label: '测试命令', type: 'text', placeholder: 'npm run test:unit' },
-      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
-    ],
-    integration: [
-      { key: 'command', label: '测试命令', type: 'text', placeholder: 'npm run test:integration' },
-      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
-    ],
-    e2e: [
-      { key: 'command', label: '测试命令', type: 'text', placeholder: 'npm run test:e2e' },
-      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
-    ],
-    coverage: [
-      { key: 'command', label: '测试命令', type: 'text', placeholder: 'npm run test:coverage' },
-      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
-    ],
-    lint: [
-      { key: 'command', label: '检查命令', type: 'text', placeholder: 'npm run lint' },
-      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
-    ],
-    ssh: [
-      { key: 'host', label: '主机地址', type: 'text', placeholder: '192.168.1.1' },
-      { key: 'port', label: '端口', type: 'number', placeholder: '22' },
-      { key: 'user', label: '用户名', type: 'text', placeholder: 'root' },
-      { key: 'script', label: '远端脚本', type: 'textarea', placeholder: 'cd /app && ./deploy.sh' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 600 }
-    ],
-    kubernetes: [
-      { key: 'command', label: '部署命令', type: 'textarea', placeholder: 'kubectl apply -f deploy.yaml' },
-      { key: 'manifest', label: 'Manifest 文件(可选)', type: 'text', placeholder: './deploy.yaml' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 600 }
-    ],
-    'docker-run': [
-      { key: 'target_resource_id', label: '目标 VM 资源', type: 'resource_selector', resource_type: 'vm', placeholder: '选择资源管理中的 VM' },
-      { key: 'user', label: 'SSH 用户', type: 'text', placeholder: 'root' },
-      { key: 'runtime', label: '远程运行时', type: 'select', options: [
-        { label: '自动检测', value: 'auto' },
-        { label: 'Docker', value: 'docker' },
-        { label: 'Podman', value: 'podman' },
-        { label: 'nerdctl', value: 'nerdctl' }
-      ], value: 'auto' },
-      { key: 'registry', label: '镜像仓库(可选)', type: 'text', placeholder: 'registry.example.com' },
-      { key: 'image_name', label: '镜像名称', type: 'text', placeholder: 'myapp' },
-      { key: 'image_tag', label: '镜像标签', type: 'text', placeholder: 'latest' },
-      { key: 'container_name', label: '容器名称(可选)', type: 'text', placeholder: 'myapp-web' },
-      { key: 'run_args', label: '运行参数', type: 'text', placeholder: '-p 8080:8080 -e ENV=prod' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 600 }
-    ],
-    shell: [
-      { key: 'script', label: '脚本内容', type: 'textarea', placeholder: 'echo "hello"' },
-      { key: 'working_dir', label: '工作目录', type: 'text', placeholder: './' },
-      { key: 'env', label: '环境变量', type: 'textarea', placeholder: 'JSON格式，如 {"KEY": "value"}' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 86400, value: 3600 }
-    ],
-    sleep: [
-      { key: 'seconds', label: '等待秒数', type: 'number', min: 1, max: 3600, placeholder: '60' }
-    ],
-    email: [
-      { key: 'to', label: '收件人', type: 'textarea', placeholder: '用逗号分隔多个邮箱，如: dev@example.com, test@example.com' },
-      { key: 'cc', label: '抄送', type: 'textarea', placeholder: '用逗号分隔多个邮箱' },
-      { key: 'subject', label: '邮件主题', type: 'text', placeholder: '构建完成通知' },
-      { key: 'body', label: '邮件正文', type: 'textarea', placeholder: '支持 HTML 格式' },
-      { key: 'smtp_host', label: 'SMTP 主机', type: 'text', placeholder: 'smtp.example.com' },
-      { key: 'smtp_port', label: 'SMTP 端口', type: 'number', min: 1, max: 65535, value: 25 },
-      { key: 'smtp_username', label: 'SMTP 用户名', type: 'text', placeholder: 'noreply@example.com' },
-      { key: 'smtp_password', label: 'SMTP 密码', type: 'text', placeholder: '应用密码或授权码' },
-      { key: 'from', label: '发件人', type: 'text', placeholder: 'noreply@example.com' },
-      { key: 'body_type', label: '正文类型', type: 'select', options: [
-        { label: '纯文本', value: 'text' },
-        { label: 'HTML', value: 'html' }
-      ], value: 'text' }
-    ],
-    webhook: [
-      { key: 'url', label: 'Webhook 地址', type: 'text', placeholder: 'https://example.com/webhook' },
-      { key: 'method', label: '请求方法', type: 'select', options: [
-        { label: 'POST', value: 'POST' },
-        { label: 'PUT', value: 'PUT' },
-        { label: 'PATCH', value: 'PATCH' }
-      ], value: 'POST' },
-      { key: 'headers_json', label: '请求头(JSON)', type: 'textarea', placeholder: '{"Authorization":"Bearer xxx"}' },
-      { key: 'body', label: '请求体', type: 'textarea', placeholder: '{"status":"success"}' },
-      { key: 'timeout', label: '超时时间(秒)', type: 'number', min: 1, max: 300, value: 10 }
-    ],
-    in_app: [
-      { key: 'title', label: '消息标题', type: 'text', placeholder: '流水线通知' },
-      { key: 'content', label: '消息内容', type: 'textarea', placeholder: '部署已完成' },
-      { key: 'message_type', label: '消息类型', type: 'select', options: [
-        { label: '系统', value: 'system' },
-        { label: '告警', value: 'alert' },
-        { label: '警告', value: 'warning' }
-      ], value: 'system' },
-      { key: 'priority', label: '优先级', type: 'number', min: 0, max: 2, value: 0 },
-      { key: 'metadata_json', label: '附加元数据(JSON)', type: 'textarea', placeholder: '{"scope":"pipeline"}' }
-    ]
-  }
-  return paramDefs[type] || []
+  const def = getTaskDefinitionByType(type)
+  if (!def || !Array.isArray(def.fields_schema)) return []
+
+  return def.fields_schema.map((field) => {
+    const formType = mapFieldTypeToFormType(field)
+    return {
+      key: field.key,
+      label: field.label || field.key,
+      type: formType,
+      field_type: field.type,
+      required: Boolean(field.required),
+      readonly: Boolean(field.readonly),
+      secret: Boolean(field.secret),
+      placeholder: field.ui_placeholder || field.placeholder || '',
+      description: field.description || '',
+      options: formType === 'select' || formType === 'checkbox_group' ? normalizeFieldOptions(field.options) : [],
+      defaultValue: getFieldDefaultValue(field),
+      resource_type: field.resource_type || '',
+      credential_type: field.credential_type || '',
+      credential_category: field.credential_category || ''
+    }
+  })
 }
 
 const buildDefaultNodeParams = (type) => {
-  const params = {}
-  for (const param of getNodeParams(type)) {
-    if (typeof param.value === 'undefined') continue
-    params[param.key] = Array.isArray(param.value) ? [...param.value] : param.value
-  }
-  return params
+  return getNodeParams(type).map((param) => ({
+    key: param.key,
+    label: param.label,
+    value: Array.isArray(param.defaultValue) ? [...param.defaultValue] : param.defaultValue,
+    is_flexible: false
+  }))
 }
 
-const normalizeNodeParams = (type, params = {}) => {
-  const normalized = { ...params }
-  if (type === 'docker') {
-    const current = normalized.architectures
-    if (Array.isArray(current)) {
-      normalized.architectures = current.length > 0 ? current : ['linux/amd64', 'linux/arm64']
-    } else if (typeof current === 'string' && current.trim()) {
-      normalized.architectures = current.split(',').map(item => item.trim()).filter(Boolean)
-    } else {
-      normalized.architectures = ['linux/amd64', 'linux/arm64']
-    }
+const normalizeNodeParams = (type, params = []) => {
+  const paramDefs = getNodeParams(type)
+  const byKey = new Map()
+
+  if (Array.isArray(params)) {
+    params.forEach((item) => {
+      if (!item || !item.key) return
+      byKey.set(item.key, {
+        key: item.key,
+        label: item.label || item.key,
+        value: item.value,
+        is_flexible: Boolean(item.is_flexible)
+      })
+    })
+  } else if (params && typeof params === 'object') {
+    Object.entries(params).forEach(([key, value]) => {
+      byKey.set(key, {
+        key,
+        label: key,
+        value,
+        is_flexible: false
+      })
+    })
   }
-  return normalized
+
+  const merged = paramDefs.map((paramDef) => {
+    const existing = byKey.get(paramDef.key)
+    return {
+      key: paramDef.key,
+      label: existing?.label || paramDef.label,
+      value: existing?.value !== undefined ? existing.value : paramDef.defaultValue,
+      is_flexible: Boolean(existing?.is_flexible)
+    }
+  })
+
+  byKey.forEach((value, key) => {
+    if (paramDefs.some(item => item.key === key)) return
+    merged.push({
+      key,
+      label: value.label || key,
+      value: value.value,
+      is_flexible: Boolean(value.is_flexible)
+    })
+  })
+
+  return merged
+}
+
+const getNodeParamEntry = (node, key) => {
+  if (!node || !Array.isArray(node.params)) return null
+  return node.params.find(item => item && item.key === key) || null
+}
+
+const getNodeParamValue = (node, key) => {
+  const entry = getNodeParamEntry(node, key)
+  return entry ? entry.value : undefined
+}
+
+const setNodeParamValue = (node, key, value, fallbackLabel = '') => {
+  if (!node) return
+  if (!Array.isArray(node.params)) {
+    node.params = []
+  }
+
+  const index = node.params.findIndex(item => item && item.key === key)
+  if (index >= 0) {
+    node.params[index].value = value
+    if (!node.params[index].label && fallbackLabel) {
+      node.params[index].label = fallbackLabel
+    }
+    return
+  }
+
+  node.params.push({
+    key,
+    label: fallbackLabel || key,
+    value,
+    is_flexible: false
+  })
+}
+
+const isNodeParamFlexible = (node, key) => {
+  const entry = getNodeParamEntry(node, key)
+  return Boolean(entry?.is_flexible)
+}
+
+const setNodeParamFlexible = (node, key, flexible, fallbackLabel = '') => {
+  if (!node) return
+  if (!Array.isArray(node.params)) {
+    node.params = []
+  }
+  const index = node.params.findIndex(item => item && item.key === key)
+  if (index >= 0) {
+    node.params[index].is_flexible = Boolean(flexible)
+    if (!node.params[index].label && fallbackLabel) {
+      node.params[index].label = fallbackLabel
+    }
+    return
+  }
+
+  node.params.push({
+    key,
+    label: fallbackLabel || key,
+    value: '',
+    is_flexible: Boolean(flexible)
+  })
+}
+
+const isParamVisible = (param, node) => {
+  if (!param?.show_if) return true
+  return getNodeParamValue(node, param.show_if.key) === param.show_if.value
 }
 
 const loadResources = async () => {
@@ -1440,90 +1489,13 @@ const getPredecessorName = (predId) => {
 
 // 获取任务类型的输出字段定义
 const getTaskOutputFields = (taskType) => {
-  const outputsMap = {
-    git_clone: [
-      { key: 'commit_sha', desc: 'Git commit SHA' },
-      { key: 'branch', desc: '分支名称' },
-      { key: 'repo_url', desc: '仓库地址' },
-      { key: 'repo_path', desc: '本地路径' }
-    ],
-    docker: [
-      { key: 'image_name', desc: '镜像名' },
-      { key: 'image_tag', desc: '镜像标签' },
-      { key: 'image_full_name', desc: '完整镜像名' },
-      { key: 'pushed', desc: '是否已推送' }
-    ],
-    docker_build: [
-      { key: 'image_name', desc: '镜像名' },
-      { key: 'image_tag', desc: '镜像标签' },
-      { key: 'image_full_name', desc: '完整镜像名' },
-      { key: 'pushed', desc: '是否已推送' }
-    ],
-    npm: [
-      { key: 'exit_code', desc: '退出码' },
-      { key: 'duration', desc: '执行时长(秒)' },
-      { key: 'artifact_path', desc: '构建产物路径' }
-    ],
-    maven: [
-      { key: 'exit_code', desc: '退出码' },
-      { key: 'duration', desc: '执行时长(秒)' },
-      { key: 'artifact_path', desc: '构建产物路径' }
-    ],
-    gradle: [
-      { key: 'exit_code', desc: '退出码' },
-      { key: 'duration', desc: '执行时长(秒)' },
-      { key: 'artifact_path', desc: '构建产物路径' }
-    ],
-    unit: [
-      { key: 'exit_code', desc: '退出码' },
-      { key: 'duration', desc: '执行时长(秒)' },
-      { key: 'tests_passed', desc: '通过数' },
-      { key: 'tests_failed', desc: '失败数' },
-      { key: 'tests_skipped', desc: '跳过数' }
-    ],
-    integration: [
-      { key: 'exit_code', desc: '退出码' },
-      { key: 'duration', desc: '执行时长(秒)' },
-      { key: 'tests_passed', desc: '通过数' },
-      { key: 'tests_failed', desc: '失败数' },
-      { key: 'tests_skipped', desc: '跳过数' }
-    ],
-    e2e: [
-      { key: 'exit_code', desc: '退出码' },
-      { key: 'duration', desc: '执行时长(秒)' },
-      { key: 'tests_passed', desc: '通过数' },
-      { key: 'tests_failed', desc: '失败数' },
-      { key: 'tests_skipped', desc: '跳过数' }
-    ],
-    coverage: [
-      { key: 'exit_code', desc: '退出码' },
-      { key: 'duration', desc: '执行时长(秒)' },
-      { key: 'coverage_percentage', desc: '覆盖率' }
-    ],
-    'docker-run': [
-      { key: 'exit_code', desc: '退出码' },
-      { key: 'duration', desc: '执行时长(秒)' },
-      { key: 'container_id', desc: '容器ID' },
-      { key: 'container_name', desc: '容器名称' },
-      { key: 'image_ref', desc: '镜像引用' }
-    ],
-    shell: [
-      { key: 'exit_code', desc: '退出码' },
-      { key: 'duration', desc: '执行时长(秒)' }
-    ],
-    ssh: [
-      { key: 'exit_code', desc: '退出码' },
-      { key: 'duration', desc: '执行时长(秒)' }
-    ],
-    kubernetes: [
-      { key: 'exit_code', desc: '退出码' },
-      { key: 'duration', desc: '执行时长(秒)' }
-    ],
-    sleep: [
-      { key: 'duration', desc: '实际等待秒数' }
-    ]
-  }
-  return outputsMap[taskType] || []
+  const def = getTaskDefinitionByType(taskType)
+  if (!def || !Array.isArray(def.outputs_schema)) return []
+  return def.outputs_schema.map(field => ({
+    key: field.key,
+    label: field.label || field.key,
+    desc: field.description || ''
+  }))
 }
 
 // 获取当前节点的第一个前置节点的 ID
@@ -1694,10 +1666,8 @@ const validateDAG = () => {
     return errors
   }
 
-  // 单节点无边是允许的（简单任务）
-  // 多节点必须包含依赖边
   if (nodes.value.length > 1 && (!connections.value || connections.value.length === 0)) {
-    errors.push('多节点流水线必须包含依赖边')
+    errors.push('流水线配置无效：多节点流水线必须包含依赖边')
     return errors
   }
 
@@ -1922,13 +1892,14 @@ const buildCredentialBindingSnapshot = (nodeList) => {
   const result = []
 
   list.forEach(node => {
-    const params = node?.params || {}
-    Object.entries(params).forEach(([key, value]) => {
-      const match = /^credentials\.([^.]+)\.credential_id$/.exec(key)
+    const params = Array.isArray(node?.params) ? node.params : []
+    params.forEach((entry) => {
+      if (!entry?.key) return
+      const match = /^credentials\.([^.]+)\.credential_id$/.exec(entry.key)
       if (!match) return
 
       const slot = match[1]
-      const credentialID = Number(value || 0)
+      const credentialID = Number(entry.value || 0)
       if (!Number.isFinite(credentialID) || credentialID <= 0) return
 
       result.push({
@@ -1979,6 +1950,90 @@ const diffCredentialBindingSnapshots = (beforeList, afterList) => {
   }
 }
 
+const buildBindingsFromNodeParams = (node, normalizedParams) => {
+  const credentialBindings = {}
+  const resourceBindings = {}
+
+  normalizedParams.forEach((param) => {
+    if (!param?.key) return
+
+    const credentialMatch = /^credentials\.([^.]+)\.credential_id$/.exec(param.key)
+    if (credentialMatch) {
+      const slotKey = credentialMatch[1]
+      const credentialID = Number(param.value || 0)
+      if (Number.isFinite(credentialID) && credentialID > 0) {
+        credentialBindings[slotKey] = credentialID
+      }
+      return
+    }
+
+    const paramDef = getNodeParams(node.type).find(item => item.key === param.key)
+    if (paramDef?.type === 'resource_selector') {
+      const value = Number(param.value || 0)
+      if (Number.isFinite(value) && value > 0) {
+        resourceBindings[param.key] = value
+      }
+    }
+  })
+
+  return {
+    credential_bindings: credentialBindings,
+    resource_bindings: resourceBindings
+  }
+}
+
+const mergeCredentialBindingsIntoParams = (params = [], credentialBindings = {}) => {
+  const merged = Array.isArray(params) ? [...params] : []
+  const byKey = new Map(merged.map((item, idx) => [item?.key, idx]))
+
+  Object.entries(credentialBindings || {}).forEach(([slot, credentialID]) => {
+    const key = `credentials.${slot}.credential_id`
+    const idx = byKey.get(key)
+    if (idx !== undefined) {
+      merged[idx] = {
+        ...merged[idx],
+        value: credentialID
+      }
+      return
+    }
+    merged.push({
+      key,
+      label: slot,
+      value: credentialID,
+      is_flexible: false
+    })
+  })
+
+  return merged
+}
+
+const buildDefinitionNodes = () => nodes.value.map((node) => {
+  const normalizedParams = normalizeNodeParams(node.type, node.params)
+  const bindings = buildBindingsFromNodeParams(node, normalizedParams)
+
+  return {
+    node_id: node.id,
+    node_name: node.name || node.id,
+    task_key: normalizeTaskType(node.type),
+    task_version: 1,
+    params: normalizedParams,
+    credential_bindings: bindings.credential_bindings,
+    resource_bindings: bindings.resource_bindings,
+    metadata: {
+      x: typeof node.x === 'number' ? node.x : 100,
+      y: typeof node.y === 'number' ? node.y : 100,
+      description: node.description || '',
+      ignore_failure: Boolean(node.ignore_failure)
+    }
+  }
+})
+
+const buildDefinitionEdges = () => connections.value.map((conn) => ({
+  from_node_id: conn.from,
+  to_node_id: conn.to,
+  condition: null
+}))
+
 // 保存流水线
 const savePipeline = async () => {
   // 验证 DAG
@@ -2022,70 +2077,17 @@ const savePipeline = async () => {
       }
     })
     
-    // ========== 步骤 2: 准备保存数据 ==========
-    // 转换为后端需要的格式
-    const nodeList = nodes.value.map(node => {
-      // 将 params 中的嵌套配置转换为平铺的 config
-      const config = {}
-      
-      // 处理嵌套配置（如 repository.url -> config.repository.url）
-      for (const [key, value] of Object.entries(node.params || {})) {
-        if (key.includes('.')) {
-          // 嵌套键，如 'repository.url'
-          const keys = key.split('.')
-          let current = config
-          for (let i = 0; i < keys.length - 1; i++) {
-            if (!current[keys[i]]) {
-              current[keys[i]] = {}
-            }
-            current = current[keys[i]]
-          }
-          current[keys[keys.length - 1]] = value
-        } else {
-          config[key] = value
-        }
-      }
-      
-      // 对于特定类型，确保有正确的默认配置
-      if (node.type === 'shell' && !config.script && node.params?.script) {
-        config.script = node.params.script
-      }
-      if (node.type === 'docker' && !config.image_name && node.params?.tag) {
-        config.image_name = node.params.tag?.replace(/:.*$/, '') || 'myapp'
-        config.image_tag = node.params.tag?.replace(/^.*:/, '') || 'latest'
-      }
-      if (node.type === 'git_clone') {
-        if (!config.repository) {
-          config.repository = {}
-        }
-        if (!config.repository.branch) config.repository.branch = 'main'
-        if (!config.repository.target_dir) config.repository.target_dir = './app'
-      }
-      
-      return {
-        id: node.id,
-        type: node.type,
-        name: node.name,
-        // 保存节点位置
-        x: typeof node.x === 'number' ? node.x : 100,
-        y: typeof node.y === 'number' ? node.y : 100,
-        config: config,
-        timeout: node.params?.timeout || 3600,
-        ignore_failure: node.ignore_failure || false
-      }
-    })
-    
-    // 转换连接为边
-    const edges = connections.value.map(conn => ({
-      from: conn.from,
-      to: conn.to,
-      ignore_failure: conn.ignore_failure || false
-    }))
-    
-    const pipelineData = {
-      version: '2.0',
+    const nodeList = buildDefinitionNodes()
+    const edges = buildDefinitionEdges()
+
+    const definitionData = {
       nodes: nodeList,
-      edges: edges
+      edges,
+      triggers: Array.isArray(loadedDefinition.value?.triggers) ? loadedDefinition.value.triggers : [],
+      metadata: {
+        ...(loadedDefinition.value?.metadata || {}),
+        version: '2.0'
+      }
     }
 
     const nextSnapshot = buildCredentialBindingSnapshot(nodes.value)
@@ -2115,17 +2117,19 @@ const savePipeline = async () => {
       })
     }
     
-    console.log('保存流水线配置:', JSON.stringify(pipelineData, null, 2))
+    console.log('保存流水线配置:', JSON.stringify(definitionData, null, 2))
     
     // 调用保存接口
     const response = await updatePipeline(pipelineId.value, {
-      config: JSON.stringify(pipelineData)
+      definition_json: JSON.stringify(definitionData)
     })
     
     if (response.code === 200) {
       ElMessage.success('流水线保存成功')
       loadedCredentialBindingSnapshot.value = nextSnapshot
+      loadedDefinition.value = definitionData
       saveHistory()
+      emit('saved')
     } else {
       ElMessage.error(response.message || '保存失败')
     }
@@ -2168,66 +2172,71 @@ const loadTaskTypeDefinitions = async () => {
 const loadPipeline = async () => {
   try {
     const response = await getPipelineDetail(pipelineId.value)
-    if (response.code === 200 && response.data && response.data.config) {
+    if (response.code === 200 && response.data) {
       try {
-        const config = JSON.parse(response.data.config)
+        const configRaw = response.data.definition_json || response.data.config
+        if (!configRaw) return
+        const config = typeof configRaw === 'string' ? JSON.parse(configRaw) : configRaw
+        const normalizedConfig = Array.isArray(config?.nodes)
+          ? config
+          : {
+              version: config?.version || config?.metadata?.version || '2.0',
+              nodes: config?.definition_json?.nodes || [],
+              edges: config?.definition_json?.edges || config?.edges || [],
+              triggers: config?.definition_json?.triggers || config?.triggers || [],
+              metadata: config?.metadata || {}
+            }
+        loadedDefinition.value = {
+          triggers: Array.isArray(normalizedConfig.triggers) ? normalizedConfig.triggers : [],
+          metadata: normalizedConfig.metadata || { version: normalizedConfig.version || '2.0' }
+        }
         
         // 检查是否是新格式（version 2.0 + edges）
-        if (config.version === '2.0' && config.edges) {
+        if (normalizedConfig.version === '2.0' && Array.isArray(normalizedConfig.edges)) {
           // 新格式：转换为前端节点格式
-          nodes.value = (config.nodes || []).map(node => {
-            // 将嵌套的 config 展平为 params
-            const params = {}
-
-            const flatten = (obj, prefix = '') => {
-              for (const [key, value] of Object.entries(obj)) {
-                const newKey = prefix ? `${prefix}.${key}` : key
-                if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-                  flatten(value, newKey)
-                } else {
-                  params[newKey] = value
-                }
-              }
-            }
-            flatten(node.config || {})
-
-            // 保留节点位置，如果保存时没有位置则使用默认值
+          nodes.value = (normalizedConfig.nodes || []).map(node => {
+            const nodeID = node.node_id || node.id
+            const taskType = normalizeTaskType(node.task_key || node.type)
+            const normalizedParams = normalizeNodeParams(taskType, node.params || node.config || {})
+            const paramsWithCredentialBindings = mergeCredentialBindingsIntoParams(normalizedParams, node.credential_bindings)
             return {
-              id: node.id,
-              type: node.type,
-              name: node.name,
-              description: '',
-              // 优先使用保存的位置，否则使用计算位置
-              x: typeof node.x === 'number' ? node.x : 100 + (parseInt(node.id.replace(/[^0-9]/g, '') || '0') % 20) * 50,
-              y: typeof node.y === 'number' ? node.y : 100 + (parseInt(node.id.replace(/[^0-9]/g, '') || '0') % 20) * 50,
+              id: nodeID,
+              type: taskType,
+              name: node.node_name || node.name || nodeID,
+              description: node.metadata?.description || node.description || '',
+              x: typeof node.metadata?.x === 'number' ? node.metadata.x : (typeof node.x === 'number' ? node.x : 100 + (parseInt(String(nodeID || '').replace(/[^0-9]/g, '') || '0') % 20) * 50),
+              y: typeof node.metadata?.y === 'number' ? node.metadata.y : (typeof node.y === 'number' ? node.y : 100 + (parseInt(String(nodeID || '').replace(/[^0-9]/g, '') || '0') % 20) * 50),
               width: 200,
-              inputs: getDefaultInputs(node.type),
-              outputs: getDefaultOutputs(node.type),
-              params: normalizeNodeParams(node.type, params),
+              inputs: getNodePorts(taskType, 'input').map(i => ({ ...i, connected: false })),
+              outputs: getNodePorts(taskType, 'output').map(o => ({ ...o, connected: false })),
+              params: paramsWithCredentialBindings,
               conditions: [],
               predecessors: [],
-              status: 'pending'
+              status: 'pending',
+              ignore_failure: Boolean(node.metadata?.ignore_failure || node.ignore_failure)
             }
           })
           
           // 从 edges 重建 connections
-          connections.value = (config.edges || []).map((edge, idx) => ({
+          connections.value = (normalizedConfig.edges || []).map((edge, idx) => ({
             id: `conn_${Date.now()}_${idx}`,
-            from: edge.from,
-            to: edge.to,
+            from: edge.from_node_id || edge.from,
+            to: edge.to_node_id || edge.to,
             ignore_failure: edge.ignore_failure || false
           }))
           
           // 从 edges 重建每个节点的 predecessors 数组
           // 这样配置面板中的"前置任务"才能正确显示
-          config.edges?.forEach(edge => {
-            const targetNode = nodes.value.find(n => n.id === edge.to)
+          normalizedConfig.edges?.forEach(edge => {
+            const fromNodeID = edge.from_node_id || edge.from
+            const toNodeID = edge.to_node_id || edge.to
+            const targetNode = nodes.value.find(n => n.id === toNodeID)
             if (targetNode) {
               if (!targetNode.predecessors) {
                 targetNode.predecessors = []
               }
-              if (!targetNode.predecessors.includes(edge.from)) {
-                targetNode.predecessors.push(edge.from)
+              if (fromNodeID && !targetNode.predecessors.includes(fromNodeID)) {
+                targetNode.predecessors.push(fromNodeID)
               }
             }
           })
@@ -2237,11 +2246,31 @@ const loadPipeline = async () => {
           console.log('新格式流水线配置加载成功', { nodes: nodes.value.length, connections: connections.value.length })
         } else {
           // 旧格式兼容
-          if (config.nodes && config.nodes.length > 0) {
-            nodes.value = config.nodes
+          if (normalizedConfig.nodes && normalizedConfig.nodes.length > 0) {
+            nodes.value = normalizedConfig.nodes.map((node) => {
+              const taskType = normalizeTaskType(node.task_key || node.type)
+              const normalizedParams = normalizeNodeParams(taskType, node.params || node.config || {})
+              const paramsWithCredentialBindings = mergeCredentialBindingsIntoParams(normalizedParams, node.credential_bindings)
+              return {
+                ...node,
+                id: node.id,
+                type: taskType,
+                name: node.name || taskType,
+                description: node.description || '',
+                x: typeof node.x === 'number' ? node.x : 100,
+                y: typeof node.y === 'number' ? node.y : 100,
+                width: node.width || 200,
+                inputs: getNodePorts(taskType, 'input').map(i => ({ ...i, connected: false })),
+                outputs: getNodePorts(taskType, 'output').map(o => ({ ...o, connected: false })),
+                params: paramsWithCredentialBindings,
+                conditions: Array.isArray(node.conditions) ? node.conditions : [],
+                predecessors: Array.isArray(node.predecessors) ? node.predecessors : [],
+                status: node.status || 'pending'
+              }
+            })
           }
-          if (config.connections && config.connections.length > 0) {
-            connections.value = config.connections
+          if (normalizedConfig.connections && normalizedConfig.connections.length > 0) {
+            connections.value = normalizedConfig.connections
             rebuildPredecessorsFromConnections()
           } else {
             rebuildConnectionsFromPredecessors()
@@ -2257,60 +2286,6 @@ const loadPipeline = async () => {
   } catch (error) {
     console.error('加载流水线配置失败:', error)
   }
-}
-
-// 获取默认输入端口
-const getDefaultInputs = (type) => {
-  const inputsMap = {
-    git_clone: [],
-    npm: [{ label: '代码', key: 'code' }],
-    maven: [{ label: '代码', key: 'code' }],
-    gradle: [{ label: '代码', key: 'code' }],
-    shell: [{ label: '输入', key: 'input' }],
-    docker: [{ label: '代码', key: 'code' }],
-    artifact_publish: [{ label: '产物', key: 'artifact' }],
-    unit: [{ label: '代码', key: 'code' }],
-    integration: [{ label: '代码', key: 'code' }],
-    e2e: [{ label: '应用', key: 'app' }],
-    coverage: [{ label: '代码', key: 'code' }],
-    lint: [{ label: '代码', key: 'code' }],
-    ssh: [{ label: '产物', key: 'artifact' }],
-    kubernetes: [{ label: '镜像', key: 'image' }],
-    'docker-run': [{ label: '镜像', key: 'image' }],
-    sleep: [],
-    email: [{ label: '消息', key: 'message' }],
-    webhook: [{ label: '数据', key: 'data' }],
-    in_app: [{ label: '消息', key: 'message' }],
-    default: [{ label: '输入', key: 'input' }]
-  }
-  return inputsMap[type] || inputsMap.default
-}
-
-// 获取默认输出端口
-const getDefaultOutputs = (type) => {
-  const outputsMap = {
-    git_clone: [{ label: '代码', key: 'code' }],
-    npm: [{ label: '产物', key: 'artifact' }],
-    maven: [{ label: '产物', key: 'artifact' }],
-    gradle: [{ label: '产物', key: 'artifact' }],
-    shell: [{ label: '输出', key: 'output' }],
-    docker: [{ label: '镜像', key: 'image' }],
-    artifact_publish: [{ label: '结果', key: 'result' }],
-    unit: [{ label: '报告', key: 'report' }],
-    integration: [{ label: '报告', key: 'report' }],
-    e2e: [{ label: '结果', key: 'result' }],
-    coverage: [{ label: '报告', key: 'report' }],
-    lint: [{ label: '结果', key: 'result' }],
-    ssh: [{ label: '结果', key: 'result' }],
-    kubernetes: [{ label: '结果', key: 'result' }],
-    'docker-run': [{ label: '结果', key: 'result' }],
-    sleep: [],
-    email: [],
-    webhook: [],
-    in_app: [],
-    default: [{ label: '输出', key: 'output' }]
-  }
-  return outputsMap[type] || outputsMap.default
 }
 
 // 根据predecessors重建connections数组
@@ -2966,6 +2941,12 @@ onUnmounted(() => {
       border-color: var(--primary-color);
       box-shadow: var(--shadow-inset), 0 0 0 3px var(--primary-light);
     }
+  }
+
+  .param-flex-row {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
   }
 
   .condition-list {

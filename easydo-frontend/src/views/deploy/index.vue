@@ -177,7 +177,7 @@
           </div>
           <div class="detail-summary-card">
             <span class="summary-label">流水线运行</span>
-            <strong class="summary-value">{{ selectedDeployment.pipeline_run_id ? `#${selectedDeployment.pipeline_run_id}` : '尚未生成' }}</strong>
+            <strong class="summary-value">{{ getDeploymentRunLabel(selectedDeployment) }}</strong>
           </div>
           <div class="detail-summary-card">
             <span class="summary-label">发布人</span>
@@ -282,7 +282,7 @@ import { getDeploymentRequestDetail, getDeploymentRequestList } from '@/api/depl
 import { getTemplateList } from '@/api/store'
 import { getResourceList } from '@/api/resource'
 import { getProjectList } from '@/api/project'
-import { getRunTasks } from '@/api/pipeline'
+import { getPipelineRunDetail } from '@/api/pipeline'
 import LogViewer from '@/views/pipeline/components/LogViewer.vue'
 import { buildResourceK8sRouteLocation, resolveNamespaceFromParameterSnapshot } from '@/views/resources/k8s/utils'
 import {
@@ -340,6 +340,80 @@ const statusCounts = computed(() => ({
 const sortedRunTasks = computed(() => {
   return [...runTasks.value].sort((a, b) => parseTaskOrderTime(a.created_at || a.start_time) - parseTaskOrderTime(b.created_at || b.start_time))
 })
+
+const parseJSONField = (value, fallback) => {
+  if (value === null || value === undefined || value === '') return fallback
+  if (typeof value === 'object') return value
+  if (typeof value !== 'string') return fallback
+  try {
+    return JSON.parse(value)
+  } catch {
+    return fallback
+  }
+}
+
+const getPipelineSnapshot = (run) => parseJSONField(run?.pipeline_snapshot_json, {}) || {}
+const getResolvedNodes = (run) => {
+  const resolved = parseJSONField(run?.resolved_nodes_json, [])
+  return Array.isArray(resolved) ? resolved : []
+}
+const getOutputsByNode = (run) => parseJSONField(run?.outputs_json, {}) || {}
+const getEvents = (run) => {
+  const events = parseJSONField(run?.events_json, [])
+  return Array.isArray(events) ? events : []
+}
+
+const buildRunTasksFromRunRecord = (run) => {
+  const resolvedNodes = getResolvedNodes(run)
+  const outputsByNode = getOutputsByNode(run)
+  const events = getEvents(run)
+  const snapshot = getPipelineSnapshot(run)
+  const snapshotNodes = Array.isArray(snapshot?.nodes) ? snapshot.nodes : []
+  const snapshotNodeMap = new Map(snapshotNodes.map((node, index) => [
+    node.node_id || node.id,
+    { ...node, __index: index }
+  ]))
+
+  const eventBuckets = new Map()
+  events.forEach((event) => {
+    const nodeID = event?.payload?.node_id
+    if (!nodeID) return
+    if (!eventBuckets.has(nodeID)) {
+      eventBuckets.set(nodeID, [])
+    }
+    eventBuckets.get(nodeID).push(event)
+  })
+
+  return resolvedNodes.map((node, index) => {
+    const nodeID = node.node_id || `node_${index + 1}`
+    const snapshotNode = snapshotNodeMap.get(nodeID) || null
+    const attempts = Array.isArray(node.attempts) ? node.attempts : []
+    const latestAttempt = attempts.length > 0 ? attempts[attempts.length - 1] : null
+    const nodeEvents = eventBuckets.get(nodeID) || []
+    const startEvent = nodeEvents.find(item => item?.event_type === 'node_running')
+
+    const normalizedStatus =
+      node.status === 'success' ? 'execute_success' :
+      node.status === 'failed' ? 'execute_failed' :
+      node.status || 'queued'
+
+    return {
+      id: latestAttempt?.task_id || 0,
+      node_id: nodeID,
+      name: node.node_name || snapshotNode?.node_name || snapshotNode?.name || nodeID,
+      task_type: node.task_key || '',
+      status: normalizedStatus,
+      display_status: normalizedStatus,
+      start_time: latestAttempt?.start_time || startEvent?.time || 0,
+      created_at: latestAttempt?.start_time || startEvent?.time || run?.created_at || 0,
+      duration: latestAttempt?.duration || 0,
+      error_msg: latestAttempt?.error_msg || '',
+      outputs: outputsByNode[nodeID] || {},
+      _order: Number.isFinite(snapshotNode?.__index) ? snapshotNode.__index : index,
+      Agent: latestAttempt?.agent_id ? { name: `Agent #${latestAttempt.agent_id}` } : null
+    }
+  }).sort((a, b) => a._order - b._order)
+}
 
 const executionProgress = computed(() => {
   if (!runTasks.value.length) return 0
@@ -409,10 +483,36 @@ const normalizeDeployment = (item) => {
     target_resource_endpoint: resource.endpoint || resourceSnapshot?.endpoint || '',
     pipeline_id: item.pipeline_id,
     pipeline_run_id: item.pipeline_run_id,
+    pipeline_build_number: item.pipeline_build_number || 0,
     target_namespace: resolveNamespaceFromParameterSnapshot(parameterSnapshot),
     parameter_snapshot: parameterSnapshot,
     template_version_snapshot: templateVersionSnapshot,
     resource_snapshot: resourceSnapshot
+  }
+}
+
+const getDeploymentRunLabel = (deployment) => {
+  if (!deployment?.pipeline_run_id) return '尚未生成'
+  if (deployment.pipeline_build_number) return `#${deployment.pipeline_build_number}`
+  return `运行 ID ${deployment.pipeline_run_id}`
+}
+
+const syncDeploymentWithRunDetail = async () => {
+  if (!selectedDeployment.value?.pipeline_id || !selectedDeployment.value?.pipeline_run_id) {
+    runTasks.value = []
+    return
+  }
+
+  const runRes = await getPipelineRunDetail(selectedDeployment.value.pipeline_id, selectedDeployment.value.pipeline_run_id)
+  const runRecord = runRes?.data || null
+  if (!runRecord) {
+    runTasks.value = []
+    return
+  }
+
+  runTasks.value = buildRunTasksFromRunRecord(runRecord)
+  if (runRecord.build_number) {
+    selectedDeployment.value.pipeline_build_number = runRecord.build_number
   }
 }
 
@@ -446,12 +546,7 @@ const refreshSelectedDeployment = async () => {
     const item = res?.data || null
     if (!item) return
     selectedDeployment.value = normalizeDeployment(item)
-    if (selectedDeployment.value.pipeline_id && selectedDeployment.value.pipeline_run_id) {
-      const tasksRes = await getRunTasks(selectedDeployment.value.pipeline_id, selectedDeployment.value.pipeline_run_id)
-      runTasks.value = Array.isArray(tasksRes.data?.list) ? tasksRes.data.list : []
-    } else {
-      runTasks.value = []
-    }
+    await syncDeploymentWithRunDetail()
     if (!activeStatuses.includes(selectedDeployment.value.status)) {
       stopDetailPolling()
     }

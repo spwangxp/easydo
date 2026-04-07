@@ -12,7 +12,7 @@ NC = \033[0m
 # 项目配置
 APP_NAME = agent
 BINARY_NAME = easydo-agent
-COMPOSE_FILE = ../docker-compose.yml
+COMPOSE_FILE = ../deploy/docker-compose/docker-compose.yml
 DC = docker-compose -f $(COMPOSE_FILE)
 
 # Agent 配置

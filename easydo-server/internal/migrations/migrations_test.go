@@ -254,15 +254,15 @@ func TestDiscoverEmbeddedMigrationsIncludesNotificationDomainMigration(t *testin
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) < 8 {
-		t.Fatalf("embedded migration count=%d, want at least 8", len(migrations))
+	if len(migrations) != 2 {
+		t.Fatalf("embedded migration count=%d, want 2", len(migrations))
 	}
 	latest := migrations[len(migrations)-1]
-	if latest.Version != 8 {
-		t.Fatalf("latest migration version=%d, want 8", latest.Version)
+	if latest.Version != 2 {
+		t.Fatalf("latest migration version=%d, want 2", latest.Version)
 	}
-	if latest.Script != "V8__resource_operation_audit.sql" {
-		t.Fatalf("latest migration script=%s, want V8__resource_operation_audit.sql", latest.Script)
+	if latest.Script != "V2__bootstrap_seed_data.sql" {
+		t.Fatalf("latest migration script=%s, want V2__bootstrap_seed_data.sql", latest.Script)
 	}
 }
 
@@ -285,8 +285,8 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 8 {
-		t.Fatalf("embedded migration count=%d, want 8", len(migrations))
+	if len(migrations) != 2 {
+		t.Fatalf("embedded migration count=%d, want 2", len(migrations))
 	}
 	if migrations[0].VersionText != "1" || migrations[0].Script != "V1__schema.sql" {
 		t.Fatalf("unexpected first embedded migration: %+v", migrations[0])
@@ -294,72 +294,80 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if migrations[1].VersionText != "2" || migrations[1].Script != "V2__bootstrap_seed_data.sql" {
 		t.Fatalf("unexpected second embedded migration: %+v", migrations[1])
 	}
-	if migrations[2].VersionText != "3" || migrations[2].Script != "V3__resource_terminal_sessions.sql" {
-		t.Fatalf("unexpected third embedded migration: %+v", migrations[2])
-	}
-	if migrations[3].VersionText != "4" || migrations[3].Script != "V4__notification_domain.sql" {
-		t.Fatalf("unexpected fourth embedded migration: %+v", migrations[3])
-	}
-	if migrations[4].VersionText != "5" || migrations[4].Script != "V5__notification_delivery_queue.sql" {
-		t.Fatalf("unexpected fifth embedded migration: %+v", migrations[4])
-	}
-	if migrations[5].VersionText != "6" || migrations[5].Script != "V6__credential_lock_state.sql" {
-		t.Fatalf("unexpected sixth embedded migration: %+v", migrations[5])
-	}
-	if migrations[6].VersionText != "7" || migrations[6].Script != "V7__notification_event_preferences.sql" {
-		t.Fatalf("unexpected seventh embedded migration: %+v", migrations[6])
-	}
-	if migrations[7].VersionText != "8" || migrations[7].Script != "V8__resource_operation_audit.sql" {
-		t.Fatalf("unexpected eighth embedded migration: %+v", migrations[7])
-	}
-	if len(migrations[0].Statements) == 0 || len(migrations[1].Statements) == 0 || len(migrations[2].Statements) == 0 || len(migrations[3].Statements) == 0 || len(migrations[4].Statements) == 0 || len(migrations[5].Statements) == 0 || len(migrations[6].Statements) == 0 || len(migrations[7].Statements) == 0 {
+	if len(migrations[0].Statements) == 0 || len(migrations[1].Statements) == 0 {
 		t.Fatalf("expected parsed statements for embedded migrations, got %+v", migrations)
 	}
 }
 
 func TestEmbeddedCredentialLockStateMigrationDeclaresCredentialsLockColumn(t *testing.T) {
-	content, err := fs.ReadFile(dbmigrations.Files, "V6__credential_lock_state.sql")
+	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
 	if err != nil {
-		t.Fatalf("read V6 migration failed: %v", err)
+		t.Fatalf("read V1 schema failed: %v", err)
 	}
 	text := string(content)
-	for _, expected := range []string{"ALTER TABLE `credentials`", "lock_state", "unlocked"} {
+	for _, expected := range []string{"CREATE TABLE `credentials`", "lock_state", "unlocked"} {
 		if !strings.Contains(text, expected) {
-			t.Fatalf("expected V6 migration to contain %q, got %s", expected, text)
+			t.Fatalf("expected V1 schema to contain %q, got %s", expected, text)
 		}
 	}
 }
 
 func TestEmbeddedNotificationEventPreferencesMigrationDeclaresEventTypeColumn(t *testing.T) {
-	content, err := fs.ReadFile(dbmigrations.Files, "V7__notification_event_preferences.sql")
+	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
 	if err != nil {
-		t.Fatalf("read V7 migration failed: %v", err)
+		t.Fatalf("read V1 schema failed: %v", err)
 	}
 	text := string(content)
-	for _, expected := range []string{"notification_preferences_v7", "event_type", "workspace.invitation.created", "pipeline.run.failed", "RENAME TABLE `notification_preferences_v7` TO `notification_preferences`"} {
+	for _, expected := range []string{"CREATE TABLE `notification_preferences`", "event_type", "rule_key"} {
 		if !strings.Contains(text, expected) {
-			t.Fatalf("expected V7 migration to contain %q, got %s", expected, text)
+			t.Fatalf("expected V1 schema to contain %q, got %s", expected, text)
 		}
 	}
 }
 
 func TestEmbeddedResourceOperationAuditMigrationDeclaresAuditTable(t *testing.T) {
-	content, err := fs.ReadFile(dbmigrations.Files, "V8__resource_operation_audit.sql")
+	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
 	if err != nil {
-		t.Fatalf("read V8 migration failed: %v", err)
+		t.Fatalf("read V1 schema failed: %v", err)
 	}
 	text := string(content)
 	for _, expected := range []string{"resource_operation_audits", "target_kind", "resource_id"} {
 		if !strings.Contains(text, expected) {
-			t.Fatalf("expected V8 migration to contain %q, got %s", expected, text)
+			t.Fatalf("expected V1 schema to contain %q, got %s", expected, text)
+		}
+	}
+}
+
+func TestEmbeddedPipelineRunRecordFieldsMigrationDeclaresRunRecordColumns(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
+	if err != nil {
+		t.Fatalf("read V1 schema failed: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{"CREATE TABLE `pipeline_runs`", "run_config_json", "pipeline_snapshot_json", "resolved_nodes_json", "outputs_json", "bindings_snapshot_json", "events_json", "CREATE TABLE `pipelines`", "definition_json", "version"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected V1 schema to contain %q, got %s", expected, text)
+		}
+	}
+}
+
+func TestEmbeddedRestoreAgentLogChunksMigrationDeclaresAgentLogChunksTable(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
+	if err != nil {
+		t.Fatalf("read V1 schema failed: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{"CREATE TABLE `agent_log_chunks`", "task_id", "pipeline_run_id", "agent_id", "agent_session_id", "attempt", "seq", "stream", "chunk", "timestamp", "unique_key"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected V1 schema to contain %q, got %s", expected, text)
 		}
 	}
 }
 
 func TestCalculateChecksumUsesSigned32BitRange(t *testing.T) {
-	content, err := fs.ReadFile(dbmigrations.Files, "V4__notification_domain.sql")
+	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
 	if err != nil {
-		t.Fatalf("read V4 migration failed: %v", err)
+		t.Fatalf("read V1 schema failed: %v", err)
 	}
 
 	got := calculateChecksum(content)

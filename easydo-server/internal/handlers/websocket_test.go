@@ -1,17 +1,24 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"easydo-server/internal/config"
 	"easydo-server/internal/models"
 	"easydo-server/pkg/utils"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 )
@@ -435,14 +442,15 @@ func TestTriggerDownstreamTasks_InjectsCredentialEnvForGitClone(t *testing.T) {
 	}
 
 	run := models.PipelineRun{
-		WorkspaceID:     workspace.ID,
-		PipelineID:      1,
-		BuildNumber:     1,
-		Status:          models.PipelineRunStatusRunning,
-		Config:          string(runConfig),
-		AgentID:         1,
-		TriggerUserID:   user.ID,
-		TriggerUserRole: "user",
+		WorkspaceID:      workspace.ID,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		Config:           "{invalid-json",
+		PipelineSnapshot: string(runConfig),
+		AgentID:          1,
+		TriggerUserID:    user.ID,
+		TriggerUserRole:  "user",
 	}
 	if err := db.Create(&run).Error; err != nil {
 		t.Fatalf("create pipeline run failed: %v", err)
@@ -498,12 +506,12 @@ func TestTriggerDownstreamTasks_PreservesDockerTaskType(t *testing.T) {
 	}
 
 	run := models.PipelineRun{
-		WorkspaceID: 1,
-		PipelineID:  1,
-		BuildNumber: 1,
-		Status:      models.PipelineRunStatusRunning,
-		Config:      string(runConfig),
-		AgentID:     1,
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		PipelineSnapshot: string(runConfig),
+		AgentID:          1,
 	}
 	if err := db.Create(&run).Error; err != nil {
 		t.Fatalf("create pipeline run failed: %v", err)
@@ -1148,7 +1156,7 @@ func TestTriggerDownstreamTasks_VariableSubstitution(t *testing.T) {
 		Nodes: []PipelineNode{
 			{ID: "node_1", Type: "shell", Name: "Upstream", Config: map[string]interface{}{"script": "echo upstream"}},
 			{ID: "node_2", Type: "shell", Name: "Downstream", Config: map[string]interface{}{
-				"script": "echo Commit: ${outputs.node_1.commit_sha}",
+				"script": "echo Commit: ${outputs.node_1.git_commit}",
 			}},
 		},
 		Edges: []PipelineEdge{{From: "node_1", To: "node_2"}},
@@ -1158,12 +1166,12 @@ func TestTriggerDownstreamTasks_VariableSubstitution(t *testing.T) {
 	}
 
 	run := models.PipelineRun{
-		WorkspaceID: 1,
-		PipelineID:  1,
-		BuildNumber: 1,
-		Status:      models.PipelineRunStatusRunning,
-		Config:      string(runConfig),
-		AgentID:     1,
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		PipelineSnapshot: string(runConfig),
+		AgentID:          1,
 	}
 	if err := db.Create(&run).Error; err != nil {
 		t.Fatalf("create pipeline run failed: %v", err)
@@ -1177,7 +1185,7 @@ func TestTriggerDownstreamTasks_VariableSubstitution(t *testing.T) {
 		Status:        models.TaskStatusExecuteSuccess,
 		ExitCode:      0,
 		Duration:      2,
-		ResultData:    `{"commit_sha": "abc123def"}`,
+		ResultData:    `{"git_commit": "abc123def"}`,
 	}
 	if err := db.Create(&upstreamTask).Error; err != nil {
 		t.Fatalf("create upstream task failed: %v", err)
@@ -1192,9 +1200,9 @@ func TestTriggerDownstreamTasks_VariableSubstitution(t *testing.T) {
 	}
 
 	if !strings.Contains(downstream.Script, "abc123def") {
-		t.Fatalf("expected downstream script to contain substituted commit_sha 'abc123def', got: %s", downstream.Script)
+		t.Fatalf("expected downstream script to contain substituted git_commit 'abc123def', got: %s", downstream.Script)
 	}
-	if strings.Contains(downstream.Script, "${outputs.node_1.commit_sha}") {
+	if strings.Contains(downstream.Script, "${outputs.node_1.git_commit}") {
 		t.Fatalf("expected downstream script to NOT contain unresolved variable, got: %s", downstream.Script)
 	}
 }
@@ -1215,7 +1223,7 @@ func TestTriggerDownstreamTasks_VariableSubstitutionNoResultData(t *testing.T) {
 		Nodes: []PipelineNode{
 			{ID: "node_1", Type: "shell", Name: "Upstream", Config: map[string]interface{}{"script": "echo upstream"}},
 			{ID: "node_2", Type: "shell", Name: "Downstream", Config: map[string]interface{}{
-				"script": "echo Commit: ${outputs.node_1.commit_sha}",
+				"script": "echo Commit: ${outputs.node_1.git_commit}",
 			}},
 		},
 		Edges: []PipelineEdge{{From: "node_1", To: "node_2"}},
@@ -1225,12 +1233,12 @@ func TestTriggerDownstreamTasks_VariableSubstitutionNoResultData(t *testing.T) {
 	}
 
 	run := models.PipelineRun{
-		WorkspaceID: 1,
-		PipelineID:  1,
-		BuildNumber: 1,
-		Status:      models.PipelineRunStatusRunning,
-		Config:      string(runConfig),
-		AgentID:     1,
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		PipelineSnapshot: string(runConfig),
+		AgentID:          1,
 	}
 	if err := db.Create(&run).Error; err != nil {
 		t.Fatalf("create pipeline run failed: %v", err)
@@ -1258,7 +1266,638 @@ func TestTriggerDownstreamTasks_VariableSubstitutionNoResultData(t *testing.T) {
 		t.Fatalf("expected downstream task to be created: %v", err)
 	}
 
-	if !strings.Contains(downstream.Script, "${outputs.node_1.commit_sha}") {
+	if !strings.Contains(downstream.Script, "${outputs.node_1.git_commit}") {
 		t.Fatalf("expected downstream script to contain unresolved variable when no result data, got: %s", downstream.Script)
+	}
+}
+
+func TestTriggerDownstreamTasks_UsesRunRecordOutputsAsPrimaryTruth(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	runConfig, err := json.Marshal(PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{ID: "node_1", Type: "shell", Name: "Upstream", Config: map[string]interface{}{"script": "echo upstream"}},
+			{ID: "node_2", Type: "shell", Name: "Downstream", Config: map[string]interface{}{
+				"script": "echo Commit: ${outputs.node_1.git_commit}",
+			}},
+		},
+		Edges: []PipelineEdge{{From: "node_1", To: "node_2"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal run config failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		Config:           "{invalid-json",
+		PipelineSnapshot: string(runConfig),
+		Outputs:          `{"node_1":{"git_commit":"run-record-commit","exit_code":0,"status":"execute_success"}}`,
+		AgentID:          1,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	upstreamTask := &models.AgentTask{
+		WorkspaceID:   1,
+		PipelineRunID: run.ID,
+		NodeID:        "node_1",
+		TaskType:      "shell",
+		Status:        models.TaskStatusExecuteSuccess,
+		ExitCode:      0,
+		Duration:      2,
+		ResultData:    `{"git_commit": "task-row-commit"}`,
+	}
+	if err := db.Create(&upstreamTask).Error; err != nil {
+		t.Fatalf("create upstream task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	handler.triggerDownstreamTasks(run.ID, []models.AgentTask{*upstreamTask})
+
+	var downstream models.AgentTask
+	if err := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, "node_2").First(&downstream).Error; err != nil {
+		t.Fatalf("expected downstream task to be created: %v", err)
+	}
+
+	if !strings.Contains(downstream.Script, "run-record-commit") {
+		t.Fatalf("expected downstream script to contain run-record commit, got: %s", downstream.Script)
+	}
+	if strings.Contains(downstream.Script, "task-row-commit") {
+		t.Fatalf("expected downstream script to ignore task-row commit, got: %s", downstream.Script)
+	}
+}
+
+func TestHandleTaskUpdateV2_PersistsRunRecordOutputsForCompletedTask(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	run := models.PipelineRun{
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		Config:           `{"version":"2.0","nodes":[{"id":"node_1","type":"shell","name":"Build","config":{"script":"echo hi"}}],"edges":[]}`,
+		PipelineSnapshot: `{"version":"2.0","nodes":[{"id":"node_1","type":"shell","name":"Build","config":{"script":"echo hi"}}],"edges":[]}`,
+		ResolvedNodes:    `[]`,
+		Outputs:          `{}`,
+		AgentID:          9,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	task := models.AgentTask{
+		WorkspaceID:   1,
+		AgentID:       9,
+		PipelineRunID: run.ID,
+		NodeID:        "node_1",
+		TaskType:      "shell",
+		Name:          "Build",
+		Params:        `{"script":"echo hi"}`,
+		Status:        models.TaskStatusRunning,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	client := &wsClient{agentID: 9, sessionID: "session-1"}
+	handler.handleTaskUpdateV2(client, &models.Agent{BaseModel: models.BaseModel{ID: 9}, Name: "worker-1"}, map[string]interface{}{
+		"task_id":         float64(task.ID),
+		"attempt":         float64(1),
+		"status":          models.TaskStatusExecuteSuccess,
+		"exit_code":       float64(0),
+		"duration_ms":     float64(1200),
+		"idempotency_key": "task-success-outputs",
+		"result": map[string]interface{}{
+			"git_commit": "abc123def",
+			"artifact":   "demo.tar",
+		},
+	})
+
+	var updatedRun models.PipelineRun
+	if err := db.First(&updatedRun, run.ID).Error; err != nil {
+		t.Fatalf("reload run failed: %v", err)
+	}
+	if !strings.Contains(updatedRun.Outputs, `"node_1"`) || !strings.Contains(updatedRun.Outputs, `"git_commit":"abc123def"`) {
+		t.Fatalf("expected run outputs_json updated from task result, got=%s", updatedRun.Outputs)
+	}
+}
+
+// Regression test: frontend WebSocket connections must stay open beyond 60 seconds.
+// Before the fix, handleFrontendMessages set a 60-second read deadline on each
+// ReadMessage call, causing the connection to be closed after 60 seconds of inactivity
+// even though the frontend is a receive-only connection that doesn't send messages.
+func TestFrontendWebSocket_ConnectionStaysOpenBeyond60Seconds(t *testing.T) {
+	t.Setenv("JWT_SECRET", "ws-longevity-test-secret")
+	t.Setenv("AUTH_TOKEN_TTL", (4 * time.Hour).String())
+	t.Setenv("AUTH_REFRESH_INTERVAL", (10 * time.Minute).String())
+
+	mini, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis failed: %v", err)
+	}
+	defer mini.Close()
+
+	previousRedis := utils.RedisClient
+	utils.RedisClient = redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() {
+		if utils.RedisClient != nil {
+			_ = utils.RedisClient.Close()
+		}
+		utils.RedisClient = previousRedis
+	})
+
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = previousDB })
+
+	config.Init()
+	config.Config.Set("server.id", "ws-longevity-test-server")
+	config.Config.Set("server.internal_url", "http://127.0.0.1:8080")
+	config.Config.Set("server.internal_token", "ws-longevity-internal-token")
+
+	wsHandler := NewWebSocketHandler()
+	userHandler := &UserHandler{DB: db}
+
+	router := gin.New()
+	router.GET("/ws/frontend/pipeline", wsHandler.HandleFrontendConnection)
+	auth := router.Group("/api/auth")
+	auth.POST("/login", userHandler.Login)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	user := models.User{
+		Username: "ws-longevity-user",
+		Status:   "active",
+		Email:    "ws-longevity@example.com",
+	}
+	if err := user.SetPassword("1qaz2WSX"); err != nil {
+		t.Fatalf("set password failed: %v", err)
+	}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+
+	workspace := models.Workspace{
+		Name:      "ws-longevity-workspace",
+		Slug:      "ws-longevity-" + strconv.FormatUint(user.ID, 10),
+		CreatedBy: user.ID,
+		Status:    "active",
+	}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+
+	member := models.WorkspaceMember{
+		WorkspaceID: workspace.ID,
+		UserID:      user.ID,
+		Role:        "owner",
+		Status:      "active",
+	}
+	if err := db.Create(&member).Error; err != nil {
+		t.Fatalf("create workspace member failed: %v", err)
+	}
+
+	loginBody := map[string]string{"username": "ws-longevity-user", "password": "1qaz2WSX"}
+	loginBytes, _ := json.Marshal(loginBody)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(loginBytes))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginW := httptest.NewRecorder()
+	router.ServeHTTP(loginW, loginReq)
+	if loginW.Code != http.StatusOK {
+		t.Fatalf("login failed: %s", loginW.Body.String())
+	}
+
+	var loginResp struct {
+		Code int `json:"code"`
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(loginW.Body.Bytes(), &loginResp); err != nil {
+		t.Fatalf("parse login response failed: %v", err)
+	}
+	token := loginResp.Data.Token
+	if token == "" {
+		t.Fatalf("no token received")
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID:   workspace.ID,
+		Status:        models.PipelineRunStatusRunning,
+		Config:        `{"version":"2.0","nodes":[],"edges":[]}`,
+		TriggerType:   "manual",
+		TriggerUserID: user.ID,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/frontend/pipeline?run_id=" + strconv.FormatUint(run.ID, 10) + "&token=" + token
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("WebSocket dial failed: %v (resp=%v)", err, resp)
+	}
+	defer conn.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("expected 101 Switching Protocols, got %d", resp.StatusCode)
+	}
+
+	// Wait 65 seconds — past the old 60-second read deadline that caused disconnects.
+	// The connection should remain open because handleFrontendMessages no longer sets
+	// any read deadline on frontend WebSocket connections (they are receive-only).
+	time.Sleep(65 * time.Second)
+
+	// Verify connection is still open by setting a read deadline and attempting a read.
+	// If the connection were closed by the server, this would fail immediately.
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, _, err = conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("WebSocket connection was closed after 65 seconds (old 60s deadline bug not fixed): %v", err)
+	}
+
+	// Clean up the read deadline — connection is confirmed alive
+	conn.SetReadDeadline(time.Time{})
+}
+
+// Regression test: when a frontend WebSocket client disconnects, the server must
+// properly clean up: remove the client from the frontends map, close the connection,
+// and stop the run watcher when no more clients are subscribed to the run.
+func TestFrontendWebSocket_ClientDisconnect_CleansUpResources(t *testing.T) {
+	t.Setenv("JWT_SECRET", "ws-disconnect-test-secret")
+	t.Setenv("AUTH_TOKEN_TTL", (4 * time.Hour).String())
+	t.Setenv("AUTH_REFRESH_INTERVAL", (10 * time.Minute).String())
+
+	mini, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis failed: %v", err)
+	}
+	defer mini.Close()
+
+	previousRedis := utils.RedisClient
+	utils.RedisClient = redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() {
+		if utils.RedisClient != nil {
+			_ = utils.RedisClient.Close()
+		}
+		utils.RedisClient = previousRedis
+	})
+
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = previousDB })
+
+	config.Init()
+	config.Config.Set("server.id", "ws-disconnect-test-server")
+	config.Config.Set("server.internal_url", "http://127.0.0.1:8080")
+	config.Config.Set("server.internal_token", "ws-disconnect-internal-token")
+
+	wsHandler := NewWebSocketHandler()
+	userHandler := &UserHandler{DB: db}
+
+	router := gin.New()
+	router.GET("/ws/frontend/pipeline", wsHandler.HandleFrontendConnection)
+	auth := router.Group("/api/auth")
+	auth.POST("/login", userHandler.Login)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	user := models.User{
+		Username: "ws-disconnect-user",
+		Status:   "active",
+		Email:    "ws-disconnect@example.com",
+	}
+	if err := user.SetPassword("1qaz2WSX"); err != nil {
+		t.Fatalf("set password failed: %v", err)
+	}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+
+	workspace := models.Workspace{
+		Name:      "ws-disconnect-workspace",
+		Slug:      "ws-disconnect-" + strconv.FormatUint(user.ID, 10),
+		CreatedBy: user.ID,
+		Status:    "active",
+	}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+
+	member := models.WorkspaceMember{
+		WorkspaceID: workspace.ID,
+		UserID:      user.ID,
+		Role:        "owner",
+		Status:      "active",
+	}
+	if err := db.Create(&member).Error; err != nil {
+		t.Fatalf("create workspace member failed: %v", err)
+	}
+
+	loginBody := map[string]string{"username": "ws-disconnect-user", "password": "1qaz2WSX"}
+	loginBytes, _ := json.Marshal(loginBody)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(loginBytes))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginW := httptest.NewRecorder()
+	router.ServeHTTP(loginW, loginReq)
+	if loginW.Code != http.StatusOK {
+		t.Fatalf("login failed: %s", loginW.Body.String())
+	}
+
+	var loginResp struct {
+		Code int `json:"code"`
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(loginW.Body.Bytes(), &loginResp); err != nil {
+		t.Fatalf("parse login response failed: %v", err)
+	}
+	token := loginResp.Data.Token
+	if token == "" {
+		t.Fatalf("no token received")
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID:   workspace.ID,
+		Status:        models.PipelineRunStatusRunning,
+		Config:        `{"version":"2.0","nodes":[],"edges":[]}`,
+		TriggerType:   "manual",
+		TriggerUserID: user.ID,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	runIDStr := strconv.FormatUint(run.ID, 10)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/frontend/pipeline?run_id=" + runIDStr + "&token=" + token
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("WebSocket dial failed: %v (resp=%v)", err, resp)
+	}
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("expected 101 Switching Protocols, got %d", resp.StatusCode)
+	}
+
+	// Wait for server goroutine to register the client
+	time.Sleep(100 * time.Millisecond)
+
+	wsHandler.frontendsMu.RLock()
+	runClients, runExists := wsHandler.frontends[runIDStr]
+	wsHandler.frontendsMu.RUnlock()
+	if !runExists {
+		t.Fatalf("expected frontends[%s] to exist after client connected", runIDStr)
+	}
+	if len(runClients) != 1 {
+		t.Fatalf("expected exactly 1 client in frontends[%s], got %d", runIDStr, len(runClients))
+	}
+
+	wsHandler.runWatchersMu.Lock()
+	_, watcherExists := wsHandler.runWatchers[run.ID]
+	wsHandler.runWatchersMu.Unlock()
+	if !watcherExists {
+		t.Fatalf("expected runWatcher for run %d to exist after client connected", run.ID)
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("conn.Close() failed: %v", err)
+	}
+
+	// Wait for deferred cleanup in handleFrontendMessages to process the disconnect
+	time.Sleep(500 * time.Millisecond)
+
+	wsHandler.frontendsMu.RLock()
+	_, runExists = wsHandler.frontends[runIDStr]
+	wsHandler.frontendsMu.RUnlock()
+	if runExists {
+		wsHandler.frontendsMu.RLock()
+		remaining := wsHandler.frontends[runIDStr]
+		wsHandler.frontendsMu.RUnlock()
+		t.Fatalf("expected frontends[%s] removed after client disconnected, but still has %d clients", runIDStr, len(remaining))
+	}
+
+	wsHandler.runWatchersMu.Lock()
+	_, watcherExists = wsHandler.runWatchers[run.ID]
+	wsHandler.runWatchersMu.Unlock()
+	if watcherExists {
+		t.Fatalf("expected runWatcher for run %d stopped after last client disconnected", run.ID)
+	}
+}
+
+func TestFrontendWebSocket_ReceivesRunTaskAndLogEvents(t *testing.T) {
+	t.Setenv("JWT_SECRET", "ws-event-stream-test-secret")
+	t.Setenv("AUTH_TOKEN_TTL", (4 * time.Hour).String())
+	t.Setenv("AUTH_REFRESH_INTERVAL", (10 * time.Minute).String())
+
+	mini, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis failed: %v", err)
+	}
+	defer mini.Close()
+
+	previousRedis := utils.RedisClient
+	utils.RedisClient = redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() {
+		if utils.RedisClient != nil {
+			_ = utils.RedisClient.Close()
+		}
+		utils.RedisClient = previousRedis
+	})
+
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = previousDB })
+
+	config.Init()
+	config.Config.Set("server.id", "ws-event-stream-test-server")
+	config.Config.Set("server.internal_url", "http://127.0.0.1:8080")
+	config.Config.Set("server.internal_token", "ws-event-stream-internal-token")
+
+	wsHandler := NewWebSocketHandler()
+	userHandler := &UserHandler{DB: db}
+
+	router := gin.New()
+	router.GET("/ws/frontend/pipeline", wsHandler.HandleFrontendConnection)
+	auth := router.Group("/api/auth")
+	auth.POST("/login", userHandler.Login)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	user := models.User{
+		Username: "ws-event-user",
+		Status:   "active",
+		Email:    "ws-event@example.com",
+	}
+	if err := user.SetPassword("1qaz2WSX"); err != nil {
+		t.Fatalf("set password failed: %v", err)
+	}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+
+	workspace := models.Workspace{
+		Name:      "ws-event-workspace",
+		Slug:      "ws-event-" + strconv.FormatUint(user.ID, 10),
+		CreatedBy: user.ID,
+		Status:    "active",
+	}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+
+	member := models.WorkspaceMember{
+		WorkspaceID: workspace.ID,
+		UserID:      user.ID,
+		Role:        "owner",
+		Status:      "active",
+	}
+	if err := db.Create(&member).Error; err != nil {
+		t.Fatalf("create workspace member failed: %v", err)
+	}
+
+	loginBody := map[string]string{"username": "ws-event-user", "password": "1qaz2WSX"}
+	loginBytes, _ := json.Marshal(loginBody)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(loginBytes))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginW := httptest.NewRecorder()
+	router.ServeHTTP(loginW, loginReq)
+	if loginW.Code != http.StatusOK {
+		t.Fatalf("login failed: %s", loginW.Body.String())
+	}
+
+	var loginResp struct {
+		Code int `json:"code"`
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(loginW.Body.Bytes(), &loginResp); err != nil {
+		t.Fatalf("parse login response failed: %v", err)
+	}
+	token := loginResp.Data.Token
+	if token == "" {
+		t.Fatalf("no token received")
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID:   workspace.ID,
+		Status:        models.PipelineRunStatusRunning,
+		Config:        `{"version":"2.0","nodes":[],"edges":[]}`,
+		TriggerType:   "manual",
+		TriggerUserID: user.ID,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	task := models.AgentTask{
+		WorkspaceID:   workspace.ID,
+		PipelineRunID: run.ID,
+		NodeID:        "node_1",
+		Name:          "Realtime Build",
+		TaskType:      "shell",
+		Status:        models.TaskStatusQueued,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create agent task failed: %v", err)
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/frontend/pipeline?run_id=" + strconv.FormatUint(run.ID, 10) + "&token=" + token
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("WebSocket dial failed: %v (resp=%v)", err, resp)
+	}
+	defer conn.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("expected 101 Switching Protocols, got %d", resp.StatusCode)
+	}
+
+	// Give the frontend client registration path time to add the subscription.
+	time.Sleep(150 * time.Millisecond)
+
+	wsHandler.BroadcastTaskStatus(run.ID, task.ID, task.NodeID, models.TaskStatusRunning, 0, "", "Agent #1")
+	_, err = appendTaskLogChunk(wsHandler, task, taskLogChunkPayloadV2{
+		TaskID:    task.ID,
+		Attempt:   1,
+		Seq:       1,
+		Level:     "info",
+		Stream:    "stdout",
+		Chunk:     "first-line",
+		Timestamp: time.Now().Unix(),
+	}, 1, "session-1")
+	if err != nil {
+		t.Fatalf("append task log chunk failed: %v", err)
+	}
+	wsHandler.BroadcastRunStatus(run.ID, models.PipelineRunStatusSuccess, "", 3)
+
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
+
+	seenTypes := make(map[string]WebSocketMessage)
+	for len(seenTypes) < 3 {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read websocket message failed: %v", err)
+		}
+
+		var msg WebSocketMessage
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			t.Fatalf("unmarshal websocket message failed: %v", err)
+		}
+
+		switch msg.Type {
+		case "task_status":
+			if getInt64(msg.Payload, "task_id") == int64(task.ID) && getString(msg.Payload, "status") == models.TaskStatusRunning {
+				seenTypes[msg.Type] = msg
+			}
+		case "task_log":
+			if getInt64(msg.Payload, "task_id") == int64(task.ID) && getString(msg.Payload, "message") == "first-line" {
+				seenTypes[msg.Type] = msg
+			}
+		case "run_status":
+			if getInt64(msg.Payload, "run_id") == int64(run.ID) && getString(msg.Payload, "status") == models.PipelineRunStatusSuccess {
+				seenTypes[msg.Type] = msg
+			}
+		}
+	}
+
+	if _, ok := seenTypes["task_status"]; !ok {
+		t.Fatalf("expected task_status websocket event")
+	}
+	if _, ok := seenTypes["task_log"]; !ok {
+		t.Fatalf("expected task_log websocket event")
+	}
+	if _, ok := seenTypes["run_status"]; !ok {
+		t.Fatalf("expected run_status websocket event")
 	}
 }

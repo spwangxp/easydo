@@ -251,6 +251,54 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="runDialogVisible"
+      title="运行流水线"
+      width="720px"
+      :close-on-click-modal="false"
+      :append-to-body="true"
+    >
+      <div v-if="manualRunNodes.length === 0" class="manual-run-empty">
+        当前流水线未配置可手动覆盖参数，将按定义直接运行。
+      </div>
+      <div v-else class="manual-run-sections">
+        <div
+          v-for="node in manualRunNodes"
+          :key="node.node_id"
+          class="manual-run-node"
+        >
+          <div class="manual-run-node-title">{{ node.node_name }}（{{ node.node_id }}）</div>
+          <el-form :model="runForm.inputs[node.node_id]" label-width="120px">
+            <el-form-item
+              v-for="param in node.params"
+              :key="`${node.node_id}-${param.key}`"
+              :label="param.label || param.key"
+            >
+              <el-switch
+                v-if="param.input_type === 'boolean'"
+                v-model="runForm.inputs[node.node_id][param.key]"
+              />
+              <el-input-number
+                v-else-if="param.input_type === 'number'"
+                v-model="runForm.inputs[node.node_id][param.key]"
+                style="width: 100%"
+              />
+              <el-input
+                v-else
+                v-model="runForm.inputs[node.node_id][param.key]"
+                :placeholder="param.placeholder || '请输入运行时覆盖值'"
+              />
+            </el-form-item>
+          </el-form>
+        </div>
+      </div>
+
+      <template #footer>
+        <el-button @click="closeRunDialog">取消</el-button>
+        <el-button type="primary" :loading="runLoading" @click="confirmRun">运行</el-button>
+      </template>
+    </el-dialog>
     
     <!-- 删除确认对话框 -->
     <el-dialog
@@ -290,8 +338,8 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch, reactive } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ref, onMounted, watch, reactive, computed } from 'vue'
+import { ElMessage } from 'element-plus'
 import {
   Plus,
   Search,
@@ -306,9 +354,10 @@ import {
   Warning,
   Clock
 } from '@element-plus/icons-vue'
-import { getPipelineList, createPipeline, runPipeline, toggleFavorite as apiToggleFavorite, deletePipeline } from '@/api/pipeline'
+import { getPipelineList, getPipelineDetail, createPipeline, runPipeline, toggleFavorite as apiToggleFavorite, deletePipeline } from '@/api/pipeline'
 import { getProjectList } from '@/api/project'
 import { useUserStore } from '@/stores/user'
+import { buildRunInputsPayload, createRunInputs, getManualRunNodes } from './runtimeConfig'
 
 const userStore = useUserStore()
 const activeTab = ref('all')
@@ -357,6 +406,13 @@ const pipelineRules = {
 
 const pipelineList = ref([])
 const projectList = ref([])
+const runDialogVisible = ref(false)
+const runLoading = ref(false)
+const runningPipeline = ref(null)
+const runForm = reactive({
+  inputs: {}
+})
+const manualRunNodes = computed(() => getManualRunNodes(runningPipeline.value))
 
 // 加载项目列表
 const fetchProjects = async () => {
@@ -484,28 +540,53 @@ const handleSubmit = async () => {
   })
 }
 
+const closeRunDialog = () => {
+  runDialogVisible.value = false
+  runLoading.value = false
+  runningPipeline.value = null
+  runForm.inputs = {}
+}
+
 // 运行流水线
 const handleRun = async (row) => {
   try {
-    await ElMessageBox.confirm(`确定要运行流水线 "${row.name}" 吗？`, '确认运行', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      type: 'info'
-    })
-    
-    const res = await runPipeline(row.id)
+    const response = await getPipelineDetail(row.id)
+    if (response.code !== 200 || !response.data) {
+      ElMessage.error(response.message || '获取流水线详情失败')
+      return
+    }
+
+    runningPipeline.value = response.data
+    runForm.inputs = createRunInputs(manualRunNodes.value)
+    runDialogVisible.value = true
+  } catch (error) {
+    console.error('获取流水线详情失败:', error)
+    ElMessage.error('获取流水线详情失败')
+  }
+}
+
+const confirmRun = async () => {
+  if (!runningPipeline.value?.id) return
+
+  runLoading.value = true
+  try {
+    const res = await runPipeline(
+      runningPipeline.value.id,
+      buildRunInputsPayload(manualRunNodes.value, runForm.inputs)
+    )
     const runStatus = res?.data?.status
     if (runStatus === 'queued') {
       ElMessage.success('已进入排队')
     } else {
       ElMessage.success('已开始运行')
     }
+    closeRunDialog()
     fetchPipelines()
   } catch (error) {
-    if (error !== 'cancel') {
-      console.error('运行流水线失败:', error)
-      ElMessage.error('运行失败')
-    }
+    console.error('运行流水线失败:', error)
+    ElMessage.error('运行失败')
+  } finally {
+    runLoading.value = false
   }
 }
 

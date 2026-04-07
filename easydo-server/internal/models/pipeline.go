@@ -5,6 +5,7 @@ type Pipeline struct {
 	Name             string `gorm:"size:128;not null" json:"name"`
 	Description      string `gorm:"type:text" json:"description"`
 	Config           string `gorm:"type:longtext" json:"config"`
+	Definition       string `gorm:"column:definition_json;type:longtext" json:"definition_json"`
 	WorkspaceID      uint64 `gorm:"not null;index" json:"workspace_id"`
 	ProjectID        uint64 `gorm:"index" json:"project_id"`
 	OwnerID          uint64 `gorm:"not null;index" json:"owner_id"`
@@ -12,6 +13,7 @@ type Pipeline struct {
 	IsPublic         bool   `gorm:"default:false" json:"is_public"`
 	IsFavorite       bool   `gorm:"default:false" json:"is_favorite"`
 	ManagementHidden bool   `gorm:"default:false;index" json:"management_hidden"`
+	Version          int    `gorm:"default:1" json:"version"`
 
 	Workspace *Workspace    `gorm:"foreignKey:WorkspaceID" json:"workspace,omitempty"`
 	Project   *Project      `gorm:"foreignKey:ProjectID" json:"project"`

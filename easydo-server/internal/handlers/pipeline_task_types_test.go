@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
@@ -8,6 +9,157 @@ import (
 
 	"easydo-server/internal/models"
 )
+
+func TestGetPipelineTaskDefinitionExposeTypedContract(t *testing.T) {
+	def, ok := getTaskDefinition("git_clone")
+	if !ok {
+		t.Fatalf("expected typed task definition for git_clone")
+	}
+	if def.TaskKey != "git_clone" {
+		t.Fatalf("expected task_key git_clone, got %s", def.TaskKey)
+	}
+	if def.ExecutorType != taskExecModeAgent {
+		t.Fatalf("expected agent executor type, got %s", def.ExecutorType)
+	}
+	if len(def.FieldsSchema) == 0 {
+		t.Fatalf("expected fields schema to be populated")
+	}
+	if len(def.OutputsSchema) == 0 {
+		t.Fatalf("expected outputs schema to be populated")
+	}
+	if def.ExecutionSpec.Mode != "shell_template" {
+		t.Fatalf("expected shell_template mode, got %s", def.ExecutionSpec.Mode)
+	}
+	if def.ExecutionSpec.EnvMapping["git_ref"] != "EASYDO_INPUT_GIT_REF" {
+		t.Fatalf("expected env mapping for git_ref")
+	}
+
+	repoFieldFound := false
+	for _, field := range def.FieldsSchema {
+		if field.Key == "git_repo_url" {
+			repoFieldFound = true
+			if !field.Required {
+				t.Fatalf("expected git_repo_url to be required")
+			}
+		}
+	}
+	if !repoFieldFound {
+		t.Fatalf("expected git_repo_url field in schema")
+	}
+
+	commitOutputFound := false
+	for _, output := range def.OutputsSchema {
+		if output.Key == "git_commit" {
+			commitOutputFound = true
+		}
+	}
+	if !commitOutputFound {
+		t.Fatalf("expected git_commit output in schema")
+	}
+
+	if len(def.CredentialSlots) != 1 || def.CredentialSlots[0].SlotKey != "repo_auth" {
+		t.Fatalf("expected typed credential slot repo_auth, got %#v", def.CredentialSlots)
+	}
+}
+
+func TestGetPipelineTaskTypesResponseIncludesTypedDefinitionFields(t *testing.T) {
+	handler := &PipelineHandler{}
+	response := handler.listPipelineTaskTypes()
+	if len(response) == 0 {
+		t.Fatalf("expected non-empty task type response")
+	}
+
+	var gitClone *pipelineTaskTypeResponse
+	for i := range response {
+		if response[i].TaskKey == "git_clone" {
+			gitClone = &response[i]
+			break
+		}
+	}
+	if gitClone == nil {
+		t.Fatalf("expected git_clone in response")
+	}
+	if gitClone.Type != gitClone.TaskKey {
+		t.Fatalf("expected type and task_key to match, got type=%s task_key=%s", gitClone.Type, gitClone.TaskKey)
+	}
+	if len(gitClone.FieldsSchema) == 0 {
+		t.Fatalf("expected response to include fields schema")
+	}
+	if len(gitClone.OutputsSchema) == 0 {
+		t.Fatalf("expected response to include outputs schema")
+	}
+	if gitClone.ExecutionSpec.Mode == "" {
+		t.Fatalf("expected response to include execution spec")
+	}
+
+	encoded, err := json.Marshal(gitClone)
+	if err != nil {
+		t.Fatalf("marshal response failed: %v", err)
+	}
+	if !strings.Contains(string(encoded), "fields_schema") || !strings.Contains(string(encoded), "outputs_schema") {
+		t.Fatalf("expected marshaled response to contain typed schema fields, got=%s", string(encoded))
+	}
+}
+
+func TestBuildAndDeployTaskDefinitionsExposeFieldSchemas(t *testing.T) {
+	for _, taskKey := range []string{"npm", "maven", "gradle", "docker", "artifact_publish", "ssh", "kubernetes", "docker-run", "email", "in_app"} {
+		def, ok := getTaskDefinition(taskKey)
+		if !ok {
+			t.Fatalf("expected task definition for %s", taskKey)
+		}
+		if len(def.FieldsSchema) == 0 {
+			t.Fatalf("expected %s to expose fields schema", taskKey)
+		}
+	}
+}
+
+func TestDockerTaskDefinitionIncludesRequiredImageField(t *testing.T) {
+	def, ok := getTaskDefinition("docker")
+	if !ok {
+		t.Fatalf("expected docker definition")
+	}
+	imageNameFound := false
+	pushFound := false
+	for _, field := range def.FieldsSchema {
+		if field.Key == "image_name" {
+			imageNameFound = true
+			if !field.Required {
+				t.Fatalf("expected image_name to be required")
+			}
+		}
+		if field.Key == "push" {
+			pushFound = true
+			if field.Type != "boolean" {
+				t.Fatalf("expected push field to be boolean, got %s", field.Type)
+			}
+		}
+	}
+	if !imageNameFound || !pushFound {
+		t.Fatalf("expected docker fields schema to include image_name and push, got %#v", def.FieldsSchema)
+	}
+}
+
+func TestNpmTaskDefinitionIncludesCommandField(t *testing.T) {
+	def, ok := getTaskDefinition("npm")
+	if !ok {
+		t.Fatalf("expected npm definition")
+	}
+	commandFound := false
+	for _, field := range def.FieldsSchema {
+		if field.Key == "command" {
+			commandFound = true
+			if !field.Required {
+				t.Fatalf("expected npm command to be required")
+			}
+			if field.Default != "npm ci && npm run build" {
+				t.Fatalf("expected npm command default to be populated, got %#v", field.Default)
+			}
+		}
+	}
+	if !commandFound {
+		t.Fatalf("expected npm fields schema to include command")
+	}
+}
 
 func TestValidateTaskTypes(t *testing.T) {
 	validCfg := PipelineConfig{
@@ -43,37 +195,11 @@ func TestValidateTaskTypes(t *testing.T) {
 	}
 }
 
-func TestGetPipelineTaskDefinitionWithAlias(t *testing.T) {
-	canonical, def, ok := getPipelineTaskDefinition("github")
-	if !ok {
-		t.Fatalf("expected github alias to be supported")
-	}
-	if canonical != "git_clone" {
-		t.Fatalf("expected canonical type git_clone, got: %s", canonical)
-	}
-	if def.ExecMode != taskExecModeAgent {
-		t.Fatalf("expected agent exec mode")
-	}
-
-	canonical, def, ok = getPipelineTaskDefinition("dingtalk")
-	if !ok {
-		t.Fatalf("expected dingtalk alias to be supported")
-	}
-	if canonical != "webhook" {
-		t.Fatalf("expected canonical type webhook, got: %s", canonical)
-	}
-	if def.ExecMode != taskExecModeServer {
-		t.Fatalf("expected server exec mode")
-	}
-}
-
 func TestRenderPipelineAgentScript(t *testing.T) {
 	_, script, err := renderPipelineAgentScript("git_clone", map[string]interface{}{
-		"repository": map[string]interface{}{
-			"url":        "https://example.com/repo.git",
-			"branch":     "main",
-			"target_dir": "./src",
-		},
+		"git_repo_url":      "https://example.com/repo.git",
+		"git_ref":           "main",
+		"git_checkout_path": "./src",
 	})
 	if err != nil {
 		t.Fatalf("expected git_clone script render success, got err: %v", err)
@@ -99,22 +225,21 @@ func TestRenderPipelineAgentScript(t *testing.T) {
 }
 
 func TestNormalizePipelineNodeConfig(t *testing.T) {
-	normalized := normalizePipelineNodeConfig("github", "git_clone", map[string]interface{}{
-		"url":        "https://example.com/repo.git",
-		"branch":     "main",
-		"workingDir": "./work",
-		"env":        `{"A":"B"}`,
+	normalized := normalizePipelineNodeConfig("git_clone", "git_clone", map[string]interface{}{
+		"git_repo_url":      "https://example.com/repo.git",
+		"git_ref":           "main",
+		"git_checkout_path": "./work",
+		"env":               `{"A":"B"}`,
 	})
 
-	repo, ok := normalized["repository"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected repository map in normalized config")
+	if normalized["git_repo_url"] != "https://example.com/repo.git" {
+		t.Fatalf("expected git_repo_url to be preserved")
 	}
-	if repo["url"] != "https://example.com/repo.git" {
-		t.Fatalf("expected normalized repository.url")
+	if normalized["git_ref"] != "main" {
+		t.Fatalf("expected git_ref to be preserved")
 	}
-	if normalized["working_dir"] != "./work" {
-		t.Fatalf("expected working_dir mapped from workingDir")
+	if normalized["git_checkout_path"] != "./work" {
+		t.Fatalf("expected git_checkout_path to be preserved")
 	}
 	env, ok := normalized["env"].(map[string]interface{})
 	if !ok || env["A"] != "B" {
@@ -483,9 +608,7 @@ func TestRenderPipelineAgentScript_DockerRunFailsOnDuplicateContainerName(t *tes
 
 func TestRenderPipelineAgentScript_GitCloneCredentialIntegration(t *testing.T) {
 	_, script, err := renderPipelineAgentScript("git_clone", map[string]interface{}{
-		"repository": map[string]interface{}{
-			"url": "https://example.com/repo.git",
-		},
+		"git_repo_url": "https://example.com/repo.git",
 	})
 	if err != nil {
 		t.Fatalf("expected git_clone script render success, got err: %v", err)

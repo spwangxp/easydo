@@ -119,7 +119,7 @@
 
             <el-table-column label="构建号" width="100">
               <template #default="{ row }">
-                <span class="build-id">#{{ row.build_number || '-' }}</span>
+                <span class="build-id">{{ getDispatchRunLabel(row) }}</span>
               </template>
             </el-table-column>
 
@@ -404,8 +404,8 @@ const getStatusText = (status) => {
 }
 
 const resolveDispatchStatus = (task) => {
-  if (task?.run_status === 'queued') return 'queued'
-  if (['queued', 'assigned', 'dispatching', 'pulling', 'acked'].includes(task?.status)) return 'pending'
+  if (task?.status === 'queued') return 'queued'
+  if (['assigned', 'dispatching', 'pulling', 'acked'].includes(task?.status)) return 'dispatching'
   if (task?.status === 'running') return 'running'
   if (task?.status === 'execute_success') return 'success'
   if (['execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(task?.status)) return 'failed'
@@ -416,7 +416,7 @@ const resolveDispatchStatus = (task) => {
 const getDispatchStatusType = (status) => {
   const types = {
     queued: 'info',
-    pending: 'warning',
+    dispatching: 'warning',
     running: 'warning',
     success: 'success',
     failed: 'danger',
@@ -428,7 +428,7 @@ const getDispatchStatusType = (status) => {
 const getDispatchStatusText = (status) => {
   const texts = {
     queued: '排队中',
-    pending: '待执行',
+    dispatching: '调度中',
     running: '运行中',
     success: '成功',
     failed: '失败',
@@ -478,6 +478,12 @@ const normalizeDispatchTasks = (tasks) => {
     ...task,
     dispatch_status: resolveDispatchStatus(task)
   }))
+}
+
+const getDispatchRunLabel = (task) => {
+  if (task?.build_number) return `#${task.build_number}`
+  if (task?.pipeline_run_id) return `运行 ${task.pipeline_run_id}`
+  return '-'
 }
 
 const fetchTaskDispatchData = async () => {

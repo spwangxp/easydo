@@ -12,7 +12,7 @@ NC = \033[0m
 # 项目配置
 APP_NAME = server
 BINARY_NAME = server
-COMPOSE_FILE = ../docker-compose.yml
+COMPOSE_FILE = ../deploy/docker-compose/docker-compose.yml
 DC = docker-compose -f $(COMPOSE_FILE)
 
 # Git 版本信息

@@ -195,11 +195,19 @@ type columnSync struct {
 
 func managedSchemaColumnSyncs() []columnSync {
 	return []columnSync{
+		{model: &Pipeline{}, field: "Definition"},
+		{model: &Pipeline{}, field: "Version"},
 		{model: &PipelineTrigger{}, field: "PushBranchFilters"},
 		{model: &PipelineTrigger{}, field: "TagFilters"},
 		{model: &PipelineTrigger{}, field: "MergeRequestSourceBranchFilters"},
 		{model: &PipelineTrigger{}, field: "MergeRequestTargetBranchFilters"},
 		{model: &PipelineRun{}, field: "IdempotencyKey"},
+		{model: &PipelineRun{}, field: "RunConfig"},
+		{model: &PipelineRun{}, field: "PipelineSnapshot"},
+		{model: &PipelineRun{}, field: "ResolvedNodes"},
+		{model: &PipelineRun{}, field: "Outputs"},
+		{model: &PipelineRun{}, field: "BindingsSnapshot"},
+		{model: &PipelineRun{}, field: "Events"},
 		{model: &LLMModelCatalog{}, field: "ParameterSize"},
 		{model: &InboxMessage{}, field: "NotificationID"},
 		{model: &InboxMessage{}, field: "EventType"},

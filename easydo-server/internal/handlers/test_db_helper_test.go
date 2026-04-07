@@ -14,7 +14,29 @@ import (
 
 func openHandlerTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
+	serverID := ""
+	serverPublicURL := ""
+	serverInternalURL := ""
+	serverInternalToken := ""
+	if config.Config != nil {
+		serverID = config.Config.GetString("server.id")
+		serverPublicURL = config.Config.GetString("server.public_url")
+		serverInternalURL = config.Config.GetString("server.internal_url")
+		serverInternalToken = config.Config.GetString("server.internal_token")
+	}
 	config.Init()
+	if serverID != "" {
+		config.Config.Set("server.id", serverID)
+	}
+	if serverPublicURL != "" {
+		config.Config.Set("server.public_url", serverPublicURL)
+	}
+	if serverInternalURL != "" {
+		config.Config.Set("server.internal_url", serverInternalURL)
+	}
+	if serverInternalToken != "" {
+		config.Config.Set("server.internal_token", serverInternalToken)
+	}
 
 	name := strings.NewReplacer("/", "_", " ", "_", ":", "_").Replace(t.Name())
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", name)

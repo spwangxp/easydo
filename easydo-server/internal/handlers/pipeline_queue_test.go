@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"easydo-server/internal/models"
@@ -154,6 +155,171 @@ func TestRunPipeline_ServerOnlyNodeStartsImmediately(t *testing.T) {
 	}
 	if run.StartTime == 0 {
 		t.Fatalf("run start_time should be set for immediate run")
+	}
+}
+
+func TestRunPipeline_StoresManualNodeScopedInputsWithoutMutatingPipelineSnapshot(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+
+	pipeline := models.Pipeline{
+		Name:        "manual-runtime-inputs",
+		Description: "manual runtime inputs should live in run_config_json",
+		OwnerID:     1,
+		Environment: "testing",
+		Config: `{
+			"version":"2.0",
+			"nodes":[
+				{"id":"n1","type":"shell","name":"Build","config":{"script":"${inputs.script}"}}
+			],
+			"edges":[]
+		}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	body := strings.NewReader(`{"inputs":{"n1":{"script":"echo manual override"}}}`)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/run", pipeline.ID), body)
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}}
+	c.Set("user_id", uint64(99))
+	c.Set("role", "admin")
+	c.Set("username", "demo-user")
+
+	h.RunPipeline(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			RunID uint64 `json:"run_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response failed: %v, body=%s", err, w.Body.String())
+	}
+
+	var run models.PipelineRun
+	if err := db.First(&run, resp.Data.RunID).Error; err != nil {
+		t.Fatalf("load run failed: %v", err)
+	}
+
+	var runConfig models.PipelineRunConfigSnapshot
+	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
+		t.Fatalf("unmarshal run config failed: %v", err)
+	}
+	if runConfig.Inputs["n1"]["script"] != "echo manual override" {
+		t.Fatalf("expected manual node-scoped inputs in run config, got %#v", runConfig.Inputs)
+	}
+
+	var pipelineSnapshot PipelineConfig
+	if err := json.Unmarshal([]byte(run.PipelineSnapshot), &pipelineSnapshot); err != nil {
+		t.Fatalf("unmarshal pipeline snapshot failed: %v", err)
+	}
+	if pipelineSnapshot.Nodes[0].Config["script"] != "${inputs.script}" {
+		t.Fatalf("expected pipeline snapshot to preserve authored config, got %#v", pipelineSnapshot.Nodes[0].Config)
+	}
+
+	var executionConfig PipelineConfig
+	if err := json.Unmarshal([]byte(run.Config), &executionConfig); err != nil {
+		t.Fatalf("unmarshal legacy execution config failed: %v", err)
+	}
+	if executionConfig.Nodes[0].Config["script"] != "echo manual override" {
+		t.Fatalf("expected execution config to resolve runtime input, got %#v", executionConfig.Nodes[0].Config)
+	}
+}
+
+func TestRunPipeline_UsesDefinitionJSONAsSourceOfTruth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+
+	pipeline := models.Pipeline{
+		Name:        "definition-source-of-truth",
+		Description: "run should use definition_json instead of legacy config",
+		OwnerID:     1,
+		WorkspaceID: 1,
+		Environment: "testing",
+		Config:      "{invalid-json",
+		Definition: `{
+			"version":"2.0",
+			"nodes":[
+				{
+					"node_id":"node_1",
+					"node_name":"Build",
+					"task_key":"shell",
+					"task_version":1,
+					"params":[{"key":"script","label":"脚本","value":"${inputs.script}","is_flexible":true}],
+					"credential_bindings":{},
+					"resource_bindings":{},
+					"metadata":{"x":100,"y":100}
+				}
+			],
+			"edges":[],
+			"triggers":[],
+			"metadata":{"version":"2.0"}
+		}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	body := strings.NewReader(`{"inputs":{"node_1":{"script":"echo from definition"}}}`)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/run", pipeline.ID), body)
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}}
+	c.Set("user_id", uint64(99))
+	c.Set("role", "admin")
+	c.Set("username", "demo-user")
+	c.Set("workspace_id", pipeline.WorkspaceID)
+
+	h.RunPipeline(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			RunID uint64 `json:"run_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response failed: %v, body=%s", err, w.Body.String())
+	}
+
+	var run models.PipelineRun
+	if err := db.First(&run, resp.Data.RunID).Error; err != nil {
+		t.Fatalf("load run failed: %v", err)
+	}
+
+	var snapshot PipelineConfig
+	if err := json.Unmarshal([]byte(run.PipelineSnapshot), &snapshot); err != nil {
+		t.Fatalf("unmarshal pipeline snapshot failed: %v", err)
+	}
+	if len(snapshot.Nodes) != 1 || snapshot.Nodes[0].ID != "node_1" {
+		t.Fatalf("expected definition snapshot node_1, got %#v", snapshot.Nodes)
+	}
+	if len(snapshot.Nodes[0].DefinitionParams) != 1 || snapshot.Nodes[0].DefinitionParams[0].Value != "${inputs.script}" {
+		t.Fatalf("expected authored params from definition_json, got %#v", snapshot.Nodes[0].DefinitionParams)
+	}
+
+	var executionConfig PipelineConfig
+	if err := json.Unmarshal([]byte(run.Config), &executionConfig); err != nil {
+		t.Fatalf("unmarshal execution config failed: %v", err)
+	}
+	if executionConfig.Nodes[0].Config["script"] != "echo from definition" {
+		t.Fatalf("expected execution config to resolve definition_json runtime input, got %#v", executionConfig.Nodes[0].Config)
 	}
 }
 

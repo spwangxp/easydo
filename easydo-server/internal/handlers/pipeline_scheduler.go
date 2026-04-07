@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -190,6 +191,7 @@ func (h *PipelineHandler) assignOneQueuedRun(db *gorm.DB) (uint64, bool) {
 
 			scheduledRunID = run.ID
 			scheduledAgentID = agentID
+			appendRunEvent(tx, run.ID, "run_started", map[string]interface{}{"agent_id": agentID})
 			return nil
 		}
 
@@ -231,10 +233,23 @@ func (h *PipelineHandler) startQueuedPipelineRun(runID uint64) {
 	}
 
 	var config PipelineConfig
-	if err := json.Unmarshal([]byte(run.Config), &config); err != nil {
+	if err := json.Unmarshal([]byte(run.PipelineSnapshot), &config); err != nil {
+		h.updateRunStatus(runID, models.PipelineRunStatusFailed, "流水线快照解析失败: "+err.Error())
+		return
+	}
+
+	var runConfig models.PipelineRunConfigSnapshot
+	if strings.TrimSpace(run.RunConfig) != "" {
+		if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
+			h.updateRunStatus(runID, models.PipelineRunStatusFailed, "运行配置解析失败: "+err.Error())
+			return
+		}
+	}
+	executionConfig, err := buildExecutionPipelineConfig(config, runConfig)
+	if err != nil {
 		h.updateRunStatus(runID, models.PipelineRunStatusFailed, "流水线配置解析失败: "+err.Error())
 		return
 	}
 
-	h.executePipelineTasks(pipeline, &run, config, run.TriggerUserID, run.TriggerUserRole)
+	h.executePipelineTasks(pipeline, &run, executionConfig, run.TriggerUserID, run.TriggerUserRole)
 }

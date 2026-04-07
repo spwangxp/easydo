@@ -117,6 +117,26 @@ func appendTaskLogChunk(h *WebSocketHandler, task models.AgentTask, logChunk tas
 		logChunk.Timestamp = time.Now().Unix()
 	}
 	normalizedTimestamp := normalizeUnixTimestamp(logChunk.Timestamp)
+	uniqueKey := buildTaskLogChunkUniqueKey(logChunk.TaskID, logChunk.Attempt, logChunk.Seq)
+	chunkRow := &models.AgentLogChunk{
+		TaskID:         logChunk.TaskID,
+		PipelineRunID:  task.PipelineRunID,
+		AgentID:        agentID,
+		AgentSessionID: agentSessionID,
+		Attempt:        logChunk.Attempt,
+		Seq:            logChunk.Seq,
+		Stream:         logChunk.Stream,
+		Chunk:          logChunk.Chunk,
+		Timestamp:      normalizedTimestamp,
+		UniqueKey:      uniqueKey,
+	}
+	if err := models.DB.Where("unique_key = ?", uniqueKey).FirstOrCreate(chunkRow).Error; err != nil {
+		return false, err
+	}
+	created := chunkRow.CreatedAt.Unix() == chunkRow.UpdatedAt.Unix()
+	if !created {
+		return false, nil
+	}
 
 	if err := agentFileLogs.Append(fileLogEntry{
 		AgentID:       agentID,

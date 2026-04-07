@@ -11,7 +11,7 @@ NC = \033[0m
 
 # 项目配置
 APP_NAME = frontend
-COMPOSE_FILE = ../docker-compose.yml
+COMPOSE_FILE = ../deploy/docker-compose/docker-compose.yml
 DC = docker-compose -f $(COMPOSE_FILE)
 
 # Git 版本信息
@@ -56,7 +56,7 @@ run:
 	@echo "$(BLUE)[Frontend]$(NC) 启动服务..."
 	@$(DC) up -d frontend
 	@echo "$(GREEN)✅ Frontend 已启动$(NC)"
-	@echo "   访问: http://localhost"
+	@echo "   访问: http://localhost:8088"
 
 # ════════════════════════════════════════════════════════════════
 # Docker 停止
@@ -96,7 +96,7 @@ debug: stop
 		--build-arg GIT_DATE=$(GIT_DATE)
 	@$(DC) up -d frontend
 	@echo "$(GREEN)✅ Frontend 调试部署完成$(NC)"
-	@echo "   访问: http://localhost"
+	@echo "   访问: http://localhost:8088"
 
 # ════════════════════════════════════════════════════════════════
 # 清理

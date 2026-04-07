@@ -603,19 +603,6 @@
             <el-option label="租约失效" value="lease_expired" />
             <el-option label="已取消" value="cancelled" />
           </el-select>
-          <el-select
-            v-model="taskFilters.run_status"
-            placeholder="流水线状态"
-            clearable
-            style="width: 150px"
-            @change="fetchAgentTasks(true)"
-          >
-            <el-option label="排队中" value="queued" />
-            <el-option label="运行中" value="running" />
-            <el-option label="成功" value="success" />
-            <el-option label="失败" value="failed" />
-            <el-option label="已取消" value="cancelled" />
-          </el-select>
           <el-button type="primary" plain @click="fetchAgentTasks(true)">
             <el-icon><Search /></el-icon>
             查询
@@ -638,14 +625,7 @@
           <el-table-column label="归属流水线" min-width="180">
             <template #default="{ row }">
               <div>{{ row.pipeline_name || '-' }}</div>
-              <div class="task-sub">#{{ row.build_number || '-' }}</div>
-            </template>
-          </el-table-column>
-          <el-table-column label="流水线状态" width="110" align="center">
-            <template #default="{ row }">
-              <el-tag :type="getRunStatusType(row.run_status)" size="small">
-                {{ getRunStatusText(row.run_status) }}
-              </el-tag>
+              <div class="task-sub">{{ getTaskRunLabel(row) }}</div>
             </template>
           </el-table-column>
           <el-table-column label="任务状态" width="110" align="center">
@@ -758,7 +738,6 @@ const agentTaskTotal = ref(0)
 const taskFilters = reactive({
   keyword: '',
   status: '',
-  run_status: '',
   page: 1,
   page_size: 20
 })
@@ -911,26 +890,10 @@ const getTaskStatusText = (status) => {
   return texts[status] || '未知'
 }
 
-const getRunStatusType = (status) => {
-  const types = {
-    queued: 'info',
-    running: 'warning',
-    success: 'success',
-    failed: 'danger',
-    cancelled: 'info'
-  }
-  return types[status] || 'info'
-}
-
-const getRunStatusText = (status) => {
-  const texts = {
-    queued: '排队中',
-    running: '运行中',
-    success: '成功',
-    failed: '失败',
-    cancelled: '已取消'
-  }
-  return texts[status] || '-'
+const getTaskRunLabel = (task) => {
+  if (task?.build_number) return `#${task.build_number}`
+  if (task?.pipeline_run_id) return `运行 ${task.pipeline_run_id}`
+  return '-'
 }
 
 const getRegistrationStatusType = (status) => {
@@ -1220,7 +1183,6 @@ const handleTasks = async (agent) => {
   taskDialogVisible.value = true
   taskFilters.keyword = ''
   taskFilters.status = ''
-  taskFilters.run_status = ''
   taskFilters.page = 1
   await fetchAgentTasks(true)
 }
@@ -1243,9 +1205,6 @@ const fetchAgentTasks = async (resetPage = false) => {
     }
     if (taskFilters.status) {
       params.status = taskFilters.status
-    }
-    if (taskFilters.run_status) {
-      params.run_status = taskFilters.run_status
     }
     const res = await getTaskDispatchList(params)
     if (res.code === 200) {

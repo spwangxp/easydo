@@ -9,12 +9,12 @@ ENV GIT_COMMIT=${GIT_COMMIT}
 ENV GIT_COMMIT_SHORT=${GIT_COMMIT_SHORT}
 ENV GIT_DATE=${GIT_DATE}
 
-WORKDIR /app
+WORKDIR /app/easydo-frontend
 
-COPY package*.json ./
+COPY easydo-frontend/package*.json ./
 RUN npm install
 
-COPY . .
+COPY easydo-frontend/ ./
 RUN npm run build
 
 # 阶段2: 生产环境
@@ -28,11 +28,11 @@ ENV GIT_COMMIT=${GIT_COMMIT}
 ENV GIT_COMMIT_SHORT=${GIT_COMMIT_SHORT}
 ENV GIT_DATE=${GIT_DATE}
 
-COPY --from=frontend-builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=frontend-builder /app/easydo-frontend/dist /usr/share/nginx/html
+COPY deploy/docker-compose/frontend/nginx.conf /etc/nginx/conf.d/default.conf
 
 # 复制版本信息打印脚本到 nginx 的 docker-entrypoint.d 目录
-COPY docker-entrypoint.d/05-version-info.sh /docker-entrypoint.d/05-version-info.sh
+COPY easydo-frontend/docker-entrypoint.d/05-version-info.sh /docker-entrypoint.d/05-version-info.sh
 RUN chmod +x /docker-entrypoint.d/05-version-info.sh
 
 EXPOSE 80

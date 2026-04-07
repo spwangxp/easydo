@@ -128,6 +128,13 @@ func (s *taskLogStore) QueryTaskLogs(runID uint64, taskID uint64, level string) 
 	if err != nil {
 		return nil, err
 	}
+	if len(entries) == 0 {
+		chunkEntries, chunkErr := s.readChunks(taskID, runID, 0)
+		if chunkErr != nil {
+			return nil, chunkErr
+		}
+		entries = append(entries, chunkEntries...)
+	}
 	entries = append(entries, s.queryLive(liveLogQuery{TaskID: taskID, RunID: runID, Level: level})...)
 	return filterEntries(dedupeEntries(entries), taskID, level, ""), nil
 }
@@ -153,6 +160,13 @@ func (s *taskLogStore) QueryRunLogs(runID uint64, taskID uint64, level, source s
 			return nil, err
 		}
 		entries = append(entries, segmentEntries...)
+	}
+	if len(entries) == 0 {
+		chunkEntries, chunkErr := s.readChunks(taskID, runID, 0)
+		if chunkErr != nil {
+			return nil, chunkErr
+		}
+		entries = append(entries, chunkEntries...)
 	}
 	entries = append(entries, s.queryLive(liveLogQuery{TaskID: taskID, RunID: runID, Level: level, Source: source})...)
 	return filterEntries(dedupeEntries(entries), taskID, level, source), nil
@@ -260,7 +274,7 @@ func (s *taskLogStore) queryLive(q liveLogQuery) []fileLogEntry {
 }
 
 // flushSegment seals the current in-memory slice for one `(task, attempt)` into
-// a compact segment object plus MySQL segment index row.
+// a compact segment object plus MariaDB segment index row.
 //
 // The lock is only held long enough to snapshot and reset the mutable buffer.
 // Compression, object upload, and DB writes happen outside the lock so log

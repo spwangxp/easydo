@@ -86,7 +86,7 @@ func GetLogsFromBuffer(runID, taskID uint64) ([]string, error) {
 	return logs, nil
 }
 
-// ClearLogBuffer removes logs from Redis buffer after they've been flushed to MySQL
+// ClearLogBuffer removes logs from Redis buffer after they've been flushed to MariaDB
 func ClearLogBuffer(runID, taskID uint64) error {
 	ctx := context.Background()
 	key := LogBufferPrefix + formatUint64(runID) + ":" + formatUint64(taskID)

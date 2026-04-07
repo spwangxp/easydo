@@ -150,6 +150,14 @@ func emitPipelineRunTerminalNotification(db *gorm.DB, run *models.PipelineRun, e
 	}
 	title := "流水线运行状态更新"
 	content := fmt.Sprintf("流水线运行 #%d 状态变更为 %s", run.BuildNumber, run.Status)
+	metadata := map[string]interface{}{
+		"pipeline_run_id": run.ID,
+		"pipeline_id":     run.PipelineID,
+		"build_number":    run.BuildNumber,
+		"trigger_type":    run.TriggerType,
+		"status":          run.Status,
+		"error_msg":       run.ErrorMsg,
+	}
 	_, _ = EmitNotificationEvent(db, NotificationEventInput{
 		WorkspaceID:      run.WorkspaceID,
 		Family:           NotificationFamilyPipelineRun,
@@ -164,18 +172,28 @@ func emitPipelineRunTerminalNotification(db *gorm.DB, run *models.PipelineRun, e
 		PermissionPolicy: "workspace_member",
 		Channels:         []string{models.NotificationChannelInApp, models.NotificationChannelEmail},
 		UserRecipients:   []uint64{run.TriggerUserID},
-		Metadata: map[string]interface{}{
-			"pipeline_run_id": run.ID,
-			"pipeline_id":     run.PipelineID,
-			"status":          run.Status,
-			"error_msg":       run.ErrorMsg,
-		},
+		Metadata:         metadata,
 	})
 }
 
 func emitDeploymentRequestNotification(db *gorm.DB, request *models.DeploymentRequest, eventType string, title string, content string) {
 	if db == nil || request == nil || request.ID == 0 || request.RequestedBy == 0 {
 		return
+	}
+	metadata := map[string]interface{}{
+		"deployment_request_id": request.ID,
+		"pipeline_run_id":       request.PipelineRunID,
+		"pipeline_id":           request.PipelineID,
+		"status":                request.Status,
+	}
+	if request.PipelineRunID > 0 {
+		var run models.PipelineRun
+		if err := db.Select("id", "pipeline_id", "build_number", "status", "trigger_type").First(&run, request.PipelineRunID).Error; err == nil {
+			metadata["pipeline_id"] = run.PipelineID
+			metadata["build_number"] = run.BuildNumber
+			metadata["run_status"] = run.Status
+			metadata["trigger_type"] = run.TriggerType
+		}
 	}
 	_, _ = EmitNotificationEvent(db, NotificationEventInput{
 		WorkspaceID:      request.WorkspaceID,
@@ -191,11 +209,7 @@ func emitDeploymentRequestNotification(db *gorm.DB, request *models.DeploymentRe
 		PermissionPolicy: "workspace_member",
 		Channels:         []string{models.NotificationChannelInApp, models.NotificationChannelEmail},
 		UserRecipients:   []uint64{request.RequestedBy},
-		Metadata: map[string]interface{}{
-			"deployment_request_id": request.ID,
-			"pipeline_run_id":       request.PipelineRunID,
-			"status":                request.Status,
-		},
+		Metadata:         metadata,
 	})
 }
 

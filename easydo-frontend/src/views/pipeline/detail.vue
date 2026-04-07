@@ -107,7 +107,7 @@
     <div class="detail-content">
       <!-- 设计 Tab -->
       <div v-show="activeTab === 'design'" class="tab-panel design-panel">
-        <design-tab :pipeline-id="pipelineId" />
+        <design-tab :pipeline-id="pipelineId" @saved="fetchPipelineDetail" />
       </div>
       
       <!-- 历史 Tab -->
@@ -130,9 +130,21 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="trigger_type" label="触发方式" width="120" />
-            <el-table-column prop="trigger_user" label="触发人" width="100" />
-            <el-table-column prop="branch" label="分支" width="150" />
+            <el-table-column label="触发方式" width="120">
+              <template #default="{ row }">
+                {{ getRunTriggerType(row) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="触发人" width="100">
+              <template #default="{ row }">
+                {{ getRunTriggerUser(row) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="分支" width="150">
+              <template #default="{ row }">
+                {{ getRunBranch(row) }}
+              </template>
+            </el-table-column>
             <el-table-column label="耗时" width="100">
               <template #default="{ row }">
                 {{ formatDuration(row.duration) }}
@@ -187,15 +199,15 @@
           <div class="execution-summary">
             <el-card class="summary-item">
               <div class="summary-label">触发方式</div>
-              <div class="summary-value">{{ currentRun?.trigger_type || '-' }}</div>
+              <div class="summary-value">{{ getRunTriggerType(currentRun) }}</div>
             </el-card>
             <el-card class="summary-item">
               <div class="summary-label">触发人</div>
-              <div class="summary-value">{{ currentRun?.trigger_user || '-' }}</div>
+              <div class="summary-value">{{ getRunTriggerUser(currentRun) }}</div>
             </el-card>
             <el-card class="summary-item">
               <div class="summary-label">开始时间</div>
-              <div class="summary-value">{{ formatDateTime(currentRun?.start_time) }}</div>
+              <div class="summary-value">{{ formatDateTime(getRunStartTime(currentRun)) }}</div>
             </el-card>
             <el-card class="summary-item">
               <div class="summary-label">耗时</div>
@@ -750,14 +762,40 @@
       title="运行流水线"
       :width="runDialogWidth"
     >
-      <el-form :model="runForm" label-width="100px">
-        <el-form-item label="分支">
-          <el-input v-model="runForm.branch" placeholder="master" />
-        </el-form-item>
-        <el-form-item label="提交">
-          <el-input v-model="runForm.commit" placeholder="latest" />
-        </el-form-item>
-      </el-form>
+      <div v-if="manualRunNodes.length === 0" class="manual-run-empty">
+        当前流水线未配置可手动覆盖参数，将按定义直接运行。
+      </div>
+      <div v-else class="manual-run-sections">
+        <div
+          v-for="node in manualRunNodes"
+          :key="node.node_id"
+          class="manual-run-node"
+        >
+          <div class="manual-run-node-title">{{ node.node_name }}（{{ node.node_id }}）</div>
+          <el-form :model="runForm.inputs[node.node_id]" label-width="120px">
+            <el-form-item
+              v-for="param in node.params"
+              :key="`${node.node_id}-${param.key}`"
+              :label="param.label || param.key"
+            >
+              <el-switch
+                v-if="param.input_type === 'boolean'"
+                v-model="runForm.inputs[node.node_id][param.key]"
+              />
+              <el-input-number
+                v-else-if="param.input_type === 'number'"
+                v-model="runForm.inputs[node.node_id][param.key]"
+                style="width: 100%"
+              />
+              <el-input
+                v-else
+                v-model="runForm.inputs[node.node_id][param.key]"
+                :placeholder="param.placeholder || '请输入运行时覆盖值'"
+              />
+            </el-form-item>
+          </el-form>
+        </div>
+      </div>
       <template #footer>
         <el-button @click="runDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="runLoading" @click="confirmRun">运行</el-button>
@@ -795,12 +833,13 @@ import {
   Warning,
   Close
 } from '@element-plus/icons-vue'
-import { getPipelineDetail, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineStatistics, getPipelineTestReports, getRunTasks, cancelPipelineRun } from '@/api/pipeline'
+import { getPipelineDetail, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineRunDetail, getRunTasks, getPipelineStatistics, getPipelineTestReports, cancelPipelineRun } from '@/api/pipeline'
 import { getTaskLogs as fetchTaskLogsFromApi } from '@/api/task'
 import { getProjectList } from '@/api/project'
 import DesignTab from './designTab.vue'
 import LogViewer from './components/LogViewer.vue'
 import realtime from '@/utils/realtime'
+import { buildRunInputsPayload as buildManualRunPayload, createRunInputs, getManualRunNodes, parseJSONField } from './runtimeConfig'
 
 const route = useRoute()
 const router = useRouter()
@@ -825,11 +864,63 @@ const projectList = ref([])
 const testReports = ref([])
 const recentFailures = ref([])
 
-// 运行表单
+// 运行表单（node-scoped runtime inputs）
 const runForm = reactive({
-  branch: 'master',
-  commit: ''
+  inputs: {}
 })
+
+const getRunConfig = (run) => parseJSONField(run?.run_config_json, {}) || {}
+const getPipelineSnapshot = (run) => parseJSONField(run?.pipeline_snapshot_json, {}) || {}
+const getResolvedNodes = (run) => {
+  const resolved = parseJSONField(run?.resolved_nodes_json, [])
+  return Array.isArray(resolved) ? resolved : []
+}
+const getOutputsByNode = (run) => parseJSONField(run?.outputs_json, {}) || {}
+const getEvents = (run) => {
+  const events = parseJSONField(run?.events_json, [])
+  return Array.isArray(events) ? events : []
+}
+
+const getRunTriggerType = (run) => {
+  const trigger = getRunConfig(run)?.trigger || {}
+  return trigger.type || run?.trigger_type || '-'
+}
+
+const getRunTriggerUser = (run) => {
+  const trigger = getRunConfig(run)?.trigger || {}
+  return trigger.operator || run?.trigger_user || '-'
+}
+
+const getRunStartTime = (run) => {
+  if (!run) return null
+  return run.start_time || run.created_at || null
+}
+
+const getRunBranch = (run) => {
+  const runInputs = getRunConfig(run)?.inputs || {}
+  for (const params of Object.values(runInputs)) {
+    if (params && typeof params === 'object') {
+      if (params.git_ref) return params.git_ref
+    }
+  }
+
+  const outputs = getOutputsByNode(run)
+  for (const nodeOutput of Object.values(outputs)) {
+    if (nodeOutput && typeof nodeOutput === 'object' && nodeOutput.git_ref) {
+      return nodeOutput.git_ref
+    }
+  }
+
+  return run?.branch || '-'
+}
+
+const manualRunNodes = computed(() => getManualRunNodes(pipeline.value))
+
+const initializeRunInputs = () => {
+  runForm.inputs = createRunInputs(manualRunNodes.value)
+}
+
+const buildRunInputsPayload = () => buildManualRunPayload(manualRunNodes.value, runForm.inputs)
 
 // 设置表单
 const settingsForm = reactive({
@@ -921,7 +1012,9 @@ const selectedTask = ref(null)
 const logContentRef = ref(null)
 const realtimeMode = ref('idle')
 const runLogViewerRef = ref(null)
+let realtimeHandlersBound = false
 let executionPollingTimer = null
+let executionPollingInFlight = false
 const detailContainerRef = ref(null)
 const detailContainerWidth = ref(0)
 let detailResizeObserver = null
@@ -985,6 +1078,98 @@ const sortedRunTasks = computed(() => {
 
 const getTaskNodeID = (task) => {
   return task?.node_id || task?.NodeID || ''
+}
+
+const buildRunTasksFromRunRecord = (run) => {
+  const resolvedNodes = getResolvedNodes(run)
+  const outputsByNode = getOutputsByNode(run)
+  const events = getEvents(run)
+  const snapshot = getPipelineSnapshot(run)
+  const snapshotNodes = Array.isArray(snapshot?.nodes) ? snapshot.nodes : []
+  const snapshotNodeMap = new Map(snapshotNodes.map((node, index) => [
+    node.node_id || node.id,
+    { ...node, __index: index }
+  ]))
+
+  const eventBuckets = new Map()
+  events.forEach((event) => {
+    const nodeID = event?.payload?.node_id
+    if (!nodeID) return
+    if (!eventBuckets.has(nodeID)) {
+      eventBuckets.set(nodeID, [])
+    }
+    eventBuckets.get(nodeID).push(event)
+  })
+
+  return resolvedNodes.map((node, index) => {
+    const nodeID = node.node_id || `node_${index + 1}`
+    const snapshotNode = snapshotNodeMap.get(nodeID) || null
+    const attempts = Array.isArray(node.attempts) ? node.attempts : []
+    const latestAttempt = attempts.length > 0 ? attempts[attempts.length - 1] : null
+    const nodeEvents = eventBuckets.get(nodeID) || []
+    const startEvent = nodeEvents.find(item => item?.event_type === 'node_running')
+
+    const normalizedStatus =
+      node.status === 'success' ? 'execute_success' :
+      node.status === 'failed' ? 'execute_failed' :
+      node.status || 'queued'
+
+    return {
+      id: latestAttempt?.task_id || latestAttempt?.attempt_no || 0,
+      node_id: nodeID,
+      name: node.node_name || snapshotNode?.node_name || snapshotNode?.name || nodeID,
+      task_type: node.task_key || '',
+      status: normalizedStatus,
+      display_status: normalizedStatus,
+      start_time: latestAttempt?.start_time || startEvent?.time || 0,
+      created_at: latestAttempt?.start_time || startEvent?.time || run?.created_at || 0,
+      duration: latestAttempt?.duration || 0,
+      error_msg: latestAttempt?.error_msg || '',
+      outputs: outputsByNode[nodeID] || {},
+      _order: Number.isFinite(snapshotNode?.__index) ? snapshotNode.__index : index,
+      Agent: latestAttempt?.agent_id ? { name: `Agent #${latestAttempt.agent_id}` } : null
+    }
+  }).sort((a, b) => a._order - b._order)
+}
+
+const normalizeRunTaskFromApi = (task, index, fallbackTaskMap = new Map()) => {
+  const nodeID = task?.node_id || task?.NodeID || task?.nodeId || ''
+  const taskID = Number(task?.id || task?.task_id || 0)
+  const fallback = (nodeID && fallbackTaskMap.get(nodeID))
+    || (taskID > 0 ? Array.from(fallbackTaskMap.values()).find(item => Number(item.id || 0) === taskID) : null)
+    || null
+
+  const rawStatus = task?.status || fallback?.status || 'queued'
+  const normalizedStatus =
+    rawStatus === 'success' ? 'execute_success'
+      : rawStatus === 'failed' ? 'execute_failed'
+        : rawStatus
+
+  const rawDisplayStatus = task?.display_status || task?.displayStatus || ''
+  const normalizedDisplayStatus = rawDisplayStatus || normalizedStatus
+  const resolvedName = task?.name || task?.task_name || task?.node_name || fallback?.name || nodeID || (taskID ? `任务 #${taskID}` : `任务 #${index + 1}`)
+
+  return {
+    ...fallback,
+    ...task,
+    id: taskID || Number(fallback?.id || 0),
+    node_id: nodeID || fallback?.node_id || fallback?.NodeID || '',
+    name: resolvedName,
+    task_type: task?.task_type || task?.type || task?.task_key || fallback?.task_type || '',
+    status: normalizedStatus,
+    display_status: normalizedDisplayStatus,
+    start_time: task?.start_time ?? fallback?.start_time ?? 0,
+    created_at: task?.created_at ?? fallback?.created_at ?? 0,
+    duration: task?.duration ?? fallback?.duration ?? 0,
+    error_msg: task?.error_msg || fallback?.error_msg || '',
+    outputs: task?.outputs || fallback?.outputs || {},
+    _order: Number.isFinite(task?._order)
+      ? task._order
+      : Number.isFinite(fallback?._order)
+        ? fallback._order
+        : index,
+    Agent: task?.Agent || (task?.agent_name ? { name: task.agent_name } : fallback?.Agent || null)
+  }
 }
 
 // 计算执行进度
@@ -1188,11 +1373,36 @@ const fetchPipelineDetail = async () => {
       settingsForm.project_id = pipeline.value.project_id
       settingsForm.environment = pipeline.value.environment
       settingsForm.description = pipeline.value.description || ''
+      return pipeline.value
     }
   } catch (error) {
     console.error('获取流水线详情失败:', error)
     ElMessage.error('获取流水线详情失败')
   }
+  return null
+}
+
+// 当执行视图可见时，确保按选中/最新构建触发详情与任务接口，避免展示陈旧执行状态。
+const hydrateExecutionViewIfVisible = async () => {
+  if (activeTab.value !== 'execution') return
+
+  const latestRun = runHistory.value[0] || null
+  const targetRun = currentRun.value?.id ? currentRun.value : latestRun
+  if (!targetRun?.id) return
+
+  const targetRunID = Number(targetRun.id || 0)
+  const currentRunID = Number(currentRun.value?.id || 0)
+  if (targetRunID !== currentRunID) {
+    currentRun.value = targetRun
+    runTasks.value = []
+    selectedTask.value = null
+    taskLogs.value = []
+  }
+
+  stopExecutionPolling()
+  stopRealtimeUpdates()
+  startRealtimeUpdates(targetRun.id)
+  await fetchExecutionDetail()
 }
 
 const fetchTriggerSettings = async () => {
@@ -1211,13 +1421,49 @@ const fetchTriggerSettings = async () => {
 }
 
 // 获取运行历史
-const fetchRunHistory = async () => {
+const fetchRunHistory = async (options = {}) => {
+  const { rehydrateExecution = false } = options
   historyLoading.value = true
+
+  // 页面初始加载若执行面板可见，先清空旧任务展示，避免接口返回前出现陈旧内容。
+  if (rehydrateExecution && activeTab.value === 'execution') {
+    runTasks.value = []
+    selectedTask.value = null
+    taskLogs.value = []
+  }
+
   try {
     const response = await getPipelineRuns(pipelineId.value, { page: 1, page_size: 50 })
     if (response.code === 200) {
       runHistory.value = response.data.list || []
       totalRuns.value = response.data.total || 0
+
+      if (rehydrateExecution) {
+        const latestRun = runHistory.value[0] || null
+
+        if (!latestRun) {
+          currentRun.value = null
+          runTasks.value = []
+          selectedTask.value = null
+          taskLogs.value = []
+          stopExecutionPolling()
+          stopRealtimeUpdates()
+          return
+        }
+
+        const latestRunID = Number(latestRun.id || 0)
+        const currentRunID = Number(currentRun.value?.id || 0)
+        const runChanged = latestRunID !== currentRunID
+
+        currentRun.value = latestRun
+        if (runChanged) {
+          runTasks.value = []
+          selectedTask.value = null
+          taskLogs.value = []
+        }
+
+        await hydrateExecutionViewIfVisible()
+      }
     }
   } catch (error) {
     console.error('获取运行历史失败:', error)
@@ -1293,10 +1539,23 @@ const goBack = () => {
   router.push('/pipeline')
 }
 
+const openRunExecutionView = async (run) => {
+  if (!run?.id) return
+  currentRun.value = run
+
+  if (activeTab.value !== 'execution') {
+    activeTab.value = 'execution'
+    return
+  }
+
+  await hydrateExecutionViewIfVisible()
+}
+
 // 运行流水线
-const handleRun = () => {
-  runForm.branch = 'master'
-  runForm.commit = ''
+const handleRun = async () => {
+  const latestPipeline = await fetchPipelineDetail()
+  if (!latestPipeline) return
+  initializeRunInputs()
   runDialogVisible.value = true
 }
 
@@ -1304,7 +1563,7 @@ const handleRun = () => {
 const confirmRun = async () => {
   runLoading.value = true
   try {
-    const response = await runPipeline(pipelineId.value)
+    const response = await runPipeline(pipelineId.value, buildRunInputsPayload())
     if (response.code === 200) {
       const runStatus = response?.data?.status
       ElMessage.success(runStatus === 'queued' ? '流水线已进入排队' : '流水线已开始运行')
@@ -1313,15 +1572,7 @@ const confirmRun = async () => {
       // 获取最新的运行记录并切换到执行Tab
       await fetchRunHistory()
       if (runHistory.value.length > 0) {
-        currentRun.value = runHistory.value[0]
-        activeTab.value = 'execution'
-
-        // 停止旧轮询，启动 WebSocket 实时更新
-        stopExecutionPolling()
-        startRealtimeUpdates(currentRun.value.id)
-
-        // 初始加载任务列表
-        await fetchExecutionDetail()
+        await openRunExecutionView(runHistory.value[0])
       }
     } else {
       // 显示服务器返回的错误消息
@@ -1359,22 +1610,12 @@ const viewRunDetail = (run) => {
 
 // 查看执行详情（切换到执行Tab）
 const viewExecutionDetail = async (run) => {
-  currentRun.value = run
-  activeTab.value = 'execution'
-  stopExecutionPolling()
-  stopRealtimeUpdates()
-  startRealtimeUpdates(run.id)
-  await fetchExecutionDetail()
+  await openRunExecutionView(run)
 }
 
 // 查看运行任务
 const viewRunTasks = async (run) => {
-  currentRun.value = run
-  activeTab.value = 'execution'
-  stopExecutionPolling()
-  stopRealtimeUpdates()
-  startRealtimeUpdates(run.id)
-  await fetchExecutionDetail()
+  await openRunExecutionView(run)
 }
 
 const viewRunLogs = async (run) => {
@@ -1389,21 +1630,33 @@ const fetchExecutionDetail = async () => {
   
   executionLoading.value = true
   try {
-    // 获取运行详情
-    const runResponse = await getPipelineDetail(pipelineId.value)
-    if (runResponse.code === 200) {
-      // 查找当前运行的记录
-      const runs = runResponse.data.runs || []
-      const found = runs.find(r => r.id === currentRun.value.id)
-      if (found) {
-        currentRun.value = found
-      }
+    const detailResponse = await getPipelineRunDetail(pipelineId.value, currentRun.value.id)
+    if (detailResponse.code === 200 && detailResponse.data) {
+      currentRun.value = detailResponse.data
     }
-    
-    // 获取任务列表
+
+    const fallbackTasks = buildRunTasksFromRunRecord(currentRun.value)
+    const fallbackTaskMap = new Map(
+      fallbackTasks
+        .filter(task => getTaskNodeID(task))
+        .map(task => [getTaskNodeID(task), task])
+    )
+
     const tasksResponse = await getRunTasks(pipelineId.value, currentRun.value.id)
-    if (tasksResponse.code === 200) {
-      runTasks.value = tasksResponse.data.list || []
+    const taskList = Array.isArray(tasksResponse?.data)
+      ? tasksResponse.data
+      : Array.isArray(tasksResponse?.data?.list)
+        ? tasksResponse.data.list
+        : Array.isArray(tasksResponse?.data?.tasks)
+          ? tasksResponse.data.tasks
+          : []
+
+    if (tasksResponse?.code === 200 && taskList.length > 0) {
+      runTasks.value = taskList
+        .map((task, index) => normalizeRunTaskFromApi(task, index, fallbackTaskMap))
+        .sort((a, b) => (a._order ?? Number.POSITIVE_INFINITY) - (b._order ?? Number.POSITIVE_INFINITY))
+    } else {
+      runTasks.value = fallbackTasks
     }
     
     // 如果有选中的任务，获取任务日志
@@ -1479,18 +1732,39 @@ const stopExecution = () => {
   }).catch(() => {})
 }
 
-// 开始轮询执行状态（备用方案，当 WebSocket 不可用时）
+const reconcileExecutionView = async () => {
+  if (executionPollingInFlight) return
+  if (activeTab.value !== 'execution') return
+  if (!currentRun.value?.id) return
+
+  if (currentRun.value?.status && isRunTerminal(currentRun.value.status)) {
+    stopExecutionPolling()
+    return
+  }
+
+  executionPollingInFlight = true
+  try {
+    await fetchExecutionDetail()
+    if (showLogPanel.value && selectedTask.value?.id) {
+      await fetchTaskLogs(selectedTask.value)
+    }
+  } finally {
+    executionPollingInFlight = false
+  }
+}
+
+// 开始轮询执行状态，用于多副本下的状态/日志对账和闭环补偿。
 const startExecutionPolling = () => {
   if (executionPollingTimer) return
 
-  fetchExecutionDetail()
+  reconcileExecutionView()
   executionPollingTimer = setInterval(() => {
     if (activeTab.value === 'execution' && isRunActive(currentRun.value?.status)) {
-      fetchExecutionDetail()
+      reconcileExecutionView()
     } else if (currentRun.value?.status && isRunTerminal(currentRun.value?.status)) {
       stopExecutionPolling()
     }
-  }, 5000)
+  }, 3000)
 }
 
 // 停止轮询
@@ -1499,6 +1773,7 @@ const stopExecutionPolling = () => {
     clearInterval(executionPollingTimer)
     executionPollingTimer = null
   }
+  executionPollingInFlight = false
 }
 
 // 停止轮询和 WebSocket
@@ -1535,14 +1810,7 @@ const getTaskLogs = async (taskId, params = {}) => {
 // 解析任务输出数据
 const getTaskOutputs = (task) => {
   if (!task) return null
-  const resultData = task.result_data || task.ResultData
-  if (!resultData) return null
-  try {
-    return JSON.parse(resultData)
-  } catch (e) {
-    console.error('解析任务输出失败:', e)
-    return null
-  }
+  return task.outputs || null
 }
 
 // 格式化任务输出显示
@@ -1560,10 +1828,11 @@ const formatTaskOutputs = (outputs, taskType) => {
 
   // git_clone 任务输出
   if (taskType === 'git_clone' || taskType === 'git-clone') {
-    if (outputs.commit_sha) lines.push({ label: 'Commit SHA', value: outputs.commit_sha, type: 'primary' })
-    if (outputs.branch) lines.push({ label: 'Branch', value: outputs.branch, type: 'primary' })
-    if (outputs.repo_url) lines.push({ label: 'Repo URL', value: outputs.repo_url, type: 'info' })
-    if (outputs.repo_path) lines.push({ label: 'Repo Path', value: outputs.repo_path, type: 'info' })
+    if (outputs.git_commit) lines.push({ label: 'Git Commit', value: outputs.git_commit, type: 'primary' })
+    if (outputs.git_commit_short) lines.push({ label: 'Git Commit (Short)', value: outputs.git_commit_short, type: 'primary' })
+    if (outputs.git_ref) lines.push({ label: 'Git Ref', value: outputs.git_ref, type: 'primary' })
+    if (outputs.git_repo_url) lines.push({ label: 'Git Repo URL', value: outputs.git_repo_url, type: 'info' })
+    if (outputs.git_checkout_path) lines.push({ label: 'Checkout Path', value: outputs.git_checkout_path, type: 'info' })
   }
 
   // docker 任务输出
@@ -1604,7 +1873,7 @@ const formatTaskOutputs = (outputs, taskType) => {
   }
 
   // 添加其他未处理的字段
-  const knownKeys = ['exit_code', 'duration', 'commit_sha', 'branch', 'repo_url', 'repo_path',
+  const knownKeys = ['exit_code', 'duration', 'git_commit', 'git_commit_short', 'git_ref', 'git_repo_url', 'git_checkout_path',
     'image_name', 'image_tag', 'image_full_name', 'pushed', 'artifact_path',
     'tests_passed', 'tests_failed', 'tests_skipped', 'coverage_percentage',
     'container_id', 'container_name', 'image_ref']
@@ -1788,6 +2057,8 @@ const getEnvironmentText = (env) => {
 watch(activeTab, (newTab) => {
   if (newTab === 'history') {
     fetchRunHistory()
+  } else if (newTab === 'execution') {
+    hydrateExecutionViewIfVisible()
   } else if (newTab === 'statistics') {
     fetchStatistics()
   } else if (newTab === 'report') {
@@ -1797,6 +2068,14 @@ watch(activeTab, (newTab) => {
 
 // 设置 WebSocket 实时更新
 const setupRealtimeUpdates = () => {
+  if (realtimeHandlersBound) return
+
+  const isActiveRealtimeRun = (payload) => {
+    if (!currentRun.value?.id) return false
+    const eventRunID = Number(payload?.runID ?? payload?.run_id ?? 0)
+    return eventRunID > 0 && eventRunID === Number(currentRun.value.id)
+  }
+
   realtimeHandlers.taskStatus = (payload) => {
     if (!currentRun.value || Number(payload.run_id) !== Number(currentRun.value.id)) return
     
@@ -1826,6 +2105,9 @@ const setupRealtimeUpdates = () => {
       if (payload.status) {
         task.display_status = payload.status
       }
+      if (!task.name && (payload.name || payload.task_name || payload.node_name)) {
+        task.name = payload.name || payload.task_name || payload.node_name
+      }
       task.exit_code = payload.exit_code
       task.error_msg = payload.error_msg
       task.duration = payload.duration
@@ -1852,7 +2134,7 @@ const setupRealtimeUpdates = () => {
         runTasks.value.push({
           id: payload.task_id || 0,
           node_id: payload.node_id,
-          name: payload.task_name || payload.node_id,
+          name: payload.name || payload.task_name || payload.node_name || payload.node_id,
           status: payload.status || 'queued',
           display_status: payload.status || 'queued',
           start_time: payload.start_time || 0,
@@ -1908,27 +2190,33 @@ const setupRealtimeUpdates = () => {
     console.log(`Pipeline run ${payload.run_id} status updated to: ${payload.status}`)
   }
 
-  realtimeHandlers.disconnected = () => {
+  realtimeHandlers.disconnected = (payload) => {
+    if (!isActiveRealtimeRun(payload)) return
     realtimeMode.value = 'reconnecting'
     console.log('实时连接已断开')
   }
 
-  realtimeHandlers.reconnecting = () => {
+  realtimeHandlers.reconnecting = (payload) => {
+    if (!isActiveRealtimeRun(payload)) return
     realtimeMode.value = 'reconnecting'
     startExecutionPolling()
   }
 
-  realtimeHandlers.polling = () => {
+  realtimeHandlers.polling = (payload) => {
+    if (!isActiveRealtimeRun(payload)) return
     realtimeMode.value = 'polling'
     startExecutionPolling()
   }
 
-  realtimeHandlers.connected = () => {
+  realtimeHandlers.connected = (payload) => {
+    if (!isActiveRealtimeRun(payload)) return
     realtimeMode.value = 'connected'
+    stopExecutionPolling()
     console.log('实时连接已建立')
   }
 
-  realtimeHandlers.recovered = async () => {
+  realtimeHandlers.recovered = async (payload) => {
+    if (!isActiveRealtimeRun(payload)) return
     realtimeMode.value = 'recovered'
     stopExecutionPolling()
     await fetchExecutionDetail()
@@ -1942,6 +2230,7 @@ const setupRealtimeUpdates = () => {
   realtime.on('polling', realtimeHandlers.polling)
   realtime.on('connected', realtimeHandlers.connected)
   realtime.on('recovered', realtimeHandlers.recovered)
+  realtimeHandlersBound = true
 }
 
 // 开始实时更新
@@ -1950,8 +2239,16 @@ const startRealtimeUpdates = (runID) => {
   realtime.connect(runID)
 }
 
-// 停止实时更新
+// 停止实时连接，但保留 handlers，便于执行视图在不同 run 间重连。
 const stopRealtimeUpdates = () => {
+  realtime.disconnect()
+  realtimeMode.value = 'idle'
+}
+
+// 仅在组件销毁时解绑 handlers，避免 stop/start 流程把监听器提前移除。
+const teardownRealtimeUpdates = () => {
+  if (!realtimeHandlersBound) return
+
   Object.entries(realtimeHandlers).forEach(([event, handler]) => {
     if (handler) {
       const normalized = event === 'taskStatus'
@@ -1964,8 +2261,7 @@ const stopRealtimeUpdates = () => {
       realtime.off(normalized, handler)
     }
   })
-  realtime.disconnect()
-  realtimeMode.value = 'idle'
+  realtimeHandlersBound = false
 }
 
 const updateDetailContainerWidth = () => {
@@ -1987,7 +2283,7 @@ onMounted(() => {
   fetchPipelineDetail()
   fetchTriggerSettings()
   fetchProjects()
-  fetchRunHistory()
+  fetchRunHistory({ rehydrateExecution: true })
   setupRealtimeUpdates()
 })
 
@@ -2000,6 +2296,7 @@ onUnmounted(() => {
   }
   stopExecutionPolling()
   stopRealtimeUpdates()
+  teardownRealtimeUpdates()
 })
 </script>
 

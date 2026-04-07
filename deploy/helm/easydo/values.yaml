@@ -1,0 +1,94 @@
+global:
+  imagePullSecrets: []
+
+frontend:
+  replicaCount: 1
+  image:
+    repository: easydo-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+
+server:
+  replicaCount: 2
+  image:
+    repository: easydo-server
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8080
+  env:
+    serverMode: release
+    serverPublicURL: http://easydo.local
+    serverInternalToken: easydo-internal-token
+    jwtSecret: easydo-secret-key
+    authTokenTTL: 4h
+    authRefreshInterval: 10m
+    smtpEnabled: "true"
+    smtpHost: 127.0.0.1
+    smtpPort: "25"
+    smtpFromAddress: noreply@easydo.local
+    smtpFromName: EasyDo
+
+agent:
+  replicaCount: 2
+  image:
+    repository: easydo-agent
+    tag: latest
+    pullPolicy: IfNotPresent
+  env:
+    serverURL: http://easydo-server:8080
+    namePrefix: easydo-agent
+
+mariadb:
+  enabled: true
+  image:
+    repository: mariadb
+    tag: "11.4"
+    pullPolicy: IfNotPresent
+  auth:
+    rootPassword: password
+    database: easydo
+  service:
+    port: 3306
+  persistence:
+    size: 10Gi
+
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: 7-alpine
+    pullPolicy: IfNotPresent
+  service:
+    port: 6379
+  persistence:
+    size: 5Gi
+
+minio:
+  enabled: true
+  image:
+    repository: minio/minio
+    tag: latest
+    pullPolicy: IfNotPresent
+  auth:
+    rootUser: minioadmin
+    rootPassword: minioadmin
+  service:
+    apiPort: 9000
+    consolePort: 9001
+  persistence:
+    size: 10Gi
+
+ingress:
+  enabled: true
+  className: nginx
+  host: easydo.local
+  annotations: {}
+
+storage:
+  bucket: easydo-logs
+  region: us-east-1

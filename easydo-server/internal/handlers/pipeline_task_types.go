@@ -17,9 +17,13 @@ const (
 
 type pipelineTaskDefinition struct {
 	CanonicalType   string
+	Name            string
+	Description     string
 	Category        string
 	ExecMode        string
 	ShellTemplate   string
+	FieldsSchema    []models.TaskDefinitionField
+	OutputsSchema   []models.TaskDefinitionOutput
 	CredentialSlots []taskCredentialSlot
 }
 
@@ -67,18 +71,33 @@ func (s taskCredentialSlot) allowsCategory(c models.CredentialCategory) bool {
 var pipelineTaskDefinitions = map[string]pipelineTaskDefinition{
 	"git_clone": {
 		CanonicalType: "git_clone",
+		Name:          "Git Clone",
+		Description:   "Clone source code from a Git repository",
 		Category:      "source",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "git_repo_url", Label: "仓库地址", Type: "string", Required: true, UIComponent: "input", UIPlaceholder: "https://github.com/org/repo.git"},
+			{Key: "git_ref", Label: "Git 引用", Type: "string", UIComponent: "input", Default: "main"},
+			{Key: "git_commit", Label: "Git 提交", Type: "string", UIComponent: "input"},
+			{Key: "git_checkout_path", Label: "检出目录", Type: "string", UIComponent: "input", Default: "./app"},
+		},
+		OutputsSchema: []models.TaskDefinitionOutput{
+			{Key: "git_commit", Label: "提交版本", Type: "string", Description: "Resolved commit SHA"},
+			{Key: "git_commit_short", Label: "短提交版本", Type: "string", Description: "Short commit SHA"},
+			{Key: "git_ref", Label: "Git 引用", Type: "string", Description: "Resolved branch or ref"},
+			{Key: "git_repo_url", Label: "仓库地址", Type: "string", Description: "Repository URL used for checkout"},
+			{Key: "git_checkout_path", Label: "检出目录", Type: "string", Description: "Checkout path"},
+		},
 		ShellTemplate: `set -e
-REPO_URL={{ shq (dig "repository.url") }}
+REPO_URL={{ shq (dig "git_repo_url") }}
 if [ -z "$REPO_URL" ]; then
-  echo "repository.url is required" >&2
+  echo "git_repo_url is required" >&2
   exit 1
 fi
-BRANCH={{ shq (def "main" (dig "repository.branch")) }}
-TARGET_DIR={{ shq (def "./app" (dig "repository.target_dir")) }}
-DEPTH={{ toInt (def 0 (dig "repository.depth")) }}
-COMMIT={{ shq (def "" (dig "repository.commit_id")) }}
+BRANCH={{ shq (def "main" (dig "git_ref")) }}
+TARGET_DIR={{ shq (def "./app" (dig "git_checkout_path")) }}
+DEPTH=0
+COMMIT={{ shq (def "" (dig "git_commit")) }}
 AUTH_TYPE="${EASYDO_CRED_REPO_AUTH_TYPE:-}"
 SSH_KEY_FILE=""
 cleanup() {
@@ -153,8 +172,14 @@ fi`,
 	},
 	"shell": {
 		CanonicalType: "shell",
+		Name:          "Shell",
+		Description:   "Execute a shell script on the agent",
 		Category:      "utils",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "working_dir", Label: "工作目录", Type: "string", UIComponent: "input", Default: "."},
+			{Key: "script", Label: "脚本内容", Type: "text", Required: true, UIComponent: "textarea"},
+		},
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
 SCRIPT_CONTENT={{ shq (def "" (dig "script")) }}
@@ -177,8 +202,14 @@ easydo_info "sleep completed after ${SECONDS_TO_SLEEP}s"`,
 	},
 	"npm": {
 		CanonicalType: "npm",
+		Name:          "NPM",
+		Description:   "Run npm install/build commands",
 		Category:      "build",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "working_dir", Label: "工作目录", Type: "string", UIComponent: "input", Default: "."},
+			{Key: "command", Label: "执行命令", Type: "text", Required: true, UIComponent: "textarea", Default: "npm ci && npm run build"},
+		},
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
 CMD={{ shq (def "npm ci && npm run build" (dig "command")) }}
@@ -192,8 +223,14 @@ eval "$CMD"`,
 	},
 	"maven": {
 		CanonicalType: "maven",
+		Name:          "Maven",
+		Description:   "Run Maven build commands",
 		Category:      "build",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "working_dir", Label: "工作目录", Type: "string", UIComponent: "input", Default: "."},
+			{Key: "command", Label: "执行命令", Type: "text", Required: true, UIComponent: "textarea", Default: "mvn -B clean package"},
+		},
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
 CMD={{ shq (def "mvn -B clean package" (dig "command")) }}
@@ -207,8 +244,14 @@ eval "$CMD"`,
 	},
 	"gradle": {
 		CanonicalType: "gradle",
+		Name:          "Gradle",
+		Description:   "Run Gradle build commands",
 		Category:      "build",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "working_dir", Label: "工作目录", Type: "string", UIComponent: "input", Default: "."},
+			{Key: "command", Label: "执行命令", Type: "text", Required: true, UIComponent: "textarea", Default: "./gradlew build"},
+		},
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
 CMD={{ shq (def "./gradlew build" (dig "command")) }}
@@ -222,8 +265,23 @@ eval "$CMD"`,
 	},
 	"docker": {
 		CanonicalType: "docker",
+		Name:          "Docker Build",
+		Description:   "Build and optionally push a Docker image",
 		Category:      "build",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "image_name", Label: "镜像名称", Type: "string", Required: true, UIComponent: "input"},
+			{Key: "image_tag", Label: "镜像标签", Type: "string", UIComponent: "input", Default: "latest"},
+			{Key: "dockerfile", Label: "Dockerfile 路径", Type: "string", UIComponent: "input", Default: "./Dockerfile"},
+			{Key: "context", Label: "构建上下文", Type: "string", UIComponent: "input", Default: "."},
+			{Key: "registry", Label: "镜像仓库", Type: "string", UIComponent: "input"},
+			{Key: "push", Label: "推送镜像", Type: "boolean", UIComponent: "switch", Default: false},
+		},
+		OutputsSchema: []models.TaskDefinitionOutput{
+			{Key: "image_name", Label: "镜像名称", Type: "string", Description: "Image name used for build"},
+			{Key: "image_tag", Label: "镜像标签", Type: "string", Description: "Image tag used for build"},
+			{Key: "image_full_name", Label: "完整镜像名", Type: "string", Description: "Resolved full image name"},
+		},
 		ShellTemplate: `set -e
 IMAGE_NAME={{ shq (def "" (dig "image_name")) }}
 if [ -z "$IMAGE_NAME" ]; then
@@ -238,12 +296,20 @@ REGISTRY={{ shq (def "" (dig "registry")) }}
 easydo_step "执行 Docker 构建任务"
 easydo_info "image=$IMAGE_NAME:$IMAGE_TAG context=$CONTEXT dockerfile=$DOCKERFILE"
 
-REGISTRY_USER="${EASYDO_CRED_REGISTRY_AUTH_USERNAME:-}"
-REGISTRY_PASSWORD="${EASYDO_CRED_REGISTRY_AUTH_PASSWORD:-${EASYDO_CRED_REGISTRY_AUTH_TOKEN:-}}"
-if [ -n "$REGISTRY" ] && [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then
-  easydo_cmd "docker login $REGISTRY --username $REGISTRY_USER --password-stdin"
-  echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
-fi
+	REGISTRY_USER="${EASYDO_CRED_REGISTRY_AUTH_USERNAME:-}"
+	REGISTRY_PASSWORD="${EASYDO_CRED_REGISTRY_AUTH_PASSWORD:-${EASYDO_CRED_REGISTRY_AUTH_TOKEN:-}}"
+	if [ -n "$REGISTRY" ] && [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then
+	  easydo_info "registry=$REGISTRY username=$REGISTRY_USER"
+	  easydo_cmd "echo '***' | docker login $REGISTRY --username $REGISTRY_USER --password-stdin"
+	  LOGGED_PASSWORD="***"
+	  echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin && easydo_info "docker login succeeded" || easydo_info "docker login failed"
+	else
+	  if [ -z "$REGISTRY" ]; then
+	    easydo_info "docker push skipped: REGISTRY is empty"
+	  else
+	    easydo_info "docker login skipped: REGISTRY_USER or REGISTRY_PASSWORD is empty"
+	  fi
+	fi
 
 easydo_cmd "docker build -t $IMAGE_NAME:$IMAGE_TAG -f $DOCKERFILE $CONTEXT"
 docker build -t "$IMAGE_NAME:$IMAGE_TAG" -f "$DOCKERFILE" "$CONTEXT"
@@ -273,8 +339,18 @@ fi`,
 	},
 	"artifact_publish": {
 		CanonicalType: "artifact_publish",
+		Name:          "Artifact Publish",
+		Description:   "Publish build artifacts to a target directory",
 		Category:      "build",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "artifact_path", Label: "制品路径", Type: "string", Required: true, UIComponent: "input"},
+			{Key: "target_dir", Label: "目标目录", Type: "string", UIComponent: "input", Default: "./artifacts"},
+		},
+		OutputsSchema: []models.TaskDefinitionOutput{
+			{Key: "artifact_path", Label: "制品路径", Type: "string", Description: "Published artifact source path"},
+			{Key: "target_dir", Label: "目标目录", Type: "string", Description: "Published artifact target directory"},
+		},
 		ShellTemplate: `set -e
 ARTIFACT_PATH={{ shq (def "" (dig "artifact_path")) }}
 TARGET_DIR={{ shq (def "./artifacts" (dig "target_dir")) }}
@@ -293,8 +369,14 @@ cp -Rv "$ARTIFACT_PATH" "$TARGET_DIR"/`,
 	},
 	"unit": {
 		CanonicalType: "unit",
+		Name:          "Unit Test",
+		Description:   "Run unit tests",
 		Category:      "test",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "working_dir", Label: "工作目录", Type: "string", UIComponent: "input", Default: "."},
+			{Key: "command", Label: "执行命令", Type: "text", Required: true, UIComponent: "textarea", Default: "npm run test:unit"},
+		},
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
 CMD={{ shq (def "npm run test:unit" (dig "command")) }}
@@ -308,8 +390,14 @@ eval "$CMD"`,
 	},
 	"integration": {
 		CanonicalType: "integration",
+		Name:          "Integration Test",
+		Description:   "Run integration tests",
 		Category:      "test",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "working_dir", Label: "工作目录", Type: "string", UIComponent: "input", Default: "."},
+			{Key: "command", Label: "执行命令", Type: "text", Required: true, UIComponent: "textarea", Default: "npm run test:integration"},
+		},
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
 CMD={{ shq (def "npm run test:integration" (dig "command")) }}
@@ -323,8 +411,14 @@ eval "$CMD"`,
 	},
 	"e2e": {
 		CanonicalType: "e2e",
+		Name:          "E2E Test",
+		Description:   "Run end-to-end tests",
 		Category:      "test",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "working_dir", Label: "工作目录", Type: "string", UIComponent: "input", Default: "."},
+			{Key: "command", Label: "执行命令", Type: "text", Required: true, UIComponent: "textarea", Default: "npm run test:e2e"},
+		},
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
 CMD={{ shq (def "npm run test:e2e" (dig "command")) }}
@@ -338,8 +432,14 @@ eval "$CMD"`,
 	},
 	"coverage": {
 		CanonicalType: "coverage",
+		Name:          "Coverage",
+		Description:   "Run coverage report generation",
 		Category:      "test",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "working_dir", Label: "工作目录", Type: "string", UIComponent: "input", Default: "."},
+			{Key: "command", Label: "执行命令", Type: "text", Required: true, UIComponent: "textarea", Default: "npm run test:coverage"},
+		},
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
 CMD={{ shq (def "npm run test:coverage" (dig "command")) }}
@@ -353,8 +453,14 @@ eval "$CMD"`,
 	},
 	"lint": {
 		CanonicalType: "lint",
+		Name:          "Lint",
+		Description:   "Run lint checks",
 		Category:      "test",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "working_dir", Label: "工作目录", Type: "string", UIComponent: "input", Default: "."},
+			{Key: "command", Label: "执行命令", Type: "text", Required: true, UIComponent: "textarea", Default: "npm run lint"},
+		},
 		ShellTemplate: `set -e
 WORKDIR={{ shq (def "." (dig "working_dir")) }}
 CMD={{ shq (def "npm run lint" (dig "command")) }}
@@ -368,8 +474,16 @@ eval "$CMD"`,
 	},
 	"ssh": {
 		CanonicalType: "ssh",
+		Name:          "SSH",
+		Description:   "Execute remote commands over SSH",
 		Category:      "deploy",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "host", Label: "主机地址", Type: "string", Required: true, UIComponent: "input"},
+			{Key: "user", Label: "用户名", Type: "string", UIComponent: "input", Default: "root"},
+			{Key: "port", Label: "端口", Type: "number", UIComponent: "input", Default: 22},
+			{Key: "script", Label: "远程脚本", Type: "text", Required: true, UIComponent: "textarea"},
+		},
 		ShellTemplate: `set -e
 HOST={{ shq (def "" (dig "host")) }}
 USER_NAME={{ shq (def "" (dig "user")) }}
@@ -441,8 +555,14 @@ fi`,
 	},
 	"kubernetes": {
 		CanonicalType: "kubernetes",
+		Name:          "Kubernetes",
+		Description:   "Execute kubectl commands or apply manifests",
 		Category:      "deploy",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "command", Label: "执行命令", Type: "text", UIComponent: "textarea"},
+			{Key: "manifest", Label: "Manifest 路径", Type: "string", UIComponent: "input"},
+		},
 		ShellTemplate: `set -e
 KUBE_CONFIG_FILE=""
 CLUSTER_CA_FILE=""
@@ -535,8 +655,26 @@ fi`,
 	},
 	"docker-run": {
 		CanonicalType: "docker-run",
+		Name:          "Docker Run",
+		Description:   "Run a container on a remote host via SSH",
 		Category:      "deploy",
 		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "host", Label: "主机地址", Type: "string", Required: true, UIComponent: "input"},
+			{Key: "user", Label: "用户名", Type: "string", UIComponent: "input", Default: "root"},
+			{Key: "port", Label: "端口", Type: "number", UIComponent: "input", Default: 22},
+			{Key: "runtime", Label: "运行时", Type: "select", UIComponent: "select", Default: "auto", Options: []models.FieldOption{{Label: "自动", Value: "auto"}, {Label: "docker", Value: "docker"}, {Label: "podman", Value: "podman"}, {Label: "nerdctl", Value: "nerdctl"}}},
+			{Key: "image_name", Label: "镜像名称", Type: "string", Required: true, UIComponent: "input"},
+			{Key: "image_tag", Label: "镜像标签", Type: "string", UIComponent: "input", Default: "latest"},
+			{Key: "container_name", Label: "容器名称", Type: "string", UIComponent: "input"},
+			{Key: "run_args", Label: "运行参数", Type: "text", UIComponent: "textarea"},
+			{Key: "registry", Label: "镜像仓库", Type: "string", UIComponent: "input"},
+		},
+		OutputsSchema: []models.TaskDefinitionOutput{
+			{Key: "image_name", Label: "镜像名称", Type: "string", Description: "Image name used for remote run"},
+			{Key: "image_tag", Label: "镜像标签", Type: "string", Description: "Image tag used for remote run"},
+			{Key: "runtime_host", Label: "运行主机", Type: "string", Description: "Target host used for remote run"},
+		},
 		ShellTemplate: `set -e
 HOST={{ shq (def "" (dig "host")) }}
 USER_NAME={{ shq (def "" (dig "user")) }}
@@ -714,8 +852,18 @@ fi`,
 	},
 	"email": {
 		CanonicalType: "email",
+		Name:          "Email",
+		Description:   "Send an email notification",
 		Category:      "notify",
 		ExecMode:      taskExecModeServer,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "to", Label: "收件人", Type: "string", Required: true, UIComponent: "input"},
+			{Key: "subject", Label: "主题", Type: "string", Required: true, UIComponent: "input"},
+			{Key: "body", Label: "内容", Type: "text", Required: true, UIComponent: "textarea"},
+		},
+		OutputsSchema: []models.TaskDefinitionOutput{
+			{Key: "delivery_status", Label: "发送状态", Type: "string", Description: "Email delivery status"},
+		},
 		CredentialSlots: []taskCredentialSlot{
 			{
 				Slot:     "smtp_auth",
@@ -734,8 +882,17 @@ fi`,
 	},
 	"webhook": {
 		CanonicalType: "webhook",
+		Name:          "Webhook",
+		Description:   "Send a webhook notification",
 		Category:      "notify",
 		ExecMode:      taskExecModeServer,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "url", Label: "Webhook 地址", Type: "string", Required: true, UIComponent: "input"},
+			{Key: "method", Label: "请求方法", Type: "select", UIComponent: "select", Default: "POST"},
+		},
+		OutputsSchema: []models.TaskDefinitionOutput{
+			{Key: "response_status", Label: "响应状态码", Type: "number", Description: "HTTP response status code"},
+		},
 		CredentialSlots: []taskCredentialSlot{
 			{
 				Slot:     "webhook_auth",
@@ -765,19 +922,22 @@ fi`,
 	},
 	"in_app": {
 		CanonicalType: "in_app",
+		Name:          "In App",
+		Description:   "Send an in-app notification",
 		Category:      "notify",
 		ExecMode:      taskExecModeServer,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "title", Label: "标题", Type: "string", Required: true, UIComponent: "input"},
+			{Key: "content", Label: "内容", Type: "text", Required: true, UIComponent: "textarea"},
+		},
+		OutputsSchema: []models.TaskDefinitionOutput{
+			{Key: "message_id", Label: "消息ID", Type: "number", Description: "Created in-app message ID"},
+		},
 	},
 }
 
-var pipelineTaskAliases = map[string]string{
-	"github":   "git_clone",
-	"gitee":    "git_clone",
-	"agent":    "shell",
-	"custom":   "shell",
-	"script":   "shell",
-	"dingtalk": "webhook",
-	"wechat":   "webhook",
+var pipelineTaskTypeAliases = map[string]string{
+	"github": "git_clone",
 }
 
 func (c *PipelineConfig) ValidateTaskTypes() (bool, string) {
@@ -789,13 +949,127 @@ func (c *PipelineConfig) ValidateTaskTypes() (bool, string) {
 	return true, ""
 }
 
+func (c *PipelineConfig) ValidateNodeParams() (bool, string) {
+	for _, node := range c.Nodes {
+		if len(node.DefinitionParams) == 0 {
+			continue
+		}
+		taskKey := node.TaskKey
+		if strings.TrimSpace(taskKey) == "" {
+			taskKey = node.Type
+		}
+		def, ok := getTaskDefinition(taskKey)
+		if !ok {
+			return false, fmt.Sprintf("流水线配置无效：不支持的任务类型 '%s'", taskKey)
+		}
+		allowed := make(map[string]struct{}, len(def.FieldsSchema))
+		for _, field := range def.FieldsSchema {
+			allowed[field.Key] = struct{}{}
+		}
+		// Build set of valid credential slot keys
+		validCredentialSlots := make(map[string]struct{}, len(def.CredentialSlots))
+		for _, slot := range def.CredentialSlots {
+			validCredentialSlots[slot.SlotKey] = struct{}{}
+		}
+		for _, param := range node.DefinitionParams {
+			if _, exists := allowed[param.Key]; exists {
+				continue
+			}
+			// Check if it's a valid credential param: credentials.<slot>.credential_id
+			if strings.HasPrefix(param.Key, "credentials.") && strings.HasSuffix(param.Key, ".credential_id") {
+				// Extract slot name: "credentials.<slot>.credential_id" -> <slot>
+				remainder := strings.TrimPrefix(param.Key, "credentials.")
+				slotName := strings.TrimSuffix(remainder, ".credential_id")
+				if _, isValidSlot := validCredentialSlots[slotName]; isValidSlot {
+					continue
+				}
+			}
+			return false, fmt.Sprintf("流水线配置无效：节点 '%s' 的参数 key '%s' 不属于任务 '%s'", node.ID, param.Key, def.TaskKey)
+		}
+	}
+	return true, ""
+}
+
 func getPipelineTaskDefinition(taskType string) (string, pipelineTaskDefinition, bool) {
 	normalized := strings.TrimSpace(strings.ToLower(taskType))
-	if alias, ok := pipelineTaskAliases[normalized]; ok {
-		normalized = alias
+	if canonical, ok := pipelineTaskTypeAliases[normalized]; ok {
+		normalized = canonical
 	}
 	def, ok := pipelineTaskDefinitions[normalized]
 	return normalized, def, ok
+}
+
+func getTaskDefinition(taskType string) (models.TaskDefinition, bool) {
+	canonical, def, ok := getPipelineTaskDefinition(taskType)
+	if !ok {
+		return models.TaskDefinition{}, false
+	}
+	credentialSlots := make([]models.TaskCredentialSlotDefinition, 0, len(def.CredentialSlots))
+	for _, slot := range def.CredentialSlots {
+		credentialSlots = append(credentialSlots, models.TaskCredentialSlotDefinition{
+			SlotKey:           slot.Slot,
+			Label:             slot.Label,
+			Required:          slot.Required,
+			AllowedTypes:      slot.AllowedTypes,
+			AllowedCategories: slot.AllowedCategories,
+		})
+	}
+	executionMode := "server_handler"
+	if def.ExecMode == taskExecModeAgent {
+		executionMode = "shell_template"
+	}
+	return models.TaskDefinition{
+		TaskKey:         canonical,
+		Name:            firstNonEmptyTaskValue(def.Name, canonical),
+		Description:     def.Description,
+		Category:        def.Category,
+		Status:          "active",
+		Version:         1,
+		ExecutorType:    def.ExecMode,
+		FieldsSchema:    append([]models.TaskDefinitionField(nil), def.FieldsSchema...),
+		OutputsSchema:   append([]models.TaskDefinitionOutput(nil), def.OutputsSchema...),
+		CredentialSlots: credentialSlots,
+		ExecutionSpec: models.TaskExecutionSpec{
+			Mode:           executionMode,
+			Entry:          canonical,
+			ScriptTemplate: def.ShellTemplate,
+			EnvMapping:     defaultTaskEnvMapping(canonical),
+			RetryDefault:   0,
+		},
+	}, true
+}
+
+func firstNonEmptyTaskValue(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func defaultTaskEnvMapping(taskKey string) map[string]string {
+	switch taskKey {
+	case "git_clone":
+		return map[string]string{
+			"git_repo_url":      "EASYDO_INPUT_GIT_REPO_URL",
+			"git_ref":           "EASYDO_INPUT_GIT_REF",
+			"git_commit":        "EASYDO_INPUT_GIT_COMMIT",
+			"git_checkout_path": "EASYDO_INPUT_GIT_CHECKOUT_PATH",
+		}
+	case "shell":
+		return map[string]string{
+			"working_dir": "EASYDO_INPUT_WORKING_DIR",
+			"script":      "EASYDO_INPUT_SCRIPT",
+		}
+	case "webhook":
+		return map[string]string{
+			"url":    "EASYDO_INPUT_URL",
+			"method": "EASYDO_INPUT_METHOD",
+		}
+	default:
+		return map[string]string{}
+	}
 }
 
 func isAgentPipelineTaskType(taskType string) bool {
@@ -813,55 +1087,25 @@ func normalizePipelineNodeConfig(rawType, canonical string, nodeConfig map[strin
 	if cfg == nil {
 		cfg = make(map[string]interface{})
 	}
-
-	if wd, ok := cfg["workingDir"].(string); ok && strings.TrimSpace(wd) != "" {
-		cfg["working_dir"] = wd
-	}
-
-	if envJSON, ok := cfg["envVars"].(string); ok && strings.TrimSpace(envJSON) != "" {
-		envMap := map[string]interface{}{}
-		if err := json.Unmarshal([]byte(envJSON), &envMap); err == nil {
+	if envRaw, ok := cfg["env"].(string); ok && strings.TrimSpace(envRaw) != "" {
+		var envMap map[string]interface{}
+		if err := json.Unmarshal([]byte(envRaw), &envMap); err == nil {
 			cfg["env"] = envMap
 		}
 	}
-	if envJSON, ok := cfg["env"].(string); ok && strings.TrimSpace(envJSON) != "" {
-		envMap := map[string]interface{}{}
-		if err := json.Unmarshal([]byte(envJSON), &envMap); err == nil {
-			cfg["env"] = envMap
-		}
-	}
-
-	switch strings.ToLower(rawType) {
-	case "github", "gitee":
-		if _, ok := cfg["repository"].(map[string]interface{}); !ok {
-			repo := map[string]interface{}{}
-			if url, ok := cfg["url"].(string); ok && strings.TrimSpace(url) != "" {
-				repo["url"] = url
+	if canonical == "git_clone" {
+		if repository, ok := cfg["repository"].(map[string]interface{}); ok {
+			if cfg["git_repo_url"] == nil && strings.TrimSpace(toString(repository["url"])) != "" {
+				cfg["git_repo_url"] = repository["url"]
 			}
-			if branch, ok := cfg["branch"].(string); ok && strings.TrimSpace(branch) != "" {
-				repo["branch"] = branch
+			if cfg["git_ref"] == nil && strings.TrimSpace(toString(repository["branch"])) != "" {
+				cfg["git_ref"] = repository["branch"]
 			}
-			if dir, ok := cfg["target_dir"].(string); ok && strings.TrimSpace(dir) != "" {
-				repo["target_dir"] = dir
-			}
-			cfg["repository"] = repo
-		}
-	case "docker-run":
-		if image, ok := cfg["image"].(string); ok && strings.TrimSpace(image) != "" {
-			if _, exists := cfg["image_name"]; !exists {
-				cfg["image_name"] = image
+			if cfg["git_commit"] == nil && strings.TrimSpace(toString(repository["commit"])) != "" {
+				cfg["git_commit"] = repository["commit"]
 			}
 		}
 	}
-
-	if canonical == "shell" {
-		if script, ok := cfg["command"].(string); ok && strings.TrimSpace(script) != "" {
-			if _, exists := cfg["script"]; !exists {
-				cfg["script"] = script
-			}
-		}
-	}
-
 	return cfg
 }
 

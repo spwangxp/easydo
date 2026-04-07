@@ -459,8 +459,8 @@ func (th *TaskHandler) extractTypeSpecificOutputs(taskType string, result *task.
 	}
 }
 
-// extractGitCloneOutputs parses git_clone stdout for commit_sha, repo_url, branch, repo_path.
-// Expected stdout format: git_info:{"url":"...","branch":"...","commit":"...","path":"..."}
+// extractGitCloneOutputs parses git_clone stdout for git_commit, git_repo_url, git_ref, git_checkout_path.
+// Expected stdout format: git_info:{"url":"...","git_ref":"...","commit":"...","path":"..."}
 func (th *TaskHandler) extractGitCloneOutputs(stdout string, outputs map[string]interface{}) {
 	if strings.Contains(stdout, "git_info") {
 		// 解析 git info JSON
@@ -470,18 +470,21 @@ func (th *TaskHandler) extractGitCloneOutputs(stdout string, outputs map[string]
 				// 尝试提取 JSON 部分
 				if idx := strings.Index(line, "{"); idx >= 0 {
 					jsonStr := line[idx:]
-					// 简单解析 - 实际应该用 json.Unmarshal
-					if strings.Contains(jsonStr, `"commit"`) {
-						outputs["commit_sha"] = th.extractJSONField(jsonStr, "commit")
+					var gitInfo map[string]interface{}
+					if err := json.Unmarshal([]byte(jsonStr), &gitInfo); err != nil {
+						continue
 					}
-					if strings.Contains(jsonStr, `"url"`) {
-						outputs["repo_url"] = th.extractJSONField(jsonStr, "url")
+					if value := strings.TrimSpace(fmt.Sprint(gitInfo["git_commit"])); value != "" && value != "<nil>" {
+						outputs["git_commit"] = value
 					}
-					if strings.Contains(jsonStr, `"branch"`) {
-						outputs["branch"] = th.extractJSONField(jsonStr, "branch")
+					if value := strings.TrimSpace(fmt.Sprint(gitInfo["git_repo_url"])); value != "" && value != "<nil>" {
+						outputs["git_repo_url"] = value
 					}
-					if strings.Contains(jsonStr, `"path"`) {
-						outputs["repo_path"] = th.extractJSONField(jsonStr, "path")
+					if value := strings.TrimSpace(fmt.Sprint(gitInfo["git_ref"])); value != "" && value != "<nil>" {
+						outputs["git_ref"] = value
+					}
+					if value := strings.TrimSpace(fmt.Sprint(gitInfo["git_checkout_path"])); value != "" && value != "<nil>" {
+						outputs["git_checkout_path"] = value
 					}
 				}
 			}
@@ -808,7 +811,7 @@ func getTaskOutputs(t *Task, result *task.Result) map[string]interface{} {
 	}
 
 	switch t.TaskType {
-	case "git_clone", "github", "gitee":
+	case "git_clone":
 		return getGitCloneOutputs(t)
 	case "docker":
 		return getDockerOutputs(t)
@@ -818,90 +821,75 @@ func getTaskOutputs(t *Task, result *task.Result) map[string]interface{} {
 		return getMavenOutputs(t)
 	case "gradle":
 		return getGradleOutputs(t)
-	case "shell", "script", "custom":
+	case "shell":
 		return getShellOutputs(t, result)
-	default:
-		return outputs
 	}
+	return outputs
 }
 
-// isGitCloneTask 检查任务是否是 git_clone 类型
+// isGitCloneTask checks if the task type is git_clone
 func isGitCloneTask(t *Task) bool {
 	if t == nil {
 		return false
 	}
-	return t.TaskType == "git_clone" || t.TaskType == "github" || t.TaskType == "gitee"
+	return t.TaskType == "git_clone"
 }
 
-// getGitCloneOutputs 获取 git_clone 任务的输出变量
-// 在任务执行成功后，通过 git 命令获取 commit 信息
 func getGitCloneOutputs(t *Task) map[string]interface{} {
 	outputs := make(map[string]interface{})
 
-	// 从任务参数中获取 target_dir
 	params := task.ParseStructuredParamsJSON(t.Params)
-	repoConfig, ok := params["repository"].(map[string]interface{})
-	if !ok {
-		return outputs
-	}
 
-	targetDir, ok := repoConfig["target_dir"].(string)
+	targetDir, ok := params["git_checkout_path"].(string)
 	if !ok || targetDir == "" {
 		targetDir = "./app"
 	}
 
-	// 如果 target_dir 是相对路径，转换为绝对路径
 	if !filepath.IsAbs(targetDir) {
-		// 使用工作空间路径
 		targetDir = filepath.Join("/data/agent/workspace", fmt.Sprintf("workspace_%d", t.PipelineRunID), targetDir)
 	}
 
-	// 检查目录是否存在
 	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
 		return outputs
 	}
 
-	// 获取 commit SHA
 	if cmd := exec.Command("git", "-C", targetDir, "rev-parse", "HEAD"); cmd != nil {
 		if out, err := cmd.Output(); err == nil {
 			commitSHA := strings.TrimSpace(string(out))
 			if commitSHA != "" {
-				outputs["commit_sha"] = commitSHA
-				outputs["commit_id"] = commitSHA
+				outputs["git_commit"] = commitSHA
 			}
 		}
 	}
 
-	// 获取 short commit SHA
 	if cmd := exec.Command("git", "-C", targetDir, "rev-parse", "--short", "HEAD"); cmd != nil {
 		if out, err := cmd.Output(); err == nil {
 			shortCommitSHA := strings.TrimSpace(string(out))
 			if shortCommitSHA != "" {
-				outputs["short_commit_sha"] = shortCommitSHA
-				outputs["short_commit_id"] = shortCommitSHA
+				outputs["git_commit_short"] = shortCommitSHA
 			}
 		}
 	}
 
-	// 获取分支名
 	if cmd := exec.Command("git", "-C", targetDir, "rev-parse", "--abbrev-ref", "HEAD"); cmd != nil {
 		if out, err := cmd.Output(); err == nil {
-			branch := strings.TrimSpace(string(out))
-			if branch != "" {
-				outputs["branch"] = branch
+			ref := strings.TrimSpace(string(out))
+			if ref != "" {
+				outputs["git_ref"] = ref
 			}
 		}
 	}
 
-	// 获取远程仓库 URL
 	if cmd := exec.Command("git", "-C", targetDir, "remote", "get-url", "origin"); cmd != nil {
 		if out, err := cmd.Output(); err == nil {
 			repoURL := strings.TrimSpace(string(out))
 			if repoURL != "" {
-				outputs["repo_url"] = repoURL
+				outputs["git_repo_url"] = repoURL
 			}
 		}
 	}
+
+	outputs["git_checkout_path"] = targetDir
 
 	return outputs
 }

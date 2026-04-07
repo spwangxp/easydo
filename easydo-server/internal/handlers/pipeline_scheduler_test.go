@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -388,6 +390,85 @@ func TestAssignOneQueuedRun_UpdatesExistingQueuedTasksToPendingAndSelectedAgent(
 	}
 }
 
+func TestEvaluateOneScheduledPipelineTrigger_StoresScheduleRuntimeInputsWithoutMutatingSnapshot(t *testing.T) {
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+
+	owner, workspace := seedCredentialTestUserAndWorkspace(t, db, "schedule-runtime-owner", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{
+		Name:        "scheduled-runtime-inputs",
+		WorkspaceID: workspace.ID,
+		OwnerID:     owner.ID,
+		Environment: "testing",
+		Config:      `{"version":"2.0","nodes":[{"id":"git","type":"git_clone","name":"Clone","config":{"repository":{"url":"https://example.com/repo.git","branch":"main"}}}],"edges":[]}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+	dueAt := time.Now().UTC().Add(-time.Minute)
+	trigger := models.PipelineTrigger{
+		WorkspaceID:     workspace.ID,
+		PipelineID:      pipeline.ID,
+		Provider:        "gitlab",
+		ScheduleEnabled: true,
+		CronExpression:  "*/5 * * * *",
+		Timezone:        "UTC",
+		NextRunAt:       &dueAt,
+		LastEventTypes:  "schedule",
+	}
+	if err := db.Create(&trigger).Error; err != nil {
+		t.Fatalf("create trigger failed: %v", err)
+	}
+
+	ok, err := h.evaluateOneScheduledPipelineTrigger(trigger.ID, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("evaluate scheduled trigger failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected scheduled trigger to launch a run")
+	}
+
+	var run models.PipelineRun
+	if err := db.Where("pipeline_id = ? AND trigger_type = ?", pipeline.ID, pipelineRunTriggerTypeSchedule).First(&run).Error; err != nil {
+		t.Fatalf("load scheduled run failed: %v", err)
+	}
+
+	var runConfig models.PipelineRunConfigSnapshot
+	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
+		t.Fatalf("unmarshal run config failed: %v", err)
+	}
+	if runConfig.Trigger.Type != pipelineRunTriggerTypeSchedule {
+		t.Fatalf("trigger type=%s, want=%s", runConfig.Trigger.Type, pipelineRunTriggerTypeSchedule)
+	}
+	if runConfig.Options["scheduled_at"] == nil {
+		t.Fatalf("expected scheduled_at option in run config, got %#v", runConfig.Options)
+	}
+
+	var snapshot PipelineConfig
+	if err := json.Unmarshal([]byte(run.PipelineSnapshot), &snapshot); err != nil {
+		t.Fatalf("unmarshal pipeline snapshot failed: %v", err)
+	}
+	repo, _ := snapshot.Nodes[0].Config["repository"].(map[string]interface{})
+	if snapshot.Nodes[0].Config["git_ref"] != "main" {
+		t.Fatalf("expected authored branch in pipeline snapshot, got %#v", repo)
+	}
+	if _, exists := snapshot.Nodes[0].Config["git_commit"]; exists {
+		t.Fatalf("expected no patched commit_id in pipeline snapshot, got %#v", repo)
+	}
+
+	var execCfg PipelineConfig
+	if err := json.Unmarshal([]byte(run.Config), &execCfg); err != nil {
+		t.Fatalf("unmarshal execution config failed: %v", err)
+	}
+	execRepo, _ := execCfg.Nodes[0].Config["repository"].(map[string]interface{})
+	if execRepo["branch"] != "main" {
+		t.Fatalf("expected execution branch to remain main without schedule override, got %#v", execRepo)
+	}
+	if fmt.Sprint(runConfig.Options["scheduled_at"]) == "" {
+		t.Fatalf("expected non-empty scheduled_at option, got %#v", runConfig.Options)
+	}
+}
+
 func TestScheduleQueuedPipelineRuns_StopsAtCapacity(t *testing.T) {
 	setupSchedulerRedis(t, "server-cap")
 	db := openHandlerTestDB(t)
@@ -427,16 +508,16 @@ func TestScheduleQueuedPipelineRuns_StopsAtCapacity(t *testing.T) {
 	}
 
 	run1 := models.PipelineRun{
-		PipelineID:  pipeline.ID,
-		BuildNumber: 1,
-		Status:      models.PipelineRunStatusQueued,
-		Config:      pipeline.Config,
+		PipelineID:       pipeline.ID,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusQueued,
+		PipelineSnapshot: pipeline.Config,
 	}
 	run2 := models.PipelineRun{
-		PipelineID:  pipeline.ID,
-		BuildNumber: 2,
-		Status:      models.PipelineRunStatusQueued,
-		Config:      pipeline.Config,
+		PipelineID:       pipeline.ID,
+		BuildNumber:      2,
+		Status:           models.PipelineRunStatusQueued,
+		PipelineSnapshot: pipeline.Config,
 	}
 	if err := db.Create(&run1).Error; err != nil {
 		t.Fatalf("create run1 failed: %v", err)
@@ -516,16 +597,16 @@ func TestScheduleQueuedPipelineRuns_FailedQueuedRunTriggersNextDispatch(t *testi
 	}
 
 	invalidRun := models.PipelineRun{
-		PipelineID:  pipeline.ID,
-		BuildNumber: 1,
-		Status:      models.PipelineRunStatusQueued,
-		Config:      "{invalid-json",
+		PipelineID:       pipeline.ID,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusQueued,
+		PipelineSnapshot: "{invalid-json",
 	}
 	validRun := models.PipelineRun{
-		PipelineID:  pipeline.ID,
-		BuildNumber: 2,
-		Status:      models.PipelineRunStatusQueued,
-		Config:      pipeline.Config,
+		PipelineID:       pipeline.ID,
+		BuildNumber:      2,
+		Status:           models.PipelineRunStatusQueued,
+		PipelineSnapshot: pipeline.Config,
 	}
 	if err := db.Create(&invalidRun).Error; err != nil {
 		t.Fatalf("create invalid run failed: %v", err)
@@ -586,8 +667,8 @@ func TestAssignOneQueuedRun_BreaksCreatedAtTiesByID(t *testing.T) {
 		t.Fatalf("create agent failed: %v", err)
 	}
 
-	run1 := models.PipelineRun{PipelineID: 1, BuildNumber: 1, Status: models.PipelineRunStatusQueued, Config: `{"version":"2.0","nodes":[],"edges":[]}`}
-	run2 := models.PipelineRun{PipelineID: 2, BuildNumber: 1, Status: models.PipelineRunStatusQueued, Config: `{"version":"2.0","nodes":[],"edges":[]}`}
+	run1 := models.PipelineRun{PipelineID: 1, BuildNumber: 1, Status: models.PipelineRunStatusQueued, PipelineSnapshot: `{"version":"2.0","nodes":[],"edges":[]}`}
+	run2 := models.PipelineRun{PipelineID: 2, BuildNumber: 1, Status: models.PipelineRunStatusQueued, PipelineSnapshot: `{"version":"2.0","nodes":[],"edges":[]}`}
 	if err := db.Create(&run1).Error; err != nil {
 		t.Fatalf("create run1 failed: %v", err)
 	}
@@ -649,10 +730,10 @@ func TestRunQueuedPipelineSchedulerTick_SchedulesQueuedRunAndCreatesInitialTasks
 	}
 
 	queuedRun := models.PipelineRun{
-		PipelineID:  pipeline.ID,
-		BuildNumber: 1,
-		Status:      models.PipelineRunStatusQueued,
-		Config:      pipeline.Config,
+		PipelineID:       pipeline.ID,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusQueued,
+		PipelineSnapshot: pipeline.Config,
 	}
 	if err := db.Create(&queuedRun).Error; err != nil {
 		t.Fatalf("create queued run failed: %v", err)

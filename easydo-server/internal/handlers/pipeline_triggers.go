@@ -70,6 +70,9 @@ type pipelineRunTriggerContext struct {
 	TriggerUserRole string
 	TriggerSource   string
 	IdempotencyKey  *string
+	RunConfig       models.PipelineRunConfigSnapshot
+	AuthoredConfig  *PipelineConfig
+	ExecutionConfig *PipelineConfig
 }
 
 type gitlabWebhookPayload struct {
@@ -172,6 +175,14 @@ func (h *PipelineHandler) UpdatePipelineTriggers(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "保存触发设置失败: " + err.Error()})
 		return
 	}
+	if config, err := h.loadPipelineDefinitionConfig(h.DB, pipeline); err == nil {
+		config.Triggers = buildPipelineTriggerDefinitions(trigger)
+		if payload, marshalErr := json.Marshal(config); marshalErr == nil {
+			_ = h.DB.Model(&models.Pipeline{}).Where("id = ?", pipeline.ID).Updates(map[string]interface{}{
+				"definition_json": string(payload),
+			}).Error
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "保存成功", "data": h.buildPipelineTriggerResponse(c, trigger)})
 }
@@ -225,8 +236,8 @@ func (h *PipelineHandler) HandleGitLabWebhook(c *gin.Context) {
 		triggerUser = fallbackUser
 	}
 
-	var config PipelineConfig
-	if err := json.Unmarshal([]byte(pipeline.Config), &config); err != nil {
+	config, err := h.loadPipelineDefinitionConfig(h.DB, pipeline)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "流水线配置解析失败: " + err.Error()})
 		return
 	}
@@ -238,7 +249,9 @@ func (h *PipelineHandler) HandleGitLabWebhook(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "流水线凭据配置无效: " + err.Error()})
 		return
 	}
-	applyGitReferenceToPipelineConfig(&config, refName, commitSHA)
+	runConfigSnapshot := models.PipelineRunConfigSnapshot{
+		Inputs: buildGitReferenceRuntimeInputs(config, refName, commitSHA),
+	}
 
 	idempotencyKeyValue := buildWebhookIdempotencyKey(trigger.ID, eventType, refName, commitSHA)
 	run, buildNumber, err := h.launchPipelineRun(pipeline, config, pipelineRunTriggerContext{
@@ -248,6 +261,7 @@ func (h *PipelineHandler) HandleGitLabWebhook(c *gin.Context) {
 		TriggerUserRole: triggerRole,
 		TriggerSource:   fmt.Sprintf("gitlab:%s:%s", eventType, payload.Project.PathWithNamespace),
 		IdempotencyKey:  &idempotencyKeyValue,
+		RunConfig:       runConfigSnapshot,
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "Webhook 触发流水线失败: " + err.Error()})
@@ -319,7 +333,8 @@ func (h *PipelineHandler) evaluateOneScheduledPipelineTrigger(triggerID uint64, 
 		if err != nil {
 			return err
 		}
-		if err := json.Unmarshal([]byte(pipeline.Config), &config); err != nil {
+		config, err = h.loadPipelineDefinitionConfig(tx, pipeline)
+		if err != nil {
 			return err
 		}
 		if valid, errMsg := config.ValidateTaskTypes(); !valid {
@@ -327,6 +342,11 @@ func (h *PipelineHandler) evaluateOneScheduledPipelineTrigger(triggerID uint64, 
 		}
 		if _, err := h.validatePipelineCredentialBindings(&config, triggerUserID, triggerRole, pipeline.ID, pipeline.WorkspaceID); err != nil {
 			return err
+		}
+		runConfigSnapshot := models.PipelineRunConfigSnapshot{
+			Options: map[string]interface{}{
+				"scheduled_at": dueAt.Format(time.RFC3339),
+			},
 		}
 		idempotencyKeyValue := buildScheduleIdempotencyKey(trigger.ID, dueAt)
 		run, _, err = h.createPipelineRunRecordWithSnapshot(tx, pipeline, config, pipelineRunTriggerContext{
@@ -336,6 +356,7 @@ func (h *PipelineHandler) evaluateOneScheduledPipelineTrigger(triggerID uint64, 
 			TriggerUserRole: triggerRole,
 			TriggerSource:   fmt.Sprintf("schedule:%d", trigger.ID),
 			IdempotencyKey:  &idempotencyKeyValue,
+			RunConfig:       runConfigSnapshot,
 		})
 		if err != nil {
 			return err
@@ -352,7 +373,15 @@ func (h *PipelineHandler) evaluateOneScheduledPipelineTrigger(triggerID uint64, 
 		return false, nil
 	}
 	syncLiveRunStateFromRun(run)
-	h.startPipelineRunExecution(pipeline, run, config, triggerUserID, triggerRole)
+	executionConfig, err := buildExecutionPipelineConfig(config, models.PipelineRunConfigSnapshot{
+		Options: map[string]interface{}{
+			"scheduled_at": run.CreatedAt.UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+	h.startPipelineRunExecution(pipeline, run, executionConfig, triggerUserID, triggerRole)
 	return true, nil
 }
 
@@ -588,19 +617,15 @@ func applyGitReferenceToPipelineConfig(config *PipelineConfig, refName string, c
 			continue
 		}
 		nodeCfg := normalizePipelineNodeConfig(node.Type, normalizePipelineTaskType(node.Type), node.getNodeConfig())
-		repo, ok := nodeCfg["repository"].(map[string]interface{})
-		if !ok {
-			repo = make(map[string]interface{})
-			nodeCfg["repository"] = repo
-		}
 		if strings.TrimSpace(refName) != "" {
-			repo["branch"] = refName
+			nodeCfg["git_ref"] = refName
 		}
 		if strings.TrimSpace(commitSHA) != "" {
-			repo["commit_id"] = commitSHA
+			nodeCfg["git_commit"] = commitSHA
 		}
 		node.Type = "git_clone"
 		node.Config = nodeCfg
+		node.DefinitionParams = nil
 		node.Params = nil
 	}
 }
@@ -611,6 +636,29 @@ func normalizePipelineTaskType(taskType string) string {
 		return taskType
 	}
 	return canonical
+}
+
+func buildGitReferenceRuntimeInputs(config PipelineConfig, refName string, commitSHA string) map[string]map[string]interface{} {
+	inputs := make(map[string]map[string]interface{})
+	for _, node := range config.Nodes {
+		if normalizePipelineTaskType(node.Type) != "git_clone" {
+			continue
+		}
+		nodeInputs := make(map[string]interface{})
+		if strings.TrimSpace(refName) != "" {
+			nodeInputs["git_ref"] = refName
+		}
+		if strings.TrimSpace(commitSHA) != "" {
+			nodeInputs["git_commit"] = commitSHA
+		}
+		if len(nodeInputs) > 0 {
+			inputs[node.ID] = nodeInputs
+		}
+	}
+	if len(inputs) == 0 {
+		return nil
+	}
+	return inputs
 }
 
 func (h *PipelineHandler) resolvePipelineAutomationIdentity(db *gorm.DB, pipeline models.Pipeline) (uint64, string, string, error) {
@@ -633,17 +681,54 @@ func (h *PipelineHandler) resolvePipelineAutomationIdentity(db *gorm.DB, pipelin
 }
 
 func (h *PipelineHandler) launchPipelineRun(pipeline models.Pipeline, config PipelineConfig, trigger pipelineRunTriggerContext) (*models.PipelineRun, int, error) {
-	run, buildNumber, err := h.createPipelineRunRecordWithSnapshot(h.DB, pipeline, config, trigger)
+	authoredConfig := config
+	if trigger.AuthoredConfig != nil {
+		authoredConfig = clonePipelineConfig(*trigger.AuthoredConfig)
+	}
+	executionConfig, err := buildExecutionPipelineConfigForTrigger(authoredConfig, trigger)
+	if err != nil {
+		return nil, 0, err
+	}
+	run, buildNumber, err := h.createPipelineRunRecordWithSnapshot(h.DB, pipeline, authoredConfig, trigger)
 	if err != nil {
 		return nil, 0, err
 	}
 	syncLiveRunStateFromRun(run)
-	h.startPipelineRunExecution(pipeline, run, config, trigger.TriggerUserID, trigger.TriggerUserRole)
+	h.startPipelineRunExecution(pipeline, run, executionConfig, trigger.TriggerUserID, trigger.TriggerUserRole)
 	return run, buildNumber, nil
 }
 
 func (h *PipelineHandler) createPipelineRunRecordWithSnapshot(db *gorm.DB, pipeline models.Pipeline, config PipelineConfig, trigger pipelineRunTriggerContext) (*models.PipelineRun, int, error) {
-	configJSON, err := json.Marshal(config)
+	if err := h.syncPipelineDefinitionTriggers(db, pipeline.ID, &config); err != nil {
+		return nil, 0, err
+	}
+	executionConfig, err := buildExecutionPipelineConfigForTrigger(config, trigger)
+	if err != nil {
+		return nil, 0, err
+	}
+	pipelineSnapshotJSON, err := json.Marshal(config)
+	if err != nil {
+		return nil, 0, err
+	}
+	executionConfigJSON, err := json.Marshal(executionConfig)
+	if err != nil {
+		return nil, 0, err
+	}
+	runConfigSnapshot := trigger.RunConfig
+	if strings.TrimSpace(runConfigSnapshot.Trigger.Type) == "" {
+		runConfigSnapshot.Trigger.Type = trigger.TriggerType
+	}
+	if strings.TrimSpace(runConfigSnapshot.Trigger.Source) == "" {
+		runConfigSnapshot.Trigger.Source = trigger.TriggerSource
+	}
+	if strings.TrimSpace(runConfigSnapshot.Trigger.Operator) == "" {
+		runConfigSnapshot.Trigger.Operator = trigger.TriggerUser
+	}
+	runConfigJSON, err := json.Marshal(runConfigSnapshot)
+	if err != nil {
+		return nil, 0, err
+	}
+	outputsJSON, err := json.Marshal(map[string]map[string]interface{}{})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -654,6 +739,36 @@ func (h *PipelineHandler) createPipelineRunRecordWithSnapshot(db *gorm.DB, pipel
 		runStatus = models.PipelineRunStatusQueued
 		startTime = 0
 	}
+	resolvedNodesJSON, err := json.Marshal(buildInitialResolvedNodeSnapshots(config, runStatus))
+	if err != nil {
+		return nil, 0, err
+	}
+	bindingsSnapshotJSON, err := json.Marshal(buildRunBindingsSnapshot(db, pipeline.WorkspaceID, config))
+	if err != nil {
+		return nil, 0, err
+	}
+	events := []map[string]interface{}{{
+		"event_type": "run_created",
+		"time":       time.Now().Unix(),
+		"payload":    map[string]interface{}{},
+	}}
+	if hasAgentNode {
+		events = append(events, map[string]interface{}{
+			"event_type": "run_queued",
+			"time":       time.Now().Unix(),
+			"payload":    map[string]interface{}{},
+		})
+	} else {
+		events = append(events, map[string]interface{}{
+			"event_type": "run_started",
+			"time":       time.Now().Unix(),
+			"payload":    map[string]interface{}{},
+		})
+	}
+	eventsJSON, err := json.Marshal(events)
+	if err != nil {
+		return nil, 0, err
+	}
 	if trigger.IdempotencyKey != nil && strings.TrimSpace(*trigger.IdempotencyKey) != "" {
 		var existing models.PipelineRun
 		if err := db.Where("idempotency_key = ?", *trigger.IdempotencyKey).First(&existing).Error; err == nil {
@@ -661,17 +776,23 @@ func (h *PipelineHandler) createPipelineRunRecordWithSnapshot(db *gorm.DB, pipel
 		}
 	}
 	run := &models.PipelineRun{
-		WorkspaceID:     pipeline.WorkspaceID,
-		PipelineID:      pipeline.ID,
-		Status:          runStatus,
-		TriggerType:     trigger.TriggerType,
-		TriggerUser:     trigger.TriggerUser,
-		TriggerUserID:   trigger.TriggerUserID,
-		TriggerUserRole: trigger.TriggerUserRole,
-		TriggerSource:   trigger.TriggerSource,
-		IdempotencyKey:  trigger.IdempotencyKey,
-		StartTime:       startTime,
-		Config:          string(configJSON),
+		WorkspaceID:      pipeline.WorkspaceID,
+		PipelineID:       pipeline.ID,
+		Status:           runStatus,
+		TriggerType:      trigger.TriggerType,
+		TriggerUser:      trigger.TriggerUser,
+		TriggerUserID:    trigger.TriggerUserID,
+		TriggerUserRole:  trigger.TriggerUserRole,
+		TriggerSource:    trigger.TriggerSource,
+		IdempotencyKey:   trigger.IdempotencyKey,
+		StartTime:        startTime,
+		Config:           string(executionConfigJSON),
+		RunConfig:        string(runConfigJSON),
+		PipelineSnapshot: string(pipelineSnapshotJSON),
+		ResolvedNodes:    string(resolvedNodesJSON),
+		Outputs:          string(outputsJSON),
+		BindingsSnapshot: string(bindingsSnapshotJSON),
+		Events:           string(eventsJSON),
 	}
 	buildNumber, err := (&PipelineHandler{DB: db}).createPipelineRunWithUniqueBuildNumber(run)
 	if err != nil {
@@ -684,6 +805,77 @@ func (h *PipelineHandler) createPipelineRunRecordWithSnapshot(db *gorm.DB, pipel
 		return nil, 0, err
 	}
 	return run, buildNumber, nil
+}
+
+func buildExecutionPipelineConfigForTrigger(config PipelineConfig, trigger pipelineRunTriggerContext) (PipelineConfig, error) {
+	if trigger.ExecutionConfig != nil {
+		return clonePipelineConfig(*trigger.ExecutionConfig), nil
+	}
+	return buildExecutionPipelineConfig(config, trigger.RunConfig)
+}
+
+func buildExecutionPipelineConfig(config PipelineConfig, runConfig models.PipelineRunConfigSnapshot) (PipelineConfig, error) {
+	resolved := clonePipelineConfig(config)
+	for i := range resolved.Nodes {
+		node := &resolved.Nodes[i]
+		canonical := normalizePipelineTaskType(node.Type)
+		nodeConfig := normalizePipelineNodeConfig(node.Type, canonical, node.getNodeConfig())
+		nodeInputs := cloneMap(runConfig.Inputs[node.ID])
+		nodeConfig = applyRuntimeInputsToNodeConfig(canonical, nodeConfig, nodeInputs)
+		if len(nodeInputs) > 0 {
+			resolver := NewVariableResolver()
+			resolver.SetInputs(nodeInputs)
+			resolvedConfig, err := resolver.ResolveNodeConfig(nodeConfig)
+			if err != nil {
+				return PipelineConfig{}, err
+			}
+			nodeConfig = normalizePipelineNodeConfig(node.Type, canonical, resolvedConfig)
+		}
+		node.Config = nodeConfig
+		node.DefinitionParams = nil
+		node.Params = nil
+	}
+	return resolved, nil
+}
+
+func clonePipelineConfig(config PipelineConfig) PipelineConfig {
+	data, err := json.Marshal(config)
+	if err != nil {
+		return config
+	}
+	var cloned PipelineConfig
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		return config
+	}
+	return cloned
+}
+
+func applyRuntimeInputsToNodeConfig(taskType string, nodeConfig map[string]interface{}, nodeInputs map[string]interface{}) map[string]interface{} {
+	if len(nodeInputs) == 0 {
+		return nodeConfig
+	}
+	if nodeConfig == nil {
+		nodeConfig = make(map[string]interface{})
+	}
+	for key, value := range nodeInputs {
+		nodeConfig[key] = value
+	}
+	switch taskType {
+	case "git_clone":
+		if value, ok := nodeInputs["git_repo_url"]; ok {
+			nodeConfig["git_repo_url"] = value
+		}
+		if value, ok := nodeInputs["git_ref"]; ok {
+			nodeConfig["git_ref"] = value
+		}
+		if value, ok := nodeInputs["git_commit"]; ok {
+			nodeConfig["git_commit"] = value
+		}
+		if value, ok := nodeInputs["git_checkout_path"]; ok {
+			nodeConfig["git_checkout_path"] = value
+		}
+	}
+	return nodeConfig
 }
 
 func (h *PipelineHandler) startPipelineRunExecution(pipeline models.Pipeline, run *models.PipelineRun, config PipelineConfig, triggerUserID uint64, triggerRole string) {

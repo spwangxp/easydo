@@ -45,10 +45,11 @@ export function deletePipeline(id) {
   })
 }
 
-export function runPipeline(id) {
+export function runPipeline(id, data = {}) {
   return request({
     url: `/pipelines/${id}/run`,
-    method: 'post'
+    method: 'post',
+    data
   })
 }
 
@@ -72,6 +73,13 @@ export function getPipelineRuns(id, params) {
     url: `/pipelines/${id}/runs`,
     method: 'get',
     params
+  })
+}
+
+export function getPipelineRunDetail(id, runId) {
+  return request({
+    url: `/pipelines/${id}/runs/${runId}`,
+    method: 'get'
   })
 }
 

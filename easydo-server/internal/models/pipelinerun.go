@@ -19,7 +19,13 @@ type PipelineRun struct {
 
 	// 关键设计：保存执行时的配置快照（因为流水线可能被编辑）
 	// 每次执行使用独立的配置副本，互不影响
-	Config string `gorm:"type:longtext" json:"config"` // 执行时的 PipelineConfig JSON 快照
+	Config           string `gorm:"type:longtext" json:"config"`
+	RunConfig        string `gorm:"column:run_config_json;type:longtext" json:"run_config_json"`
+	PipelineSnapshot string `gorm:"column:pipeline_snapshot_json;type:longtext" json:"pipeline_snapshot_json"`
+	ResolvedNodes    string `gorm:"column:resolved_nodes_json;type:longtext" json:"resolved_nodes_json"`
+	Outputs          string `gorm:"column:outputs_json;type:longtext" json:"outputs_json"`
+	BindingsSnapshot string `gorm:"column:bindings_snapshot_json;type:longtext" json:"bindings_snapshot_json"`
+	Events           string `gorm:"column:events_json;type:longtext" json:"events_json"`
 
 	// 执行时绑定的 Agent（一次 PipelineRun 只使用一个 Agent，0 表示未分配）
 	AgentID uint64 `gorm:"index" json:"agent_id"`

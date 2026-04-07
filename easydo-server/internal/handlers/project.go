@@ -108,13 +108,13 @@ func (h *ProjectHandler) GetProjectList(c *gin.Context) {
 	latestRunByProject := make(map[uint64]latestProjectRunRow, len(projects))
 	if len(projectIDs) > 0 {
 		var latestRows []latestProjectRunRow
-		latestRunSubQuery := h.DB.Table("pipeline_runs AS pr").
+		latestRunSubQuery := regularPipelineRunsQuery(h.DB.Table("pipeline_runs AS pr")).
 			Select("p.project_id, MAX(pr.created_at) AS latest_created_at").
 			Joins("JOIN pipelines p ON p.id = pr.pipeline_id").
 			Where("p.workspace_id = ? AND p.project_id IN ?", workspaceID, projectIDs).
 			Group("p.project_id")
 
-		h.DB.Table("pipeline_runs AS pr").
+		regularPipelineRunsQuery(h.DB.Table("pipeline_runs AS pr")).
 			Select("p.project_id, pr.trigger_user, pr.created_at, pr.status").
 			Joins("JOIN pipelines p ON p.id = pr.pipeline_id").
 			Joins("JOIN (?) latest ON latest.project_id = p.project_id AND latest.latest_created_at = pr.created_at", latestRunSubQuery).

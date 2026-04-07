@@ -260,7 +260,7 @@ func TestBuildNodeOutputs_GitClone(t *testing.T) {
 	h := &TaskHandler{}
 	result := &agenttask.Result{
 		ExitCode: 0,
-		Stdout:   `Cloning into 'repo'...\ngit_info:{"url":"https://github.com/example/repo.git","branch":"main","commit":"abc123def456","path":"/workspace/repo"}`,
+		Stdout:   `Cloning into 'repo'...\ngit_info:{"git_repo_url":"https://github.com/example/repo.git","git_ref":"main","git_commit":"abc123def456","git_checkout_path":"/workspace/repo"}`,
 		Stderr:   "",
 		Error:    "",
 		Duration: 3 * time.Second,
@@ -268,17 +268,17 @@ func TestBuildNodeOutputs_GitClone(t *testing.T) {
 
 	outputs := h.buildNodeOutputs("node_1", "git_clone", result)
 
-	if outputs["commit_sha"] != "abc123def456" {
-		t.Fatalf("commit_sha=%v, want abc123def456", outputs["commit_sha"])
+	if outputs["git_commit"] != "abc123def456" {
+		t.Fatalf("git_commit=%v, want abc123def456", outputs["git_commit"])
 	}
-	if outputs["repo_url"] != "https://github.com/example/repo.git" {
-		t.Fatalf("repo_url=%v, want https://github.com/example/repo.git", outputs["repo_url"])
+	if outputs["git_repo_url"] != "https://github.com/example/repo.git" {
+		t.Fatalf("git_repo_url=%v, want https://github.com/example/repo.git", outputs["git_repo_url"])
 	}
-	if outputs["branch"] != "main" {
-		t.Fatalf("branch=%v, want main", outputs["branch"])
+	if outputs["git_ref"] != "main" {
+		t.Fatalf("git_ref=%v, want main", outputs["git_ref"])
 	}
-	if outputs["repo_path"] != "/workspace/repo" {
-		t.Fatalf("repo_path=%v, want /workspace/repo", outputs["repo_path"])
+	if outputs["git_checkout_path"] != "/workspace/repo" {
+		t.Fatalf("git_checkout_path=%v, want /workspace/repo", outputs["git_checkout_path"])
 	}
 }
 

@@ -41,10 +41,18 @@ func pipelineManagementQuery(db *gorm.DB, includeHidden bool) *gorm.DB {
 }
 
 type pipelineTaskTypeResponse struct {
-	Type            string                       `json:"type"`
-	Category        string                       `json:"category"`
-	ExecMode        string                       `json:"exec_mode"`
-	CredentialSlots []pipelineTaskCredentialSlot `json:"credential_slots"`
+	Type            string                                `json:"type"`
+	TaskKey         string                                `json:"task_key"`
+	Name            string                                `json:"name"`
+	Description     string                                `json:"description,omitempty"`
+	Category        string                                `json:"category"`
+	Status          string                                `json:"status,omitempty"`
+	Version         int                                   `json:"version"`
+	ExecMode        string                                `json:"exec_mode"`
+	FieldsSchema    []models.TaskDefinitionField          `json:"fields_schema"`
+	OutputsSchema   []models.TaskDefinitionOutput         `json:"outputs_schema"`
+	CredentialSlots []models.TaskCredentialSlotDefinition `json:"credential_slots"`
+	ExecutionSpec   models.TaskExecutionSpec              `json:"execution_spec"`
 }
 
 type pipelineTaskCredentialSlot struct {
@@ -73,7 +81,7 @@ func getEnvironmentText(env string) string {
 	}
 }
 
-func (h *PipelineHandler) GetPipelineTaskTypes(c *gin.Context) {
+func (h *PipelineHandler) listPipelineTaskTypes() []pipelineTaskTypeResponse {
 	keys := make([]string, 0, len(pipelineTaskDefinitions))
 	for taskType := range pipelineTaskDefinitions {
 		keys = append(keys, taskType)
@@ -82,24 +90,30 @@ func (h *PipelineHandler) GetPipelineTaskTypes(c *gin.Context) {
 
 	result := make([]pipelineTaskTypeResponse, 0, len(keys))
 	for _, taskType := range keys {
-		def := pipelineTaskDefinitions[taskType]
-		slots := make([]pipelineTaskCredentialSlot, 0, len(def.CredentialSlots))
-		for _, slot := range def.CredentialSlots {
-			slots = append(slots, pipelineTaskCredentialSlot{
-				Slot:              slot.Slot,
-				Label:             slot.Label,
-				Required:          slot.Required,
-				AllowedTypes:      slot.AllowedTypes,
-				AllowedCategories: slot.AllowedCategories,
-			})
+		def, ok := getTaskDefinition(taskType)
+		if !ok {
+			continue
 		}
 		result = append(result, pipelineTaskTypeResponse{
-			Type:            def.CanonicalType,
+			Type:            def.TaskKey,
+			TaskKey:         def.TaskKey,
+			Name:            def.Name,
+			Description:     def.Description,
 			Category:        def.Category,
-			ExecMode:        def.ExecMode,
-			CredentialSlots: slots,
+			Status:          def.Status,
+			Version:         def.Version,
+			ExecMode:        def.ExecutorType,
+			FieldsSchema:    def.FieldsSchema,
+			OutputsSchema:   def.OutputsSchema,
+			CredentialSlots: def.CredentialSlots,
+			ExecutionSpec:   def.ExecutionSpec,
 		})
 	}
+	return result
+}
+
+func (h *PipelineHandler) GetPipelineTaskTypes(c *gin.Context) {
+	result := h.listPipelineTaskTypes()
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -128,6 +142,10 @@ func (h *PipelineHandler) validatePipelineCredentialBindings(config *PipelineCon
 		if !ok {
 			continue
 		}
+		node.TaskKey = canonical
+		if node.TaskVersion <= 0 {
+			node.TaskVersion = 1
+		}
 
 		nodeCfg := normalizePipelineNodeConfig(node.Type, canonical, node.getNodeConfig())
 		node.Config = nodeCfg
@@ -138,7 +156,7 @@ func (h *PipelineHandler) validatePipelineCredentialBindings(config *PipelineCon
 			continue
 		}
 
-		rawBindings, _ := nodeCfg["credentials"].(map[string]interface{})
+		rawBindings := expandFlatCredentialBindings(nodeCfg)
 		if rawBindings != nil {
 			for key := range rawBindings {
 				if _, slotOK := def.findCredentialSlot(key); !slotOK {
@@ -230,9 +248,145 @@ func (h *PipelineHandler) validatePipelineCredentialBindings(config *PipelineCon
 	return refs, nil
 }
 
-func (h *PipelineHandler) parseAndValidatePipelineConfig(rawConfig string, userID uint64, role string, pipelineID uint64, workspaceID uint64) (PipelineConfig, []models.PipelineCredentialRef, string, error) {
+func normalizeDefinitionParams(taskKey string, node *PipelineNode) {
+	if node == nil {
+		return
+	}
+
+	canonical := normalizePipelineTaskType(firstNonEmptyTaskValue(taskKey, node.TaskKey, node.Type))
+	if len(node.DefinitionParams) == 0 && len(node.Config) > 0 {
+		cfg := normalizePipelineNodeConfig(node.Type, canonical, node.Config)
+		params := make([]models.PipelineDefinitionParam, 0, len(cfg))
+		used := make(map[string]struct{})
+		if def, ok := getTaskDefinition(canonical); ok {
+			for _, field := range def.FieldsSchema {
+				value, exists := cfg[field.Key]
+				if !exists {
+					continue
+				}
+				used[field.Key] = struct{}{}
+				params = append(params, models.PipelineDefinitionParam{
+					Key:        field.Key,
+					Label:      field.Label,
+					Value:      value,
+					IsFlexible: false,
+				})
+			}
+		}
+		extraKeys := make([]string, 0)
+		for key := range cfg {
+			if _, exists := used[key]; exists {
+				continue
+			}
+			if key == "credentials" || strings.HasPrefix(key, "credentials.") {
+				continue
+			}
+			extraKeys = append(extraKeys, key)
+		}
+		sort.Strings(extraKeys)
+		for _, key := range extraKeys {
+			params = append(params, models.PipelineDefinitionParam{
+				Key:        key,
+				Value:      cfg[key],
+				IsFlexible: false,
+			})
+		}
+		node.DefinitionParams = params
+		node.Config = nil
+	}
+
+	if len(node.DefinitionParams) > 0 {
+		normalized := make([]models.PipelineDefinitionParam, 0, len(node.DefinitionParams))
+		for _, param := range node.DefinitionParams {
+			if match := strings.TrimPrefix(param.Key, "credentials."); match != param.Key && strings.HasSuffix(param.Key, ".credential_id") {
+				slot := strings.TrimSuffix(match, ".credential_id")
+				if node.CredentialBindings == nil {
+					node.CredentialBindings = make(map[string]uint64)
+				}
+				if credentialID, ok := parseCredentialID(param.Value); ok {
+					node.CredentialBindings[slot] = credentialID
+				}
+				continue
+			}
+			normalized = append(normalized, param)
+		}
+		node.DefinitionParams = normalized
+	}
+}
+
+func normalizePipelineConfigStructure(config *PipelineConfig) {
+	if config == nil {
+		return
+	}
+	if strings.TrimSpace(config.Version) == "" {
+		config.Version = firstNonEmptyTaskValue(toString(config.Metadata["version"]), "2.0")
+	}
+	if config.Metadata == nil {
+		config.Metadata = map[string]interface{}{}
+	}
+	if config.Metadata["version"] == nil {
+		config.Metadata["version"] = config.Version
+	}
+	for i := range config.Nodes {
+		node := &config.Nodes[i]
+		if strings.TrimSpace(node.ID) == "" && strings.TrimSpace(node.NodeID) != "" {
+			node.ID = node.NodeID
+		}
+		node.NodeID = node.ID
+		if strings.TrimSpace(node.Name) == "" && strings.TrimSpace(node.NodeName) != "" {
+			node.Name = node.NodeName
+		}
+		node.NodeName = node.Name
+		canonical := normalizePipelineTaskType(firstNonEmptyTaskValue(node.TaskKey, node.Type))
+		node.TaskKey = canonical
+		node.Type = canonical
+		if node.TaskVersion <= 0 {
+			node.TaskVersion = 1
+		}
+		if node.Metadata == nil {
+			node.Metadata = map[string]interface{}{}
+		}
+		if node.X == nil {
+			if x, ok := node.Metadata["x"]; ok {
+				if xv, ok := toFloat64Value(x); ok {
+					node.X = &xv
+				}
+			}
+		}
+		if node.Y == nil {
+			if y, ok := node.Metadata["y"]; ok {
+				if yv, ok := toFloat64Value(y); ok {
+					node.Y = &yv
+				}
+			}
+		}
+		if node.X != nil {
+			node.Metadata["x"] = *node.X
+		}
+		if node.Y != nil {
+			node.Metadata["y"] = *node.Y
+		}
+		normalizeDefinitionParams(canonical, node)
+	}
+	for i := range config.Edges {
+		if strings.TrimSpace(config.Edges[i].From) == "" || strings.TrimSpace(config.Edges[i].To) == "" {
+			continue
+		}
+	}
+}
+
+func parsePipelineConfigJSON(rawConfig string) (PipelineConfig, error) {
 	var config PipelineConfig
 	if err := json.Unmarshal([]byte(rawConfig), &config); err != nil {
+		return PipelineConfig{}, err
+	}
+	normalizePipelineConfigStructure(&config)
+	return config, nil
+}
+
+func (h *PipelineHandler) parseAndValidatePipelineConfig(rawConfig string, userID uint64, role string, pipelineID uint64, workspaceID uint64) (PipelineConfig, []models.PipelineCredentialRef, string, error) {
+	config, err := parsePipelineConfigJSON(rawConfig)
+	if err != nil {
 		return PipelineConfig{}, nil, "流水线配置JSON解析失败: " + err.Error(), err
 	}
 
@@ -240,6 +394,9 @@ func (h *PipelineHandler) parseAndValidatePipelineConfig(rawConfig string, userI
 		return PipelineConfig{}, nil, errMsg, errors.New(errMsg)
 	}
 	if valid, errMsg := config.ValidateTaskTypes(); !valid {
+		return PipelineConfig{}, nil, errMsg, errors.New(errMsg)
+	}
+	if valid, errMsg := config.ValidateNodeParams(); !valid {
 		return PipelineConfig{}, nil, errMsg, errors.New(errMsg)
 	}
 
@@ -262,6 +419,72 @@ func (h *PipelineHandler) replacePipelineCredentialRefs(tx *gorm.DB, pipelineID 
 		refs[i].PipelineID = pipelineID
 	}
 	return tx.Create(&refs).Error
+}
+
+func pipelineDefinitionPayload(pipeline models.Pipeline) string {
+	if strings.TrimSpace(pipeline.Definition) != "" {
+		return pipeline.Definition
+	}
+	return pipeline.Config
+}
+
+func buildPipelineTriggerDefinitions(trigger *models.PipelineTrigger) []map[string]interface{} {
+	triggers := []map[string]interface{}{
+		{"type": "manual", "enabled": true},
+	}
+	if trigger == nil {
+		return triggers
+	}
+	triggers = append(triggers, map[string]interface{}{
+		"type":                                "webhook",
+		"enabled":                             trigger.WebhookEnabled,
+		"provider":                            defaultIfEmpty(trigger.Provider, "gitlab"),
+		"push_enabled":                        trigger.PushEnabled,
+		"tag_enabled":                         trigger.TagEnabled,
+		"merge_request_enabled":               trigger.MergeRequestEnabled,
+		"push_branch_filters":                 trigger.PushBranchFilters,
+		"tag_filters":                         trigger.TagFilters,
+		"merge_request_source_branch_filters": trigger.MergeRequestSourceBranchFilters,
+		"merge_request_target_branch_filters": trigger.MergeRequestTargetBranchFilters,
+		"webhook_enabled":                     trigger.WebhookEnabled,
+	})
+	triggers = append(triggers, map[string]interface{}{
+		"type":            "schedule",
+		"enabled":         trigger.ScheduleEnabled,
+		"cron_expression": trigger.CronExpression,
+		"timezone":        defaultIfEmpty(trigger.Timezone, "UTC"),
+	})
+	return triggers
+}
+
+func (h *PipelineHandler) syncPipelineDefinitionTriggers(db *gorm.DB, pipelineID uint64, config *PipelineConfig) error {
+	if db == nil || pipelineID == 0 || config == nil {
+		return nil
+	}
+	var trigger models.PipelineTrigger
+	if err := db.Where("pipeline_id = ?", pipelineID).First(&trigger).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	config.Triggers = buildPipelineTriggerDefinitions(&trigger)
+	return nil
+}
+
+func (h *PipelineHandler) loadPipelineDefinitionConfig(db *gorm.DB, pipeline models.Pipeline) (PipelineConfig, error) {
+	raw := pipelineDefinitionPayload(pipeline)
+	if strings.TrimSpace(raw) == "" {
+		return PipelineConfig{}, fmt.Errorf("流水线定义为空")
+	}
+	config, err := parsePipelineConfigJSON(raw)
+	if err != nil {
+		return PipelineConfig{}, err
+	}
+	if err := h.syncPipelineDefinitionTriggers(db, pipeline.ID, &config); err != nil {
+		return PipelineConfig{}, err
+	}
+	return config, nil
 }
 
 func (h *PipelineHandler) GetPipelineList(c *gin.Context) {
@@ -417,11 +640,12 @@ func (h *PipelineHandler) GetPipelineDetail(c *gin.Context) {
 
 func (h *PipelineHandler) CreatePipeline(c *gin.Context) {
 	var req struct {
-		Name        string `json:"name" binding:"required"`
-		Description string `json:"description"`
-		ProjectID   uint64 `json:"project_id"`
-		Environment string `json:"environment"`
-		Config      string `json:"config"`
+		Name           string `json:"name" binding:"required"`
+		Description    string `json:"description"`
+		ProjectID      uint64 `json:"project_id"`
+		Environment    string `json:"environment"`
+		Config         string `json:"config"`
+		DefinitionJSON string `json:"definition_json"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -444,9 +668,13 @@ func (h *PipelineHandler) CreatePipeline(c *gin.Context) {
 		return
 	}
 	credentialRefs := make([]models.PipelineCredentialRef, 0)
+	definitionPayload := strings.TrimSpace(req.DefinitionJSON)
+	if definitionPayload == "" {
+		definitionPayload = strings.TrimSpace(req.Config)
+	}
 
-	if req.Config != "" {
-		config, refs, errMsg, err := h.parseAndValidatePipelineConfig(req.Config, userID, role, 0, workspaceID)
+	if definitionPayload != "" {
+		config, refs, errMsg, err := h.parseAndValidatePipelineConfig(definitionPayload, userID, role, 0, workspaceID)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"code":    400,
@@ -454,8 +682,12 @@ func (h *PipelineHandler) CreatePipeline(c *gin.Context) {
 			})
 			return
 		}
-		normalizedConfig, _ := json.Marshal(config)
-		req.Config = string(normalizedConfig)
+		if err := h.syncPipelineDefinitionTriggers(h.DB, 0, &config); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "同步触发定义失败: " + err.Error()})
+			return
+		}
+		normalizedDefinition, _ := json.Marshal(config)
+		req.DefinitionJSON = string(normalizedDefinition)
 		credentialRefs = refs
 	}
 
@@ -465,7 +697,7 @@ func (h *PipelineHandler) CreatePipeline(c *gin.Context) {
 		WorkspaceID: workspaceID,
 		ProjectID:   req.ProjectID,
 		Environment: req.Environment,
-		Config:      req.Config,
+		Definition:  req.DefinitionJSON,
 		OwnerID:     userID,
 	}
 
@@ -498,10 +730,11 @@ func (h *PipelineHandler) UpdatePipeline(c *gin.Context) {
 	id := c.Param("id")
 
 	var req struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Environment string `json:"environment"`
-		Config      string `json:"config"`
+		Name           string `json:"name"`
+		Description    string `json:"description"`
+		Environment    string `json:"environment"`
+		Config         string `json:"config"`
+		DefinitionJSON string `json:"definition_json"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -530,9 +763,13 @@ func (h *PipelineHandler) UpdatePipeline(c *gin.Context) {
 		return
 	}
 	credentialRefs := make([]models.PipelineCredentialRef, 0)
+	definitionPayload := strings.TrimSpace(req.DefinitionJSON)
+	if definitionPayload == "" {
+		definitionPayload = strings.TrimSpace(req.Config)
+	}
 
-	if req.Config != "" {
-		config, refs, errMsg, err := h.parseAndValidatePipelineConfig(req.Config, userID, role, pipeline.ID, workspaceID)
+	if definitionPayload != "" {
+		config, refs, errMsg, err := h.parseAndValidatePipelineConfig(definitionPayload, userID, role, pipeline.ID, workspaceID)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"code":    400,
@@ -540,8 +777,12 @@ func (h *PipelineHandler) UpdatePipeline(c *gin.Context) {
 			})
 			return
 		}
-		normalizedConfig, _ := json.Marshal(config)
-		req.Config = string(normalizedConfig)
+		if err := h.syncPipelineDefinitionTriggers(h.DB, pipeline.ID, &config); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "同步触发定义失败: " + err.Error()})
+			return
+		}
+		normalizedDefinition, _ := json.Marshal(config)
+		req.DefinitionJSON = string(normalizedDefinition)
 		credentialRefs = refs
 	}
 
@@ -556,8 +797,9 @@ func (h *PipelineHandler) UpdatePipeline(c *gin.Context) {
 	if req.Environment != "" {
 		updates["environment"] = req.Environment
 	}
-	if req.Config != "" {
-		updates["config"] = req.Config
+	if req.DefinitionJSON != "" {
+		updates["definition_json"] = req.DefinitionJSON
+		updates["version"] = gorm.Expr("version + 1")
 	}
 
 	// 仅更新显式传入字段，避免将数据库中的 NULL project_id 回写为 0
@@ -569,7 +811,7 @@ func (h *PipelineHandler) UpdatePipeline(c *gin.Context) {
 			})
 			return
 		}
-		if req.Config != "" {
+		if req.DefinitionJSON != "" {
 			if err := h.replacePipelineCredentialRefs(h.DB, pipeline.ID, credentialRefs); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{
 					"code":    500,
@@ -622,6 +864,10 @@ func (h *PipelineHandler) DeletePipeline(c *gin.Context) {
 func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 	id := c.Param("id")
 	workspaceID := c.GetUint64("workspace_id")
+	type pipelineRunRequest struct {
+		Inputs  map[string]map[string]interface{} `json:"inputs"`
+		Options map[string]interface{}            `json:"options"`
+	}
 
 	var pipeline models.Pipeline
 	if err := h.DB.Where("id = ? AND workspace_id = ?", id, workspaceID).First(&pipeline).Error; err != nil {
@@ -632,12 +878,12 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 		return
 	}
 
-	// 解析流水线配置，检查是否有需要 Agent 执行的节点
-	var config PipelineConfig
-	if err := json.Unmarshal([]byte(pipeline.Config), &config); err != nil {
+	// 解析流水线定义，检查是否有需要 Agent 执行的节点
+	config, err := h.loadPipelineDefinitionConfig(h.DB, pipeline)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
-			"message": "流水线配置解析失败: " + err.Error(),
+			"message": "流水线定义解析失败: " + err.Error(),
 		})
 		return
 	}
@@ -657,6 +903,17 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 		triggerUsername = "system"
 	}
 
+	var req pipelineRunRequest
+	if c.Request != nil && c.Request.Body != nil {
+		if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code":    400,
+				"message": "运行参数错误: " + err.Error(),
+			})
+			return
+		}
+	}
+
 	if _, err := h.validatePipelineCredentialBindings(&config, triggerUserID, triggerRole, pipeline.ID, workspaceID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
@@ -670,6 +927,10 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 		TriggerUser:     triggerUsername,
 		TriggerUserID:   triggerUserID,
 		TriggerUserRole: triggerRole,
+		RunConfig: models.PipelineRunConfigSnapshot{
+			Inputs:  req.Inputs,
+			Options: req.Options,
+		},
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -876,28 +1137,158 @@ func (h *PipelineHandler) createPipelineRunWithUniqueBuildNumber(run *models.Pip
 
 // PipelineNode represents a node in the pipeline configuration
 type PipelineNode struct {
-	ID            string                 `json:"id"`
-	Type          string                 `json:"type"` // git_clone/npm/maven/gradle/docker/unit/integration/e2e/coverage/lint/ssh/kubernetes/docker-run/shell/sleep/email/webhook/in_app
-	Name          string                 `json:"name"`
-	X             *float64               `json:"x,omitempty"`
-	Y             *float64               `json:"y,omitempty"`
-	Config        map[string]interface{} `json:"config,omitempty"` // 新格式：config
-	Params        map[string]interface{} `json:"params,omitempty"` // 旧格式兼容：params
-	Timeout       int                    `json:"timeout"`
-	IgnoreFailure bool                   `json:"ignore_failure"` // If true, current node can execute even if upstream fails
+	ID                 string                           `json:"id"`
+	NodeID             string                           `json:"node_id,omitempty"`
+	Type               string                           `json:"type"`
+	TaskKey            string                           `json:"task_key,omitempty"`
+	Name               string                           `json:"name"`
+	NodeName           string                           `json:"node_name,omitempty"`
+	Description        string                           `json:"description,omitempty"`
+	TaskVersion        int                              `json:"task_version,omitempty"`
+	X                  *float64                         `json:"x,omitempty"`
+	Y                  *float64                         `json:"y,omitempty"`
+	Config             map[string]interface{}           `json:"config,omitempty"`
+	Params             map[string]interface{}           `json:"-"`
+	DefinitionParams   []models.PipelineDefinitionParam `json:"-"`
+	CredentialBindings map[string]uint64                `json:"credential_bindings,omitempty"`
+	ResourceBindings   map[string]uint64                `json:"resource_bindings,omitempty"`
+	Metadata           map[string]interface{}           `json:"metadata,omitempty"`
+	Timeout            int                              `json:"timeout"`
+	IgnoreFailure      bool                             `json:"ignore_failure"`
+}
+
+func (n *PipelineNode) UnmarshalJSON(data []byte) error {
+	type pipelineNodeAlias PipelineNode
+	aux := struct {
+		pipelineNodeAlias
+		Params json.RawMessage `json:"params"`
+	}{}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*n = PipelineNode(aux.pipelineNodeAlias)
+	if strings.TrimSpace(n.ID) == "" && strings.TrimSpace(n.NodeID) != "" {
+		n.ID = n.NodeID
+	}
+	if strings.TrimSpace(n.Name) == "" && strings.TrimSpace(n.NodeName) != "" {
+		n.Name = n.NodeName
+	}
+	if strings.TrimSpace(n.TaskKey) == "" && strings.TrimSpace(n.Type) != "" {
+		n.TaskKey = n.Type
+	}
+	if len(aux.Params) == 0 || string(aux.Params) == "null" {
+		return nil
+	}
+	var definitionParams []models.PipelineDefinitionParam
+	if err := json.Unmarshal(aux.Params, &definitionParams); err == nil {
+		n.DefinitionParams = definitionParams
+		return nil
+	}
+	var legacyParams map[string]interface{}
+	if err := json.Unmarshal(aux.Params, &legacyParams); err == nil {
+		n.Params = legacyParams
+		return nil
+	}
+	return fmt.Errorf("invalid node params format")
+}
+
+func (n PipelineNode) MarshalJSON() ([]byte, error) {
+	aux := struct {
+		NodeID             string                 `json:"node_id"`
+		NodeName           string                 `json:"node_name,omitempty"`
+		Description        string                 `json:"description,omitempty"`
+		TaskKey            string                 `json:"task_key,omitempty"`
+		TaskVersion        int                    `json:"task_version,omitempty"`
+		Type               string                 `json:"type,omitempty"`
+		Params             interface{}            `json:"params,omitempty"`
+		Config             map[string]interface{} `json:"config,omitempty"`
+		CredentialBindings map[string]uint64      `json:"credential_bindings,omitempty"`
+		ResourceBindings   map[string]uint64      `json:"resource_bindings,omitempty"`
+		Metadata           map[string]interface{} `json:"metadata,omitempty"`
+		IgnoreFailure      bool                   `json:"ignore_failure,omitempty"`
+		Timeout            int                    `json:"timeout,omitempty"`
+		X                  *float64               `json:"x,omitempty"`
+		Y                  *float64               `json:"y,omitempty"`
+	}{
+		NodeID:             firstNonEmptyTaskValue(n.ID, n.NodeID),
+		NodeName:           firstNonEmptyTaskValue(n.Name, n.NodeName),
+		Description:        n.Description,
+		TaskKey:            firstNonEmptyTaskValue(n.TaskKey, n.Type),
+		TaskVersion:        n.TaskVersion,
+		Type:               firstNonEmptyTaskValue(n.Type, n.TaskKey),
+		Config:             n.Config,
+		CredentialBindings: n.CredentialBindings,
+		ResourceBindings:   n.ResourceBindings,
+		Metadata:           cloneMap(n.Metadata),
+		IgnoreFailure:      n.IgnoreFailure,
+		Timeout:            n.Timeout,
+		X:                  n.X,
+		Y:                  n.Y,
+	}
+	if len(n.DefinitionParams) > 0 {
+		aux.Params = n.DefinitionParams
+	} else if len(n.Params) > 0 {
+		aux.Params = n.Params
+	}
+	if aux.Metadata == nil {
+		aux.Metadata = make(map[string]interface{})
+	}
+	if aux.X != nil {
+		aux.Metadata["x"] = *aux.X
+	}
+	if aux.Y != nil {
+		aux.Metadata["y"] = *aux.Y
+	}
+	return json.Marshal(aux)
 }
 
 // getNodeConfig returns the node configuration, supporting both config and params
 func (n *PipelineNode) getNodeConfig() map[string]interface{} {
+	mergeBindings := func(cfg map[string]interface{}) map[string]interface{} {
+		if cfg == nil {
+			cfg = make(map[string]interface{})
+		}
+		if len(n.CredentialBindings) > 0 {
+			credentials, _ := cfg["credentials"].(map[string]interface{})
+			if credentials == nil {
+				credentials = make(map[string]interface{}, len(n.CredentialBindings))
+			}
+			for slot, credentialID := range n.CredentialBindings {
+				if credentialID == 0 {
+					continue
+				}
+				credentials[slot] = map[string]interface{}{"credential_id": credentialID}
+			}
+			if len(credentials) > 0 {
+				cfg["credentials"] = credentials
+			}
+		}
+		for key, resourceID := range n.ResourceBindings {
+			if resourceID == 0 {
+				continue
+			}
+			if _, exists := cfg[key]; !exists {
+				cfg[key] = resourceID
+			}
+		}
+		return cfg
+	}
 	// 优先使用 config（新格式）
 	if n.Config != nil && len(n.Config) > 0 {
-		return n.Config
+		return mergeBindings(cloneMap(n.Config))
+	}
+	if len(n.DefinitionParams) > 0 {
+		cfg := make(map[string]interface{}, len(n.DefinitionParams))
+		for _, param := range n.DefinitionParams {
+			cfg[param.Key] = param.Value
+		}
+		return mergeBindings(cfg)
 	}
 	// 兼容 params（旧格式）
 	if n.Params != nil && len(n.Params) > 0 {
-		return n.Params
+		return mergeBindings(cloneMap(n.Params))
 	}
-	return make(map[string]interface{})
+	return mergeBindings(make(map[string]interface{}))
 }
 
 // PipelineConfig represents the pipeline configuration
@@ -905,17 +1296,49 @@ func (n *PipelineNode) getNodeConfig() map[string]interface{} {
 // - 新格式 (version: "2.0"): nodes + edges
 // - 旧格式: nodes + connections
 type PipelineConfig struct {
-	Version     string               `json:"version"`
-	Nodes       []PipelineNode       `json:"nodes"`
-	Edges       []PipelineEdge       `json:"edges"`       // 新格式
-	Connections []PipelineConnection `json:"connections"` // 旧格式兼容
+	Version     string                   `json:"version"`
+	Nodes       []PipelineNode           `json:"nodes"`
+	Edges       []PipelineEdge           `json:"edges"`       // 新格式
+	Connections []PipelineConnection     `json:"connections"` // 旧格式兼容
+	Triggers    []map[string]interface{} `json:"triggers,omitempty"`
+	Metadata    map[string]interface{}   `json:"metadata,omitempty"`
 }
 
 // PipelineEdge represents an edge in the pipeline DAG (新格式)
 type PipelineEdge struct {
-	From          string `json:"from"`
-	To            string `json:"to"`
+	From          string `json:"-"`
+	To            string `json:"-"`
 	IgnoreFailure bool   `json:"ignore_failure"` // If true, downstream can execute even if upstream fails
+}
+
+func (e *PipelineEdge) UnmarshalJSON(data []byte) error {
+	type edgeAlias struct {
+		From          string `json:"from"`
+		To            string `json:"to"`
+		FromNodeID    string `json:"from_node_id"`
+		ToNodeID      string `json:"to_node_id"`
+		IgnoreFailure bool   `json:"ignore_failure"`
+	}
+	var aux edgeAlias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	e.From = firstNonEmptyTaskValue(aux.From, aux.FromNodeID)
+	e.To = firstNonEmptyTaskValue(aux.To, aux.ToNodeID)
+	e.IgnoreFailure = aux.IgnoreFailure
+	return nil
+}
+
+func (e PipelineEdge) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		FromNodeID    string `json:"from_node_id"`
+		ToNodeID      string `json:"to_node_id"`
+		IgnoreFailure bool   `json:"ignore_failure,omitempty"`
+	}{
+		FromNodeID:    e.From,
+		ToNodeID:      e.To,
+		IgnoreFailure: e.IgnoreFailure,
+	})
 }
 
 // PipelineConnection represents a connection between nodes (旧格式兼容)
@@ -1310,6 +1733,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 		fmt.Printf("Failed to resolve resource-backed config for node %s: %v\n", node.ID, err)
 		return false, nil
 	}
+	resolvedInputs := cloneMap(nodeConfig)
 
 	if err := h.injectCredentialEnv(db, canonicalType, def, nodeConfig, run, triggerUserID, triggerRole); err != nil {
 		fmt.Printf("Failed to inject credential for node %s: %v\n", node.ID, err)
@@ -1327,11 +1751,20 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 	maxRetries := resolveTaskMaxRetries(nodeConfig)
 
 	if def.ExecMode == taskExecModeServer {
+		workDir := ""
+		if wd, ok := nodeConfig["working_dir"].(string); ok {
+			workDir = wd
+		}
+		envMap, _ := nodeConfig["env"].(map[string]interface{})
+		upsertResolvedNodeSnapshot(db, run.ID, *node, models.TaskStatusRunning, resolvedInputs, buildExecutorPayload("", workDir, envMap))
+		appendRunEvent(db, run.ID, "node_running", map[string]interface{}{"node_id": node.ID})
 		success, errMsg := h.executeServerTask(db, run, node, canonicalType, nodeConfig, timeout)
 		if !success {
 			fmt.Printf("Server task failed: node=%s type=%s err=%s\n", node.ID, canonicalType, errMsg)
+			appendRunEvent(db, run.ID, "node_failed", map[string]interface{}{"node_id": node.ID, "error_msg": errMsg})
 			return false, nil
 		}
+		appendRunEvent(db, run.ID, "node_success", map[string]interface{}{"node_id": node.ID})
 		return true, nil
 	}
 
@@ -1368,22 +1801,22 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 		envJSON, _ := json.Marshal(env)
 		envVars = string(envJSON)
 	}
+	envMap, _ := nodeConfig["env"].(map[string]interface{})
+	upsertResolvedNodeSnapshot(db, run.ID, *node, models.TaskStatusQueued, resolvedInputs, buildExecutorPayload(script, workDir, envMap))
 
 	repoURL, repoBranch, repoCommit, repoPath := "", "", "", ""
 	if canonicalType == "git_clone" {
-		if repo, ok := nodeConfig["repository"].(map[string]interface{}); ok {
-			if url, ok := repo["url"].(string); ok {
-				repoURL = url
-			}
-			if branch, ok := repo["branch"].(string); ok {
-				repoBranch = branch
-			}
-			if commit, ok := repo["commit_id"].(string); ok {
-				repoCommit = commit
-			}
-			if targetDir, ok := repo["target_dir"].(string); ok {
-				repoPath = targetDir
-			}
+		if url, ok := nodeConfig["git_repo_url"].(string); ok {
+			repoURL = url
+		}
+		if branch, ok := nodeConfig["git_ref"].(string); ok {
+			repoBranch = branch
+		}
+		if commit, ok := nodeConfig["git_commit"].(string); ok {
+			repoCommit = commit
+		}
+		if targetDir, ok := nodeConfig["git_checkout_path"].(string); ok {
+			repoPath = targetDir
 		}
 	}
 
@@ -1432,6 +1865,8 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 			return false, nil
 		}
 	}
+	updateResolvedNodeAttempts(db, task)
+	appendRunEvent(db, run.ID, "node_assigned", map[string]interface{}{"node_id": node.ID, "task_id": task.ID, "agent_id": agentID})
 
 	_ = SharedWebSocketHandler().sendTaskAssign(task)
 	return true, nil
@@ -1509,6 +1944,61 @@ func extractCredentialIDFromBinding(raw interface{}) (uint64, bool) {
 		return 0, false
 	}
 	return parseCredentialID(binding["credential_id"])
+}
+
+// expandFlatCredentialBindings converts flat keys like "credentials.registry_auth.credential_id"
+// into nested structure "credentials": {"registry_auth": {"credential_id": ...}}"
+// This is needed because some pipeline configs store credentials with flat keys.
+func expandFlatCredentialBindings(nodeConfig map[string]interface{}) map[string]interface{} {
+	if nodeConfig == nil {
+		return nil
+	}
+
+	// If credentials already exists as nested map, return it
+	if existing, ok := nodeConfig["credentials"].(map[string]interface{}); ok && existing != nil {
+		return existing
+	}
+
+	// Look for flat keys like "credentials.registry_auth.credential_id" and build nested structure
+	credentials := make(map[string]interface{})
+	prefix := "credentials."
+
+	for key, value := range nodeConfig {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+
+		// Extract the part after "credentials."
+		remainder := key[len(prefix):]
+		parts := strings.SplitN(remainder, ".", 2)
+
+		if len(parts) < 2 {
+			continue
+		}
+
+		slotName := parts[0]  // e.g., "registry_auth"
+		fieldName := parts[1] // e.g., "credential_id"
+
+		if slotName == "" || fieldName == "" {
+			continue
+		}
+
+		// Get or create the slot map
+		slotMap, ok := credentials[slotName].(map[string]interface{})
+		if !ok {
+			slotMap = make(map[string]interface{})
+			credentials[slotName] = slotMap
+		}
+
+		slotMap[fieldName] = value
+	}
+
+	// If we found any flat keys, update nodeConfig
+	if len(credentials) > 0 {
+		nodeConfig["credentials"] = credentials
+	}
+
+	return credentials
 }
 
 func slotEnvPrefix(slot string) string {
@@ -1870,12 +2360,42 @@ func toUint64Value(v interface{}) uint64 {
 	return 0
 }
 
+func toFloat64Value(v interface{}) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case float32:
+		return float64(val), true
+	case int:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case int32:
+		return float64(val), true
+	case uint:
+		return float64(val), true
+	case uint64:
+		return float64(val), true
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
+		if err == nil {
+			return parsed, true
+		}
+	case json.Number:
+		parsed, err := val.Float64()
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
 func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, canonicalType string, def pipelineTaskDefinition, nodeConfig map[string]interface{}, run *models.PipelineRun, userID uint64, role string) error {
 	if nodeConfig == nil || len(def.CredentialSlots) == 0 {
 		return nil
 	}
 
-	rawBindings, _ := nodeConfig["credentials"].(map[string]interface{})
+	rawBindings := expandFlatCredentialBindings(nodeConfig)
 	injectEnv := def.ExecMode == taskExecModeAgent
 	var envMap map[string]interface{}
 	if injectEnv {
@@ -2422,6 +2942,435 @@ func (h *PipelineHandler) buildTaskOutputs(taskType string, task *models.AgentTa
 	return outputs
 }
 
+func parsePipelineRunJSONField(raw string, emptyDefault interface{}) interface{} {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return emptyDefault
+	}
+	var parsed interface{}
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+		return raw
+	}
+	if parsed == nil {
+		return emptyDefault
+	}
+	return parsed
+}
+
+func pipelineRunDetailPayload(run models.PipelineRun) gin.H {
+	return gin.H{
+		"id":                     run.ID,
+		"created_at":             run.CreatedAt,
+		"updated_at":             run.UpdatedAt,
+		"workspace_id":           run.WorkspaceID,
+		"pipeline_id":            run.PipelineID,
+		"build_number":           run.BuildNumber,
+		"status":                 run.Status,
+		"trigger_type":           run.TriggerType,
+		"trigger_user":           run.TriggerUser,
+		"trigger_user_id":        run.TriggerUserID,
+		"trigger_user_role":      run.TriggerUserRole,
+		"trigger_source":         run.TriggerSource,
+		"start_time":             run.StartTime,
+		"end_time":               run.EndTime,
+		"duration":               run.Duration,
+		"error_msg":              run.ErrorMsg,
+		"config":                 run.Config,
+		"run_config_json":        parsePipelineRunJSONField(run.RunConfig, map[string]interface{}{}),
+		"pipeline_snapshot_json": parsePipelineRunJSONField(run.PipelineSnapshot, map[string]interface{}{}),
+		"resolved_nodes_json":    parsePipelineRunJSONField(run.ResolvedNodes, []interface{}{}),
+		"outputs_json":           parsePipelineRunJSONField(run.Outputs, map[string]interface{}{}),
+		"bindings_snapshot_json": parsePipelineRunJSONField(run.BindingsSnapshot, map[string]interface{}{}),
+		"events_json":            parsePipelineRunJSONField(run.Events, []interface{}{}),
+		"agent_id":               run.AgentID,
+		"pipeline":               run.Pipeline,
+		"tasks":                  run.Tasks,
+	}
+}
+
+func nodeCredentialBindingMap(node PipelineNode) map[string]uint64 {
+	if len(node.CredentialBindings) > 0 {
+		bindings := make(map[string]uint64, len(node.CredentialBindings))
+		for slot, credentialID := range node.CredentialBindings {
+			bindings[slot] = credentialID
+		}
+		return bindings
+	}
+	rawBindings := expandFlatCredentialBindings(node.getNodeConfig())
+	if len(rawBindings) == 0 {
+		return nil
+	}
+	bindings := make(map[string]uint64)
+	for slot, raw := range rawBindings {
+		if credentialID, ok := extractCredentialIDFromBinding(raw); ok {
+			bindings[slot] = credentialID
+		}
+	}
+	return bindings
+}
+
+func nodeResourceBindingMap(node PipelineNode) map[string]uint64 {
+	if len(node.ResourceBindings) > 0 {
+		bindings := make(map[string]uint64, len(node.ResourceBindings))
+		for key, resourceID := range node.ResourceBindings {
+			bindings[key] = resourceID
+		}
+		return bindings
+	}
+	cfg := node.getNodeConfig()
+	bindings := make(map[string]uint64)
+	for key, value := range cfg {
+		if !strings.HasSuffix(key, "_resource_id") && key != "target_resource_id" {
+			continue
+		}
+		if resourceID := toUint64Value(value); resourceID > 0 {
+			bindings[key] = resourceID
+		}
+	}
+	if len(bindings) == 0 {
+		return nil
+	}
+	return bindings
+}
+
+func buildRunBindingsSnapshot(db *gorm.DB, workspaceID uint64, config PipelineConfig) map[string]interface{} {
+	credentialIDs := make(map[uint64]struct{})
+	resourceIDs := make(map[uint64]struct{})
+	for _, node := range config.Nodes {
+		for _, credentialID := range nodeCredentialBindingMap(node) {
+			if credentialID > 0 {
+				credentialIDs[credentialID] = struct{}{}
+			}
+		}
+		for _, resourceID := range nodeResourceBindingMap(node) {
+			if resourceID > 0 {
+				resourceIDs[resourceID] = struct{}{}
+			}
+		}
+	}
+
+	credentialMap := make(map[uint64]models.Credential)
+	if len(credentialIDs) > 0 && db != nil {
+		ids := make([]uint64, 0, len(credentialIDs))
+		for id := range credentialIDs {
+			ids = append(ids, id)
+		}
+		var credentials []models.Credential
+		if err := db.Where("workspace_id = ? AND id IN ?", workspaceID, ids).Find(&credentials).Error; err == nil {
+			for _, credential := range credentials {
+				credentialMap[credential.ID] = credential
+			}
+		}
+	}
+
+	resourceMap := make(map[uint64]models.Resource)
+	if len(resourceIDs) > 0 && db != nil {
+		ids := make([]uint64, 0, len(resourceIDs))
+		for id := range resourceIDs {
+			ids = append(ids, id)
+		}
+		var resources []models.Resource
+		if err := db.Where("workspace_id = ? AND id IN ?", workspaceID, ids).Find(&resources).Error; err == nil {
+			for _, resource := range resources {
+				resourceMap[resource.ID] = resource
+			}
+		}
+	}
+
+	credentialsPayload := make(map[string]map[string]interface{})
+	resourcesPayload := make(map[string]map[string]interface{})
+	for _, node := range config.Nodes {
+		nodeCredentials := make(map[string]interface{})
+		for slot, credentialID := range nodeCredentialBindingMap(node) {
+			item := map[string]interface{}{"credential_id": credentialID}
+			if credential, ok := credentialMap[credentialID]; ok {
+				item["credential_type"] = credential.Type
+				item["credential_name"] = credential.Name
+			}
+			nodeCredentials[slot] = item
+		}
+		if len(nodeCredentials) > 0 {
+			credentialsPayload[node.ID] = nodeCredentials
+		}
+
+		nodeResources := make(map[string]interface{})
+		for key, resourceID := range nodeResourceBindingMap(node) {
+			item := map[string]interface{}{"resource_id": resourceID}
+			if resource, ok := resourceMap[resourceID]; ok {
+				item["resource_type"] = resource.Type
+				item["resource_name"] = resource.Name
+				host, _ := parseEndpointHostPort(resource.Endpoint)
+				if strings.TrimSpace(host) != "" {
+					item["resolved_host"] = host
+				}
+			}
+			nodeResources[key] = item
+		}
+		if len(nodeResources) > 0 {
+			resourcesPayload[node.ID] = nodeResources
+		}
+	}
+
+	return map[string]interface{}{
+		"credentials": credentialsPayload,
+		"resources":   resourcesPayload,
+	}
+}
+
+func defaultResolvedNodeStatus(runStatus string) string {
+	switch runStatus {
+	case models.PipelineRunStatusQueued:
+		return models.PipelineRunStatusQueued
+	case models.PipelineRunStatusRunning:
+		return models.PipelineRunStatusPending
+	default:
+		return models.PipelineRunStatusPending
+	}
+}
+
+func buildInitialResolvedNodeSnapshots(config PipelineConfig, runStatus string) []map[string]interface{} {
+	resolvedNodes := make([]map[string]interface{}, 0, len(config.Nodes))
+	defaultStatus := defaultResolvedNodeStatus(runStatus)
+	for _, node := range config.Nodes {
+		resolvedNodes = append(resolvedNodes, map[string]interface{}{
+			"node_id":          node.ID,
+			"task_key":         firstNonEmptyTaskValue(node.TaskKey, node.Type),
+			"task_version":     node.TaskVersion,
+			"status":           defaultStatus,
+			"resolved_inputs":  map[string]interface{}{},
+			"executor_payload": map[string]interface{}{},
+			"attempts":         []map[string]interface{}{},
+		})
+	}
+	return resolvedNodes
+}
+
+func appendRunEvent(db *gorm.DB, runID uint64, eventType string, payload map[string]interface{}) {
+	if db == nil || runID == 0 || strings.TrimSpace(eventType) == "" {
+		return
+	}
+	var run models.PipelineRun
+	if err := db.Select("id", "events_json").First(&run, runID).Error; err != nil {
+		return
+	}
+	events := make([]map[string]interface{}, 0)
+	if strings.TrimSpace(run.Events) != "" {
+		_ = json.Unmarshal([]byte(run.Events), &events)
+	}
+	events = append(events, map[string]interface{}{
+		"event_type": eventType,
+		"time":       time.Now().Unix(),
+		"payload":    payload,
+	})
+	if payloadJSON, err := json.Marshal(events); err == nil {
+		_ = db.Model(&models.PipelineRun{}).Where("id = ?", runID).Update("events_json", string(payloadJSON)).Error
+	}
+}
+
+func buildExecutorPayload(script, workDir string, env map[string]interface{}) map[string]interface{} {
+	payload := map[string]interface{}{}
+	if strings.TrimSpace(script) != "" {
+		payload["script"] = script
+	}
+	if strings.TrimSpace(workDir) != "" {
+		payload["work_dir"] = workDir
+	}
+	safeEnv := make(map[string]interface{})
+	for key, value := range env {
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(key)), "EASYDO_CRED_") {
+			continue
+		}
+		safeEnv[key] = value
+	}
+	if len(safeEnv) > 0 {
+		payload["env_vars"] = safeEnv
+	}
+	return payload
+}
+
+func upsertResolvedNodeSnapshot(db *gorm.DB, runID uint64, node PipelineNode, status string, resolvedInputs map[string]interface{}, executorPayload map[string]interface{}) {
+	if db == nil || runID == 0 || strings.TrimSpace(node.ID) == "" {
+		return
+	}
+	var run models.PipelineRun
+	if err := db.Select("id", "resolved_nodes_json").First(&run, runID).Error; err != nil {
+		return
+	}
+	resolvedNodes := make([]map[string]interface{}, 0)
+	if strings.TrimSpace(run.ResolvedNodes) != "" {
+		_ = json.Unmarshal([]byte(run.ResolvedNodes), &resolvedNodes)
+	}
+	entry := map[string]interface{}{
+		"node_id":          node.ID,
+		"task_key":         firstNonEmptyTaskValue(node.TaskKey, node.Type),
+		"task_version":     node.TaskVersion,
+		"status":           status,
+		"resolved_inputs":  cloneMap(resolvedInputs),
+		"executor_payload": cloneMap(executorPayload),
+		"attempts":         []map[string]interface{}{},
+	}
+	updated := false
+	for i := range resolvedNodes {
+		if strings.TrimSpace(toString(resolvedNodes[i]["node_id"])) != node.ID {
+			continue
+		}
+		if attempts, ok := resolvedNodes[i]["attempts"]; ok {
+			entry["attempts"] = attempts
+		}
+		resolvedNodes[i] = entry
+		updated = true
+		break
+	}
+	if !updated {
+		resolvedNodes = append(resolvedNodes, entry)
+	}
+	if payloadJSON, err := json.Marshal(resolvedNodes); err == nil {
+		_ = db.Model(&models.PipelineRun{}).Where("id = ?", runID).Update("resolved_nodes_json", string(payloadJSON)).Error
+	}
+}
+
+func buildTaskAttemptSnapshots(db *gorm.DB, task models.AgentTask) []map[string]interface{} {
+	attempts := make([]map[string]interface{}, 0)
+	var executions []models.TaskExecution
+	if db != nil {
+		_ = db.Where("task_id = ?", task.ID).Order("attempt ASC").Find(&executions).Error
+	}
+	for _, execution := range executions {
+		attempts = append(attempts, map[string]interface{}{
+			"attempt_no":       execution.Attempt,
+			"agent_id":         task.AgentID,
+			"agent_session_id": task.AgentSessionID,
+			"owner_server_id":  task.OwnerServerID,
+			"status":           execution.Status,
+			"start_time":       execution.StartTime,
+			"end_time":         execution.EndTime,
+			"duration":         execution.Duration,
+			"exit_code":        execution.ExitCode,
+			"error_msg":        execution.ErrorMsg,
+		})
+	}
+	currentAttempt := task.RetryCount + 1
+	hasCurrent := false
+	for _, attempt := range attempts {
+		if toInt(attempt["attempt_no"]) == currentAttempt {
+			hasCurrent = true
+			break
+		}
+	}
+	if !hasCurrent {
+		attempts = append(attempts, map[string]interface{}{
+			"attempt_no":       currentAttempt,
+			"agent_id":         task.AgentID,
+			"agent_session_id": task.AgentSessionID,
+			"owner_server_id":  task.OwnerServerID,
+			"status":           task.Status,
+			"start_time":       task.StartTime,
+			"end_time":         task.EndTime,
+			"duration":         task.Duration,
+			"exit_code":        task.ExitCode,
+			"error_msg":        task.ErrorMsg,
+		})
+	}
+	return attempts
+}
+
+func updateResolvedNodeAttempts(db *gorm.DB, task models.AgentTask) {
+	if db == nil || task.PipelineRunID == 0 || strings.TrimSpace(task.NodeID) == "" {
+		return
+	}
+	var run models.PipelineRun
+	if err := db.Select("id", "resolved_nodes_json").First(&run, task.PipelineRunID).Error; err != nil {
+		return
+	}
+	resolvedNodes := make([]map[string]interface{}, 0)
+	if strings.TrimSpace(run.ResolvedNodes) != "" {
+		_ = json.Unmarshal([]byte(run.ResolvedNodes), &resolvedNodes)
+	}
+	updated := false
+	for i := range resolvedNodes {
+		if strings.TrimSpace(toString(resolvedNodes[i]["node_id"])) != task.NodeID {
+			continue
+		}
+		resolvedNodes[i]["attempts"] = buildTaskAttemptSnapshots(db, task)
+		resolvedNodes[i]["status"] = task.Status
+		updated = true
+		break
+	}
+	if !updated {
+		resolvedNodes = append(resolvedNodes, map[string]interface{}{
+			"node_id":          task.NodeID,
+			"task_key":         task.TaskType,
+			"task_version":     1,
+			"status":           task.Status,
+			"resolved_inputs":  parsePipelineRunJSONField(task.Params, map[string]interface{}{}),
+			"executor_payload": map[string]interface{}{},
+			"attempts":         buildTaskAttemptSnapshots(db, task),
+		})
+	}
+	if payloadJSON, err := json.Marshal(resolvedNodes); err == nil {
+		_ = db.Model(&models.PipelineRun{}).Where("id = ?", task.PipelineRunID).Update("resolved_nodes_json", string(payloadJSON)).Error
+	}
+}
+
+func buildRunRecordOutputsFromResult(task *models.AgentTask, result map[string]interface{}) map[string]interface{} {
+	outputs := map[string]interface{}{}
+	if task != nil {
+		outputs["status"] = task.Status
+		outputs["exit_code"] = task.ExitCode
+		outputs["duration"] = task.Duration
+	}
+	for k, v := range result {
+		outputs[k] = v
+	}
+	return outputs
+}
+
+func upsertRunOutputSnapshot(db *gorm.DB, runID uint64, nodeID string, outputs map[string]interface{}) {
+	if db == nil || runID == 0 || strings.TrimSpace(nodeID) == "" || len(outputs) == 0 {
+		return
+	}
+	var run models.PipelineRun
+	if err := db.Select("id", "outputs_json").First(&run, runID).Error; err != nil {
+		return
+	}
+	outputMap := make(map[string]map[string]interface{})
+	if strings.TrimSpace(run.Outputs) != "" {
+		_ = json.Unmarshal([]byte(run.Outputs), &outputMap)
+	}
+	cloned := make(map[string]interface{}, len(outputs))
+	for k, v := range outputs {
+		cloned[k] = v
+	}
+	outputMap[nodeID] = cloned
+	if payload, err := json.Marshal(outputMap); err == nil {
+		_ = db.Model(&models.PipelineRun{}).Where("id = ?", runID).Update("outputs_json", string(payload)).Error
+	}
+}
+
+func loadRunOutputSnapshots(run models.PipelineRun, completedTasks []models.AgentTask) map[string]map[string]interface{} {
+	outputMap := make(map[string]map[string]interface{})
+	if strings.TrimSpace(run.Outputs) != "" {
+		_ = json.Unmarshal([]byte(run.Outputs), &outputMap)
+	}
+	for _, task := range completedTasks {
+		if strings.TrimSpace(task.NodeID) == "" {
+			continue
+		}
+		if _, exists := outputMap[task.NodeID]; exists {
+			continue
+		}
+		if task.Status != models.TaskStatusExecuteSuccess || strings.TrimSpace(task.ResultData) == "" {
+			continue
+		}
+		resultData := make(map[string]interface{})
+		if err := json.Unmarshal([]byte(task.ResultData), &resultData); err != nil {
+			continue
+		}
+		outputMap[task.NodeID] = buildRunRecordOutputsFromResult(&task, resultData)
+	}
+	return outputMap
+}
+
 // jsonEncode encodes map to JSON string
 func (h *PipelineHandler) jsonEncode(v interface{}) string {
 	data, _ := json.Marshal(v)
@@ -2489,6 +3438,11 @@ func (h *PipelineHandler) updateRunStatus(runID uint64, status, errorMsg string)
 	run.EndTime = now
 	run.Duration = duration
 	run.ErrorMsg = errorMsg
+	if status == models.PipelineRunStatusCancelled {
+		appendRunEvent(h.DB, runID, "run_cancelled", map[string]interface{}{"error_msg": errorMsg})
+	} else if status == models.PipelineRunStatusSuccess || status == models.PipelineRunStatusFailed {
+		appendRunEvent(h.DB, runID, "run_finished", map[string]interface{}{"status": status, "error_msg": errorMsg})
+	}
 	syncLiveRunStateFromRun(&run)
 	syncDeploymentStateFromRun(h.DB, &run)
 
@@ -2671,7 +3625,7 @@ func (h *PipelineHandler) GetRunDetail(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
-		"data": run,
+		"data": pipelineRunDetailPayload(run),
 	})
 }
 
@@ -2730,10 +3684,10 @@ func (h *PipelineHandler) GetRunTasks(c *gin.Context) {
 		taskMap[tasks[i].NodeID] = &tasks[i]
 	}
 
-	// 解析流水线配置
 	var config PipelineConfig
-	if run.Config != "" {
-		if err := json.Unmarshal([]byte(run.Config), &config); err != nil {
+	configPayload := strings.TrimSpace(run.PipelineSnapshot)
+	if configPayload != "" {
+		if err := json.Unmarshal([]byte(configPayload), &config); err != nil {
 			// 配置解析失败，返回已执行的任务
 			c.JSON(http.StatusOK, gin.H{
 				"code": 200,

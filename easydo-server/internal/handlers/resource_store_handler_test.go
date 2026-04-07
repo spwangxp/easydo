@@ -545,6 +545,30 @@ func TestStoreTemplateVersionAndDeploymentRequest_CreatePipelineRun(t *testing.T
 	if err := db.First(&run, req.PipelineRunID).Error; err != nil {
 		t.Fatalf("load pipeline run failed: %v", err)
 	}
+	var runConfig models.PipelineRunConfigSnapshot
+	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
+		t.Fatalf("unmarshal run config failed: %v", err)
+	}
+	if runConfig.Inputs["deploy"]["resource_host"] != "10.0.0.8" {
+		t.Fatalf("expected deployment runtime inputs to include resource_host, got %#v", runConfig.Inputs)
+	}
+	if runConfig.Inputs["deploy"]["app_name"] != "nginx-web" {
+		t.Fatalf("expected deployment runtime inputs to include app_name, got %#v", runConfig.Inputs)
+	}
+	var pipelineSnapshot PipelineConfig
+	if err := json.Unmarshal([]byte(run.PipelineSnapshot), &pipelineSnapshot); err != nil {
+		t.Fatalf("unmarshal pipeline snapshot failed: %v", err)
+	}
+	if len(pipelineSnapshot.Nodes[0].DefinitionParams) == 0 {
+		t.Fatalf("expected pipeline snapshot to preserve authored params, got %#v", pipelineSnapshot.Nodes[0])
+	}
+	authoredParams := map[string]interface{}{}
+	for _, param := range pipelineSnapshot.Nodes[0].DefinitionParams {
+		authoredParams[param.Key] = param.Value
+	}
+	if authoredParams["host"] != "${inputs.resource_host}" {
+		t.Fatalf("expected pipeline snapshot to preserve authored host template, got %#v", authoredParams)
+	}
 	if !bytes.Contains([]byte(run.Config), []byte("10.0.0.8")) || !bytes.Contains([]byte(run.Config), []byte("nginx-web")) {
 		t.Fatalf("expected resolved resource/parameter values in pipeline config, got=%s", run.Config)
 	}

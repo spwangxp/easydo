@@ -13,6 +13,15 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func mustDecodeNotificationMetadata(t *testing.T, raw string) map[string]interface{} {
+	t.Helper()
+	metadata := make(map[string]interface{})
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		t.Fatalf("decode notification metadata failed: %v raw=%s", err, raw)
+	}
+	return metadata
+}
+
 func TestNotificationHandlerInboxReadFlow(t *testing.T) {
 	db := openHandlerTestDB(t)
 	h := &NotificationHandler{DB: db}
@@ -603,6 +612,21 @@ func TestAgentAndTerminalNotificationProducersEmitExpectedEventTypes(t *testing.
 			t.Fatalf("event count for %s = %d, want 1", eventType, eventCount)
 		}
 	}
+
+	var failedEvent models.NotificationEvent
+	if err := db.Where("event_type = ?", NotificationEventTypePipelineRunFailed).First(&failedEvent).Error; err != nil {
+		t.Fatalf("load failed pipeline event failed: %v", err)
+	}
+	failedMetadata := mustDecodeNotificationMetadata(t, failedEvent.Metadata)
+	if got := failedMetadata["pipeline_run_id"]; got != float64(run.ID) {
+		t.Fatalf("failed event pipeline_run_id=%v, want %d", got, run.ID)
+	}
+	if got := failedMetadata["build_number"]; got != float64(run.BuildNumber) {
+		t.Fatalf("failed event build_number=%v, want %d", got, run.BuildNumber)
+	}
+	if got := failedMetadata["trigger_type"]; got != run.TriggerType {
+		t.Fatalf("failed event trigger_type=%v, want %s", got, run.TriggerType)
+	}
 }
 
 func TestDeploymentAndSystemNotificationProducersEmitExpectedEventTypes(t *testing.T) {
@@ -625,6 +649,15 @@ func TestDeploymentAndSystemNotificationProducersEmitExpectedEventTypes(t *testi
 	request := models.DeploymentRequest{WorkspaceID: workspace.ID, RequestedBy: user.ID, Status: models.DeploymentRequestStatusQueued}
 	if err := db.Create(&request).Error; err != nil {
 		t.Fatalf("create deployment request failed: %v", err)
+	}
+	run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: 88, BuildNumber: 12, Status: models.PipelineRunStatusQueued, TriggerType: "deployment_request", TriggerUserID: user.ID, TriggerUser: user.Username}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create deployment run failed: %v", err)
+	}
+	request.PipelineID = run.PipelineID
+	request.PipelineRunID = run.ID
+	if err := db.Save(&request).Error; err != nil {
+		t.Fatalf("update deployment request linkage failed: %v", err)
 	}
 
 	emitDeploymentRequestNotification(db, &request, NotificationEventTypeDeploymentRequestCreated, "created", "created")
@@ -651,6 +684,21 @@ func TestDeploymentAndSystemNotificationProducersEmitExpectedEventTypes(t *testi
 		if eventCount != 1 {
 			t.Fatalf("event count for %s = %d, want 1", eventType, eventCount)
 		}
+	}
+
+	var createdEvent models.NotificationEvent
+	if err := db.Where("event_type = ?", NotificationEventTypeDeploymentRequestCreated).First(&createdEvent).Error; err != nil {
+		t.Fatalf("load created deployment event failed: %v", err)
+	}
+	createdMetadata := mustDecodeNotificationMetadata(t, createdEvent.Metadata)
+	if got := createdMetadata["pipeline_run_id"]; got != float64(run.ID) {
+		t.Fatalf("created event pipeline_run_id=%v, want %d", got, run.ID)
+	}
+	if got := createdMetadata["pipeline_id"]; got != float64(run.PipelineID) {
+		t.Fatalf("created event pipeline_id=%v, want %d", got, run.PipelineID)
+	}
+	if got := createdMetadata["build_number"]; got != float64(run.BuildNumber) {
+		t.Fatalf("created event build_number=%v, want %d", got, run.BuildNumber)
 	}
 }
 

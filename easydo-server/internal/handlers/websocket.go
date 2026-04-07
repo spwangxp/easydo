@@ -34,7 +34,7 @@ var upgrader = websocket.Upgrader{
 // WebSocketHandler owns the process-local realtime runtime.
 //
 // It is intentionally responsible only for live socket/session coordination and
-// short-lived watchers. Durable/shared truth still lives in MySQL and Redis.
+// short-lived watchers. Durable/shared truth still lives in MariaDB and Redis.
 // The distinction matters in multi-replica mode: a process may die at any time,
 // so anything stored here must be reconstructable from shared state.
 type WebSocketHandler struct {
@@ -122,10 +122,11 @@ type wsClient struct {
 
 // frontendClient represents a connected frontend WebSocket client
 type frontendClient struct {
-	conn   *websocket.Conn
-	runID  string
-	userID uint64
-	mu     sync.Mutex
+	conn              *websocket.Conn
+	runID             string
+	userID            uint64
+	cancelRemoteWatch context.CancelFunc
+	mu                sync.Mutex
 }
 
 // WebSocketMessage represents a WebSocket message
@@ -314,6 +315,8 @@ func (h *WebSocketHandler) HandleFrontendConnection(c *gin.Context) {
 		runID:  runID,
 		userID: userID,
 	}
+	remoteWatchCtx, cancelRemoteWatch := context.WithCancel(context.Background())
+	client.cancelRemoteWatch = cancelRemoteWatch
 
 	h.frontendsMu.Lock()
 	if h.frontends[runID] == nil {
@@ -325,10 +328,10 @@ func (h *WebSocketHandler) HandleFrontendConnection(c *gin.Context) {
 
 	fmt.Printf("Frontend client %s connected for run %s\n", clientID, runID)
 
-	// Subscribe to remote task logs for cross-server log forwarding
-	// This looks up all tasks in the run, finds which server each agent is on,
-	// and establishes proxy connections to remote servers to receive logs.
-	go h.subscribeToRemoteTaskLogs(runIDNum, clientID)
+	// Keep resolving remote run ownership while the frontend stays connected.
+	// Runs may be queued when the page opens, so the remote agent server can
+	// appear only after scheduling finishes.
+	go h.watchRemoteRunEvents(remoteWatchCtx, runIDNum, clientID)
 
 	h.handleFrontendMessages(client, runID, clientID)
 }
@@ -386,9 +389,12 @@ func (h *WebSocketHandler) handleAgentMessages(client *wsClient, agent *models.A
 // handleFrontendMessages handles incoming messages from frontend
 func (h *WebSocketHandler) handleFrontendMessages(client *frontendClient, runID, clientID string) {
 	defer func() {
-		// Unsubscribe from remote task logs (cross-server proxy)
+		if client.cancelRemoteWatch != nil {
+			client.cancelRemoteWatch()
+		}
+		// Unsubscribe from remote run events (cross-server proxy)
 		runIDNum, _ := strconv.ParseUint(runID, 10, 64)
-		h.unsubscribeFromRemoteTaskLogs(runIDNum, clientID)
+		h.unsubscribeFromRemoteRunEvents(runIDNum, clientID)
 
 		h.frontendsMu.Lock()
 		if runClients, exists := h.frontends[runID]; exists {
@@ -408,9 +414,9 @@ func (h *WebSocketHandler) handleFrontendMessages(client *frontendClient, runID,
 	}()
 
 	for {
-		client.mu.Lock()
-		client.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		client.mu.Unlock()
+		// Frontend WebSocket connections are receive-only - they don't send messages
+		// so we don't set a read deadline. The connection stays open for server-to-client
+		// push updates. The goroutine exits when the client disconnects.
 
 		_, _, err := client.conn.ReadMessage()
 		if err != nil {
@@ -989,12 +995,19 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 	task.ErrorMsg = update.ErrorMsg
 	if data, ok := updates["result_data"].(string); ok {
 		task.ResultData = data
+		if task.Status == models.TaskStatusExecuteSuccess {
+			resultData := make(map[string]interface{})
+			if err := json.Unmarshal([]byte(data), &resultData); err == nil {
+				upsertRunOutputSnapshot(models.DB, task.PipelineRunID, task.NodeID, buildRunRecordOutputsFromResult(&task, resultData))
+			}
+		}
 	}
 	task.StartTime = startTimeForFrontend
 	if v, ok := updates["end_time"].(int64); ok {
 		task.EndTime = v
 	}
 	task.Duration = durationForFrontend
+	updateResolvedNodeAttempts(models.DB, task)
 	_ = syncResourceOperationAuditRecords(models.DB, &task)
 	if !willRetry {
 		syncLiveTaskStateFromTask(&task, agent.Name)
@@ -1026,6 +1039,16 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 			ErrorMsg:  update.ErrorMsg,
 		}
 		models.DB.Create(execution)
+		updateResolvedNodeAttempts(models.DB, task)
+	}
+
+	switch update.Status {
+	case models.TaskStatusRunning:
+		appendRunEvent(models.DB, task.PipelineRunID, "node_running", map[string]interface{}{"node_id": task.NodeID, "task_id": task.ID})
+	case models.TaskStatusExecuteSuccess:
+		appendRunEvent(models.DB, task.PipelineRunID, "node_success", map[string]interface{}{"node_id": task.NodeID, "task_id": task.ID})
+	case models.TaskStatusExecuteFailed, models.TaskStatusScheduleFailed, models.TaskStatusCancelled:
+		appendRunEvent(models.DB, task.PipelineRunID, "node_failed", map[string]interface{}{"node_id": task.NodeID, "task_id": task.ID, "error_msg": update.ErrorMsg})
 	}
 
 	// Automatic retry/failover: only when task failed and retries remain.
@@ -1064,6 +1087,8 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 		task.AgentSessionID = ""
 		task.OwnerServerID = ""
 		syncLiveTaskStateFromTask(&task, agent.Name)
+		updateResolvedNodeAttempts(models.DB, task)
+		appendRunEvent(models.DB, task.PipelineRunID, "node_retrying", map[string]interface{}{"node_id": task.NodeID, "task_id": task.ID, "retry_count": task.RetryCount})
 
 		h.broadcastToFrontend(task.PipelineRunID, "task_status", map[string]interface{}{
 			"task_id":     task.ID,
@@ -1636,9 +1661,8 @@ func (h *WebSocketHandler) handleAgentPullTask(client *wsClient, agent *models.A
 }
 
 // broadcastToFrontend broadcasts a message to all frontend clients subscribed to a run.
-// It also handles cross-server routing: when the message is task_log, it forwards
-// to proxy frontend clients (incoming connections from remote servers) that are
-// subscribed to the task.
+// It also handles cross-server routing for run-scoped realtime events so multi-replica
+// frontends can receive task logs, task status, and run status through the proxy chain.
 func (h *WebSocketHandler) broadcastToFrontend(runID uint64, msgType string, payload map[string]interface{}) {
 	runIDStr := strconv.FormatUint(runID, 10)
 
@@ -1648,8 +1672,8 @@ func (h *WebSocketHandler) broadcastToFrontend(runID uint64, msgType string, pay
 	hasLocalFrontends := exists && len(runClients) > 0
 	h.frontendsMu.RUnlock()
 
-	// If no local frontends and no proxy routing needed, skip
-	if !hasLocalFrontends && msgType != "task_log" {
+	// If no local frontends and no proxy routing needed, skip.
+	if !hasLocalFrontends && !isRunScopedProxyMessageType(msgType) {
 		return
 	}
 
@@ -1676,11 +1700,9 @@ func (h *WebSocketHandler) broadcastToFrontend(runID uint64, msgType string, pay
 	}
 
 	// Also broadcast to proxy frontends (incoming connections from remote servers)
-	// that are subscribed to this task. This enables cross-server log forwarding.
-	// When msgType is "task_log", we extract taskID and forward to proxy subscribers.
-	if msgType == "task_log" {
-		taskID := uint64(getFloat64(payload, "task_id"))
-		h.broadcastToProxyFrontends(taskID, runID, payload)
+	// that are subscribed to this run. This enables cross-server realtime forwarding.
+	if isRunScopedProxyMessageType(msgType) {
+		h.broadcastToProxyFrontends(runID, msgType, payload)
 	}
 }
 
@@ -1736,9 +1758,9 @@ func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
 	}
 
 	nodeIgnoreFailure := map[string]bool{}
-	if run.Config != "" {
+	if run.PipelineSnapshot != "" {
 		var config PipelineConfig
-		if err := json.Unmarshal([]byte(run.Config), &config); err == nil {
+		if err := json.Unmarshal([]byte(run.PipelineSnapshot), &config); err == nil {
 			for i := range config.Nodes {
 				nodeIgnoreFailure[config.Nodes[i].ID] = config.Nodes[i].IgnoreFailure
 			}
@@ -1794,6 +1816,7 @@ func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
 		run.EndTime = now
 		run.Duration = duration
 		run.ErrorMsg = firstErrorMsg
+		appendRunEvent(models.DB, runID, "run_finished", map[string]interface{}{"status": models.PipelineRunStatusFailed, "error_msg": firstErrorMsg})
 		syncLiveRunStateFromRun(&run)
 		syncDeploymentStateFromRun(models.DB, &run)
 		emitPipelineRunTerminalNotification(models.DB, &run, NotificationEventTypePipelineRunFailed)
@@ -1819,6 +1842,7 @@ func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
 		run.EndTime = now
 		run.Duration = duration
 		run.ErrorMsg = ""
+		appendRunEvent(models.DB, runID, "run_finished", map[string]interface{}{"status": models.PipelineRunStatusSuccess})
 		syncLiveRunStateFromRun(&run)
 		syncDeploymentStateFromRun(models.DB, &run)
 		emitPipelineRunTerminalNotification(models.DB, &run, NotificationEventTypePipelineRunSucceeded)
@@ -1845,14 +1869,13 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 		return
 	}
 
-	// Get pipeline config
 	var config PipelineConfig
-	if run.Config == "" {
-		fmt.Printf("[DEBUG] PipelineRun %d has empty config\n", runID)
+	if run.PipelineSnapshot == "" {
+		fmt.Printf("[DEBUG] PipelineRun %d has empty pipeline snapshot\n", runID)
 		return
 	}
-	if err := json.Unmarshal([]byte(run.Config), &config); err != nil {
-		fmt.Printf("[DEBUG] Failed to parse config for run %d: %v\n", runID, err)
+	if err := json.Unmarshal([]byte(run.PipelineSnapshot), &config); err != nil {
+		fmt.Printf("[DEBUG] Failed to parse pipeline snapshot for run %d: %v\n", runID, err)
 		return
 	}
 
@@ -2020,6 +2043,7 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 				h.BroadcastTaskStatus(runID, failedTask.ID, failedTask.NodeID, failedTask.Status, 0, failedTask.ErrorMsg, "")
 				continue
 			}
+			resolvedInputs := cloneMap(nodeConfig)
 
 			timeout := node.Timeout
 			if timeout <= 0 {
@@ -2053,25 +2077,7 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 			}
 
 			// ===== Variable Substitution: Resolve ${outputs.<node_id>.<field>} references =====
-			// Build task outputs map from completed tasks
-			taskOutputs := make(map[string]map[string]interface{})
-			for _, completedTask := range completedTasks {
-				if completedTask.Status == models.TaskStatusExecuteSuccess && completedTask.ResultData != "" {
-					var resultData map[string]interface{}
-					if err := json.Unmarshal([]byte(completedTask.ResultData), &resultData); err == nil {
-						// Build base outputs with exit_code and duration
-						outputs := map[string]interface{}{
-							"exit_code": completedTask.ExitCode,
-							"duration":  completedTask.Duration,
-						}
-						// Merge ResultData fields
-						for k, v := range resultData {
-							outputs[k] = v
-						}
-						taskOutputs[completedTask.NodeID] = outputs
-					}
-				}
-			}
+			taskOutputs := loadRunOutputSnapshots(run, completedTasks)
 
 			// Create resolver and populate with task outputs
 			resolver := NewVariableResolver()
@@ -2089,11 +2095,20 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 			}
 
 			if def.ExecMode == taskExecModeServer {
+				workDir := ""
+				if wd, ok := nodeConfig["working_dir"].(string); ok {
+					workDir = wd
+				}
+				envMap, _ := nodeConfig["env"].(map[string]interface{})
+				upsertResolvedNodeSnapshot(models.DB, runID, *node, models.TaskStatusRunning, resolvedInputs, buildExecutorPayload("", workDir, envMap))
+				appendRunEvent(models.DB, runID, "node_running", map[string]interface{}{"node_id": downstreamID})
 				success, errMsg := pipelineHandler.executeServerTask(models.DB, &run, node, canonicalType, nodeConfig, timeout)
 				if success {
 					fmt.Printf("[SUCCESS] Executed server downstream task: node=%s type=%s\n", downstreamID, canonicalType)
+					appendRunEvent(models.DB, runID, "node_success", map[string]interface{}{"node_id": downstreamID})
 				} else {
 					fmt.Printf("[ERROR] Failed server downstream task: node=%s type=%s err=%s\n", downstreamID, canonicalType, errMsg)
+					appendRunEvent(models.DB, runID, "node_failed", map[string]interface{}{"node_id": downstreamID, "error_msg": errMsg})
 				}
 				serverTasksExecuted = true
 				continue
@@ -2134,30 +2149,31 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 			}
 
 			envVars := ""
+			envMap := map[string]interface{}{}
 			if env, ok := nodeConfig["env"].(map[string]interface{}); ok {
+				envMap = env
 				if envJSON, err := json.Marshal(env); err == nil {
 					envVars = string(envJSON)
 				}
 			}
+			upsertResolvedNodeSnapshot(models.DB, runID, *node, models.TaskStatusQueued, resolvedInputs, buildExecutorPayload(script, workDir, envMap))
 
 			maxRetries := resolveTaskMaxRetries(nodeConfig)
 
 			paramsJSON, _ := json.Marshal(nodeConfig)
 			repoURL, repoBranch, repoCommit, repoPath := "", "", "", ""
 			if canonicalType == "git_clone" {
-				if repo, ok := nodeConfig["repository"].(map[string]interface{}); ok {
-					if v, ok := repo["url"].(string); ok {
-						repoURL = v
-					}
-					if v, ok := repo["branch"].(string); ok {
-						repoBranch = v
-					}
-					if v, ok := repo["commit_id"].(string); ok {
-						repoCommit = v
-					}
-					if v, ok := repo["target_dir"].(string); ok {
-						repoPath = v
-					}
+				if v, ok := nodeConfig["git_repo_url"].(string); ok {
+					repoURL = v
+				}
+				if v, ok := nodeConfig["git_ref"].(string); ok {
+					repoBranch = v
+				}
+				if v, ok := nodeConfig["git_commit"].(string); ok {
+					repoCommit = v
+				}
+				if v, ok := nodeConfig["git_checkout_path"].(string); ok {
+					repoPath = v
 				}
 			}
 
@@ -2183,6 +2199,8 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 
 			if err := createAgentTaskWithExplicitMaxRetries(models.DB, newTask); err == nil {
 				fmt.Printf("[SUCCESS] Triggered downstream task %d for node %s\n", newTask.ID, downstreamID)
+				updateResolvedNodeAttempts(models.DB, *newTask)
+				appendRunEvent(models.DB, runID, "node_assigned", map[string]interface{}{"node_id": downstreamID, "task_id": newTask.ID, "agent_id": run.AgentID})
 				h.BroadcastTaskStatus(runID, newTask.ID, newTask.NodeID, newTask.Status, 0, "", "")
 				_ = h.sendTaskAssign(*newTask)
 			} else {

@@ -285,7 +285,7 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 | Go | 1.21 | 核心语言 / Core Language |
 | Gin | 1.9+ | Web 框架 / Web Framework |
 | GORM | 1.25+ | ORM 框架 / ORM Framework |
-| MySQL | 8.0 | 主数据库 / Primary Database |
+| MariaDB | 11.4 | 主数据库 / Primary Database |
 | Redis | 7.x | 缓存/会话/消息队列 / Cache/Session/Message Queue |
 | JWT | 5.2+ | 认证授权 / Authentication |
 | Viper | 1.18+ | 配置管理 / Configuration |
@@ -295,7 +295,7 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 - **Docker** - 容器化运行时 / Container Runtime
 - **Docker Compose** - 多容器编排 / Multi-container Orchestration
 - **Nginx** - 前端服务与反向代理 / Frontend & Reverse Proxy
-- **MySQL** - 关系型数据库 / Relational Database
+- **MariaDB** - 关系型数据库 / Relational Database
 - **Redis** - 缓存与会话存储 / Cache & Session Storage
 - **对象存储** - 日志持久化存储 / Object Storage for Log Persistence
 
@@ -307,7 +307,7 @@ EasyDo is an **intelligent work platform** designed to provide teams with a one-
 
 EasyDo 采用**无状态多副本**架构设计，任意 Server 副本都能处理任意请求，无需依赖 sticky session：
 
-- **前端实时状态同步**：前端连接的任意 Server 可通过 Redis Live State + MySQL Fallback 获取 Run/Task 状态
+- **前端实时状态同步**：前端连接的任意 Server 可通过 Redis Live State + MariaDB Fallback 获取 Run/Task 状态
 - **Agent Session Failover**：运行中的任务在 Owner Server 崩溃后，可自动迁移 Agent Session，保持状态不回退并最终收敛
 - **任务分发容错**：Redis Stream 用于任务分发，超时任务自动进入 `dispatch_timeout` 状态，Agent 恢复后可重新分发
 - **日志共享化**：运行中日志由 Owner Server 提供实时增量；完成后日志从对象存储读取，不再依赖原 Owner 存活
@@ -395,7 +395,8 @@ easydo/
 │   ├── go.mod                   # Go 依赖 / Go Dependencies
 │   └── Dockerfile               # Docker 构建文件 / Docker Build File
 │
-├── 📁 docker-compose.yml        # Docker Compose 编排配置
+├── 📁 deploy/                   # 部署材料 / Deployment Assets
+│   └── 📁 docker-compose/       # 多副本 Docker Compose 配置
 ├── 📁 Makefile                  # Make 命令集合 / Make Commands
 ├── 📁 AGENTS.md                 # 项目开发规范 / Development Guidelines
 ├── 📁 README.md                 # 项目说明文档 / Project Documentation
@@ -425,7 +426,7 @@ make
 # 一键编译所有项目 / Build all projects
 make build
 
-# 一键启动所有服务（后台运行）/ Start all services (background)
+# 一键启动多副本服务（后台运行）/ Start multi-replica services (background)
 make up
 
 # 一键停止所有服务 / Stop all services
@@ -448,19 +449,19 @@ make restart
 git clone <repository-url>
 cd easydo
 
-# 构建并启动所有服务 / Build and start all services
-docker-compose up -d --build
+# 构建并启动多副本服务 / Build and start multi-replica services
+docker-compose -f deploy/docker-compose/docker-compose.yml up -d --build
 
 # 查看服务状态 / View service status
-docker-compose ps
+docker-compose -f deploy/docker-compose/docker-compose.yml ps
 
 # 查看服务日志 / View service logs
-docker-compose logs -f
+docker-compose -f deploy/docker-compose/docker-compose.yml logs -f
 ```
 
 ### 访问应用 / Access Application
 
-- 前端 / Frontend：`http://localhost`
+- 前端 / Frontend：`http://localhost:8088`
 - 后端 API / Backend API：`http://localhost:8080`
 
 ---

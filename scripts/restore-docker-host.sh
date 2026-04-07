@@ -3,8 +3,79 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 shopt -s nullglob
 
-log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >&2; }
-die() { log "ERROR: $*"; exit 1; }
+SCRIPT_STATUS="starting"
+SCRIPT_START_TIME="$(date '+%F %T')"
+EXECUTION_LOG_FILE=""
+SUMMARY_FILE=""
+VALIDATION_LOG_FILE=""
+SUMMARY_WRITTEN=0
+CURRENT_STEP="startup"
+ERR_TRAP_ACTIVE=0
+preflight_report=""
+container_count=0
+volume_count=0
+network_count=0
+
+append_execution_log() {
+  local line=$1
+  [[ -n "${EXECUTION_LOG_FILE:-}" ]] || return 0
+  printf '%s\n' "$line" >>"$EXECUTION_LOG_FILE"
+}
+
+log() {
+  local line
+  line=$(printf '[%s] %s' "$(date '+%F %T')" "$*")
+  append_execution_log "$line"
+}
+
+append_validation_log() {
+  local line=$1
+  [[ -n "${VALIDATION_LOG_FILE:-}" ]] || return 0
+  printf '%s\n' "$line" >>"$VALIDATION_LOG_FILE"
+}
+
+validation_log() {
+  local line
+  line=$(printf '[%s] %s' "$(date '+%F %T')" "$*")
+  append_validation_log "$line"
+}
+
+validation_pass() { validation_log "CHECK [PASS] $1"; }
+validation_fail() { validation_log "CHECK [FAIL] $1"; }
+validation_info() { validation_log "CHECK [INFO] $1"; }
+
+step_start() {
+  CURRENT_STEP="$1"
+  log "STEP [START] $1"
+}
+
+step_success() { log "STEP [OK] $1"; }
+step_info() { log "STEP [INFO] $1"; }
+step_fail() { log "STEP [FAIL] $1"; }
+
+die() {
+  SCRIPT_STATUS="failed"
+  log "ERROR: $*"
+  exit 1
+}
+
+on_err() {
+  local exit_code=$?
+  local line_no=${BASH_LINENO[0]:-unknown}
+
+  if (( ERR_TRAP_ACTIVE == 1 )) || [[ "$SCRIPT_STATUS" == "completed" ]]; then
+    return "$exit_code"
+  fi
+
+  ERR_TRAP_ACTIVE=1
+  SCRIPT_STATUS="failed"
+  step_fail "${CURRENT_STEP:-unknown} (exit=${exit_code}, line=${line_no})"
+  ERR_TRAP_ACTIVE=0
+  return "$exit_code"
+}
+
+trap 'on_err' ERR
+
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
 require_root() {
   [[ "${EASYDO_SKIP_ROOT_CHECK:-0}" == "1" ]] && return 0
@@ -65,7 +136,7 @@ create_network_from_inspect() {
   done < <(jq -r '.[0].Labels // {} | to_entries[] | [.key, (.value|tostring)] | @tsv' "$json")
 
   cmd+=("$name")
-  "${cmd[@]}"
+  "${cmd[@]}" >>"$EXECUTION_LOG_FILE" 2>&1
 }
 
 create_volume_from_inspect() {
@@ -90,12 +161,13 @@ create_volume_from_inspect() {
   done < <(jq -r '.[0].Labels // {} | to_entries[] | [.key, (.value|tostring)] | @tsv' "$json")
 
   cmd+=("$name")
-  "${cmd[@]}"
+  "${cmd[@]}" >>"$EXECUTION_LOG_FILE" 2>&1
 }
 
 create_container_from_inspect() {
   local inspect=$1 backup_image=$2 name=$3
   local network_mode restart_name restart_max
+  local create_stderr_file=${4:-}
 
   cmd=(docker create --name "$name")
 
@@ -276,7 +348,11 @@ create_container_from_inspect() {
   fi
 
   cmd+=("$backup_image")
-  "${cmd[@]}" >/dev/null
+  if [[ -n "$create_stderr_file" ]]; then
+    "${cmd[@]}" >/dev/null 2>"$create_stderr_file"
+  else
+    "${cmd[@]}" >>"$EXECUTION_LOG_FILE" 2>&1
+  fi
 }
 
 connect_additional_networks() {
@@ -299,12 +375,13 @@ connect_additional_networks() {
     [[ -n "$ip6" ]] && connect_cmd+=(--ip6 "$ip6")
 
     connect_cmd+=("$network_name" "$name")
-    "${connect_cmd[@]}" >/dev/null
+    "${connect_cmd[@]}" >>"$EXECUTION_LOG_FILE" 2>&1
   done < <(jq -r '.[0].NetworkSettings.Networks | keys[]?' "$inspect")
 }
 
 preflight_report_add() {
   printf '%s\n' "$1" >>"$preflight_report"
+  validation_log "$1"
 }
 
 check_container_dependency_exists() {
@@ -323,20 +400,29 @@ run_restore_preflight() {
   local volume_file volume_name archive_file mountpoint bind_key bind_type bind_source bind_archive_rel
   local network_file network_name dep_name mode source_path existing_type expected_type archive_abs
 
-  preflight_report="$backup_root/meta/restore-preflight-report.txt"
+  preflight_report="$PREFLIGHT_REPORT_FILE"
   : >"$preflight_report"
+  : >"$VALIDATION_LOG_FILE"
+  validation_info "starting restore preflight"
+  validation_info "backup_root=$backup_root"
+  validation_info "expected containers=${#container_dirs[@]}, volumes=${#volume_files[@]}, networks=${#network_files[@]}"
 
   if ! is_valid_json "$backup_root/meta/manifest.json"; then
     preflight_report_add "manifest invalid or missing"
     issues=$((issues + 1))
+  else
+    validation_pass "manifest valid: $backup_root/meta/manifest.json"
   fi
 
   if [[ ! -s "$backup_root/meta/checksums.sha256" ]]; then
     preflight_report_add "checksums.sha256 missing or empty"
     issues=$((issues + 1))
+  else
+    validation_pass "checksums file present and non-empty: $backup_root/meta/checksums.sha256"
   fi
 
   for network_file in ${network_files[@]+"${network_files[@]}"}; do
+    validation_info "checking network metadata file: $network_file"
     if ! is_valid_json "$network_file"; then
       preflight_report_add "network inspect invalid or missing: $network_file"
       issues=$((issues + 1))
@@ -346,10 +432,13 @@ run_restore_preflight() {
     if [[ -z "$network_name" ]]; then
       preflight_report_add "network name missing in inspect: $network_file"
       issues=$((issues + 1))
+    else
+      validation_pass "network metadata valid: $network_name"
     fi
   done
 
   for volume_file in ${volume_files[@]+"${volume_files[@]}"}; do
+    validation_info "checking volume metadata file: $volume_file"
     if ! is_valid_json "$volume_file"; then
       preflight_report_add "volume inspect invalid or missing: $volume_file"
       issues=$((issues + 1))
@@ -361,29 +450,42 @@ run_restore_preflight() {
       preflight_report_add "volume name missing in inspect: $volume_file"
       issues=$((issues + 1))
       continue
+    else
+      validation_pass "volume metadata valid: $volume_name"
     fi
 
     archive_file="$backup_root/volumes/data/$(safe_name "$volume_name").tar"
     if [[ -f "$archive_file" ]] && ! is_valid_tar "$archive_file"; then
       preflight_report_add "volume archive invalid: $archive_file"
       issues=$((issues + 1))
+    elif [[ -f "$archive_file" ]]; then
+      validation_pass "volume archive valid: $archive_file"
+    else
+      validation_info "volume archive absent for metadata-only volume: $volume_name"
     fi
 
     if docker volume inspect "$volume_name" >/dev/null 2>&1; then
-      mountpoint="$(docker volume inspect "$volume_name" | jq -r '.[0].Mountpoint // empty')"
+      mountpoint="$(docker volume inspect "$volume_name" 2>>"$VALIDATION_LOG_FILE" | jq -r '.[0].Mountpoint // empty')"
+      validation_info "target volume exists on host: $volume_name mountpoint=$mountpoint"
       if [[ -n "$mountpoint" && -d "$mountpoint" && -f "$archive_file" ]]; then
         if find "$mountpoint" -mindepth 1 -print -quit | grep -q .; then
           preflight_report_add "target volume is not empty and would be overwritten: $volume_name ($mountpoint)"
           issues=$((issues + 1))
+        else
+          validation_pass "target volume is empty and safe to restore: $volume_name"
         fi
       fi
+    else
+      validation_info "target volume does not yet exist and will be created: $volume_name"
     fi
   done
 
   if [[ -f "$backup_root/meta/bind-mounts.tsv" ]]; then
+    validation_pass "bind mount index present: $backup_root/meta/bind-mounts.tsv"
     while IFS=$'\t' read -r bind_key bind_type bind_source bind_archive_rel; do
       [[ -n "$bind_key" ]] || continue
       archive_abs="$backup_root/$bind_archive_rel"
+      validation_info "checking bind source=$bind_source archive=$archive_abs expected_type=$bind_type"
 
       if [[ "$bind_source" != /* ]]; then
         preflight_report_add "bind source is not absolute: $bind_source"
@@ -393,6 +495,8 @@ run_restore_preflight() {
       if ! is_valid_tar "$archive_abs"; then
         preflight_report_add "bind archive invalid or missing: $archive_abs"
         issues=$((issues + 1))
+      else
+        validation_pass "bind archive valid: $archive_abs"
       fi
 
       if [[ -e "$bind_source" ]]; then
@@ -406,9 +510,15 @@ run_restore_preflight() {
         if [[ "$expected_type" != "$existing_type" ]]; then
           preflight_report_add "bind source type mismatch on target: $bind_source expected=$expected_type actual=$existing_type"
           issues=$((issues + 1))
+        else
+          validation_pass "bind source type matches target: $bind_source type=$existing_type"
         fi
+      else
+        validation_info "bind source does not yet exist on target and will be restored: $bind_source"
       fi
     done <"$backup_root/meta/bind-mounts.tsv"
+  else
+    validation_info "bind mount index absent; no bind mount data to validate"
   fi
 
   backup_container_name_list=""
@@ -430,22 +540,29 @@ run_restore_preflight() {
     meta_file="$container_dir/meta.json"
     inspect_file="$container_dir/inspect.json"
     image_file="$container_dir/image.tar"
+    validation_info "checking container backup directory: $container_dir"
 
     if ! is_valid_json "$meta_file"; then
       preflight_report_add "container meta invalid or missing: $container_dir/meta.json"
       issues=$((issues + 1))
       continue
+    else
+      validation_pass "container metadata valid: $container_dir/meta.json"
     fi
 
     if ! is_valid_json "$inspect_file"; then
       preflight_report_add "container inspect invalid or missing: $container_dir/inspect.json"
       issues=$((issues + 1))
       continue
+    else
+      validation_pass "container inspect valid: $container_dir/inspect.json"
     fi
 
     if ! is_valid_tar "$image_file"; then
       preflight_report_add "container image archive invalid or missing: $container_dir/image.tar"
       issues=$((issues + 1))
+    else
+      validation_pass "container image archive valid: $image_file"
     fi
 
     container_name="$(jq -r '.name // empty' "$meta_file")"
@@ -454,16 +571,21 @@ run_restore_preflight() {
       preflight_report_add "container name missing in meta: $meta_file"
       issues=$((issues + 1))
       continue
+    else
+      validation_pass "container name present: $container_name"
     fi
 
     [[ -n "$backup_image" ]] || {
       preflight_report_add "backup_image missing in meta: $meta_file"
       issues=$((issues + 1))
     }
+    [[ -n "$backup_image" ]] && validation_pass "backup image recorded for container: $container_name -> $backup_image"
 
     if docker container inspect "$container_name" >/dev/null 2>&1; then
       preflight_report_add "target container already exists: $container_name"
       issues=$((issues + 1))
+    else
+      validation_pass "target container does not yet exist: $container_name"
     fi
 
     while IFS= read -r source_path; do
@@ -471,6 +593,8 @@ run_restore_preflight() {
       if [[ ! -e "$source_path" ]]; then
         preflight_report_add "required host device path missing: $container_name -> $source_path"
         issues=$((issues + 1))
+      else
+        validation_pass "required host device path exists: $container_name -> $source_path"
       fi
     done < <(jq -r '.[0].HostConfig.Devices // [] | .[] | .PathOnHost // empty' "$inspect_file")
 
@@ -480,6 +604,8 @@ run_restore_preflight() {
       if ! check_container_dependency_exists "$dep_name"; then
         preflight_report_add "container network dependency missing: $container_name -> $dep_name"
         issues=$((issues + 1))
+      else
+        validation_pass "container network dependency satisfied: $container_name -> $dep_name"
       fi
     fi
 
@@ -488,6 +614,8 @@ run_restore_preflight() {
       if ! check_container_dependency_exists "$dep_name"; then
         preflight_report_add "volumes-from dependency missing: $container_name -> $dep_name"
         issues=$((issues + 1))
+      else
+        validation_pass "volumes-from dependency satisfied: $container_name -> $dep_name"
       fi
     done < <(jq -r '.[0].HostConfig.VolumesFrom[]?' "$inspect_file" | sed 's/:.*$//')
 
@@ -496,28 +624,23 @@ run_restore_preflight() {
       if ! check_container_dependency_exists "$dep_name"; then
         preflight_report_add "link dependency missing: $container_name -> $dep_name"
         issues=$((issues + 1))
+      else
+        validation_pass "link dependency satisfied: $container_name -> $dep_name"
       fi
     done < <(jq -r '.[0].HostConfig.Links[]?' "$inspect_file" | sed 's/:.*$//' | sed 's#^/##')
   done
 
   if (( issues > 0 )); then
     log "restore preflight failed, report: $preflight_report"
-    cat "$preflight_report" >&2
+    validation_fail "restore preflight failed with issues=$issues; see $preflight_report"
     return 1
   fi
 
   printf 'restore preflight check passed\n' >"$preflight_report"
+  validation_pass "restore preflight check passed with zero issues"
   log "preflight check passed"
   return 0
 }
-
-require_root
-need_cmd docker
-need_cmd jq
-need_cmd tar
-need_cmd gzip
-need_cmd mktemp
-need_cmd awk
 
 PREFLIGHT_ONLY=0
 INPUT=""
@@ -548,11 +671,25 @@ done
 
 [[ -n "$INPUT" ]] || die "usage: $0 [--preflight-only] <backup.tar.gz | extracted-backup-dir>"
 
+require_root
+need_cmd docker
+need_cmd jq
+need_cmd tar
+need_cmd gzip
+need_cmd mktemp
+need_cmd awk
+
 workdir=""
 cleanup() {
   if [[ -n "$workdir" && -d "$workdir" ]]; then
     rm -rf "$workdir"
   fi
+
+  if [[ "$SCRIPT_STATUS" != "completed" ]]; then
+    step_fail "restore exited before completion"
+  fi
+
+  write_summary
   return 0
 }
 trap cleanup EXIT
@@ -560,7 +697,7 @@ trap cleanup EXIT
 if [[ -f "$INPUT" ]]; then
   workdir="$(mktemp -d /tmp/docker-host-restore.XXXXXX)"
   log "extracting archive to $workdir"
-  tar -xzpf "$INPUT" -C "$workdir"
+  tar -xzpf "$INPUT" -C "$workdir" >>"$EXECUTION_LOG_FILE" 2>&1
   roots=()
   while IFS= read -r root_dir; do
     roots+=("$root_dir")
@@ -574,6 +711,23 @@ else
 fi
 
 [[ -d "$backup_root/meta" ]] || die "invalid backup directory: $backup_root"
+
+if [[ -f "$INPUT" ]]; then
+  restore_log_base="$(basename "$INPUT")"
+  restore_log_dir="$(dirname "$INPUT")"
+else
+  restore_log_base="$(basename "$backup_root")"
+  restore_log_dir="$backup_root/meta"
+fi
+EXECUTION_LOG_FILE="$restore_log_dir/${restore_log_base}.restore.execution.log"
+SUMMARY_FILE="$restore_log_dir/${restore_log_base}.restore.summary.log"
+PREFLIGHT_REPORT_FILE="$restore_log_dir/${restore_log_base}.restore.preflight.log"
+VALIDATION_LOG_FILE="$restore_log_dir/${restore_log_base}.restore.validation.log"
+: >"$EXECUTION_LOG_FILE"
+log "execution log: $EXECUTION_LOG_FILE"
+log "summary log: $SUMMARY_FILE"
+log "preflight report: $PREFLIGHT_REPORT_FILE"
+log "validation log: $VALIDATION_LOG_FILE"
 
 declare -a network_files=()
 declare -a volume_files=()
@@ -602,52 +756,98 @@ done < <(find "$backup_root/containers" -type f -name 'image.tar' | sort)
 
 ((${#container_dirs[@]} > 0)) || die "no container backups found"
 
+container_count=${#container_dirs[@]}
+volume_count=${#volume_files[@]}
+network_count=${#network_files[@]}
+step_info "discovered containers=${container_count}, volumes=${volume_count}, networks=${network_count}"
+
+write_summary() {
+  local finished_at
+
+  [[ -n "${SUMMARY_FILE:-}" ]] || return 0
+  (( SUMMARY_WRITTEN == 0 )) || return 0
+
+  finished_at="$(date '+%F %T')"
+  {
+    printf 'status=%s\n' "$SCRIPT_STATUS"
+    printf 'started_at=%s\n' "$SCRIPT_START_TIME"
+    printf 'finished_at=%s\n' "$finished_at"
+    printf 'current_step=%s\n' "${CURRENT_STEP:-unknown}"
+    printf 'backup_root=%s\n' "${backup_root:-}"
+    printf 'preflight_report=%s\n' "${preflight_report:-}"
+    printf 'execution_log=%s\n' "${EXECUTION_LOG_FILE:-}"
+    printf 'validation_log=%s\n' "${VALIDATION_LOG_FILE:-}"
+    printf 'containers=%s\n' "${container_count:-0}"
+    printf 'volumes=%s\n' "${volume_count:-0}"
+    printf 'networks=%s\n' "${network_count:-0}"
+  } >"$SUMMARY_FILE"
+
+  SUMMARY_WRITTEN=1
+  log "summary written: $SUMMARY_FILE"
+}
+
+step_start "running restore preflight"
 run_restore_preflight
+step_success "restore preflight passed"
 
 if [[ "$PREFLIGHT_ONLY" == "1" ]]; then
+  SCRIPT_STATUS="completed"
+  write_summary
   log "preflight-only mode completed successfully"
   exit 0
 fi
 
-log "loading committed images"
+step_start "loading committed images"
 for image_file in ${image_files[@]+"${image_files[@]}"}; do
-  docker load -i "$image_file" >/dev/null
+  step_info "loading image archive: $image_file"
+  docker load -i "$image_file" >>"$EXECUTION_LOG_FILE" 2>&1
 done
+step_success "loaded committed images"
 
-log "recreating custom networks"
+step_start "recreating custom networks"
 for network_file in ${network_files[@]+"${network_files[@]}"}; do
+  step_info "recreating network from: $network_file"
   create_network_from_inspect "$network_file"
 done
+step_success "recreated custom networks"
 
-log "recreating volumes"
+step_start "recreating volumes"
 for volume_file in ${volume_files[@]+"${volume_files[@]}"}; do
+  step_info "recreating volume from: $volume_file"
   create_volume_from_inspect "$volume_file"
 done
+step_success "recreated volumes"
 
-log "restoring volume data"
+step_start "restoring volume data"
 for volume_file in ${volume_files[@]+"${volume_files[@]}"}; do
   volume_name="$(jq -r '.[0].Name' "$volume_file")"
   archive_file="$backup_root/volumes/data/$(safe_name "$volume_name").tar"
   [[ -f "$archive_file" ]] || continue
 
-  mountpoint="$(docker volume inspect "$volume_name" | jq -r '.[0].Mountpoint')"
+  step_info "restoring volume data: $volume_name"
+  mountpoint="$(docker volume inspect "$volume_name" 2>>"$EXECUTION_LOG_FILE" | jq -r '.[0].Mountpoint')"
   [[ -n "$mountpoint" && -d "$mountpoint" ]] || die "volume mountpoint not accessible: $volume_name"
 
   if find "$mountpoint" -mindepth 1 -print -quit | grep -q .; then
     die "volume is not empty, refuse to overwrite: $volume_name ($mountpoint)"
   fi
 
-  tar --numeric-owner --xattrs --acls -xpf "$archive_file" -C "$mountpoint"
+  tar --numeric-owner --xattrs --acls -xpf "$archive_file" -C "$mountpoint" >>"$EXECUTION_LOG_FILE" 2>&1
 done
+step_success "restored volume data"
 
 if [[ -f "$backup_root/meta/bind-mounts.tsv" ]]; then
-  log "restoring bind mount data to original absolute paths"
+  step_start "restoring bind mount data to original absolute paths"
   while IFS=$'\t' read -r bind_key bind_type bind_source bind_archive_rel; do
     [[ -n "$bind_key" ]] || continue
     archive_abs="$backup_root/$bind_archive_rel"
     [[ -f "$archive_abs" ]] || die "bind archive missing: $archive_abs"
-    tar --numeric-owner --xattrs --acls -xpf "$archive_abs" -C /
+    step_info "restoring bind mount data: $bind_source"
+    tar --numeric-owner --xattrs --acls -xpf "$archive_abs" -C / >>"$EXECUTION_LOG_FILE" 2>&1
   done < "$backup_root/meta/bind-mounts.tsv"
+  step_success "restored bind mount data"
+else
+  step_info "no bind mount archive index found"
 fi
 
 for container_dir in "${container_dirs[@]}"; do
@@ -655,27 +855,31 @@ for container_dir in "${container_dirs[@]}"; do
   docker container inspect "$container_name" >/dev/null 2>&1 && die "container already exists: $container_name"
 done
 
-log "creating containers"
+step_start "creating containers"
 pending=("${container_dirs[@]}")
 for round in $(seq 1 10); do
   ((${#pending[@]} == 0)) && break
   next_pending=()
   progress=0
+  step_info "container creation round ${round}, pending=${#pending[@]}"
 
   for container_dir in "${pending[@]}"; do
     container_name="$(jq -r '.name' "$container_dir/meta.json")"
     backup_image="$(jq -r '.backup_image' "$container_dir/meta.json")"
     inspect_file="$container_dir/inspect.json"
 
-    if create_container_from_inspect "$inspect_file" "$backup_image" "$container_name" 2>"$container_dir/create.err"; then
+    step_info "creating container: $container_name"
+    if create_container_from_inspect "$inspect_file" "$backup_image" "$container_name" "$container_dir/create.err"; then
       primary_network="$(jq -r '.[0].HostConfig.NetworkMode // empty' "$inspect_file")"
       if [[ "$primary_network" == "default" || "$primary_network" == "bridge" ]]; then
         primary_network=""
       fi
       connect_additional_networks "$inspect_file" "$container_name" "$primary_network" || true
       progress=1
+      step_success "created container: $container_name"
     else
       next_pending+=("$container_dir")
+      step_info "container create deferred: $container_name"
     fi
   done
 
@@ -688,29 +892,42 @@ if ((${#pending[@]} > 0)); then
   for container_dir in "${pending[@]}"; do
     container_name="$(jq -r '.name' "$container_dir/meta.json")"
     log "create failed: $container_name"
-    [[ -s "$container_dir/create.err" ]] && tail -n 20 "$container_dir/create.err" >&2
+    if [[ -s "$container_dir/create.err" ]]; then
+      while IFS= read -r err_line; do
+        log "create stderr [$container_name] $err_line"
+      done <"$container_dir/create.err"
+    fi
   done
   exit 1
 fi
+step_success "created containers"
 
-log "starting containers that were running before backup"
+step_start "starting containers that were running before backup"
 pending_start=()
 for container_dir in "${container_dirs[@]}"; do
   was_running="$(jq -r '.running_before' "$container_dir/meta.json")"
   [[ "$was_running" == "true" ]] && pending_start+=("$container_dir")
 done
 
+if ((${#pending_start[@]} == 0)); then
+  step_info "no containers were marked as running before backup"
+fi
+
 for round in $(seq 1 10); do
   ((${#pending_start[@]} == 0)) && break
   next_pending=()
   progress=0
+  step_info "container start round ${round}, pending=${#pending_start[@]}"
 
   for container_dir in "${pending_start[@]}"; do
     container_name="$(jq -r '.name' "$container_dir/meta.json")"
+    step_info "starting container: $container_name"
     if docker start "$container_name" >"$container_dir/start.out" 2>"$container_dir/start.err"; then
       progress=1
+      step_success "started container: $container_name"
     else
       next_pending+=("$container_dir")
+      step_info "container start deferred: $container_name"
     fi
   done
 
@@ -723,9 +940,16 @@ if ((${#pending_start[@]} > 0)); then
   for container_dir in "${pending_start[@]}"; do
     container_name="$(jq -r '.name' "$container_dir/meta.json")"
     log "start failed: $container_name"
-    [[ -s "$container_dir/start.err" ]] && tail -n 20 "$container_dir/start.err" >&2
+    if [[ -s "$container_dir/start.err" ]]; then
+      while IFS= read -r err_line; do
+        log "start stderr [$container_name] $err_line"
+      done <"$container_dir/start.err"
+    fi
   done
   exit 1
 fi
 
+step_success "started containers that were running before backup"
+SCRIPT_STATUS="completed"
+write_summary
 log "restore completed"
