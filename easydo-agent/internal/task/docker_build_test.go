@@ -22,6 +22,26 @@ func TestDockerBuildScript_HostRuntimeUsesDetectedRuntime(t *testing.T) {
 	}
 }
 
+func TestDockerBuildScript_HostRuntimeRunsPreBuildScriptInSameShell(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendHostRuntime, PrimaryRuntime: "docker"}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name":       "demo/app",
+		"image_tag":        "v1",
+		"dockerfile":       "./Dockerfile",
+		"context":          ".",
+		"pre_build_script": "cd ./app",
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if !strings.Contains(script, "cd ./app") {
+		t.Fatalf("expected host runtime script to include pre-build shell content, got:\n%s", script)
+	}
+	if strings.Index(script, "cd ./app") > strings.Index(script, `"$RUNTIME_BIN" build`) {
+		t.Fatalf("expected pre-build script to run before docker build, got:\n%s", script)
+	}
+}
+
 func TestDockerBuildScript_HostRuntimeMultiArchUsesBuildx(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendHostRuntime, PrimaryRuntime: "docker"}}
 	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
@@ -130,8 +150,31 @@ func TestDockerBuildScript_EmbeddedBuildkitUsesBuildctl(t *testing.T) {
 	if !strings.Contains(script, `OUTPUT_SPEC="type=oci,dest=.easydo-artifacts/images/demo_app_v1.tar"`) {
 		t.Fatalf("expected OCI output for non-push build, got:\n%s", script)
 	}
-	if !strings.Contains(script, `--local dockerfile="/workspace/app/build"`) {
-		t.Fatalf("expected resolved dockerfile dir, got:\n%s", script)
+	if !strings.Contains(script, `--local context="."`) {
+		t.Fatalf("expected relative context dir, got:\n%s", script)
+	}
+	if !strings.Contains(script, `--local dockerfile="build"`) {
+		t.Fatalf("expected relative dockerfile dir, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitRunsPreBuildScriptBeforeBuildctl(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name":       "demo/app",
+		"image_tag":        "v1",
+		"dockerfile":       "./build/Dockerfile",
+		"context":          ".",
+		"pre_build_script": "cd ./app",
+	}}, "/workspace/app")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if !strings.Contains(script, "cd ./app") {
+		t.Fatalf("expected embedded buildkit script to include pre-build shell content, got:\n%s", script)
+	}
+	if strings.Index(script, "cd ./app") > strings.Index(script, `buildctl --addr "unix://$SOCKET_PATH" build`) {
+		t.Fatalf("expected pre-build script before buildctl invocation, got:\n%s", script)
 	}
 }
 

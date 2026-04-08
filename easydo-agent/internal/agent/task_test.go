@@ -260,7 +260,7 @@ func TestBuildNodeOutputs_GitClone(t *testing.T) {
 	h := &TaskHandler{}
 	result := &agenttask.Result{
 		ExitCode: 0,
-		Stdout:   `Cloning into 'repo'...\ngit_info:{"git_repo_url":"https://github.com/example/repo.git","git_ref":"main","git_commit":"abc123def456","git_checkout_path":"/workspace/repo"}`,
+		Stdout:   `Cloning into 'repo'...\ngit_info:{"git_repo_url":"https://github.com/example/repo.git","git_ref":"main","git_commit":"abc123def456","git_checkout_path":"./repo"}`,
 		Stderr:   "",
 		Error:    "",
 		Duration: 3 * time.Second,
@@ -277,8 +277,8 @@ func TestBuildNodeOutputs_GitClone(t *testing.T) {
 	if outputs["git_ref"] != "main" {
 		t.Fatalf("git_ref=%v, want main", outputs["git_ref"])
 	}
-	if outputs["git_checkout_path"] != "/workspace/repo" {
-		t.Fatalf("git_checkout_path=%v, want /workspace/repo", outputs["git_checkout_path"])
+	if outputs["git_checkout_path"] != "./repo" {
+		t.Fatalf("git_checkout_path=%v, want ./repo", outputs["git_checkout_path"])
 	}
 }
 

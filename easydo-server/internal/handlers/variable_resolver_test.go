@@ -88,8 +88,9 @@ func TestVariableResolver_ResolveNodeConfig(t *testing.T) {
 	resolver := NewVariableResolver()
 
 	resolver.SetTaskOutput("git_clone", map[string]interface{}{
-		"git_commit":       "abc123def",
-		"git_commit_short": "abc123d",
+		"git_commit":        "abc123def",
+		"git_commit_short":  "abc123d",
+		"git_checkout_path": "./app",
 	})
 
 	resolver.SetEnvVars(map[string]string{
@@ -97,8 +98,9 @@ func TestVariableResolver_ResolveNodeConfig(t *testing.T) {
 	})
 
 	config := map[string]interface{}{
-		"image_name": "myapp",
-		"image_tag":  "${outputs.git_clone.git_commit_short}",
+		"image_name":       "myapp",
+		"image_tag":        "${outputs.git_clone.git_commit_short}",
+		"pre_build_script": "cd ${outputs.git_clone.git_checkout_path}",
 		"build_args": map[string]interface{}{
 			"COMMIT_ID":    "${outputs.git_clone.git_commit}",
 			"BUILD_NUMBER": "${env.BUILD_NUMBER}",
@@ -113,6 +115,9 @@ func TestVariableResolver_ResolveNodeConfig(t *testing.T) {
 	// Check image_tag
 	if tag, ok := resolved["image_tag"].(string); !ok || tag != "abc123d" {
 		t.Errorf("image_tag = %v, expected abc123d", tag)
+	}
+	if script, ok := resolved["pre_build_script"].(string); !ok || script != "cd ./app" {
+		t.Errorf("pre_build_script = %v, expected cd ./app", script)
 	}
 
 	// Check build_args

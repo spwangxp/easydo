@@ -840,6 +840,7 @@ import DesignTab from './designTab.vue'
 import LogViewer from './components/LogViewer.vue'
 import realtime from '@/utils/realtime'
 import { buildRunInputsPayload as buildManualRunPayload, createRunInputs, getManualRunNodes, parseJSONField } from './runtimeConfig'
+import { applyTaskStatusPayload, normalizeExecutionTaskOutputs } from './executionRealtimeState'
 
 const route = useRoute()
 const router = useRouter()
@@ -1013,8 +1014,6 @@ const logContentRef = ref(null)
 const realtimeMode = ref('idle')
 const runLogViewerRef = ref(null)
 let realtimeHandlersBound = false
-let executionPollingTimer = null
-let executionPollingInFlight = false
 const detailContainerRef = ref(null)
 const detailContainerWidth = ref(0)
 let detailResizeObserver = null
@@ -1399,7 +1398,6 @@ const hydrateExecutionViewIfVisible = async () => {
     taskLogs.value = []
   }
 
-  stopExecutionPolling()
   stopRealtimeUpdates()
   startRealtimeUpdates(targetRun.id)
   await fetchExecutionDetail()
@@ -1446,7 +1444,6 @@ const fetchRunHistory = async (options = {}) => {
           runTasks.value = []
           selectedTask.value = null
           taskLogs.value = []
-          stopExecutionPolling()
           stopRealtimeUpdates()
           return
         }
@@ -1653,6 +1650,7 @@ const fetchExecutionDetail = async () => {
 
     if (tasksResponse?.code === 200 && taskList.length > 0) {
       runTasks.value = taskList
+        .map((task) => normalizeExecutionTaskOutputs(task))
         .map((task, index) => normalizeRunTaskFromApi(task, index, fallbackTaskMap))
         .sort((a, b) => (a._order ?? Number.POSITIVE_INFINITY) - (b._order ?? Number.POSITIVE_INFINITY))
     } else {
@@ -1732,53 +1730,8 @@ const stopExecution = () => {
   }).catch(() => {})
 }
 
-const reconcileExecutionView = async () => {
-  if (executionPollingInFlight) return
-  if (activeTab.value !== 'execution') return
-  if (!currentRun.value?.id) return
-
-  if (currentRun.value?.status && isRunTerminal(currentRun.value.status)) {
-    stopExecutionPolling()
-    return
-  }
-
-  executionPollingInFlight = true
-  try {
-    await fetchExecutionDetail()
-    if (showLogPanel.value && selectedTask.value?.id) {
-      await fetchTaskLogs(selectedTask.value)
-    }
-  } finally {
-    executionPollingInFlight = false
-  }
-}
-
-// 开始轮询执行状态，用于多副本下的状态/日志对账和闭环补偿。
-const startExecutionPolling = () => {
-  if (executionPollingTimer) return
-
-  reconcileExecutionView()
-  executionPollingTimer = setInterval(() => {
-    if (activeTab.value === 'execution' && isRunActive(currentRun.value?.status)) {
-      reconcileExecutionView()
-    } else if (currentRun.value?.status && isRunTerminal(currentRun.value?.status)) {
-      stopExecutionPolling()
-    }
-  }, 3000)
-}
-
-// 停止轮询
-const stopExecutionPolling = () => {
-  if (executionPollingTimer) {
-    clearInterval(executionPollingTimer)
-    executionPollingTimer = null
-  }
-  executionPollingInFlight = false
-}
-
-// 停止轮询和 WebSocket
+// 停止 WebSocket 更新
 const stopAllUpdates = () => {
-  stopExecutionPolling()
   stopRealtimeUpdates()
 }
 
@@ -2078,71 +2031,12 @@ const setupRealtimeUpdates = () => {
 
   realtimeHandlers.taskStatus = (payload) => {
     if (!currentRun.value || Number(payload.run_id) !== Number(currentRun.value.id)) return
-    
-    // 更新任务状态
-    let taskIndex = -1
-    if (payload.task_id) {
-      taskIndex = runTasks.value.findIndex(t => Number(t.id || 0) === Number(payload.task_id))
-    }
-    if (taskIndex === -1 && payload.node_id) {
-      taskIndex = runTasks.value.findIndex(t => getTaskNodeID(t) === payload.node_id)
-    }
+    runTasks.value = applyTaskStatusPayload(runTasks.value, payload)
 
-    if (taskIndex !== -1) {
-      const task = runTasks.value[taskIndex]
-
-      if (payload.task_id && (!task.id || task.id === 0)) {
-        task.id = payload.task_id
-      }
-      if (payload.node_id) {
-        task.node_id = payload.node_id
-      }
-      if (!task.created_at && payload.timestamp) {
-        task.created_at = payload.timestamp
-      }
-
-      task.status = payload.status
-      if (payload.status) {
-        task.display_status = payload.status
-      }
-      if (!task.name && (payload.name || payload.task_name || payload.node_name)) {
-        task.name = payload.name || payload.task_name || payload.node_name
-      }
-      task.exit_code = payload.exit_code
-      task.error_msg = payload.error_msg
-      task.duration = payload.duration
-      if (payload.start_time !== undefined && payload.start_time !== null) {
-        task.start_time = payload.start_time
-      } else if (payload.status === 'running' && !task.start_time && payload.timestamp) {
-        task.start_time = payload.timestamp
-      } else if (payload.status === 'queued' && payload.retrying) {
-        task.start_time = 0
-      }
-      if (payload.agent_name) {
-        task.Agent = { name: payload.agent_name }
-      }
-
-      // Only update selectedTask if the status update is for the exact same task
-      // Don't auto-update selectedTask based on node_id matching, as this can cause
-      // selectedTask.value to point to a different task than what the user selected
-      if (selectedTask.value && payload.task_id && Number(selectedTask.value.id || 0) === Number(payload.task_id)) {
-        selectedTask.value = task
-      }
-    } else if (payload.node_id) {
-      const existingIndex = runTasks.value.findIndex(t => t.node_id === payload.node_id || (payload.task_id && Number(t.id || 0) === Number(payload.task_id)))
-      if (existingIndex === -1) {
-        runTasks.value.push({
-          id: payload.task_id || 0,
-          node_id: payload.node_id,
-          name: payload.name || payload.task_name || payload.node_name || payload.node_id,
-          status: payload.status || 'queued',
-          display_status: payload.status || 'queued',
-          start_time: payload.start_time || 0,
-          duration: payload.duration || 0,
-          error_msg: payload.error_msg || '',
-          created_at: payload.timestamp || 0,
-          Agent: payload.agent_name ? { name: payload.agent_name } : null
-        })
+    if (selectedTask.value && payload.task_id) {
+      const updatedTask = runTasks.value.find(task => Number(task.id || 0) === Number(payload.task_id))
+      if (updatedTask && Number(selectedTask.value.id || 0) === Number(payload.task_id)) {
+        selectedTask.value = updatedTask
       }
     }
     
@@ -2199,26 +2093,22 @@ const setupRealtimeUpdates = () => {
   realtimeHandlers.reconnecting = (payload) => {
     if (!isActiveRealtimeRun(payload)) return
     realtimeMode.value = 'reconnecting'
-    startExecutionPolling()
   }
 
   realtimeHandlers.polling = (payload) => {
     if (!isActiveRealtimeRun(payload)) return
     realtimeMode.value = 'polling'
-    startExecutionPolling()
   }
 
   realtimeHandlers.connected = (payload) => {
     if (!isActiveRealtimeRun(payload)) return
     realtimeMode.value = 'connected'
-    stopExecutionPolling()
     console.log('实时连接已建立')
   }
 
   realtimeHandlers.recovered = async (payload) => {
     if (!isActiveRealtimeRun(payload)) return
     realtimeMode.value = 'recovered'
-    stopExecutionPolling()
     await fetchExecutionDetail()
   }
 
@@ -2287,14 +2177,13 @@ onMounted(() => {
   setupRealtimeUpdates()
 })
 
-// 组件卸载时停止轮询和 WebSocket
+// 组件卸载时停止 WebSocket
 onUnmounted(() => {
   window.removeEventListener('resize', updateDetailContainerWidth)
   if (detailResizeObserver) {
     detailResizeObserver.disconnect()
     detailResizeObserver = null
   }
-  stopExecutionPolling()
   stopRealtimeUpdates()
   teardownRealtimeUpdates()
 })

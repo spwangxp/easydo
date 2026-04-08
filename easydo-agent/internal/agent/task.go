@@ -840,11 +840,12 @@ func getGitCloneOutputs(t *Task) map[string]interface{} {
 
 	params := task.ParseStructuredParamsJSON(t.Params)
 
-	targetDir, ok := params["git_checkout_path"].(string)
-	if !ok || targetDir == "" {
-		targetDir = "./app"
+	checkoutPath, ok := params["git_checkout_path"].(string)
+	if !ok || checkoutPath == "" {
+		checkoutPath = "./app"
 	}
 
+	targetDir := checkoutPath
 	if !filepath.IsAbs(targetDir) {
 		targetDir = filepath.Join("/data/agent/workspace", fmt.Sprintf("workspace_%d", t.PipelineRunID), targetDir)
 	}
@@ -889,7 +890,7 @@ func getGitCloneOutputs(t *Task) map[string]interface{} {
 		}
 	}
 
-	outputs["git_checkout_path"] = targetDir
+	outputs["git_checkout_path"] = checkoutPath
 
 	return outputs
 }

@@ -2547,6 +2547,11 @@ func (h *PipelineHandler) executeServerTask(db *gorm.DB, run *models.PipelineRun
 
 	end := time.Now().Unix()
 	duration := int(end - start)
+	resultPayload := map[string]interface{}{
+		"status":    models.TaskStatusExecuteSuccess,
+		"duration":  duration,
+		"exit_code": 0,
+	}
 	updates := map[string]interface{}{
 		"end_time":  end,
 		"duration":  duration,
@@ -2554,18 +2559,27 @@ func (h *PipelineHandler) executeServerTask(db *gorm.DB, run *models.PipelineRun
 		"error_msg": "",
 	}
 	if !success {
+		resultPayload["status"] = models.TaskStatusExecuteFailed
 		updates["status"] = models.TaskStatusExecuteFailed
 		updates["error_msg"] = errMsg
+		resultPayload["error_msg"] = errMsg
 		logger.Error(errMsg)
 	} else {
 		logger.Info(fmt.Sprintf("任务执行完成 duration=%ds", duration))
+	}
+	if payload, err := json.Marshal(resultPayload); err == nil {
+		updates["result_data"] = string(payload)
 	}
 	db.Model(&task).Updates(updates)
 	task.EndTime = end
 	task.Duration = duration
 	task.ErrorMsg = errMsg
+	if resultData, ok := updates["result_data"].(string); ok {
+		task.ResultData = resultData
+	}
 	if success {
 		task.Status = models.TaskStatusExecuteSuccess
+		upsertRunOutputSnapshot(db, run.ID, task.NodeID, resultPayload)
 	} else {
 		task.Status = models.TaskStatusExecuteFailed
 	}
@@ -2930,6 +2944,10 @@ func (h *PipelineHandler) buildTaskOutputs(taskType string, task *models.AgentTa
 		outputs["url"] = task.RepoURL
 		outputs["branch"] = task.RepoBranch
 		outputs["commit_id"] = task.RepoCommit
+		outputs["git_repo_url"] = task.RepoURL
+		outputs["git_ref"] = task.RepoBranch
+		outputs["git_commit"] = task.RepoCommit
+		outputs["git_checkout_path"] = task.RepoPath
 		outputs["checkout_path"] = task.RepoPath
 
 	case "shell":

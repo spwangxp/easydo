@@ -18,6 +18,7 @@ func (e *Executor) dockerBuildScript(params TaskParams, workDir string) (string,
 		return "", fmt.Errorf("image_name is required")
 	}
 	imageTag := defaultString(stringifyParam(params.Params["image_tag"]), "latest")
+	preBuildScript := strings.TrimSpace(stringifyParam(params.Params["pre_build_script"]))
 	dockerfile := defaultString(stringifyParam(params.Params["dockerfile"]), "./Dockerfile")
 	contextDir := defaultString(stringifyParam(params.Params["context"]), ".")
 	registry := normalizeDockerRegistry(stringifyParam(params.Params["registry"]), toBool(params.Params["push"]))
@@ -33,18 +34,20 @@ func (e *Executor) dockerBuildScript(params TaskParams, workDir string) (string,
 	switch e.runtime.PreferredBuildBackend {
 	case system.BuildBackendHostRuntime:
 		runtimeBin := defaultString(e.runtime.PrimaryRuntime, "docker")
-		return buildHostRuntimeScript(runtimeBin, imageName, imageTag, dockerfile, contextDir, registry, imageRef, push, platformValue), nil
+		return buildHostRuntimeScript(runtimeBin, imageName, imageTag, preBuildScript, dockerfile, contextDir, registry, imageRef, push, platformValue), nil
 	default:
-		resolvedDockerfileDir := resolveBuildPath(workDir, filepath.Dir(dockerfile))
-		resolvedContextDir := resolveBuildPath(workDir, contextDir)
-		return buildEmbeddedBuildkitScript(imageRef, dockerfile, resolvedDockerfileDir, resolvedContextDir, registry, push, platformValue), nil
+		return buildEmbeddedBuildkitScript(imageRef, preBuildScript, dockerfile, filepath.Dir(dockerfile), contextDir, registry, push, platformValue), nil
 	}
 }
 
-func buildHostRuntimeScript(runtimeBin, imageName, imageTag, dockerfile, contextDir, registry, imageRef string, push bool, platforms string) string {
+func buildHostRuntimeScript(runtimeBin, imageName, imageTag, preBuildScript, dockerfile, contextDir, registry, imageRef string, push bool, platforms string) string {
 	pushValue := "false"
 	if push {
 		pushValue = "true"
+	}
+	preBuildBlock := ""
+	if preBuildScript != "" {
+		preBuildBlock = fmt.Sprintf("if [ -n %q ]; then\n  %s\nfi\n", preBuildScript, preBuildScript)
 	}
 	script := fmt.Sprintf(`set -e
 RUNTIME_BIN=%q
@@ -61,6 +64,7 @@ REGISTRY_PASSWORD="${EASYDO_CRED_REGISTRY_AUTH_PASSWORD:-${EASYDO_CRED_REGISTRY_
 if [ -n "$REGISTRY" ] && [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then
   printf '%%s\n' "$REGISTRY_PASSWORD" | "$RUNTIME_BIN" login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
 fi
+%s
 if [ -n "$PLATFORMS" ]; then
   case "$PLATFORMS" in
     *,*)
@@ -83,7 +87,7 @@ if [ -n "$PLATFORMS" ]; then
 else
   "$RUNTIME_BIN" build -t "$IMAGE_NAME:$IMAGE_TAG" -f "$DOCKERFILE" "$CONTEXT"
 fi
-`, runtimeBin, imageName, imageTag, dockerfile, contextDir, registry, imageRef, platforms, pushValue, shellSafeFilename(imageRef))
+`, runtimeBin, imageName, imageTag, dockerfile, contextDir, registry, imageRef, platforms, pushValue, preBuildBlock, shellSafeFilename(imageRef))
 	if push {
 		script += `if [ -n "$REGISTRY" ]; then
   case "$IMAGE_NAME" in
@@ -97,10 +101,14 @@ fi
 	return script
 }
 
-func buildEmbeddedBuildkitScript(imageRef, dockerfile, dockerfileDir, contextDir, registry string, push bool, platforms string) string {
+func buildEmbeddedBuildkitScript(imageRef, preBuildScript, dockerfile, dockerfileDir, contextDir, registry string, push bool, platforms string) string {
 	outputLine := fmt.Sprintf("OUTPUT_SPEC=\"type=oci,dest=.easydo-artifacts/images/%s.tar\"\nmkdir -p .easydo-artifacts/images", shellSafeFilename(imageRef))
 	if push {
 		outputLine = fmt.Sprintf("OUTPUT_SPEC=\"type=image,name=%s,push=true\"\nif [ -n \"$REGISTRY\" ] && [ -n \"$REGISTRY_USER\" ] && [ -n \"$REGISTRY_PASSWORD\" ]; then\n  mkdir -p \"$DOCKER_CONFIG\"\n  AUTH_B64=$(printf '%%s:%%s' \"$REGISTRY_USER\" \"$REGISTRY_PASSWORD\" | base64 | tr -d '\\n')\n  cat > \"$DOCKER_CONFIG/config.json\" <<EOF\n%s\nEOF\nfi", imageRef, buildRegistryAuthConfigJSON(registry))
+	}
+	preBuildBlock := ""
+	if preBuildScript != "" {
+		preBuildBlock = fmt.Sprintf("if [ -n %q ]; then\n  %s\nfi\n", preBuildScript, preBuildScript)
 	}
 	return fmt.Sprintf(`set -e
 SOCKET_DIR="${XDG_RUNTIME_DIR:-$(pwd)/.buildkit-run}"
@@ -133,6 +141,7 @@ if ! buildctl --addr "unix://$SOCKET_PATH" debug workers >/dev/null 2>&1; then
   exit 1
 fi
 %s
+%s
 buildctl --addr "unix://$SOCKET_PATH" build \
   --frontend dockerfile.v0 \
   --local context=%q \
@@ -140,7 +149,7 @@ buildctl --addr "unix://$SOCKET_PATH" build \
   --opt platform=%q \
   --opt filename=%q \
   --output "$OUTPUT_SPEC"
-`, registry, platforms, outputLine, contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
+`, registry, platforms, preBuildBlock, outputLine, contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
 }
 
 func defaultString(value, fallback string) string {
@@ -209,13 +218,6 @@ func buildRegistryAuthConfigJSON(registry string) string {
 		return `{"auths":{"docker.io":{"auth":"$AUTH_B64"},"index.docker.io":{"auth":"$AUTH_B64"},"registry-1.docker.io":{"auth":"$AUTH_B64"},"https://index.docker.io/v1/":{"auth":"$AUTH_B64"}}}`
 	}
 	return fmt.Sprintf(`{"auths":{"%s":{"auth":"$AUTH_B64"}}}`, registry)
-}
-
-func resolveBuildPath(workDir, pathValue string) string {
-	if filepath.IsAbs(pathValue) || workDir == "" {
-		return pathValue
-	}
-	return filepath.Clean(filepath.Join(workDir, pathValue))
 }
 
 func shellSafeFilename(value string) string {

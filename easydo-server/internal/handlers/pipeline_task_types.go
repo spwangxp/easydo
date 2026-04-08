@@ -272,6 +272,7 @@ eval "$CMD"`,
 		FieldsSchema: []models.TaskDefinitionField{
 			{Key: "image_name", Label: "镜像名称", Type: "string", Required: true, UIComponent: "input"},
 			{Key: "image_tag", Label: "镜像标签", Type: "string", UIComponent: "input", Default: "latest"},
+			{Key: "pre_build_script", Label: "构建前脚本", Type: "text", UIComponent: "textarea", UIPlaceholder: "cd ${outputs.clone_frontend.git_checkout_path}"},
 			{Key: "dockerfile", Label: "Dockerfile 路径", Type: "string", UIComponent: "input", Default: "./Dockerfile"},
 			{Key: "context", Label: "构建上下文", Type: "string", UIComponent: "input", Default: "."},
 			{Key: "registry", Label: "镜像仓库", Type: "string", UIComponent: "input"},
@@ -289,6 +290,8 @@ if [ -z "$IMAGE_NAME" ]; then
   exit 1
 fi
 IMAGE_TAG={{ shq (def "latest" (dig "image_tag")) }}
+PRE_BUILD_SCRIPT={{ shq (def "" (dig "pre_build_script")) }}
+PRE_BUILD_SCRIPT_LOG={{ logq (def "" (dig "pre_build_script")) }}
 DOCKERFILE={{ shq (def "./Dockerfile" (dig "dockerfile")) }}
 CONTEXT={{ shq (def "." (dig "context")) }}
 REGISTRY={{ shq (def "" (dig "registry")) }}
@@ -310,6 +313,12 @@ easydo_info "image=$IMAGE_NAME:$IMAGE_TAG context=$CONTEXT dockerfile=$DOCKERFIL
 	    easydo_info "docker login skipped: REGISTRY_USER or REGISTRY_PASSWORD is empty"
 	  fi
 	fi
+
+if [ -n "$PRE_BUILD_SCRIPT" ]; then
+  easydo_step "执行构建前脚本"
+  easydo_cmd "$PRE_BUILD_SCRIPT_LOG"
+  eval "$PRE_BUILD_SCRIPT"
+fi
 
 easydo_cmd "docker build -t $IMAGE_NAME:$IMAGE_TAG -f $DOCKERFILE $CONTEXT"
 docker build -t "$IMAGE_NAME:$IMAGE_TAG" -f "$DOCKERFILE" "$CONTEXT"

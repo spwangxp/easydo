@@ -77,6 +77,7 @@ type taskRealtimeState struct {
 	Duration  int64
 	StartTime int64
 	AgentName string
+	Outputs   string
 }
 
 var (
@@ -496,6 +497,7 @@ func syncLiveTaskStateFromTask(task *models.AgentTask, agentName string) {
 		ExitCode:        task.ExitCode,
 		ErrorMsg:        task.ErrorMsg,
 		AgentName:       agentName,
+		Outputs:         task.ResultData,
 		UpdatedAt:       time.Now().Unix(),
 	}, models.IsTerminalTaskStatus(task.Status))
 }
@@ -584,6 +586,7 @@ func (h *WebSocketHandler) pollRunWatcherState(watcher *runWatcher) {
 				Duration:  int64(taskState.Duration),
 				StartTime: taskState.StartTime,
 				AgentName: taskState.AgentName,
+				Outputs:   taskState.Outputs,
 			}
 			watcher.mu.Lock()
 			previous, exists := watcher.taskStates[taskState.TaskID]
@@ -591,7 +594,7 @@ func (h *WebSocketHandler) pollRunWatcherState(watcher *runWatcher) {
 			watcher.taskStates[taskState.TaskID] = state
 			watcher.mu.Unlock()
 			if changed {
-				h.broadcastToFrontend(watcher.runID, "task_status", map[string]interface{}{
+				payload := map[string]interface{}{
 					"task_id":    taskState.TaskID,
 					"node_id":    taskState.NodeID,
 					"run_id":     watcher.runID,
@@ -602,7 +605,11 @@ func (h *WebSocketHandler) pollRunWatcherState(watcher *runWatcher) {
 					"start_time": taskState.StartTime,
 					"agent_name": taskState.AgentName,
 					"timestamp":  time.Now().Unix(),
-				})
+				}
+				if outputs := taskOutputsPayload(taskState.Outputs); outputs != nil {
+					payload["outputs"] = outputs
+				}
+				h.broadcastToFrontend(watcher.runID, "task_status", payload)
 			}
 		}
 		return
@@ -613,7 +620,7 @@ func (h *WebSocketHandler) pollRunWatcherState(watcher *runWatcher) {
 		return
 	}
 	for _, task := range tasks {
-		state := taskRealtimeState{Status: task.Status, ExitCode: task.ExitCode, ErrorMsg: task.ErrorMsg, Duration: int64(task.Duration), StartTime: task.StartTime}
+		state := taskRealtimeState{Status: task.Status, ExitCode: task.ExitCode, ErrorMsg: task.ErrorMsg, Duration: int64(task.Duration), StartTime: task.StartTime, Outputs: task.ResultData}
 		if task.Agent != nil {
 			state.AgentName = task.Agent.Name
 		}
@@ -623,7 +630,7 @@ func (h *WebSocketHandler) pollRunWatcherState(watcher *runWatcher) {
 		watcher.taskStates[task.ID] = state
 		watcher.mu.Unlock()
 		if changed {
-			h.broadcastToFrontend(watcher.runID, "task_status", map[string]interface{}{
+			payload := map[string]interface{}{
 				"task_id":    task.ID,
 				"node_id":    task.NodeID,
 				"run_id":     watcher.runID,
@@ -634,7 +641,11 @@ func (h *WebSocketHandler) pollRunWatcherState(watcher *runWatcher) {
 				"start_time": task.StartTime,
 				"agent_name": state.AgentName,
 				"timestamp":  time.Now().Unix(),
-			})
+			}
+			if outputs := taskOutputsPayload(task.ResultData); outputs != nil {
+				payload["outputs"] = outputs
+			}
+			h.broadcastToFrontend(watcher.runID, "task_status", payload)
 		}
 	}
 }
@@ -1013,7 +1024,7 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 		syncLiveTaskStateFromTask(&task, agent.Name)
 	}
 
-	h.broadcastToFrontend(task.PipelineRunID, "task_status", map[string]interface{}{
+	statusPayload := map[string]interface{}{
 		"task_id":    update.TaskID,
 		"node_id":    task.NodeID,
 		"run_id":     task.PipelineRunID,
@@ -1025,7 +1036,11 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 		"agent_id":   client.agentID,
 		"agent_name": agent.Name,
 		"timestamp":  now,
-	})
+	}
+	if outputs := taskOutputsPayload(task.ResultData); outputs != nil {
+		statusPayload["outputs"] = outputs
+	}
+	h.broadcastToFrontend(task.PipelineRunID, "task_status", statusPayload)
 
 	if isTerminal {
 		execution := &models.TaskExecution{
@@ -1090,7 +1105,7 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 		updateResolvedNodeAttempts(models.DB, task)
 		appendRunEvent(models.DB, task.PipelineRunID, "node_retrying", map[string]interface{}{"node_id": task.NodeID, "task_id": task.ID, "retry_count": task.RetryCount})
 
-		h.broadcastToFrontend(task.PipelineRunID, "task_status", map[string]interface{}{
+		retryPayload := map[string]interface{}{
 			"task_id":     task.ID,
 			"node_id":     task.NodeID,
 			"run_id":      task.PipelineRunID,
@@ -1105,7 +1120,8 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 			"max_retries": task.MaxRetries,
 			"retrying":    true,
 			"timestamp":   time.Now().Unix(),
-		})
+		}
+		h.broadcastToFrontend(task.PipelineRunID, "task_status", retryPayload)
 
 		go NewPipelineHandler().scheduleQueuedPipelineRuns(models.DB)
 		h.checkAgentStatus(client.agentID)
@@ -1706,8 +1722,31 @@ func (h *WebSocketHandler) broadcastToFrontend(runID uint64, msgType string, pay
 	}
 }
 
+func taskOutputsPayload(resultData string) map[string]interface{} {
+	trimmed := strings.TrimSpace(resultData)
+	if trimmed == "" {
+		return nil
+	}
+	outputs := make(map[string]interface{})
+	if err := json.Unmarshal([]byte(trimmed), &outputs); err != nil {
+		return nil
+	}
+	return outputs
+}
+
 // BroadcastTaskStatus broadcasts task status to all frontend clients
 func (h *WebSocketHandler) BroadcastTaskStatus(runID, taskID uint64, nodeID, status string, exitCode int, errorMsg, agentName string) {
+	var task models.AgentTask
+	resultData := ""
+	startTime := int64(0)
+	duration := 0
+	if models.DB != nil {
+		if err := models.DB.Select("id", "start_time", "duration", "result_data").First(&task, taskID).Error; err == nil {
+			resultData = task.ResultData
+			startTime = task.StartTime
+			duration = task.Duration
+		}
+	}
 	payload := map[string]interface{}{
 		"task_id":    taskID,
 		"node_id":    nodeID,
@@ -1715,8 +1754,13 @@ func (h *WebSocketHandler) BroadcastTaskStatus(runID, taskID uint64, nodeID, sta
 		"status":     status,
 		"exit_code":  exitCode,
 		"error_msg":  errorMsg,
+		"start_time": startTime,
+		"duration":   duration,
 		"agent_name": agentName,
 		"timestamp":  time.Now().Unix(),
+	}
+	if outputs := taskOutputsPayload(resultData); outputs != nil {
+		payload["outputs"] = outputs
 	}
 	h.broadcastToFrontend(runID, "task_status", payload)
 }

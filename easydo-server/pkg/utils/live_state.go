@@ -33,6 +33,7 @@ type LiveTaskState struct {
 	ExitCode        int    `json:"exit_code,omitempty"`
 	ErrorMsg        string `json:"error_msg,omitempty"`
 	AgentName       string `json:"agent_name,omitempty"`
+	Outputs         string `json:"outputs,omitempty"`
 	UpdatedAt       int64  `json:"updated_at"`
 	IsTerminal      bool   `json:"is_terminal"`
 }

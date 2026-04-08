@@ -1901,3 +1901,172 @@ func TestFrontendWebSocket_ReceivesRunTaskAndLogEvents(t *testing.T) {
 		t.Fatalf("expected run_status websocket event")
 	}
 }
+
+func TestFrontendWebSocket_InitialTaskSnapshotIncludesOutputs(t *testing.T) {
+	t.Setenv("JWT_SECRET", "ws-initial-snapshot-secret")
+	t.Setenv("AUTH_TOKEN_TTL", (4 * time.Hour).String())
+	t.Setenv("AUTH_REFRESH_INTERVAL", (10 * time.Minute).String())
+
+	mini, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis failed: %v", err)
+	}
+	defer mini.Close()
+
+	previousRedis := utils.RedisClient
+	utils.RedisClient = redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() {
+		if utils.RedisClient != nil {
+			_ = utils.RedisClient.Close()
+		}
+		utils.RedisClient = previousRedis
+	})
+
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = previousDB })
+
+	config.Init()
+	config.Config.Set("server.id", "ws-initial-snapshot-server")
+	config.Config.Set("server.internal_url", "http://127.0.0.1:8080")
+	config.Config.Set("server.internal_token", "ws-initial-snapshot-token")
+
+	wsHandler := NewWebSocketHandler()
+	userHandler := &UserHandler{DB: db}
+
+	router := gin.New()
+	router.GET("/ws/frontend/pipeline", wsHandler.HandleFrontendConnection)
+	auth := router.Group("/api/auth")
+	auth.POST("/login", userHandler.Login)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	user := models.User{
+		Username: "ws-initial-snapshot-user",
+		Status:   "active",
+		Email:    "ws-initial-snapshot@example.com",
+	}
+	if err := user.SetPassword("1qaz2WSX"); err != nil {
+		t.Fatalf("set password failed: %v", err)
+	}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+
+	workspace := models.Workspace{
+		Name:      "ws-initial-snapshot-workspace",
+		Slug:      "ws-initial-snapshot-" + strconv.FormatUint(user.ID, 10),
+		CreatedBy: user.ID,
+		Status:    "active",
+	}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+
+	member := models.WorkspaceMember{
+		WorkspaceID: workspace.ID,
+		UserID:      user.ID,
+		Role:        "owner",
+		Status:      "active",
+	}
+	if err := db.Create(&member).Error; err != nil {
+		t.Fatalf("create workspace member failed: %v", err)
+	}
+
+	loginBody := map[string]string{"username": "ws-initial-snapshot-user", "password": "1qaz2WSX"}
+	loginBytes, _ := json.Marshal(loginBody)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(loginBytes))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginW := httptest.NewRecorder()
+	router.ServeHTTP(loginW, loginReq)
+	if loginW.Code != http.StatusOK {
+		t.Fatalf("login failed: %s", loginW.Body.String())
+	}
+
+	var loginResp struct {
+		Code int `json:"code"`
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(loginW.Body.Bytes(), &loginResp); err != nil {
+		t.Fatalf("parse login response failed: %v", err)
+	}
+	token := loginResp.Data.Token
+	if token == "" {
+		t.Fatalf("no token received")
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID:   workspace.ID,
+		Status:        models.PipelineRunStatusRunning,
+		Config:        `{"version":"2.0","nodes":[],"edges":[]}`,
+		TriggerType:   "manual",
+		TriggerUserID: user.ID,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	task := models.AgentTask{
+		WorkspaceID:   workspace.ID,
+		PipelineRunID: run.ID,
+		NodeID:        "node_output",
+		Name:          "Output Task",
+		TaskType:      "shell",
+		Status:        models.TaskStatusExecuteSuccess,
+		ExitCode:      0,
+		Duration:      7,
+		ResultData:    `{"artifact":"bundle.tgz","commit_sha":"abc123"}`,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create agent task failed: %v", err)
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/frontend/pipeline?run_id=" + strconv.FormatUint(run.ID, 10) + "&token=" + token
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("WebSocket dial failed: %v (resp=%v)", err, resp)
+	}
+	defer conn.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("expected 101 Switching Protocols, got %d", resp.StatusCode)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
+
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read websocket message failed: %v", err)
+		}
+
+		var msg WebSocketMessage
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			t.Fatalf("unmarshal websocket message failed: %v", err)
+		}
+
+		if msg.Type != "task_status" {
+			continue
+		}
+		if getInt64(msg.Payload, "task_id") != int64(task.ID) {
+			continue
+		}
+
+		outputs, ok := msg.Payload["outputs"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected task_status payload to include outputs map, got %#v", msg.Payload["outputs"])
+		}
+		if outputs["artifact"] != "bundle.tgz" {
+			t.Fatalf("expected artifact output in task_status payload, got %#v", outputs)
+		}
+		if outputs["commit_sha"] != "abc123" {
+			t.Fatalf("expected commit_sha output in task_status payload, got %#v", outputs)
+		}
+		break
+	}
+}

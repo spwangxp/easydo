@@ -119,6 +119,7 @@ func TestDockerTaskDefinitionIncludesRequiredImageField(t *testing.T) {
 		t.Fatalf("expected docker definition")
 	}
 	imageNameFound := false
+	preBuildScriptFound := false
 	pushFound := false
 	for _, field := range def.FieldsSchema {
 		if field.Key == "image_name" {
@@ -133,9 +134,37 @@ func TestDockerTaskDefinitionIncludesRequiredImageField(t *testing.T) {
 				t.Fatalf("expected push field to be boolean, got %s", field.Type)
 			}
 		}
+		if field.Key == "pre_build_script" {
+			preBuildScriptFound = true
+			if field.Type != "text" {
+				t.Fatalf("expected pre_build_script to be text, got %s", field.Type)
+			}
+			if field.UIComponent != "textarea" {
+				t.Fatalf("expected pre_build_script to render as textarea, got %s", field.UIComponent)
+			}
+		}
 	}
-	if !imageNameFound || !pushFound {
-		t.Fatalf("expected docker fields schema to include image_name and push, got %#v", def.FieldsSchema)
+	if !imageNameFound || !pushFound || !preBuildScriptFound {
+		t.Fatalf("expected docker fields schema to include image_name, pre_build_script and push, got %#v", def.FieldsSchema)
+	}
+}
+
+func TestRenderPipelineAgentScript_DockerIncludesPreBuildScript(t *testing.T) {
+	_, script, err := renderPipelineAgentScript("docker", map[string]interface{}{
+		"image_name":       "demo/app",
+		"pre_build_script": "cd ${outputs.clone.git_checkout_path}",
+	})
+	if err != nil {
+		t.Fatalf("expected docker script render success, got err: %v", err)
+	}
+	if !strings.Contains(script, "执行构建前脚本") {
+		t.Fatalf("expected docker script to include pre-build step, got: %s", script)
+	}
+	if !strings.Contains(script, `eval "$PRE_BUILD_SCRIPT"`) {
+		t.Fatalf("expected docker script to eval pre-build script, got: %s", script)
+	}
+	if !strings.Contains(script, `cd ${outputs.clone.git_checkout_path}`) {
+		t.Fatalf("expected docker script to preserve output variable reference for runtime substitution, got: %s", script)
 	}
 }
 
