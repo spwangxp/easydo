@@ -1054,8 +1054,8 @@ func TestStoreTemplateHandler_ListTemplateVersionsIncludesParameterMetadata(t *t
 		t.Fatalf("create version failed: %v", err)
 	}
 	parameters := []models.TemplateParameter{
-		{TemplateVersionID: version.ID, Name: "model_tag", Label: "Model Tag", Description: "要发布的模型标签版本", Type: "string", DefaultValue: "latest", Required: true, SortOrder: 1},
-		{TemplateVersionID: version.ID, Name: "gpu_memory_utilization", Label: "GPU Memory Utilization", Description: "控制显存占用比例", Type: "number", DefaultValue: "0.9", Required: false, Advanced: true, SortOrder: 2},
+		{TemplateVersionID: version.ID, Name: "model_tag", Label: "Model Tag", Description: "要发布的模型标签版本", ExtraTip: "推荐使用与目标模型文件匹配的标签。", Type: "string", DefaultValue: "latest", Required: true, SortOrder: 1},
+		{TemplateVersionID: version.ID, Name: "gpu_memory_utilization", Label: "GPU Memory Utilization", Description: "控制显存占用比例", ExtraTip: "默认 0.9，显存紧张时可适度下调。", Type: "number", DefaultValue: "0.9", Required: false, Advanced: true, SortOrder: 2},
 	}
 	if err := db.Create(&parameters).Error; err != nil {
 		t.Fatalf("create template parameters failed: %v", err)
@@ -1066,7 +1066,7 @@ func TestStoreTemplateHandler_ListTemplateVersionsIncludesParameterMetadata(t *t
 	if resp.Code != http.StatusOK {
 		t.Fatalf("expected list template versions success, got=%d body=%s", resp.Code, resp.Body.String())
 	}
-	if !bytes.Contains(resp.Body.Bytes(), []byte("model_tag")) || !bytes.Contains(resp.Body.Bytes(), []byte("GPU Memory Utilization")) || !bytes.Contains(resp.Body.Bytes(), []byte("控制显存占用比例")) || !bytes.Contains(resp.Body.Bytes(), []byte(`"advanced":true`)) {
+	if !bytes.Contains(resp.Body.Bytes(), []byte("model_tag")) || !bytes.Contains(resp.Body.Bytes(), []byte("GPU Memory Utilization")) || !bytes.Contains(resp.Body.Bytes(), []byte("控制显存占用比例")) || !bytes.Contains(resp.Body.Bytes(), []byte("默认 0.9，显存紧张时可适度下调。")) || !bytes.Contains(resp.Body.Bytes(), []byte(`"advanced":true`)) {
 		t.Fatalf("expected template version parameter metadata in response, got=%s", resp.Body.String())
 	}
 }
@@ -1180,6 +1180,8 @@ func TestStoreTemplateHandler_UpdateAndDeleteTemplateVersion(t *testing.T) {
 			{
 				"name":          "container_name",
 				"label":         "Container Name",
+				"description":   "Redis 容器名称",
+				"extra_tip":     "建议与部署环境保持一一对应，便于排查。",
 				"type":          "text",
 				"default_value": "redis-main",
 				"required":      true,
@@ -1218,6 +1220,17 @@ func TestStoreTemplateHandler_UpdateAndDeleteTemplateVersion(t *testing.T) {
 	}
 	if !bytes.Contains(listResp.Body.Bytes(), []byte(`"container_name"`)) {
 		t.Fatalf("expected rewritten parameters in list response, got=%s", listResp.Body.String())
+	}
+	if !bytes.Contains(listResp.Body.Bytes(), []byte(`"extra_tip":"建议与部署环境保持一一对应，便于排查。"`)) {
+		t.Fatalf("expected extra_tip in list response, got=%s", listResp.Body.String())
+	}
+
+	var persistedParameter models.TemplateParameter
+	if err := db.Where("template_version_id = ? AND name = ?", version.ID, "container_name").First(&persistedParameter).Error; err != nil {
+		t.Fatalf("load persisted template parameter failed: %v", err)
+	}
+	if persistedParameter.ExtraTip != "建议与部署环境保持一一对应，便于排查。" {
+		t.Fatalf("expected persisted extra_tip, got=%q", persistedParameter.ExtraTip)
 	}
 
 	deleteResp := performResourceStoreRequest(
@@ -1275,6 +1288,18 @@ func TestStoreTemplateHandler_CreateTemplateVersionWithUploadedChartInMultipartS
 		"status":              string(models.StoreTemplateStatusPublished),
 		"infra_type":          "k8s",
 		"version_description": "mysql upload variant",
+		"parameters": []map[string]interface{}{
+			{
+				"name":          "release_name",
+				"label":         "Release Name",
+				"description":   "Helm 发布名称",
+				"extra_tip":     "建议与环境和服务名称保持一致。",
+				"type":          "text",
+				"default_value": "mysql",
+				"required":      true,
+				"sort_order":    1,
+			},
+		},
 		"chart_source": map[string]interface{}{
 			"type":          "upload",
 			"chart_name":    "mysql",
@@ -1312,6 +1337,9 @@ func TestStoreTemplateHandler_CreateTemplateVersionWithUploadedChartInMultipartS
 	if !bytes.Contains(body, []byte(`"object_key":"store/charts/`)) {
 		t.Fatalf("expected object key in response, got=%s", string(body))
 	}
+	if !bytes.Contains(body, []byte(`"extra_tip":"建议与环境和服务名称保持一致。"`)) {
+		t.Fatalf("expected extra_tip in create response, got=%s", string(body))
+	}
 	if len(store.objects) != 1 {
 		t.Fatalf("expected object store to contain uploaded chart, got=%d", len(store.objects))
 	}
@@ -1327,6 +1355,13 @@ func TestStoreTemplateHandler_CreateTemplateVersionWithUploadedChartInMultipartS
 	}
 	if !bytes.Contains([]byte(version.DefaultConfig), []byte(`"object_key":"store/charts/`)) {
 		t.Fatalf("expected persisted object key in default config, got=%s", version.DefaultConfig)
+	}
+	var parameter models.TemplateParameter
+	if err := db.Where("template_version_id = ? AND name = ?", version.ID, "release_name").First(&parameter).Error; err != nil {
+		t.Fatalf("load created template parameter failed: %v", err)
+	}
+	if parameter.ExtraTip != "建议与环境和服务名称保持一致。" {
+		t.Fatalf("expected persisted extra_tip on create, got=%q", parameter.ExtraTip)
 	}
 }
 

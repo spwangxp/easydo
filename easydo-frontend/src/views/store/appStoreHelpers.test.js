@@ -6,6 +6,7 @@ import {
   buildChartSourcePayload,
   buildRepoChartDownloadURL,
   deriveChartNameFromOCIUrl,
+  extractCanonicalParameters,
   extractHelmChartDownloadURL,
   parseOCIChartReference,
   normalizeParameterRows,
@@ -23,6 +24,31 @@ test('normalizeParameterRows sorts rows and parses option values', () => {
 
   assert.equal(rows[0].name, 'release_name')
   assert.deepEqual(rows[1].option_values, ['ClusterIP', 'LoadBalancer'])
+})
+
+test('normalizeParameterRows keeps extra_tip in canonical row shape', () => {
+  const [row] = normalizeParameterRows([
+    {
+      name: 'image_tag',
+      label: '镜像标签',
+      extra_tip: '建议使用固定版本，避免 latest 漂移',
+      sort_order: 1
+    }
+  ])
+
+  assert.equal(row.extra_tip, '建议使用固定版本，避免 latest 漂移')
+})
+
+test('extractCanonicalParameters reads only version.parameters canonical array', () => {
+  const rows = extractCanonicalParameters({
+    parameters: [{ name: 'model', label: '模型', sort_order: 1 }],
+    parameter_metadata: [{ key: 'legacy_key', label: '旧字段' }],
+    parameter_schema: [{ key: 'legacy_schema', label: '旧 schema' }],
+    parameter_definitions: [{ key: 'legacy_definition', label: '旧 definitions' }]
+  })
+
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].name, 'model')
 })
 
 test('splitParametersByAdvanced separates basic and advanced rows', () => {

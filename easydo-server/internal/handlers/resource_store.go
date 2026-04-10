@@ -604,6 +604,7 @@ type templateParameterRequest struct {
 	Name         string   `json:"name"`
 	Label        string   `json:"label"`
 	Description  string   `json:"description"`
+	ExtraTip     string   `json:"extra_tip"`
 	Type         string   `json:"type"`
 	DefaultValue string   `json:"default_value"`
 	OptionValues []string `json:"option_values"`
@@ -2930,6 +2931,7 @@ func buildTemplateParameters(reqs []templateParameterRequest, _ uint64) ([]model
 			Name:         name,
 			Label:        defaultIfEmpty(strings.TrimSpace(req.Label), name),
 			Description:  strings.TrimSpace(req.Description),
+			ExtraTip:     strings.TrimSpace(req.ExtraTip),
 			Type:         paramType,
 			DefaultValue: req.DefaultValue,
 			OptionValues: string(optionValues),

@@ -169,6 +169,7 @@ type TemplateParameter struct {
 	Name              string `gorm:"size:128;not null" json:"name"`
 	Label             string `gorm:"size:128;not null" json:"label"`
 	Description       string `gorm:"type:text" json:"description"`
+	ExtraTip          string `gorm:"type:text" json:"extra_tip"`
 	Type              string `gorm:"size:32;not null" json:"type"`
 	DefaultValue      string `gorm:"type:text" json:"default_value"`
 	OptionValues      string `gorm:"type:longtext" json:"option_values"`

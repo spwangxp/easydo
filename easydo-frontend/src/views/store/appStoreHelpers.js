@@ -11,6 +11,7 @@ export function createParameterRow() {
     name: '',
     label: '',
     description: '',
+    extra_tip: '',
     type: 'text',
     default_value: '',
     option_values: [],
@@ -26,6 +27,7 @@ export function normalizeParameterRows(parameters = []) {
       name: item.name || '',
       label: item.label || item.name || '',
       description: item.description || '',
+      extra_tip: item.extra_tip || '',
       type: item.type || 'text',
       default_value: item.default_value ?? '',
       option_values: normalizeOptionValues(item.option_values),
@@ -34,6 +36,10 @@ export function normalizeParameterRows(parameters = []) {
       sort_order: Number.isFinite(Number(item.sort_order)) ? Number(item.sort_order) : index + 1
     }))
     .sort((left, right) => left.sort_order - right.sort_order)
+}
+
+export function extractCanonicalParameters(version = {}) {
+  return normalizeParameterRows(Array.isArray(version?.parameters) ? version.parameters : [])
 }
 
 export function splitParametersByAdvanced(parameters = []) {

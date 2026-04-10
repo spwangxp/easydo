@@ -389,10 +389,11 @@
                 <el-form-item :required="field.required">
                   <template #label>
                     <span class="parameter-label">
-                      <span>{{ field.label }}</span>
-                      <el-tooltip v-if="field.description" :content="field.description" placement="top" effect="dark">
-                        <el-icon class="parameter-help-icon"><QuestionFilled /></el-icon>
-                      </el-tooltip>
+                        <span>{{ field.label }}</span>
+                        <span v-if="field.description" class="parameter-recommendation">{{ field.description }}</span>
+                        <el-tooltip v-if="field.extraTip" :content="field.extraTip" placement="top" effect="dark">
+                          <el-icon class="parameter-help-icon"><QuestionFilled /></el-icon>
+                        </el-tooltip>
                       <el-tag v-if="field.mutable === false" size="small" effect="plain">只读</el-tag>
                     </span>
                   </template>
@@ -463,7 +464,8 @@
                       <template #label>
                         <span class="parameter-label">
                           <span>{{ field.label }}</span>
-                          <el-tooltip v-if="field.description" :content="field.description" placement="top" effect="dark">
+                          <span v-if="field.description" class="parameter-recommendation">{{ field.description }}</span>
+                          <el-tooltip v-if="field.extraTip" :content="field.extraTip" placement="top" effect="dark">
                             <el-icon class="parameter-help-icon"><QuestionFilled /></el-icon>
                           </el-tooltip>
                           <el-tag v-if="field.mutable === false" size="small" effect="plain">只读</el-tag>
@@ -560,6 +562,7 @@ import {
   getTemplateVersions
 } from '@/api/store'
 import { getPipelineList } from '@/api/pipeline'
+import { extractCanonicalParameters } from '../appStoreHelpers'
 
 const props = defineProps({
   storeKind: { type: String, required: true }
@@ -670,9 +673,9 @@ const resourceScopedDeployContext = computed(() => {
 
 const parameterSectionHint = computed(() => {
   if (isLLMStore.value) {
-    return '参数表单根据所选部署工具版本的元数据动态生成。'
+    return '参数表单根据所选部署工具版本的 parameters（统一数组结构）动态生成。'
   }
-  return '优先读取模板版本返回的参数元数据；未提供时保留原有默认部署参数。'
+  return '优先读取模板版本返回的 parameters（统一数组结构）；未提供时保留原有默认部署参数。'
 })
 
 const deployVramEstimate = computed(() => {
@@ -989,12 +992,7 @@ const handleDeployVersionChange = async (versionId) => {
   }
 
   const currentVersion = templateVersions.value.find(item => String(item.id) === String(versionId))
-  let fields = normalizeParameterFields(
-    currentVersion?.parameter_metadata
-      || currentVersion?.parameter_schema
-      || currentVersion?.parameter_definitions
-      || currentVersion?.parameters
-  )
+  let fields = normalizeParameterFields(currentVersion)
 
   if (fields.length === 0 && !isLLMStore.value) {
     fields = buildFallbackParameterFields(selectedTemplate.value?.name || '')
@@ -1400,22 +1398,23 @@ const normalizeLocalModels = (payload) => extractArray(payload)
     return rightTime - leftTime || String(left.name).localeCompare(String(right.name), 'zh-CN')
   })
 
-const normalizeParameterFields = (payload) => extractArray(payload)
+const normalizeParameterFields = (version) => extractCanonicalParameters(version)
   .map((field, index) => {
-    const key = field.key || field.name || field.code || field.parameter_key || field.parameter || `param_${index}`
-    const rawType = field.input_type || field.type || field.widget || field.component || field.data_type || 'text'
+    const key = field.name || `param_${index}`
+    const rawType = field.type || 'text'
     const normalizedType = normalizeFieldType(rawType)
     return {
       key,
-      label: field.label || field.title || field.display_name || key,
-      description: field.description || field.help_text || field.hint || '',
-      placeholder: field.placeholder || field.example || '',
-      required: Boolean(field.required || field.mandatory),
-      defaultValue: normalizeFieldDefaultValue(normalizedType, field.default_value ?? field.default ?? field.initial_value),
+      label: field.label || key,
+      description: field.description || '',
+      extraTip: field.extra_tip || '',
+      placeholder: '',
+      required: Boolean(field.required),
+      defaultValue: normalizeFieldDefaultValue(normalizedType, field.default_value),
       type: normalizedType,
-      options: normalizeFieldOptions(field.options || field.choices || field.enums || field.enum_values || field.option_values),
-      min: field.min ?? field.minimum,
-      max: field.max ?? field.maximum,
+      options: normalizeFieldOptions(field.option_values),
+      min: field.min,
+      max: field.max,
       step: field.step ?? 1,
       rows: field.rows || (normalizedType === 'json' ? 6 : 4),
       fullWidth: Boolean(field.full_width || normalizedType === 'textarea' || normalizedType === 'json'),
@@ -1986,6 +1985,10 @@ onMounted(loadData)
 .parameter-help-icon {
   color: var(--text-muted);
   cursor: help;
+}
+
+.parameter-recommendation {
+  color: var(--text-muted);
 }
 
 .parameter-number {

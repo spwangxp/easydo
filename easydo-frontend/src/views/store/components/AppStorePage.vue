@@ -290,6 +290,9 @@
             <el-table-column label="描述" min-width="180">
               <template #default="{ row }"><el-input v-model="row.description" size="small" /></template>
             </el-table-column>
+            <el-table-column label="额外提示" min-width="180">
+              <template #default="{ row }"><el-input v-model="row.extra_tip" size="small" placeholder="如：显存紧张时先下调" /></template>
+            </el-table-column>
             <el-table-column label="必填" width="70">
               <template #default="{ row }"><el-switch v-model="row.required" size="small" /></template>
             </el-table-column>
@@ -335,7 +338,13 @@
 
             <div class="parameter-stack" v-if="deployBasicParameters.length > 0">
               <div v-for="parameter in deployBasicParameters" :key="parameter.name" class="parameter-field">
-                <label>{{ parameter.label || parameter.name }}</label>
+                <label class="parameter-label">
+                  <span>{{ parameter.label || parameter.name }}</span>
+                  <span v-if="parameter.description" class="parameter-recommendation">{{ parameter.description }}</span>
+                  <el-tooltip v-if="parameter.extra_tip" :content="parameter.extra_tip" placement="top" effect="dark">
+                    <el-icon class="parameter-help-icon"><QuestionFilled /></el-icon>
+                  </el-tooltip>
+                </label>
                 <el-input-number
                   v-if="parameter.type === 'number'"
                   v-model="deployState.parameters[parameter.name]"
@@ -365,7 +374,6 @@
                   :type="parameter.type === 'textarea' ? 'textarea' : 'text'"
                   :rows="parameter.type === 'textarea' ? 3 : undefined"
                 />
-                <small>{{ parameter.description || parameter.name }}</small>
               </div>
             </div>
 
@@ -373,7 +381,13 @@
               <el-collapse-item title="更多参数" name="advanced">
                 <div class="parameter-stack">
                   <div v-for="parameter in deployAdvancedParameters" :key="parameter.name" class="parameter-field">
-                    <label>{{ parameter.label || parameter.name }}</label>
+                    <label class="parameter-label">
+                      <span>{{ parameter.label || parameter.name }}</span>
+                      <span v-if="parameter.description" class="parameter-recommendation">{{ parameter.description }}</span>
+                      <el-tooltip v-if="parameter.extra_tip" :content="parameter.extra_tip" placement="top" effect="dark">
+                        <el-icon class="parameter-help-icon"><QuestionFilled /></el-icon>
+                      </el-tooltip>
+                    </label>
                     <el-input-number
                       v-if="parameter.type === 'number'"
                       v-model="deployState.parameters[parameter.name]"
@@ -403,7 +417,6 @@
                       :type="parameter.type === 'textarea' ? 'textarea' : 'text'"
                       :rows="parameter.type === 'textarea' ? 3 : undefined"
                     />
-                    <small>{{ parameter.description || parameter.name }}</small>
                   </div>
                 </div>
               </el-collapse-item>
@@ -454,6 +467,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { QuestionFilled } from '@element-plus/icons-vue'
 
 import { createDeploymentRequest } from '@/api/deployment'
 import { getResourceList } from '@/api/resource'
@@ -946,6 +960,7 @@ function buildVariantPayload() {
         name: row.name.trim(),
         label: (row.label || row.name).trim(),
         description: row.description.trim(),
+        extra_tip: row.extra_tip.trim(),
         type: row.type,
         default_value: row.default_value,
         option_values: row.type === 'select'
@@ -1471,10 +1486,23 @@ function formatDiffText(line) {
   background: var(--bg-elevated);
 }
 
-.parameter-field label {
+.parameter-label {
   display: block;
   margin-bottom: 8px;
   font-size: 13px;
+  color: var(--text-primary);
+}
+
+.parameter-help-icon {
+  color: var(--text-muted);
+  margin-left: 4px;
+  cursor: help;
+}
+
+.parameter-recommendation {
+  margin-left: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .advanced-collapse {

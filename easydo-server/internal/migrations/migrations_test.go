@@ -299,6 +299,47 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	}
 }
 
+func TestEmbeddedSchemaIncludesTemplateParametersExtraTipColumn(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
+	if err != nil {
+		t.Fatalf("read V1 schema failed: %v", err)
+	}
+	text := string(content)
+	// Verify extra_tip column exists in template_parameters table
+	if !strings.Contains(text, "`extra_tip` text NULL") {
+		t.Fatalf("expected V1 schema to contain extra_tip column in template_parameters")
+	}
+}
+
+func TestEmbeddedSeedDataIncludesVLLMExtraTipValues(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V2__bootstrap_seed_data.sql")
+	if err != nil {
+		t.Fatalf("read V2 seed data failed: %v", err)
+	}
+	text := string(content)
+	// Verify V8's refined extra_tip texts are present in V2 seed data for vLLM parameters
+	// These are the "影响范围" texts from V8 that were folded into V2
+	expectedTips := []string{
+		"影响范围：决定模型权重拆到多少张 GPU",          // tensor_parallel_size
+		"影响范围：决定模型层被切成多少个执行阶段",          // pipeline_parallel_size
+		"影响范围：决定推理精度、显存占用和兼容性",          // dtype
+		"影响范围：决定 vLLM 可使用的单卡显存比例",       // gpu_memory_utilization
+		"影响范围：决定可承载的上下文长度和 KV Cache 占用", // max_model_len
+		"影响范围：决定模型加载时使用的量化后端",           // quantization
+		"影响范围：决定权重文件按什么格式加载",            // load_format
+		"影响范围：决定是否允许运行模型仓库中的自定义代码",      // trust_remote_code
+	}
+	for _, expected := range expectedTips {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected V2 seed data to contain folded extra_tip %q", expected)
+		}
+	}
+	// Verify extra_tip column is explicitly listed in INSERT
+	if !strings.Contains(text, "`extra_tip`") {
+		t.Fatalf("expected V2 seed data INSERT to explicitly list extra_tip column")
+	}
+}
+
 func TestEmbeddedCredentialLockStateMigrationDeclaresCredentialsLockColumn(t *testing.T) {
 	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
 	if err != nil {

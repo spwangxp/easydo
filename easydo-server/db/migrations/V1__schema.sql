@@ -965,6 +965,7 @@ CREATE TABLE `template_parameters` (
   `name` varchar(128) NOT NULL,
   `label` varchar(128) NOT NULL,
   `description` text,
+  `extra_tip` text NULL,
   `type` varchar(32) NOT NULL,
   `default_value` text,
   `option_values` longtext,
