@@ -303,3 +303,26 @@ func TestDockerBuildScript_EmbeddedBuildkitPushAddsDockerHubAliasAuthEntries(t *
 		}
 	}
 }
+
+func TestDockerBuildScript_EmbeddedBuildkitMultiArchChecksQemuHelpers(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{TaskID: 321, Params: map[string]interface{}{
+		"image_name":    "demo/app",
+		"image_tag":     "v1",
+		"dockerfile":    "./build/Dockerfile",
+		"context":       ".",
+		"architectures": []interface{}{"linux/amd64", "linux/arm64"},
+	}}, "/workspace/app")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	for _, expected := range []string{
+		`for helper in buildkit-qemu-aarch64 buildkit-qemu-arm`,
+		`command -v "$helper" >/dev/null 2>&1`,
+		`multi-platform embedded buildkit requires qemu helpers`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("expected embedded multi-arch script to validate qemu helpers with %s, got:\n%s", expected, script)
+		}
+	}
+}

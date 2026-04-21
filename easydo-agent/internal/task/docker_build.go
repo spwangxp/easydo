@@ -114,6 +114,20 @@ func buildEmbeddedBuildkitScript(taskID uint64, imageRef, preBuildScript, docker
 	if preBuildScript != "" {
 		preBuildBlock = fmt.Sprintf("if [ -n %q ]; then\n  %s\nfi\n", preBuildScript, preBuildScript)
 	}
+	qemuCheckBlock := ""
+	if strings.Contains(platforms, ",") || (platforms != "" && !strings.Contains(platforms, "linux/amd64")) {
+		qemuCheckBlock = `missing_helpers=""
+for helper in buildkit-qemu-aarch64 buildkit-qemu-arm; do
+  if ! command -v "$helper" >/dev/null 2>&1; then
+    missing_helpers="$missing_helpers $helper"
+  fi
+done
+if [ -n "$missing_helpers" ]; then
+  echo "multi-platform embedded buildkit requires qemu helpers:$missing_helpers" >&2
+  exit 1
+fi
+`
+	}
 	return fmt.Sprintf(`set -e
 RUNTIME_ROOT=%q
 SOCKET_DIR="$RUNTIME_ROOT/run"
@@ -134,7 +148,7 @@ cleanup() {
   rm -rf "$RUNTIME_ROOT"
 }
 trap cleanup EXIT
-buildkitd --addr "unix://$SOCKET_PATH" --root "$STATE_DIR" >"$STATE_DIR/buildkitd.log" 2>&1 &
+%sbuildkitd --addr "unix://$SOCKET_PATH" --root "$STATE_DIR" >"$STATE_DIR/buildkitd.log" 2>&1 &
 BUILDKIT_PID=$!
 for _ in $(seq 1 50); do
   if buildctl --addr "unix://$SOCKET_PATH" debug workers >/dev/null 2>&1; then
@@ -156,7 +170,7 @@ buildctl --addr "unix://$SOCKET_PATH" build \
   --opt platform=%q \
   --opt filename=%q \
   --output "$OUTPUT_SPEC"
-`, runtimeRoot, registry, platforms, preBuildBlock, outputLine, contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
+`, runtimeRoot, registry, platforms, qemuCheckBlock, preBuildBlock, outputLine, contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
 }
 
 func defaultString(value, fallback string) string {

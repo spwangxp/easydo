@@ -48,6 +48,12 @@ RUN apk add --no-cache git docker-cli openssh-client-default sshpass kubectl run
 
 COPY --from=buildkit /usr/bin/buildctl /usr/local/bin/buildctl
 COPY --from=buildkit /usr/bin/buildkitd /usr/local/bin/buildkitd
+COPY --from=buildkit /usr/bin/buildkit-qemu-aarch64 /usr/local/bin/buildkit-qemu-aarch64
+COPY --from=buildkit /usr/bin/buildkit-qemu-arm /usr/local/bin/buildkit-qemu-arm
+COPY --from=buildkit /usr/bin/buildkit-qemu-i386 /usr/local/bin/buildkit-qemu-i386
+COPY --from=buildkit /usr/bin/buildkit-qemu-ppc64le /usr/local/bin/buildkit-qemu-ppc64le
+COPY --from=buildkit /usr/bin/buildkit-qemu-riscv64 /usr/local/bin/buildkit-qemu-riscv64
+COPY --from=buildkit /usr/bin/buildkit-qemu-s390x /usr/local/bin/buildkit-qemu-s390x
 COPY --from=buildkit /usr/bin/rootlesskit /usr/local/bin/rootlesskit
 COPY --from=helm /usr/bin/helm /usr/local/bin/helm
 
