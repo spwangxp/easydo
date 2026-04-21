@@ -36,7 +36,7 @@ func (e *Executor) dockerBuildScript(params TaskParams, workDir string) (string,
 		runtimeBin := defaultString(e.runtime.PrimaryRuntime, "docker")
 		return buildHostRuntimeScript(runtimeBin, imageName, imageTag, preBuildScript, dockerfile, contextDir, registry, imageRef, push, platformValue), nil
 	default:
-		return buildEmbeddedBuildkitScript(imageRef, preBuildScript, dockerfile, filepath.Dir(dockerfile), contextDir, registry, push, platformValue), nil
+		return buildEmbeddedBuildkitScript(params.TaskID, imageRef, preBuildScript, dockerfile, filepath.Dir(dockerfile), contextDir, registry, push, platformValue), nil
 	}
 }
 
@@ -101,7 +101,11 @@ fi
 	return script
 }
 
-func buildEmbeddedBuildkitScript(imageRef, preBuildScript, dockerfile, dockerfileDir, contextDir, registry string, push bool, platforms string) string {
+func buildEmbeddedBuildkitScript(taskID uint64, imageRef, preBuildScript, dockerfile, dockerfileDir, contextDir, registry string, push bool, platforms string) string {
+	runtimeRoot := "$(pwd)/.easydo-buildkit"
+	if taskID > 0 {
+		runtimeRoot = fmt.Sprintf("$(pwd)/.easydo-buildkit/task_%d", taskID)
+	}
 	outputLine := fmt.Sprintf("OUTPUT_SPEC=\"type=oci,dest=.easydo-artifacts/images/%s.tar\"\nmkdir -p .easydo-artifacts/images", shellSafeFilename(imageRef))
 	if push {
 		outputLine = fmt.Sprintf("OUTPUT_SPEC=\"type=image,name=%s,push=true\"\nif [ -n \"$REGISTRY\" ] && [ -n \"$REGISTRY_USER\" ] && [ -n \"$REGISTRY_PASSWORD\" ]; then\n  mkdir -p \"$DOCKER_CONFIG\"\n  AUTH_B64=$(printf '%%s:%%s' \"$REGISTRY_USER\" \"$REGISTRY_PASSWORD\" | base64 | tr -d '\\n')\n  cat > \"$DOCKER_CONFIG/config.json\" <<EOF\n%s\nEOF\nfi", imageRef, buildRegistryAuthConfigJSON(registry))
@@ -111,21 +115,23 @@ func buildEmbeddedBuildkitScript(imageRef, preBuildScript, dockerfile, dockerfil
 		preBuildBlock = fmt.Sprintf("if [ -n %q ]; then\n  %s\nfi\n", preBuildScript, preBuildScript)
 	}
 	return fmt.Sprintf(`set -e
-SOCKET_DIR="${XDG_RUNTIME_DIR:-$(pwd)/.buildkit-run}"
+RUNTIME_ROOT=%q
+SOCKET_DIR="$RUNTIME_ROOT/run"
 SOCKET_PATH="$SOCKET_DIR/buildkitd.sock"
-STATE_DIR="$(pwd)/.buildkit-state"
-DOCKER_CONFIG="$(pwd)/.docker"
-export DOCKER_CONFIG
+STATE_DIR="$RUNTIME_ROOT/state"
+DOCKER_CONFIG="$RUNTIME_ROOT/docker"
+export DOCKER_CONFIG RUNTIME_ROOT
 REGISTRY=%q
 PLATFORMS=%q
 REGISTRY_USER="${EASYDO_CRED_REGISTRY_AUTH_USERNAME:-}"
 REGISTRY_PASSWORD="${EASYDO_CRED_REGISTRY_AUTH_PASSWORD:-${EASYDO_CRED_REGISTRY_AUTH_TOKEN:-}}"
-mkdir -p "$SOCKET_DIR" "$STATE_DIR"
+mkdir -p "$RUNTIME_ROOT" "$SOCKET_DIR" "$STATE_DIR" "$DOCKER_CONFIG" .easydo-artifacts/images
 cleanup() {
   if [ -n "${BUILDKIT_PID:-}" ]; then
     kill "$BUILDKIT_PID" >/dev/null 2>&1 || true
     wait "$BUILDKIT_PID" >/dev/null 2>&1 || true
   fi
+  rm -rf "$RUNTIME_ROOT"
 }
 trap cleanup EXIT
 buildkitd --addr "unix://$SOCKET_PATH" --root "$STATE_DIR" >"$STATE_DIR/buildkitd.log" 2>&1 &
@@ -138,6 +144,7 @@ for _ in $(seq 1 50); do
 done
 if ! buildctl --addr "unix://$SOCKET_PATH" debug workers >/dev/null 2>&1; then
   echo "buildkitd did not become ready" >&2
+  sed -n '1,200p' "$STATE_DIR/buildkitd.log" >&2 || true
   exit 1
 fi
 %s
@@ -149,7 +156,7 @@ buildctl --addr "unix://$SOCKET_PATH" build \
   --opt platform=%q \
   --opt filename=%q \
   --output "$OUTPUT_SPEC"
-`, registry, platforms, preBuildBlock, outputLine, contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
+`, runtimeRoot, registry, platforms, preBuildBlock, outputLine, contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
 }
 
 func defaultString(value, fallback string) string {

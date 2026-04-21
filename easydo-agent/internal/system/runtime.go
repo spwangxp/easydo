@@ -76,6 +76,9 @@ func probeRuntimeCapabilities(deps probeDependencies) RuntimeCapabilities {
 
 func chooseBuildBackend(capabilities RuntimeCapabilities) string {
 	if capabilities.ExecutionMode == ExecutionModeContainer {
+		if capabilities.DockerSocketAvailable && capabilities.PrimaryRuntime != "" {
+			return BuildBackendHostRuntime
+		}
 		return BuildBackendEmbeddedBuildkit
 	}
 	if capabilities.PrimaryRuntime != "" {

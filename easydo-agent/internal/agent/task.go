@@ -1250,7 +1250,7 @@ func (th *TaskHandler) reportTaskUpdateV2(t *Task, attempt int, status string, e
 		return fmt.Errorf("websocket unavailable")
 	}
 
-	if err := wsClient.SendMessage("task_update_v2", payload); err != nil {
+	if err := wsClient.SendMessageWithAck("task_update_v2", payload, 5*time.Second); err != nil {
 		if queueOnFailure {
 			th.enqueuePendingWebSocketMessage("task_update_v2", payload)
 		}

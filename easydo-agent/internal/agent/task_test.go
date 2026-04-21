@@ -1,12 +1,18 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"easydo-agent/internal/client"
 	agenttask "easydo-agent/internal/task"
+	"github.com/gorilla/websocket"
 )
 
 func TestReportTaskUpdateV2_QueuesTerminalUpdateWhenWebsocketUnavailable(t *testing.T) {
@@ -16,6 +22,70 @@ func TestReportTaskUpdateV2_QueuesTerminalUpdateWhenWebsocketUnavailable(t *test
 	err := h.reportTaskUpdateV2(task, 1, "execute_success", 0, "", 1000, map[string]interface{}{"stdout_size": 1})
 	if err == nil {
 		t.Fatal("expected websocket unavailable error")
+	}
+	if len(h.pendingWS) != 1 {
+		t.Fatalf("pending queue len=%d, want=1", len(h.pendingWS))
+	}
+	if h.pendingWS[0].messageType != "task_update_v2" {
+		t.Fatalf("queued message type=%s, want task_update_v2", h.pendingWS[0].messageType)
+	}
+}
+
+func TestReportTaskUpdateV2_QueuesTerminalUpdateWhenAckRejected(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg client.WebSocketMessage
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				return
+			}
+			if msg.Type != "task_update_v2" {
+				continue
+			}
+
+			ack := client.WebSocketMessage{Type: "ack_v2", Payload: map[string]interface{}{
+				"event":     "task_update_v2",
+				"task_id":   12,
+				"attempt":   1,
+				"ok":        false,
+				"error_msg": "invalid status transition",
+				"timestamp": time.Now().Unix(),
+			}}
+			payload, _ := json.Marshal(ack)
+			_ = conn.WriteMessage(websocket.TextMessage, payload)
+			return
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	wsClient := client.NewWebSocketClient(server.URL, 1, "token", "")
+	if err := wsClient.Connect(ctx); err != nil {
+		t.Fatalf("connect failed: %v", err)
+	}
+	defer wsClient.Close()
+
+	h := &TaskHandler{wsClient: wsClient}
+	task := &Task{ID: 12}
+
+	err := h.reportTaskUpdateV2(task, 1, "execute_success", 0, "", 1000, map[string]interface{}{"stdout_size": 1})
+	if err == nil {
+		t.Fatal("expected ack rejection error")
+	}
+	if !strings.Contains(err.Error(), "invalid status transition") {
+		t.Fatalf("error=%v, want ack rejection reason", err)
 	}
 	if len(h.pendingWS) != 1 {
 		t.Fatalf("pending queue len=%d, want=1", len(h.pendingWS))

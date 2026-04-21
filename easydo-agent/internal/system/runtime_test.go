@@ -49,7 +49,7 @@ func TestProbeRuntimeCapabilities_HostPrefersLocalRuntime(t *testing.T) {
 	}
 }
 
-func TestProbeRuntimeCapabilities_ContainerPrefersEmbeddedBuildkit(t *testing.T) {
+func TestProbeRuntimeCapabilities_ContainerWithDockerSocketPrefersHostRuntime(t *testing.T) {
 	deps := probeDependencies{
 		lookPath: func(name string) (string, error) {
 			switch name {
@@ -74,13 +74,46 @@ func TestProbeRuntimeCapabilities_ContainerPrefersEmbeddedBuildkit(t *testing.T)
 	if capabilities.ExecutionMode != ExecutionModeContainer {
 		t.Fatalf("execution mode=%s, want %s", capabilities.ExecutionMode, ExecutionModeContainer)
 	}
-	if capabilities.PreferredBuildBackend != BuildBackendEmbeddedBuildkit {
-		t.Fatalf("preferred backend=%s, want %s", capabilities.PreferredBuildBackend, BuildBackendEmbeddedBuildkit)
+	if capabilities.PreferredBuildBackend != BuildBackendHostRuntime {
+		t.Fatalf("preferred backend=%s, want %s", capabilities.PreferredBuildBackend, BuildBackendHostRuntime)
 	}
 	if !capabilities.DockerSocketAvailable {
 		t.Fatalf("expected docker socket to be detected")
 	}
 	if !containsString(capabilities.AvailableBuilders, "buildkitd") {
 		t.Fatalf("available builders=%v, expected buildkitd", capabilities.AvailableBuilders)
+	}
+}
+
+func TestProbeRuntimeCapabilities_ContainerWithoutDockerSocketPrefersEmbeddedBuildkit(t *testing.T) {
+	deps := probeDependencies{
+		lookPath: func(name string) (string, error) {
+			switch name {
+			case "docker", "buildctl", "buildkitd":
+				return "/usr/bin/" + name, nil
+			default:
+				return "", errors.New("not found")
+			}
+		},
+		stat: func(path string) (fs.FileInfo, error) {
+			switch path {
+			case "/.dockerenv":
+				return fakeFileInfo{}, nil
+			default:
+				return nil, errors.New("missing")
+			}
+		},
+		getenv: func(key string) string { return "" },
+	}
+
+	capabilities := probeRuntimeCapabilities(deps)
+	if capabilities.ExecutionMode != ExecutionModeContainer {
+		t.Fatalf("execution mode=%s, want %s", capabilities.ExecutionMode, ExecutionModeContainer)
+	}
+	if capabilities.PreferredBuildBackend != BuildBackendEmbeddedBuildkit {
+		t.Fatalf("preferred backend=%s, want %s", capabilities.PreferredBuildBackend, BuildBackendEmbeddedBuildkit)
+	}
+	if capabilities.DockerSocketAvailable {
+		t.Fatalf("expected docker socket to be unavailable")
 	}
 }

@@ -42,6 +42,13 @@ agent:
   env:
     serverURL: http://easydo-server:8080
     namePrefix: easydo-agent
+  securityContext:
+    privileged: true
+    allowPrivilegeEscalation: true
+  mountDockerSock: false
+  dockerSockPath: /var/run/docker.sock
+  extraVolumes: []
+  extraVolumeMounts: []
 
 mariadb:
   enabled: true

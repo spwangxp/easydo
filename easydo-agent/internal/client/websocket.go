@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -145,6 +146,12 @@ type WebSocketClient struct {
 	executor        *task.Executor
 	onReconnect     func()
 	onHeartbeatAck  func(map[string]interface{})
+	ackWaiters      map[string]chan ackResult
+}
+
+ type ackResult struct {
+	ok       bool
+	errorMsg string
 }
 
 // websocketConfig holds WebSocket configuration
@@ -175,6 +182,7 @@ func NewWebSocketClient(baseURL string, agentID uint64, token, registerKey strin
 		registerKey: registerKey,
 		stopChan:    make(chan struct{}),
 		cfg:         defaultConfig,
+		ackWaiters:  make(map[string]chan ackResult),
 	}
 }
 
@@ -367,6 +375,8 @@ func (c *WebSocketClient) handleMessage(message []byte) {
 		c.handleAgentConfig(msg.Payload)
 	case "heartbeat_ack":
 		c.handleHeartbeatAck(msg.Payload)
+	case "ack_v2":
+		c.handleAckV2(msg.Payload)
 	default:
 		klog.V(4).Infof("Received message of type: %s", msg.Type)
 	}
@@ -413,6 +423,32 @@ func (c *WebSocketClient) handleHeartbeatAck(payload map[string]interface{}) {
 	c.mu.RUnlock()
 	if handler != nil {
 		handler(payload)
+	}
+}
+
+func (c *WebSocketClient) handleAckV2(payload map[string]interface{}) {
+	key := ackKey(getStringValue(payload, "event"), uint64(numberValue(payload["task_id"])), int(numberValue(payload["attempt"])))
+	if key == "" {
+		return
+	}
+
+	c.mu.Lock()
+	waiter := c.ackWaiters[key]
+	if waiter != nil {
+		delete(c.ackWaiters, key)
+	}
+	c.mu.Unlock()
+	if waiter == nil {
+		return
+	}
+
+	result := ackResult{ok: false, errorMsg: getStringValue(payload, "error_msg")}
+	if ok, exists := payload["ok"].(bool); exists {
+		result.ok = ok
+	}
+	select {
+	case waiter <- result:
+	default:
 	}
 }
 
@@ -652,6 +688,21 @@ func numberValue(value interface{}) float64 {
 	}
 }
 
+func getStringValue(payload map[string]interface{}, key string) string {
+	if payload == nil {
+		return ""
+	}
+	value, _ := payload[key].(string)
+	return value
+}
+
+func ackKey(event string, taskID uint64, attempt int) string {
+	if strings.TrimSpace(event) == "" || taskID == 0 || attempt <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d:%d", event, taskID, attempt)
+}
+
 // handleDisconnect tears down the dead socket and performs bounded reconnect
 // attempts. A successful reconnect triggers the registered replay callback so
 // buffered terminal/log messages can be resent on the new session.
@@ -761,6 +812,45 @@ func (c *WebSocketClient) SendMessage(msgType string, payload map[string]interfa
 	c.mu.Unlock()
 
 	return err
+}
+
+func (c *WebSocketClient) SendMessageWithAck(msgType string, payload map[string]interface{}, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	key := ackKey(msgType, uint64(numberValue(payload["task_id"])), int(numberValue(payload["attempt"])))
+	if key == "" {
+		return fmt.Errorf("ack key is required")
+	}
+	waiter := make(chan ackResult, 1)
+	c.mu.Lock()
+	if c.ackWaiters == nil {
+		c.ackWaiters = make(map[string]chan ackResult)
+	}
+	c.ackWaiters[key] = waiter
+	c.mu.Unlock()
+	if err := c.SendMessage(msgType, payload); err != nil {
+		c.mu.Lock()
+		delete(c.ackWaiters, key)
+		c.mu.Unlock()
+		return err
+	}
+
+	select {
+	case result := <-waiter:
+		if result.ok {
+			return nil
+		}
+		if result.errorMsg != "" {
+			return fmt.Errorf("server rejected %s: %s", msgType, result.errorMsg)
+		}
+		return fmt.Errorf("server rejected %s", msgType)
+	case <-time.After(timeout):
+		c.mu.Lock()
+		delete(c.ackWaiters, key)
+		c.mu.Unlock()
+		return fmt.Errorf("timed out waiting for %s ack", msgType)
+	}
 }
 
 // SetAgentID sets the agent ID
