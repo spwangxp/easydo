@@ -116,12 +116,37 @@ func buildEmbeddedBuildkitScript(taskID uint64, imageRef, preBuildScript, docker
 	}
 	qemuCheckBlock := ""
 	if strings.Contains(platforms, ",") || (platforms != "" && !strings.Contains(platforms, "linux/amd64")) {
-		qemuCheckBlock = `missing_helpers=""
-for helper in buildkit-qemu-aarch64 buildkit-qemu-arm; do
+		qemuCheckBlock = `normalize_platform_arch() {
+  case "$1" in
+    amd64|x86_64) echo "amd64" ;;
+    arm64|aarch64) echo "arm64" ;;
+    *) echo "$1" ;;
+  esac
+}
+helper_for_arch() {
+  case "$1" in
+    amd64) echo "buildkit-qemu-x86_64" ;;
+    arm64) echo "buildkit-qemu-aarch64" ;;
+    *) return 1 ;;
+  esac
+}
+HOST_ARCH=$(uname -m)
+NATIVE_ARCH=$(normalize_platform_arch "$HOST_ARCH")
+missing_helpers=""
+OLD_IFS=$IFS
+IFS=,
+for platform in $PLATFORMS; do
+  arch=${platform##*/}
+  arch=$(normalize_platform_arch "$arch")
+  if [ "$arch" = "$NATIVE_ARCH" ]; then
+    continue
+  fi
+  helper=$(helper_for_arch "$arch") || continue
   if ! command -v "$helper" >/dev/null 2>&1; then
     missing_helpers="$missing_helpers $helper"
   fi
 done
+IFS=$OLD_IFS
 if [ -n "$missing_helpers" ]; then
   echo "multi-platform embedded buildkit requires qemu helpers:$missing_helpers" >&2
   exit 1

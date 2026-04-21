@@ -304,7 +304,7 @@ func TestDockerBuildScript_EmbeddedBuildkitPushAddsDockerHubAliasAuthEntries(t *
 	}
 }
 
-func TestDockerBuildScript_EmbeddedBuildkitMultiArchChecksQemuHelpers(t *testing.T) {
+func TestDockerBuildScript_EmbeddedBuildkitMultiArchChecksNativeDependentQemuHelpers(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
 	script, err := executor.dockerBuildScript(TaskParams{TaskID: 321, Params: map[string]interface{}{
 		"image_name":    "demo/app",
@@ -317,12 +317,29 @@ func TestDockerBuildScript_EmbeddedBuildkitMultiArchChecksQemuHelpers(t *testing
 		t.Fatalf("dockerBuildScript returned error: %v", err)
 	}
 	for _, expected := range []string{
-		`for helper in buildkit-qemu-aarch64 buildkit-qemu-arm`,
-		`command -v "$helper" >/dev/null 2>&1`,
+		`HOST_ARCH=$(uname -m)`,
+		`normalize_platform_arch() {`,
+		`amd64|x86_64) echo "amd64" ;;`,
+		`arm64|aarch64) echo "arm64" ;;`,
+		`helper_for_arch() {`,
+		`amd64) echo "buildkit-qemu-x86_64" ;;`,
+		`arm64) echo "buildkit-qemu-aarch64" ;;`,
+		`if [ "$arch" = "$NATIVE_ARCH" ]; then`,
 		`multi-platform embedded buildkit requires qemu helpers`,
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("expected embedded multi-arch script to validate qemu helpers with %s, got:\n%s", expected, script)
+		}
+	}
+	for _, unexpected := range []string{
+		`buildkit-qemu-riscv64`,
+		`buildkit-qemu-ppc64le`,
+		`buildkit-qemu-s390x`,
+		`buildkit-qemu-i386`,
+		`buildkit-qemu-arm`,
+	} {
+		if strings.Contains(script, unexpected) {
+			t.Fatalf("expected embedded multi-arch helper validation to stay limited to arm64/amd64, got:\n%s", script)
 		}
 	}
 }
