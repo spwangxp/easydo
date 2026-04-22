@@ -954,6 +954,12 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 		return
 	}
 
+	ackSent := false
+	if update.Status == models.TaskStatusRunning {
+		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, true, "", nil)
+		ackSent = true
+	}
+
 	now := time.Now().Unix()
 	updates := map[string]interface{}{
 		"status":    update.Status,
@@ -985,7 +991,11 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 	}
 
 	if err := models.DB.Model(&task).Updates(updates).Error; err != nil {
-		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, false, "failed to update task", nil)
+		if !ackSent {
+			h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, false, "failed to update task", nil)
+		} else {
+			fmt.Printf("task_update_v2 post-ack task update failed: task_id=%d attempt=%d err=%v\n", update.TaskID, update.Attempt, err)
+		}
 		return
 	}
 
@@ -1086,7 +1096,11 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 			"owner_server_id":  "",
 		}
 		if err := models.DB.Model(&task).Updates(retryUpdates).Error; err != nil {
-			h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, false, "failed to enqueue retry", nil)
+			if !ackSent {
+				h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, false, "failed to enqueue retry", nil)
+			} else {
+				fmt.Printf("task_update_v2 post-ack retry enqueue failed: task_id=%d attempt=%d err=%v\n", update.TaskID, update.Attempt, err)
+			}
 			return
 		}
 
@@ -1143,7 +1157,9 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 		h.checkAndUpdatePipelineStatus(task.PipelineRunID)
 	}
 
-	h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, true, "", nil)
+	if !ackSent {
+		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, true, "", nil)
+	}
 }
 
 func (h *WebSocketHandler) persistResourceBaseInfoTaskResult(task *models.AgentTask, update taskUpdatePayloadV2) {
@@ -1922,6 +1938,13 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 		fmt.Printf("[DEBUG] Failed to parse pipeline snapshot for run %d: %v\n", runID, err)
 		return
 	}
+	var runConfig models.PipelineRunConfigSnapshot
+	if strings.TrimSpace(run.RunConfig) != "" {
+		if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
+			fmt.Printf("[DEBUG] Failed to parse run config for run %d: %v\n", runID, err)
+			return
+		}
+	}
 
 	edges := config.getEdges()
 	if len(config.Nodes) == 0 || len(edges) == 0 {
@@ -2068,6 +2091,18 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 				continue
 			}
 			nodeConfig := normalizePipelineNodeConfig(node.Type, canonicalType, node.getNodeConfig())
+				nodeInputs := cloneMap(runConfig.Inputs[downstreamID])
+				nodeConfig = applyRuntimeInputsToNodeConfig(canonicalType, nodeConfig, nodeInputs)
+				if len(nodeInputs) > 0 {
+					inputResolver := NewVariableResolver()
+					inputResolver.SetInputs(nodeInputs)
+					resolvedConfig, err := inputResolver.ResolveNodeConfig(nodeConfig)
+					if err != nil {
+						fmt.Printf("[WARN] Failed to resolve runtime inputs for downstream node %s: %v\n", downstreamID, err)
+					} else {
+						nodeConfig = normalizePipelineNodeConfig(node.Type, canonicalType, resolvedConfig)
+					}
+				}
 			if err := resolveResourceBackedNodeConfig(models.DB, canonicalType, run.WorkspaceID, nodeConfig); err != nil {
 				fmt.Printf("[ERROR] Failed to resolve resource-backed config for downstream node %s: %v\n", downstreamID, err)
 				failedTask := &models.AgentTask{

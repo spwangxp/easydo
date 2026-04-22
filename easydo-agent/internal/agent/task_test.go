@@ -95,6 +95,68 @@ func TestReportTaskUpdateV2_QueuesTerminalUpdateWhenAckRejected(t *testing.T) {
 	}
 }
 
+func TestReportTaskUpdateV2_AllowsSlowSuccessfulAck(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg client.WebSocketMessage
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				return
+			}
+			if msg.Type != "task_update_v2" {
+				continue
+			}
+
+			time.Sleep(6 * time.Second)
+			ack := client.WebSocketMessage{Type: "ack_v2", Payload: map[string]interface{}{
+				"event":     "task_update_v2",
+				"task_id":   13,
+				"attempt":   1,
+				"ok":        true,
+				"timestamp": time.Now().Unix(),
+			}}
+			payload, _ := json.Marshal(ack)
+			_ = conn.WriteMessage(websocket.TextMessage, payload)
+			return
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	wsClient := client.NewWebSocketClient(server.URL, 1, "token", "")
+	if err := wsClient.Connect(ctx); err != nil {
+		t.Fatalf("connect failed: %v", err)
+	}
+	defer wsClient.Close()
+
+	h := &TaskHandler{wsClient: wsClient}
+	task := &Task{ID: 13}
+
+	started := time.Now()
+	err := h.reportTaskUpdateV2(task, 1, "running", 0, "", 0, nil)
+	if err != nil {
+		t.Fatalf("expected slow ack to succeed, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 6*time.Second {
+		t.Fatalf("report returned too early after %v, want it to wait for slow ack", elapsed)
+	}
+	if len(h.pendingWS) != 0 {
+		t.Fatalf("pending queue len=%d, want=0", len(h.pendingWS))
+	}
+}
+
 func TestFlushPendingWebSocketMessagesWithSender_FlushesInOrderAndStopsOnFailure(t *testing.T) {
 	h := &TaskHandler{}
 	h.enqueuePendingWebSocketMessage("task_log_chunk_v2", map[string]interface{}{"seq": int64(1)})

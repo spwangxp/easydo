@@ -21,6 +21,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
+	"gorm.io/gorm"
 )
 
 func TestNewWebSocketHandler(t *testing.T) {
@@ -1340,6 +1341,85 @@ func TestTriggerDownstreamTasks_UsesRunRecordOutputsAsPrimaryTruth(t *testing.T)
 	}
 }
 
+func TestTriggerDownstreamTasks_ReappliesManualRuntimeInputsFromRunConfig(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	pipelineSnapshot, err := json.Marshal(PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{ID: "node_1", Type: "git_clone", Name: "Clone", Config: map[string]interface{}{"git_repo_url": "https://example.com/repo.git", "git_ref": "main", "git_checkout_path": "./app"}},
+			{ID: "node_2", Type: "docker", Name: "Build", Config: map[string]interface{}{"image_name": "demo/app", "image_tag": "latest", "dockerfile": "Dockerfile", "context": ".", "push": false, "pre_build_script": "cd ${outputs.node_1.git_checkout_path};"}},
+		},
+		Edges: []PipelineEdge{{From: "node_1", To: "node_2"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal pipeline snapshot failed: %v", err)
+	}
+
+	runConfigJSON, err := json.Marshal(models.PipelineRunConfigSnapshot{
+		Inputs: map[string]map[string]interface{}{
+			"node_2": {
+				"image_tag": "hk_latest",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal run config failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		RunConfig:        string(runConfigJSON),
+		PipelineSnapshot: string(pipelineSnapshot),
+		Outputs:          `{"node_1":{"git_checkout_path":"./app","exit_code":0,"status":"execute_success"}}`,
+		AgentID:          1,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	upstreamTask := &models.AgentTask{
+		WorkspaceID:   1,
+		PipelineRunID: run.ID,
+		NodeID:        "node_1",
+		TaskType:      "git_clone",
+		Status:        models.TaskStatusExecuteSuccess,
+		ExitCode:      0,
+		Duration:      2,
+		ResultData:    `{"git_checkout_path":"./app"}`,
+	}
+	if err := db.Create(&upstreamTask).Error; err != nil {
+		t.Fatalf("create upstream task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	handler.triggerDownstreamTasks(run.ID, []models.AgentTask{*upstreamTask})
+
+	var downstream models.AgentTask
+	if err := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, "node_2").First(&downstream).Error; err != nil {
+		t.Fatalf("expected downstream task to be created: %v", err)
+	}
+
+	var params map[string]interface{}
+	if err := json.Unmarshal([]byte(downstream.Params), &params); err != nil {
+		t.Fatalf("unmarshal downstream params failed: %v", err)
+	}
+	if got := fmt.Sprint(params["image_tag"]); got != "hk_latest" {
+		t.Fatalf("downstream image_tag=%q, want hk_latest; params=%s", got, downstream.Params)
+	}
+}
+
 func TestHandleTaskUpdateV2_PersistsRunRecordOutputsForCompletedTask(t *testing.T) {
 	db := openHandlerTestDB(t)
 	previousDB := models.DB
@@ -1401,6 +1481,163 @@ func TestHandleTaskUpdateV2_PersistsRunRecordOutputsForCompletedTask(t *testing.
 	if !strings.Contains(updatedRun.Outputs, `"node_1"`) || !strings.Contains(updatedRun.Outputs, `"git_commit":"abc123def"`) {
 		t.Fatalf("expected run outputs_json updated from task result, got=%s", updatedRun.Outputs)
 	}
+}
+
+func TestTaskUpdateV2_AcksBeforeSlowPostPersistWork(t *testing.T) {
+	setupAgentWSTestRuntime(t)
+
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = previousDB
+	})
+
+	agent := models.Agent{
+		Name:               "worker-1",
+		Host:               "host-a",
+		Port:               1,
+		Status:             models.AgentStatusOnline,
+		RegistrationStatus: models.AgentRegistrationStatusApproved,
+		Token:              "tok-ok",
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+
+	task := models.AgentTask{
+		WorkspaceID:     1,
+		AgentID:         agent.ID,
+		AgentSessionID:  "",
+		PipelineRunID:   1,
+		NodeID:          "node_1",
+		TaskType:        "shell",
+		Name:            "Build",
+		Params:          `{"script":"echo hi"}`,
+		Status:          models.TaskStatusAcked,
+		DispatchAttempt: 1,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	slowUpdateStarted := make(chan struct{}, 1)
+	releaseSlowUpdate := make(chan struct{})
+	callbackName := "test:slow-agent-task-update"
+	if err := db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement == nil || tx.Statement.Schema == nil || tx.Statement.Schema.Table != "agent_tasks" {
+			return
+		}
+		updates, ok := tx.Statement.Dest.(map[string]interface{})
+		if !ok {
+			return
+		}
+		status, _ := updates["status"].(string)
+		if status != models.TaskStatusRunning {
+			return
+		}
+		select {
+		case slowUpdateStarted <- struct{}{}:
+		default:
+		}
+		<-releaseSlowUpdate
+	}); err != nil {
+		t.Fatalf("register update callback failed: %v", err)
+	}
+	defer db.Callback().Update().Remove(callbackName)
+
+	handler := NewWebSocketHandler()
+	server := newAgentWSTestServer(t, handler)
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(server.URL, fmt.Sprintf("?agent_id=%d&token=%s", agent.ID, agent.Token)), nil)
+	if err != nil {
+		t.Fatalf("dial agent websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	heartbeat := WebSocketMessage{
+		Type: "heartbeat",
+		Payload: map[string]interface{}{
+			"agent_id":  agent.ID,
+			"timestamp": time.Now().Unix(),
+		},
+	}
+	heartbeatData, err := json.Marshal(heartbeat)
+	if err != nil {
+		t.Fatalf("marshal heartbeat failed: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, heartbeatData); err != nil {
+		t.Fatalf("write heartbeat failed: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set heartbeat read deadline failed: %v", err)
+	}
+	_, raw, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read heartbeat ack failed: %v", err)
+	}
+	conn.SetReadDeadline(time.Time{})
+	var heartbeatAck WebSocketMessage
+	if err := json.Unmarshal(raw, &heartbeatAck); err != nil {
+		t.Fatalf("unmarshal heartbeat ack failed: %v", err)
+	}
+	if heartbeatAck.Type != "heartbeat_ack" {
+		t.Fatalf("expected heartbeat_ack, got %s", heartbeatAck.Type)
+	}
+
+	taskUpdate := WebSocketMessage{
+		Type: "task_update_v2",
+		Payload: map[string]interface{}{
+			"task_id":         task.ID,
+			"attempt":         1,
+			"status":          models.TaskStatusRunning,
+			"exit_code":       0,
+			"duration_ms":     0,
+			"idempotency_key": fmt.Sprintf("%d:1:running:0", task.ID),
+		},
+	}
+	data, err := json.Marshal(taskUpdate)
+	if err != nil {
+		t.Fatalf("marshal task update failed: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write task update failed: %v", err)
+	}
+
+	select {
+	case <-slowUpdateStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected slow agent_tasks update to start")
+	}
+
+	conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	_, raw, err = conn.ReadMessage()
+	if err != nil {
+		close(releaseSlowUpdate)
+		t.Fatalf("expected ack_v2 before slow post-persist work finished: %v", err)
+	}
+	conn.SetReadDeadline(time.Time{})
+
+	var ack WebSocketMessage
+	if err := json.Unmarshal(raw, &ack); err != nil {
+		close(releaseSlowUpdate)
+		t.Fatalf("unmarshal ack failed: %v", err)
+	}
+	if ack.Type != "ack_v2" {
+		close(releaseSlowUpdate)
+		t.Fatalf("expected ack_v2, got %s", ack.Type)
+	}
+	if ack.Payload["event"] != "task_update_v2" {
+		close(releaseSlowUpdate)
+		t.Fatalf("expected ack for task_update_v2, got %#v", ack.Payload)
+	}
+	if ok, _ := ack.Payload["ok"].(bool); !ok {
+		close(releaseSlowUpdate)
+		t.Fatalf("expected successful ack payload, got %#v", ack.Payload)
+	}
+
+	close(releaseSlowUpdate)
 }
 
 // Regression test: frontend WebSocket connections must stay open beyond 60 seconds.
