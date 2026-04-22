@@ -3,9 +3,14 @@ package task
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestParseParams_PreservesEnvVarsWhenJSONContainsNonStringValues(t *testing.T) {
@@ -82,5 +87,41 @@ func TestErrToString_IncludesStderrForExitErrors(t *testing.T) {
 	}
 	if !strings.Contains(got, "Permission denied") {
 		t.Fatalf("expected stderr snippet in error, got=%q", got)
+	}
+}
+
+func TestRunScript_KillsBackgroundProcessGroupOnContextCancel(t *testing.T) {
+	tmpDir := t.TempDir()
+	pidFile := filepath.Join(tmpDir, "child.pid")
+	executor := &Executor{}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, _, err := executor.runScript(ctx, 1, `sh -c 'trap "" HUP TERM INT; while true; do sleep 1; done' >/dev/null 2>&1 & child=$!; echo $child > "`+pidFile+`"; wait`, tmpDir, nil)
+	if err == nil {
+		t.Fatal("expected context cancellation error")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, readErr := os.ReadFile(pidFile)
+		if readErr == nil && strings.TrimSpace(string(data)) != "" {
+			pid, convErr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if convErr != nil {
+				t.Fatalf("invalid child pid %q: %v", string(data), convErr)
+			}
+			killErr := syscall.Kill(pid, 0)
+			if errors.Is(killErr, syscall.ESRCH) {
+				break
+			}
+			if killErr != nil {
+				t.Fatalf("unexpected kill check error for pid %d: %v", pid, killErr)
+			}
+		}
+		if time.Now().After(deadline) {
+			data, _ := os.ReadFile(pidFile)
+			t.Fatalf("background child still alive after cancellation, pid=%s", strings.TrimSpace(string(data)))
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

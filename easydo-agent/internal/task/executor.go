@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"easydo-agent/internal/system"
@@ -302,6 +303,7 @@ func (e *Executor) runScript(ctx context.Context, taskID uint64, script, workDir
 	cmd := exec.CommandContext(ctx, shell, "-c", script)
 	cmd.Env = env
 	cmd.Dir = workDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	callback := e.GetLogCallback()
@@ -313,6 +315,13 @@ func (e *Executor) runScript(ctx context.Context, taskID uint64, script, workDir
 	// Start command
 	if err := cmd.Start(); err != nil {
 		return "", "", fmt.Errorf("failed to start command: %w", err)
+	}
+
+	if cmd.Process != nil {
+		go func() {
+			<-ctx.Done()
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}()
 	}
 
 	// Wait for command to complete
