@@ -733,14 +733,18 @@ func (h *WebSocketHandler) handleAgentHeartbeat(client *wsClient, agent *models.
 }
 
 func (h *WebSocketHandler) buildHeartbeatAckPayload(client *wsClient, agent *models.Agent, pendingTasks int) map[string]interface{} {
+	systemDefaults := loadSystemDockerHubMirrors(models.DB)
 	payload := map[string]interface{}{
-		"status":              "ok",
-		"server_time":         time.Now().Unix(),
-		"pending_tasks":       pendingTasks,
-		"heartbeat_interval":  agent.HeartbeatInterval,
-		"agent_session_id":    client.sessionID,
-		"server_id":           client.serverID,
-		"registration_status": agent.RegistrationStatus,
+		"status":                   "ok",
+		"server_time":              time.Now().Unix(),
+		"pending_tasks":            pendingTasks,
+		"heartbeat_interval":       agent.HeartbeatInterval,
+		"agent_session_id":         client.sessionID,
+		"server_id":                client.serverID,
+		"registration_status":      agent.RegistrationStatus,
+		"max_concurrent_pipelines": normalizeAgentMaxConcurrentPipelines(agent.MaxConcurrentPipelines),
+		"task_concurrency":         normalizeAgentTaskConcurrency(agent.TaskConcurrency),
+		"dockerhub_mirrors":        effectiveDockerHubMirrors(agent, systemDefaults),
 	}
 	if agent.RegistrationStatus == models.AgentRegistrationStatusApproved && agent.Token != "" {
 		payload["token"] = agent.Token
@@ -1960,31 +1964,23 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 		nodeMap[config.Nodes[i].ID] = &config.Nodes[i]
 	}
 
-	// Build graph with IgnoreFailure info
+	// Build graph for downstream traversal
 	graph := make(map[string][]DownstreamEdge)
 	for _, node := range config.Nodes {
 		graph[node.ID] = []DownstreamEdge{}
 	}
-	for _, edge := range edges {
-		graph[edge.From] = append(graph[edge.From], DownstreamEdge{
-			To:            edge.To,
-			IgnoreFailure: edge.IgnoreFailure,
-		})
-		fmt.Printf("[DEBUG] Edge: %s -> %s (ignore_failure=%v)\n", edge.From, edge.To, edge.IgnoreFailure)
-	}
-
-	// Build edge map for quick lookup
-	edgeMap := make(map[string]map[string]bool)
-	// Build upstream edges map for efficient dependency checking
-	upstreamEdges := make(map[string][]PipelineEdge)
-	for _, edge := range edges {
-		if edgeMap[edge.From] == nil {
-			edgeMap[edge.From] = make(map[string]bool)
+		for _, edge := range edges {
+			graph[edge.From] = append(graph[edge.From], DownstreamEdge{
+				To: edge.To,
+			})
+			fmt.Printf("[DEBUG] Edge: %s -> %s\n", edge.From, edge.To)
 		}
-		edgeMap[edge.From][edge.To] = edge.IgnoreFailure
-		// Add to upstream edges map
-		upstreamEdges[edge.To] = append(upstreamEdges[edge.To], edge)
-	}
+
+		// Build upstream edges map for efficient dependency checking
+		upstreamEdges := make(map[string][]PipelineEdge)
+		for _, edge := range edges {
+			upstreamEdges[edge.To] = append(upstreamEdges[edge.To], edge)
+		}
 
 	// Mark completed tasks by status - only consider tasks that are truly complete
 	completedSuccess := make(map[string]bool)
@@ -2054,10 +2050,10 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 					// Upstream succeeded, dependency met
 					continue
 				} else if upstreamFailed && upstreamIgnoreFailure {
-					// Upstream failed but upstream node ignores its own failure, dependency met
+					// Upstream failed but upstream node ignores the failure, dependency met
 					continue
 				} else if upstreamFailed && !upstreamIgnoreFailure {
-					// Upstream failed and upstream does not ignore failure, blocking downstream
+					// Upstream failed and node does not ignore failure, blocking downstream
 					allUpstreamCompleted = false
 					fmt.Printf("[DEBUG] Upstream %s failed with ignore_failure=false, blocking downstream %s\n", upstreamID, downstreamID)
 					break
@@ -2297,8 +2293,7 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 }
 
 type DownstreamEdge struct {
-	To            string
-	IgnoreFailure bool
+	To string
 }
 
 func (h *WebSocketHandler) sendAgentAck(client *wsClient, event string, taskID uint64, attempt int, ok bool, errMsg string, extra map[string]interface{}) {

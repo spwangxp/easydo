@@ -272,6 +272,7 @@ eval "$CMD"`,
 		FieldsSchema: []models.TaskDefinitionField{
 			{Key: "image_name", Label: "镜像名称", Type: "string", Required: true, UIComponent: "input"},
 			{Key: "image_tag", Label: "镜像标签", Type: "string", UIComponent: "input", Default: "latest"},
+			{Key: "architectures", Label: "目标架构", Type: "multiselect", UIComponent: "checkbox_group", Default: []string{"linux/amd64", "linux/arm64"}, Options: []models.FieldOption{{Label: "linux/amd64", Value: "linux/amd64"}, {Label: "linux/arm64", Value: "linux/arm64"}}},
 			{Key: "pre_build_script", Label: "构建前脚本", Type: "text", UIComponent: "textarea", UIPlaceholder: "cd ${outputs.clone_frontend.git_checkout_path}"},
 			{Key: "dockerfile", Label: "Dockerfile 路径", Type: "string", UIComponent: "input", Default: "./Dockerfile"},
 			{Key: "context", Label: "构建上下文", Type: "string", UIComponent: "input", Default: "."},

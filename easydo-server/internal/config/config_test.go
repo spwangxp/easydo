@@ -1,54 +1,43 @@
 package config
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
-func TestValidateMultiReplicaRequirements_RejectsMissingInternalSettings(t *testing.T) {
+func TestInit_BindsBootstrapDockerHubMirrorsEnv(t *testing.T) {
+	t.Setenv("BOOTSTRAP_DOCKERHUB_MIRRORS", "https://mirror-a.example, https://mirror-b.example")
 	Init()
-	Config.Set("server.id", "")
-	Config.Set("server.internal_url", "")
-	Config.Set("server.internal_token", "")
 
-	err := ValidateMultiReplicaRequirements()
-	if err == nil {
-		t.Fatal("expected validation error for missing multi-replica settings")
+	if got := Config.GetString("buildkit.bootstrap_dockerhub_mirrors"); got != "https://mirror-a.example, https://mirror-b.example" {
+		t.Fatalf("bootstrap mirrors=%q, want env value", got)
 	}
 }
 
-func TestValidateMultiReplicaRequirements_AllowsCompleteInternalSettings(t *testing.T) {
+func TestBootstrapDockerHubMirrors_ParsesEnvList(t *testing.T) {
+	t.Setenv("BOOTSTRAP_DOCKERHUB_MIRRORS", " https://mirror-a.example ,https://mirror-b.example ,, ")
 	Init()
-	Config.Set("server.id", "server-a")
-	Config.Set("server.internal_url", "http://server-a:8080")
-	Config.Set("server.internal_token", "shared-secret")
 
-	if err := ValidateMultiReplicaRequirements(); err != nil {
-		t.Fatalf("expected validation success, got %v", err)
+	got := BootstrapDockerHubMirrors()
+	want := []string{"https://mirror-a.example", "https://mirror-b.example"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mirrors=%v, want=%v", got, want)
 	}
 }
 
-func TestDatabaseStartupFlags_AreNoLongerConfigured(t *testing.T) {
-	t.Setenv("DB_AUTO_MIGRATE", "true")
-	t.Setenv("DB_SEED_TEST_DATA", "true")
-
+func TestBootstrapDockerHubMirrors_EmptyEnvReturnsBuiltInDefaults(t *testing.T) {
+	t.Setenv("BOOTSTRAP_DOCKERHUB_MIRRORS", "")
 	Init()
 
-	if Config.IsSet("database.auto_migrate") {
-		t.Fatal("expected database.auto_migrate to be removed from configuration")
+	got := BootstrapDockerHubMirrors()
+	want := []string{
+		"https://docker.1ms.run/",
+		"https://hub-mirror.c.163.com/",
+		"https://docker.mirrors.ustc.edu.cn/",
+		"https://docker.m.daocloud.io/",
+		"https://mirror.aliyuncs.com/",
 	}
-	if Config.IsSet("database.seed_test_data") {
-		t.Fatal("expected database.seed_test_data to be removed from configuration")
-	}
-}
-
-func TestServerMode_NormalizesInvalidValues(t *testing.T) {
-	Init()
-	Config.Set("server.mode", "invalid-mode")
-
-	if got := ServerMode(); got != "release" {
-		t.Fatalf("server mode=%s, want release", got)
-	}
-
-	Config.Set("server.mode", "debug")
-	if got := ServerMode(); got != "debug" {
-		t.Fatalf("server mode=%s, want debug", got)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mirrors=%v, want=%v", got, want)
 	}
 }

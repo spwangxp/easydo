@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -121,6 +122,7 @@ func TestDockerTaskDefinitionIncludesRequiredImageField(t *testing.T) {
 	imageNameFound := false
 	preBuildScriptFound := false
 	pushFound := false
+	architecturesFound := false
 	for _, field := range def.FieldsSchema {
 		if field.Key == "image_name" {
 			imageNameFound = true
@@ -143,9 +145,24 @@ func TestDockerTaskDefinitionIncludesRequiredImageField(t *testing.T) {
 				t.Fatalf("expected pre_build_script to render as textarea, got %s", field.UIComponent)
 			}
 		}
+		if field.Key == "architectures" {
+			architecturesFound = true
+			if field.Type != "multiselect" {
+				t.Fatalf("expected architectures field to be multiselect, got %s", field.Type)
+			}
+			if field.UIComponent != "checkbox_group" {
+				t.Fatalf("expected architectures to render as checkbox_group, got %s", field.UIComponent)
+			}
+			if !reflect.DeepEqual(field.Default, []string{"linux/amd64", "linux/arm64"}) {
+				t.Fatalf("expected architectures default dual-arch, got %#v", field.Default)
+			}
+			if len(field.Options) != 2 {
+				t.Fatalf("expected architectures options, got %#v", field.Options)
+			}
+		}
 	}
-	if !imageNameFound || !pushFound || !preBuildScriptFound {
-		t.Fatalf("expected docker fields schema to include image_name, pre_build_script and push, got %#v", def.FieldsSchema)
+	if !imageNameFound || !pushFound || !preBuildScriptFound || !architecturesFound {
+		t.Fatalf("expected docker fields schema to include image_name, pre_build_script, push and architectures, got %#v", def.FieldsSchema)
 	}
 }
 

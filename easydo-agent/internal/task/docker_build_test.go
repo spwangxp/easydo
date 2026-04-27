@@ -22,7 +22,7 @@ func TestDockerBuildScript_HostRuntimeUsesDetectedRuntime(t *testing.T) {
 	}
 }
 
-func TestDockerBuildScript_EmbeddedBuildkitUsesTaskScopedRuntimeRoot(t *testing.T) {
+func TestDockerBuildScript_EmbeddedBuildkitUsesSharedRuntimeRoot(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
 	script, err := executor.dockerBuildScript(TaskParams{TaskID: 987, Params: map[string]interface{}{
 		"image_name": "demo/app",
@@ -33,15 +33,15 @@ func TestDockerBuildScript_EmbeddedBuildkitUsesTaskScopedRuntimeRoot(t *testing.
 	if err != nil {
 		t.Fatalf("dockerBuildScript returned error: %v", err)
 	}
-	if !strings.Contains(script, `RUNTIME_ROOT="$(pwd)/.easydo-buildkit/task_987"`) {
-		t.Fatalf("expected embedded buildkit runtime root to be task scoped, got:\n%s", script)
+	if !strings.Contains(script, `RUNTIME_ROOT="$(pwd)/.easydo-buildkit/shared"`) {
+		t.Fatalf("expected embedded buildkit runtime root to be shared, got:\n%s", script)
 	}
-	if strings.Contains(script, "RUNTIME_ROOT=\"$(pwd)/.easydo-buildkit\"\n") {
-		t.Fatalf("expected embedded buildkit runtime root not to use shared directory, got:\n%s", script)
+	if strings.Contains(script, `/task_987`) {
+		t.Fatalf("expected embedded buildkit runtime root not to be task scoped, got:\n%s", script)
 	}
 }
 
-func TestDockerBuildScript_EmbeddedBuildkitCleansTaskScopedRuntimeRoot(t *testing.T) {
+func TestDockerBuildScript_EmbeddedBuildkitKeepsSharedRuntimeRoot(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
 	script, err := executor.dockerBuildScript(TaskParams{TaskID: 654, Params: map[string]interface{}{
 		"image_name": "demo/app",
@@ -52,8 +52,27 @@ func TestDockerBuildScript_EmbeddedBuildkitCleansTaskScopedRuntimeRoot(t *testin
 	if err != nil {
 		t.Fatalf("dockerBuildScript returned error: %v", err)
 	}
-	if !strings.Contains(script, `rm -rf "$RUNTIME_ROOT"`) {
-		t.Fatalf("expected embedded buildkit cleanup to remove task runtime root, got:\n%s", script)
+	if strings.Contains(script, `rm -rf "$RUNTIME_ROOT"`) {
+		t.Fatalf("expected embedded buildkit cleanup not to remove shared runtime root, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitRemovesDirectoryLockOnCleanup(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{TaskID: 655, Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./build/Dockerfile",
+		"context":    ".",
+	}}, "/workspace/app")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if strings.Contains(script, `rm -f "$LOCK_FILE"`) {
+		t.Fatalf("expected embedded buildkit cleanup not to remove lock dir as a file, got:\n%s", script)
+	}
+	if !strings.Contains(script, `rmdir "$LOCK_FILE" >/dev/null 2>&1 || true`) {
+		t.Fatalf("expected embedded buildkit cleanup to remove directory lock, got:\n%s", script)
 	}
 }
 
@@ -169,6 +188,11 @@ func TestDockerBuildScript_HostRuntimePushNormalizesDockerHubAliases(t *testing.
 
 func TestDockerBuildScript_EmbeddedBuildkitUsesBuildctl(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	executor.SetEmbeddedBuildkitEnv(map[string]string{
+		"EASYDO_BUILDKIT_SOCKET_PATH": "/tmp/buildkitd.sock",
+		"EASYDO_BUILDKIT_STATE_DIR":   "/tmp/buildkit-state",
+		"EASYDO_BUILDKIT_CONFIG_PATH": "/tmp/buildkitd.toml",
+	})
 	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{"image_name": "demo/app", "image_tag": "v1", "dockerfile": "./build/Dockerfile", "context": ".", "push": false}}, "/workspace/app")
 	if err != nil {
 		t.Fatalf("dockerBuildScript returned error: %v", err)
@@ -176,20 +200,28 @@ func TestDockerBuildScript_EmbeddedBuildkitUsesBuildctl(t *testing.T) {
 	if strings.Contains(script, `unshare -Ur`) || strings.Contains(script, `rootlesskit buildkitd`) || strings.Contains(script, `buildkitd --rootless`) {
 		t.Fatalf("expected embedded buildkit script to use direct privileged buildkitd launch, got:\n%s", script)
 	}
-	if !strings.Contains(script, `buildkitd --addr "unix://$SOCKET_PATH" --root "$STATE_DIR"`) {
-		t.Fatalf("expected embedded buildkit to launch buildkitd directly, got:\n%s", script)
+	for _, unexpected := range []string{
+		`buildkitd --config`,
+		`buildkitd did not become ready`,
+		`shared buildkitd did not become ready`,
+		`mkdir "$LOCK_FILE"`,
+	} {
+		if strings.Contains(script, unexpected) {
+			t.Fatalf("expected embedded buildkit task script not to manage daemon lifecycle with %s, got:\n%s", unexpected, script)
+		}
 	}
-	if !strings.Contains(script, `buildctl --addr "unix://$SOCKET_PATH" build`) {
-		t.Fatalf("expected buildctl build in script, got:\n%s", script)
-	}
-	if !strings.Contains(script, `OUTPUT_SPEC="type=oci,dest=.easydo-artifacts/images/demo_app_v1.tar"`) {
-		t.Fatalf("expected OCI output for non-push build, got:\n%s", script)
-	}
-	if !strings.Contains(script, `--local context="."`) {
-		t.Fatalf("expected relative context dir, got:\n%s", script)
-	}
-	if !strings.Contains(script, `--local dockerfile="build"`) {
-		t.Fatalf("expected relative dockerfile dir, got:\n%s", script)
+	for _, expected := range []string{
+		`SOCKET_PATH="/tmp/buildkitd.sock"`,
+		`BUILDKIT_STATE_DIR="/tmp/buildkit-state"`,
+		`BUILDKIT_CONFIG_PATH="/tmp/buildkitd.toml"`,
+		`buildctl --addr "unix://$SOCKET_PATH" build`,
+		`OUTPUT_SPEC="type=oci,dest=.easydo-artifacts/images/demo_app_v1.tar"`,
+		`--local context="."`,
+		`--local dockerfile="build"`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("expected embedded buildkit script to include %s, got:\n%s", expected, script)
+		}
 	}
 }
 
@@ -234,9 +266,9 @@ func TestDockerBuildScript_EmbeddedBuildkitMultiArchAddsPlatformOpt(t *testing.T
 	}
 }
 
-func TestDockerBuildScript_EmbeddedBuildkitPushExportsDockerConfig(t *testing.T) {
+func TestDockerBuildScript_EmbeddedBuildkitPushUsesTaskScopedDockerConfig(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
-	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+	script, err := executor.dockerBuildScript(TaskParams{TaskID: 123, Params: map[string]interface{}{
 		"image_name":    "demo/app",
 		"image_tag":     "v1",
 		"dockerfile":    "./build/Dockerfile",
@@ -248,8 +280,49 @@ func TestDockerBuildScript_EmbeddedBuildkitPushExportsDockerConfig(t *testing.T)
 	if err != nil {
 		t.Fatalf("dockerBuildScript returned error: %v", err)
 	}
-	if !strings.Contains(script, `export DOCKER_CONFIG`) {
-		t.Fatalf("expected embedded buildkit push to export DOCKER_CONFIG, got:\n%s", script)
+	if strings.Contains(script, `DOCKER_CONFIG="$(pwd)/.easydo-buildkit/shared/docker"`) {
+		t.Fatalf("expected embedded buildkit push not to reuse shared docker config dir, got:\n%s", script)
+	}
+	if !strings.Contains(script, `.easydo-buildkit/tasks/task_123/docker`) {
+		t.Fatalf("expected embedded buildkit push to use task scoped docker config dir, got:\n%s", script)
+	}
+	if strings.Contains(script, `.easydo-buildkit/tasks/registry.example.com_demo_app_v1/docker`) {
+		t.Fatalf("expected embedded buildkit push docker config dir to stop using image-ref scope, got:\n%s", script)
+	}
+	if !strings.Contains(script, `cat > "$DOCKER_CONFIG/config.json" <<EOF`) {
+		t.Fatalf("expected embedded buildkit push to write auth config into task scoped docker config, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitPushUsesDistinctDockerConfigPerTaskID(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	scriptA, err := executor.dockerBuildScript(TaskParams{TaskID: 123, Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./build/Dockerfile",
+		"context":    ".",
+		"push":       true,
+		"registry":   "registry.example.com",
+	}}, "/workspace/app")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error for task 123: %v", err)
+	}
+	scriptB, err := executor.dockerBuildScript(TaskParams{TaskID: 456, Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./build/Dockerfile",
+		"context":    ".",
+		"push":       true,
+		"registry":   "registry.example.com",
+	}}, "/workspace/app")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error for task 456: %v", err)
+	}
+	if !strings.Contains(scriptA, `.easydo-buildkit/tasks/task_123/docker`) {
+		t.Fatalf("expected task 123 script to use task_123 docker config dir, got:\n%s", scriptA)
+	}
+	if !strings.Contains(scriptB, `.easydo-buildkit/tasks/task_456/docker`) {
+		t.Fatalf("expected task 456 script to use task_456 docker config dir, got:\n%s", scriptB)
 	}
 }
 
@@ -301,6 +374,96 @@ func TestDockerBuildScript_EmbeddedBuildkitPushAddsDockerHubAliasAuthEntries(t *
 		if !strings.Contains(script, expected) {
 			t.Fatalf("expected embedded buildkit auth config to include %s, got:\n%s", expected, script)
 		}
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitPushExportsDockerConfigForBuildctl(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{TaskID: 123, Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./build/Dockerfile",
+		"context":    ".",
+		"push":       true,
+		"registry":   "registry.example.com",
+	}}, "/workspace/app")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if !strings.Contains(script, `export DOCKER_CONFIG`) {
+		t.Fatalf("expected embedded buildkit push to export DOCKER_CONFIG for buildctl, got:\n%s", script)
+	}
+}
+
+func TestExecutorEmbeddedBuildkitEnvIsCopied(t *testing.T) {
+	executor := &Executor{}
+	executor.SetEmbeddedBuildkitEnv(map[string]string{
+		"EASYDO_BUILDKIT_SOCKET_PATH": "/var/run/easydo/buildkitd.sock",
+		"EASYDO_BUILDKIT_STATE_DIR":   "/var/lib/easydo/buildkit",
+	})
+	got := executor.EmbeddedBuildkitEnv()
+	if got["EASYDO_BUILDKIT_SOCKET_PATH"] != "/var/run/easydo/buildkitd.sock" {
+		t.Fatalf("socket path=%q, want propagated value", got["EASYDO_BUILDKIT_SOCKET_PATH"])
+	}
+	got["EASYDO_BUILDKIT_SOCKET_PATH"] = "/mutated"
+	if executor.EmbeddedBuildkitEnv()["EASYDO_BUILDKIT_SOCKET_PATH"] != "/var/run/easydo/buildkitd.sock" {
+		t.Fatal("expected embedded buildkit env getter to return a defensive copy")
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitUsesConfiguredSocketPaths(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	executor.SetEmbeddedBuildkitEnv(map[string]string{
+		"EASYDO_BUILDKIT_SOCKET_PATH": "/var/run/easydo/buildkitd.sock",
+		"EASYDO_BUILDKIT_STATE_DIR":   "/var/lib/easydo/buildkit",
+		"EASYDO_BUILDKIT_CONFIG_PATH": "/etc/easydo/buildkitd.toml",
+	})
+	script, err := executor.dockerBuildScript(TaskParams{TaskID: 777, Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./build/Dockerfile",
+		"context":    ".",
+	}}, "/workspace/app")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	for _, expected := range []string{
+		`SOCKET_PATH="/var/run/easydo/buildkitd.sock"`,
+		`BUILDKIT_STATE_DIR="/var/lib/easydo/buildkit"`,
+		`BUILDKIT_CONFIG_PATH="/etc/easydo/buildkitd.toml"`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("expected embedded buildkit script to include %s, got:\n%s", expected, script)
+		}
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitGeneratesDockerHubMirrorConfigFromTaskParams(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{TaskID: 777, Params: map[string]interface{}{
+		"image_name":         "demo/app",
+		"image_tag":          "v1",
+		"dockerfile":         "./build/Dockerfile",
+		"context":            ".",
+		"dockerhub_mirrors": []interface{}{"https://mirror-a.example", "https://mirror-b.example"},
+	}}, "/workspace/app")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	for _, expected := range []string{
+		`BUILDKIT_CONFIG_PATH="$(pwd)/.easydo-buildkit/shared/buildkitd.toml"`,
+		`[registry."docker.io"]`,
+		`mirrors = [`,
+		`"https://mirror-a.example"`,
+		`"https://mirror-b.example"`,
+		`cat >> "$BUILDKIT_CONFIG_PATH" <<'EOF'`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("expected embedded buildkit script to include %s, got:\n%s", expected, script)
+		}
+	}
+	if strings.Contains(script, `docker info --format '{{json .RegistryConfig.IndexConfigs}}'`) {
+		t.Fatalf("expected embedded buildkit script not to depend on docker info, got:\n%s", script)
 	}
 }
 

@@ -96,6 +96,7 @@ func openHandlerTestDB(t *testing.T) *gorm.DB {
 		&models.DeploymentRequest{},
 		&models.DeploymentRecord{},
 		&models.MasterKey{},
+		&models.SystemSetting{},
 	); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}

@@ -37,25 +37,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-          {{- if or .Values.agent.mountDockerSock .Values.agent.extraVolumeMounts }}
+          {{- with .Values.agent.extraVolumeMounts }}
           volumeMounts:
-            {{- if .Values.agent.mountDockerSock }}
-            - name: docker-sock
-              mountPath: {{ .Values.agent.dockerSockPath | quote }}
-            {{- end }}
-            {{- with .Values.agent.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
-            {{- end }}
           {{- end }}
-      {{- if or .Values.agent.mountDockerSock .Values.agent.extraVolumes }}
+      {{- with .Values.agent.extraVolumes }}
       volumes:
-        {{- if .Values.agent.mountDockerSock }}
-        - name: docker-sock
-          hostPath:
-            path: {{ .Values.agent.dockerSockPath | quote }}
-            type: Socket
-        {{- end }}
-        {{- with .Values.agent.extraVolumes }}
         {{- toYaml . | nindent 8 }}
-        {{- end }}
       {{- end }}

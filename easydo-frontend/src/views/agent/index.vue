@@ -253,6 +253,19 @@
           <el-input-number v-model="formData.max_concurrent_pipelines" :min="1" :max="100" placeholder="并发数量" />
           <span class="form-tip">实时生效：达到上限后新任务将进入排队</span>
         </el-form-item>
+        <el-form-item label="任务并发" prop="task_concurrency">
+          <el-input-number v-model="formData.task_concurrency" :min="1" :max="100" placeholder="任务并发数量" />
+          <span class="form-tip">默认 5，控制执行器同时运行的任务数量</span>
+        </el-form-item>
+        <el-form-item label="镜像地址">
+          <el-input
+            v-model="formData.dockerhub_mirrors_text"
+            type="textarea"
+            :rows="4"
+            placeholder="每行一个镜像地址；默认已填充当前生效镜像"
+          />
+          <div class="form-tip">默认显示当前生效镜像。保持不变表示继续使用系统默认；留空表示显式禁用镜像。</div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -322,7 +335,11 @@
             <el-descriptions-item label="版本">{{ currentAgent.version || '-' }}</el-descriptions-item>
             <el-descriptions-item label="最后心跳">{{ formatDateTime(currentAgent.last_heart_at) }}</el-descriptions-item>
             <el-descriptions-item label="流水线并发上限">{{ currentAgent.max_concurrent_pipelines || 10 }}</el-descriptions-item>
+            <el-descriptions-item label="任务并发上限">{{ currentAgent.task_concurrency || 5 }}</el-descriptions-item>
             <el-descriptions-item label="心跳周期">{{ currentAgent.heartbeat_interval || 10 }} 秒</el-descriptions-item>
+            <el-descriptions-item label="镜像配置模式">{{ currentAgent.dockerhub_mirrors_configured ? '自定义' : '系统默认' }}</el-descriptions-item>
+            <el-descriptions-item label="系统默认镜像" :span="2">{{ formatMirrorListForDisplay(currentAgent.system_default_dockerhub_mirrors, '未配置') }}</el-descriptions-item>
+            <el-descriptions-item label="生效镜像" :span="2">{{ formatMirrorListForDisplay(currentAgent.effective_dockerhub_mirrors, currentAgent.dockerhub_mirrors_configured ? '已显式禁用' : '未配置') }}</el-descriptions-item>
           </el-descriptions>
         </div>
         <div class="detail-section" v-if="currentAgent.registration_status === 'approved' && canRefreshToken(currentAgent)">
@@ -681,6 +698,7 @@ import {
 } from '@element-plus/icons-vue'
 import { getAgentList, getAgentDetail, updateAgent, deleteAgent, getAgentHeartbeats, refreshAgentToken, approveAgent, rejectAgent, removeAgent, getPendingAgents } from '@/api/agent'
 import { getTaskDispatchList } from '@/api/task'
+import { normalizeMirrorList, deriveMirrorEditorText, buildMirrorSubmitPayload } from './mirrorSettings'
 
 const userStore = useUserStore()
 
@@ -752,7 +770,11 @@ const formData = reactive({
   scope_type: 'platform',
   workspace_id: null,
   heartbeat_interval: 10,
-  max_concurrent_pipelines: 10
+  max_concurrent_pipelines: 10,
+  task_concurrency: 5,
+  dockerhub_mirrors_configured: false,
+  dockerhub_mirrors_text: '',
+  system_default_dockerhub_mirrors: []
 })
 
 const formRules = {
@@ -924,6 +946,13 @@ const parseLabels = (labelsStr) => {
   }
 }
 
+const formatMirrorListForDisplay = (mirrors, emptyText = '-') => {
+  if (!Array.isArray(mirrors) || mirrors.length === 0) {
+    return emptyText
+  }
+  return mirrors.join('、')
+}
+
 const formatMemory = (bytes) => {
   if (!bytes) return '-'
   const gb = bytes / (1024 * 1024 * 1024)
@@ -1013,20 +1042,35 @@ const handleSearch = () => {
   }, 300)
 }
 
-const handleEdit = (agent) => {
-  isEdit.value = true
-  currentAgentId.value = agent.id
-  formData.name = agent.name
-  formData.host = agent.host
-  formData.port = agent.port
-  formData.labels = agent.labels || ''
-  formData.tags = agent.tags || ''
-  formData.status = agent.status
-  formData.scope_type = isPlatformScoped(agent) ? 'platform' : 'workspace'
-  formData.workspace_id = agent.workspace_id || null
-  formData.heartbeat_interval = agent.heartbeat_interval || 10
-  formData.max_concurrent_pipelines = agent.max_concurrent_pipelines || 10
-  dialogVisible.value = true
+const handleEdit = async (agent) => {
+  try {
+    const res = await getAgentDetail(agent.id)
+    if (res.code !== 200) {
+      ElMessage.error(res.message || '获取详情失败')
+      return
+    }
+    const detail = res.data || {}
+    isEdit.value = true
+    currentAgentId.value = agent.id
+    formData.name = detail.name || agent.name
+    formData.host = detail.host || agent.host
+    formData.port = detail.port || agent.port
+    formData.labels = detail.labels || agent.labels || ''
+    formData.tags = detail.tags || agent.tags || ''
+    formData.status = detail.status || agent.status
+    formData.scope_type = isPlatformScoped(detail) ? 'platform' : 'workspace'
+    formData.workspace_id = detail.workspace_id || null
+    formData.heartbeat_interval = detail.heartbeat_interval || 10
+    formData.max_concurrent_pipelines = detail.max_concurrent_pipelines || 10
+    formData.task_concurrency = detail.task_concurrency || 5
+    formData.dockerhub_mirrors_configured = Boolean(detail.dockerhub_mirrors_configured)
+    formData.system_default_dockerhub_mirrors = detail.system_default_dockerhub_mirrors || []
+    formData.dockerhub_mirrors_text = deriveMirrorEditorText(detail)
+    dialogVisible.value = true
+  } catch (error) {
+    console.error('获取执行器详情失败:', error)
+    ElMessage.error('获取详情失败')
+  }
 }
 
 const handleDetail = async (agent) => {
@@ -1281,13 +1325,17 @@ const handleSubmit = async () => {
       return
     }
 
+    const mirrorPayload = buildMirrorSubmitPayload(formData)
     const data = {
       name: formData.name,
       labels: formData.labels,
       tags: formData.tags,
       status: formData.status,
       heartbeat_interval: formData.heartbeat_interval,
-      max_concurrent_pipelines: formData.max_concurrent_pipelines
+      max_concurrent_pipelines: formData.max_concurrent_pipelines,
+      task_concurrency: formData.task_concurrency,
+      dockerhub_mirrors_configured: mirrorPayload.dockerhub_mirrors_configured,
+      dockerhub_mirrors: mirrorPayload.dockerhub_mirrors
     }
     if (isPlatformAdmin.value) {
       data.scope_type = formData.scope_type

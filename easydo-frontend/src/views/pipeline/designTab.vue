@@ -536,8 +536,8 @@
             <el-form-item>
               <el-checkbox v-model="selectedNode.ignore_failure" @change="updateNode(selectedNode)">
                 <div class="checkbox-label">
-                  <span class="checkbox-title">忽略失败</span>
-                  <span class="checkbox-desc">当前置任务执行失败时，仍然继续执行当前任务</span>
+                  <span class="checkbox-title">忽略当前节点失败</span>
+                  <span class="checkbox-desc">当前节点执行失败时，任务状态仍显示失败，但不会阻断后续节点继续执行</span>
                 </div>
               </el-checkbox>
             </el-form-item>
@@ -1243,8 +1243,7 @@ const finishConnection = (node, port, type) => {
     connections.value.push({
       id: `conn_${Date.now()}`,
       from: connectionStart.value.node.id,
-      to: node.id,
-      ignore_failure: false
+      to: node.id
     })
     
     // 更新端口连接状态
@@ -1587,8 +1586,7 @@ const syncConnectionsWithPredecessors = () => {
       nextConnections.push({
         id: existing?.id || `conn_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
         from: predId,
-        to: node.id,
-        ignore_failure: existing?.ignore_failure || false
+        to: node.id
       })
     })
 
@@ -2016,14 +2014,14 @@ const buildDefinitionNodes = () => nodes.value.map((node) => {
     node_name: node.name || node.id,
     task_key: normalizeTaskType(node.type),
     task_version: 1,
+    ignore_failure: Boolean(node.ignore_failure),
     params: normalizedParams,
     credential_bindings: bindings.credential_bindings,
     resource_bindings: bindings.resource_bindings,
     metadata: {
       x: typeof node.x === 'number' ? node.x : 100,
       y: typeof node.y === 'number' ? node.y : 100,
-      description: node.description || '',
-      ignore_failure: Boolean(node.ignore_failure)
+      description: node.description || ''
     }
   }
 })
@@ -2221,8 +2219,7 @@ const loadPipeline = async () => {
           connections.value = (normalizedConfig.edges || []).map((edge, idx) => ({
             id: `conn_${Date.now()}_${idx}`,
             from: edge.from_node_id || edge.from,
-            to: edge.to_node_id || edge.to,
-            ignore_failure: edge.ignore_failure || false
+            to: edge.to_node_id || edge.to
           }))
           
           // 从 edges 重建每个节点的 predecessors 数组

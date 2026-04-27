@@ -249,20 +249,20 @@ func TestRunRejectsFailedPriorMigration(t *testing.T) {
 	}
 }
 
-func TestDiscoverEmbeddedMigrationsIncludesNotificationDomainMigration(t *testing.T) {
+func TestDiscoverEmbeddedMigrationsIncludesAgentExecutorSettingsMigration(t *testing.T) {
 	migrations, err := discoverMigrations(dbmigrations.Files)
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 2 {
-		t.Fatalf("embedded migration count=%d, want 2", len(migrations))
+	if len(migrations) != 3 {
+		t.Fatalf("embedded migration count=%d, want 3", len(migrations))
 	}
 	latest := migrations[len(migrations)-1]
-	if latest.Version != 2 {
-		t.Fatalf("latest migration version=%d, want 2", latest.Version)
+	if latest.Version != 3 {
+		t.Fatalf("latest migration version=%d, want 3", latest.Version)
 	}
-	if latest.Script != "V2__bootstrap_seed_data.sql" {
-		t.Fatalf("latest migration script=%s, want V2__bootstrap_seed_data.sql", latest.Script)
+	if latest.Script != "V3__agent_buildkit_executor_settings.sql" {
+		t.Fatalf("latest migration script=%s, want V3__agent_buildkit_executor_settings.sql", latest.Script)
 	}
 }
 
@@ -285,8 +285,8 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 2 {
-		t.Fatalf("embedded migration count=%d, want 2", len(migrations))
+	if len(migrations) != 3 {
+		t.Fatalf("embedded migration count=%d, want 3", len(migrations))
 	}
 	if migrations[0].VersionText != "1" || migrations[0].Script != "V1__schema.sql" {
 		t.Fatalf("unexpected first embedded migration: %+v", migrations[0])
@@ -294,7 +294,10 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if migrations[1].VersionText != "2" || migrations[1].Script != "V2__bootstrap_seed_data.sql" {
 		t.Fatalf("unexpected second embedded migration: %+v", migrations[1])
 	}
-	if len(migrations[0].Statements) == 0 || len(migrations[1].Statements) == 0 {
+	if migrations[2].VersionText != "3" || migrations[2].Script != "V3__agent_buildkit_executor_settings.sql" {
+		t.Fatalf("unexpected third embedded migration: %+v", migrations[2])
+	}
+	if len(migrations[0].Statements) == 0 || len(migrations[1].Statements) == 0 || len(migrations[2].Statements) == 0 {
 		t.Fatalf("expected parsed statements for embedded migrations, got %+v", migrations)
 	}
 }
@@ -401,6 +404,19 @@ func TestEmbeddedRestoreAgentLogChunksMigrationDeclaresAgentLogChunksTable(t *te
 	for _, expected := range []string{"CREATE TABLE `agent_log_chunks`", "task_id", "pipeline_run_id", "agent_id", "agent_session_id", "attempt", "seq", "stream", "chunk", "timestamp", "unique_key"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("expected V1 schema to contain %q, got %s", expected, text)
+		}
+	}
+}
+
+func TestEmbeddedAgentBuildkitExecutorSettingsMigrationDeclaresAgentAndSystemSettingColumns(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V3__agent_buildkit_executor_settings.sql")
+	if err != nil {
+		t.Fatalf("read V3 migration failed: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{"ALTER TABLE `agents`", "task_concurrency", "dockerhub_mirrors", "dockerhub_mirrors_configured", "CREATE TABLE `system_settings`", "`key` varchar(128) NOT NULL", "UNIQUE KEY `idx_system_settings_key` (`key`)"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected V3 migration to contain %q, got %s", expected, text)
 		}
 	}
 }

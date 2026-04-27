@@ -11,6 +11,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"easydo-agent/internal/system"
+	"github.com/sirupsen/logrus"
 )
 
 func TestParseParams_PreservesEnvVarsWhenJSONContainsNonStringValues(t *testing.T) {
@@ -87,6 +90,59 @@ func TestErrToString_IncludesStderrForExitErrors(t *testing.T) {
 	}
 	if !strings.Contains(got, "Permission denied") {
 		t.Fatalf("expected stderr snippet in error, got=%q", got)
+	}
+}
+
+func TestEmbeddedBuildkitManagerEnsureRunningSetsExecutorEnv(t *testing.T) {
+	workspacePath := t.TempDir()
+	mgr := NewEmbeddedBuildkitManager(logrus.New(), workspacePath, system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit})
+	startCalls := 0
+	mgr.startProcess = func(configPath, socketPath, stateDir, logPath string) (processHandle, error) {
+		startCalls++
+		return processHandle{}, nil
+	}
+	mgr.waitUntilReady = func(socketPath string) error { return nil }
+	mgr.stopProcess = func(processHandle) error { return nil }
+
+	if err := mgr.EnsureRunning([]string{"https://mirror-a.example"}); err != nil {
+		t.Fatalf("ensure running failed: %v", err)
+	}
+	if startCalls != 1 {
+		t.Fatalf("start calls=%d, want 1", startCalls)
+	}
+	env := mgr.Env()
+	if env["EASYDO_BUILDKIT_SOCKET_PATH"] == "" || env["EASYDO_BUILDKIT_CONFIG_PATH"] == "" {
+		t.Fatalf("expected buildkit env to be populated, got %#v", env)
+	}
+	configBytes, err := os.ReadFile(env["EASYDO_BUILDKIT_CONFIG_PATH"])
+	if err != nil {
+		t.Fatalf("read buildkit config failed: %v", err)
+	}
+	configText := string(configBytes)
+	if !strings.Contains(configText, `[registry."docker.io"]`) || !strings.Contains(configText, `"https://mirror-a.example"`) {
+		t.Fatalf("expected mirror config in buildkit config, got:\n%s", configText)
+	}
+}
+
+func TestEmbeddedBuildkitManagerDoesNotRestartWhenMirrorsUnchanged(t *testing.T) {
+	mgr := NewEmbeddedBuildkitManager(logrus.New(), t.TempDir(), system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit})
+	startCalls := 0
+	mgr.startProcess = func(configPath, socketPath, stateDir, logPath string) (processHandle, error) {
+		startCalls++
+		return processHandle{pid: 1}, nil
+	}
+	mgr.waitUntilReady = func(socketPath string) error { return nil }
+	mgr.stopProcess = func(processHandle) error { return nil }
+
+	mirrors := []string{"https://mirror-a.example"}
+	if err := mgr.EnsureRunning(mirrors); err != nil {
+		t.Fatalf("first ensure failed: %v", err)
+	}
+	if err := mgr.EnsureRunning(mirrors); err != nil {
+		t.Fatalf("second ensure failed: %v", err)
+	}
+	if startCalls != 1 {
+		t.Fatalf("start calls=%d, want 1", startCalls)
 	}
 }
 

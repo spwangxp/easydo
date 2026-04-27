@@ -27,21 +27,24 @@ import (
 // server relies on to converge run/task state. Terminal status/log messages may
 // need to survive temporary WS outages and be replayed after reconnect.
 type TaskHandler struct {
-	httpClient *client.HTTPClient
-	wsClient   *client.WebSocketClient
-	cfg        *config.Config
-	tokenMgr   *TokenManager
-	agentID    uint64
-	token      string
-	log        *logrus.Logger
-	executor   *task.Executor
-	mu         sync.RWMutex
-	running    bool
-	stopChan   chan struct{}
-	runCtx     context.Context
-	inFlight   sync.Map
-	pendingMu  sync.Mutex
-	pendingWS  []pendingWebSocketMessage
+	httpClient            *client.HTTPClient
+	wsClient              *client.WebSocketClient
+	cfg                   *config.Config
+	tokenMgr              *TokenManager
+	agentID               uint64
+	token                 string
+	log                   *logrus.Logger
+	executor              *task.Executor
+	embeddedBuildkit      *task.EmbeddedBuildkitManager
+	mu                    sync.RWMutex
+	running               bool
+	stopChan              chan struct{}
+	runCtx                context.Context
+	inFlight              sync.Map
+	pendingMu             sync.Mutex
+	pendingWS             []pendingWebSocketMessage
+	taskSlots             chan struct{}
+	runtimeAgentCfg       client.AgentConfig
 }
 
 // pendingWebSocketMessage stores one outbound WS message that could not be sent
@@ -53,14 +56,17 @@ type pendingWebSocketMessage struct {
 
 // NewTaskHandler creates a new task handler
 func NewTaskHandler(httpClient *client.HTTPClient, wsClient *client.WebSocketClient, cfg *config.Config, tokenMgr *TokenManager, runtimeCaps system.RuntimeCapabilities, log *logrus.Logger) *TaskHandler {
+	executor := task.NewExecutor(log, cfg.GetWorkspacePath(), runtimeCaps)
 	return &TaskHandler{
-		httpClient: httpClient,
-		wsClient:   wsClient,
-		cfg:        cfg,
-		tokenMgr:   tokenMgr,
-		log:        log,
-		executor:   task.NewExecutor(log, cfg.GetWorkspacePath(), runtimeCaps),
-		stopChan:   make(chan struct{}),
+		httpClient:       httpClient,
+		wsClient:         wsClient,
+		cfg:              cfg,
+		tokenMgr:         tokenMgr,
+		log:              log,
+		executor:         executor,
+		embeddedBuildkit: task.NewEmbeddedBuildkitManager(log, cfg.GetWorkspacePath(), runtimeCaps),
+		stopChan:         make(chan struct{}),
+		taskSlots:        make(chan struct{}, defaultTaskConcurrencyLimit()),
 	}
 }
 
@@ -97,6 +103,87 @@ func (th *TaskHandler) SetToken(token string) {
 	th.mu.Lock()
 	th.token = token
 	th.mu.Unlock()
+}
+
+func defaultTaskConcurrencyLimit() int {
+	return 5
+}
+
+func normalizeDockerHubMirrors(value any) []string {
+	mirrors := make([]string, 0)
+	appendMirror := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		for _, existing := range mirrors {
+			if existing == raw {
+				return
+			}
+		}
+		mirrors = append(mirrors, raw)
+	}
+	switch v := value.(type) {
+	case []string:
+		for _, item := range v {
+			appendMirror(item)
+		}
+	case []any:
+		for _, item := range v {
+			appendMirror(fmt.Sprint(item))
+		}
+	case string:
+		for _, item := range strings.Split(v, ",") {
+			appendMirror(item)
+		}
+	}
+	return mirrors
+}
+
+func (th *TaskHandler) getTaskConcurrencyLimit(agentCfg client.AgentConfig) int {
+	if agentCfg.TaskConcurrency > 0 {
+		return agentCfg.TaskConcurrency
+	}
+	return defaultTaskConcurrencyLimit()
+}
+
+func (th *TaskHandler) updateTaskConcurrency(agentCfg client.AgentConfig) {
+	limit := th.getTaskConcurrencyLimit(agentCfg)
+	if limit <= 0 {
+		limit = defaultTaskConcurrencyLimit()
+	}
+	th.mu.Lock()
+	defer th.mu.Unlock()
+	th.runtimeAgentCfg = agentCfg
+	if th.taskSlots != nil && cap(th.taskSlots) == limit {
+		return
+	}
+	th.taskSlots = make(chan struct{}, limit)
+}
+
+func (th *TaskHandler) updateRuntimeAgentConfig(agentCfg client.AgentConfig) {
+	th.mu.Lock()
+	th.runtimeAgentCfg = agentCfg
+	th.mu.Unlock()
+}
+
+func (th *TaskHandler) runtimeAgentConfig() client.AgentConfig {
+	th.mu.RLock()
+	defer th.mu.RUnlock()
+	return th.runtimeAgentCfg
+}
+
+func (th *TaskHandler) withTaskSlot(run func()) {
+	th.mu.RLock()
+	taskSlots := th.taskSlots
+	th.mu.RUnlock()
+	if taskSlots == nil {
+		run()
+		return
+	}
+	taskSlots <- struct{}{}
+	defer func() { <-taskSlots }()
+	run()
 }
 
 // SetAgentID sets the agent ID
@@ -166,7 +253,9 @@ func (th *TaskHandler) HandleTaskAssign(msg *client.TaskAssignMessage) error {
 
 	go func(task Task) {
 		defer th.inFlight.Delete(task.ID)
-		th.executeTask(ctx, &task)
+		th.withTaskSlot(func() {
+			th.executeTask(ctx, &task)
+		})
 	}(t)
 
 	return nil
@@ -193,6 +282,7 @@ func (th *TaskHandler) HandlePullTaskNow(taskID uint64, dispatchToken string) er
 // HandlePipelineAssign handles pipeline assignment from server via WebSocket
 func (th *TaskHandler) HandlePipelineAssign(msg *client.PipelineAssignMessage) error {
 	th.log.Infof("Handling pipeline assignment: run_id=%d", msg.RunID)
+	th.updateTaskConcurrency(msg.AgentConfig)
 
 	go func() {
 		if err := th.executePipeline(msg); err != nil {
@@ -378,12 +468,6 @@ func (th *TaskHandler) executeNode(runID uint64, node *task.PipelineNode) (*task
 		if attempt >= maxRetries {
 			break
 		}
-	}
-
-	// If all retries failed but ignore_failure is set, treat as success
-	if !success && node.IgnoreFailure {
-		th.log.Infof("Node %s failed but ignore_failure is true, continuing...", node.ID)
-		success = true
 	}
 
 	// Report final status
@@ -688,6 +772,11 @@ func (th *TaskHandler) Stop() {
 	th.runCtx = nil
 	th.mu.Unlock()
 
+	if th.embeddedBuildkit != nil {
+		if err := th.embeddedBuildkit.Stop(); err != nil {
+			th.log.Warnf("Failed to stop embedded buildkit: %v", err)
+		}
+	}
 	close(th.stopChan)
 }
 
@@ -698,10 +787,18 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 	attempt := task.RetryCount + 1
 
 	// Parse task parameters
-	params, err := task.ParseParams()
+	params, err := task.ParseParamsWithRuntimeConfig(th.runtimeAgentConfig())
 	if err != nil {
 		th.log.Warnf("Failed to parse task params: %v", err)
 		return
+	}
+	if params.TaskType == "docker" && th.embeddedBuildkit != nil {
+		mirrors := normalizeDockerHubMirrors(params.Params["dockerhub_mirrors"])
+		if err := th.embeddedBuildkit.EnsureRunning(mirrors); err != nil {
+			th.log.Warnf("Failed to prepare embedded buildkit: %v", err)
+			return
+		}
+		th.executor.SetEmbeddedBuildkitEnv(th.embeddedBuildkit.Env())
 	}
 
 	// Report task as running first. If this fails, keep task pending server-side and wait for redispatch.
@@ -740,6 +837,10 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 
 // ParseParams converts Task to TaskParams
 func (t *Task) ParseParams() (*task.TaskParams, error) {
+	return t.ParseParamsWithRuntimeConfig(client.AgentConfig{})
+}
+
+func (t *Task) ParseParamsWithRuntimeConfig(agentCfg client.AgentConfig) (*task.TaskParams, error) {
 	params := &task.TaskParams{
 		TaskID:        t.ID,
 		PipelineRunID: t.PipelineRunID,
@@ -750,6 +851,16 @@ func (t *Task) ParseParams() (*task.TaskParams, error) {
 		Script:        t.Script,
 		WorkDir:       t.WorkDir,
 		Timeout:       t.Timeout,
+	}
+	if params.Params == nil {
+		params.Params = map[string]any{}
+	}
+	if t.TaskType == "docker" && len(agentCfg.DockerHubMirrors) > 0 {
+		mirrors := make([]any, 0, len(agentCfg.DockerHubMirrors))
+		for _, mirror := range agentCfg.DockerHubMirrors {
+			mirrors = append(mirrors, mirror)
+		}
+		params.Params["dockerhub_mirrors"] = mirrors
 	}
 
 	// Parse environment variables
@@ -1402,12 +1513,13 @@ func convertNodes(nodes []client.PipelineNode) []task.PipelineNode {
 	result := make([]task.PipelineNode, len(nodes))
 	for i, n := range nodes {
 		node := task.PipelineNode{
-			ID:      n.ID,
-			Type:    n.Type,
-			Name:    n.Name,
-			Config:  n.Config,
-			Params:  n.Params,
-			Timeout: n.Timeout,
+			ID:            n.ID,
+			Type:          n.Type,
+			Name:          n.Name,
+			Config:        n.Config,
+			Params:        n.Params,
+			Timeout:       n.Timeout,
+			IgnoreFailure: n.IgnoreFailure,
 		}
 
 		if n.Config != nil {
@@ -1432,9 +1544,8 @@ func convertEdges(edges []client.PipelineEdge) []task.PipelineEdge {
 	result := make([]task.PipelineEdge, len(edges))
 	for i, e := range edges {
 		result[i] = task.PipelineEdge{
-			From:          e.From,
-			To:            e.To,
-			IgnoreFailure: e.IgnoreFailure,
+			From: e.From,
+			To:   e.To,
 		}
 	}
 	return result

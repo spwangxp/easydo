@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -216,6 +217,24 @@ func TestTaskParseParams_PreservesEnvVarsWhenJSONContainsNonStringValues(t *test
 	}
 	if len(params.EnvVars) != 3 {
 		t.Fatalf("expected all env vars to survive parsing, got %#v", params.EnvVars)
+	}
+}
+
+func TestConvertNodes_PreservesTopLevelIgnoreFailure(t *testing.T) {
+	nodes := []client.PipelineNode{{
+		ID:            "node_2",
+		Type:          "shell",
+		Name:          "Build",
+		IgnoreFailure: true,
+		Config:        map[string]interface{}{"script": "exit 1"},
+	}}
+
+	converted := convertNodes(nodes)
+	if len(converted) != 1 {
+		t.Fatalf("converted len=%d, want 1", len(converted))
+	}
+	if !converted[0].IgnoreFailure {
+		t.Fatalf("ignore_failure=%v, want true", converted[0].IgnoreFailure)
 	}
 }
 
@@ -504,5 +523,92 @@ func TestBuildNodeOutputs_UnknownTaskType(t *testing.T) {
 	}
 	if len(outputs) != 2 {
 		t.Fatalf("expected only basic fields for unknown task type, got %d fields: %v", len(outputs), outputs)
+	}
+}
+
+func TestTaskHandlerTaskConcurrencyLimit(t *testing.T) {
+	h := &TaskHandler{}
+	if got := h.getTaskConcurrencyLimit(client.AgentConfig{}); got != 5 {
+		t.Fatalf("default task concurrency=%d, want 5", got)
+	}
+	if got := h.getTaskConcurrencyLimit(client.AgentConfig{MaxConcurrentPipelines: 4}); got != 5 {
+		t.Fatalf("pipeline concurrency fallback=%d, want 5", got)
+	}
+	if got := h.getTaskConcurrencyLimit(client.AgentConfig{TaskConcurrency: 7, MaxConcurrentPipelines: 4}); got != 7 {
+		t.Fatalf("explicit task concurrency=%d, want 7", got)
+	}
+}
+
+func TestTaskHandlerPropagatesDockerHubMirrorsIntoDockerTaskParams(t *testing.T) {
+	h := &TaskHandler{}
+	h.updateRuntimeAgentConfig(client.AgentConfig{DockerHubMirrors: []string{"https://mirror-a.example", "https://mirror-b.example"}})
+
+	params, err := (&Task{TaskType: "docker", Params: `{"image_name":"demo/app"}`}).ParseParamsWithRuntimeConfig(h.runtimeAgentConfig())
+	if err != nil {
+		t.Fatalf("parse params failed: %v", err)
+	}
+	got, ok := params.Params["dockerhub_mirrors"].([]any)
+	if !ok {
+		t.Fatalf("dockerhub_mirrors type=%T, want []any", params.Params["dockerhub_mirrors"])
+	}
+	if len(got) != 2 || got[0] != "https://mirror-a.example" || got[1] != "https://mirror-b.example" {
+		t.Fatalf("dockerhub_mirrors=%v, want propagated mirrors", got)
+	}
+}
+
+func TestTaskHandlerUpdateTaskConcurrencyRefreshesRuntimeMirrors(t *testing.T) {
+	h := &TaskHandler{}
+	h.updateTaskConcurrency(client.AgentConfig{TaskConcurrency: 5, DockerHubMirrors: []string{"https://mirror-a.example"}})
+
+	params, err := (&Task{TaskType: "docker", Params: `{"image_name":"demo/app"}`}).ParseParamsWithRuntimeConfig(h.runtimeAgentConfig())
+	if err != nil {
+		t.Fatalf("parse params failed: %v", err)
+	}
+	got, ok := params.Params["dockerhub_mirrors"].([]any)
+	if !ok || len(got) != 1 || got[0] != "https://mirror-a.example" {
+		t.Fatalf("dockerhub_mirrors=%v, want refreshed runtime mirrors", params.Params["dockerhub_mirrors"])
+	}
+}
+
+func TestTaskHandlerWithTaskSlotRunsTasksSequentiallyWhenLimitIsOne(t *testing.T) {
+	h := &TaskHandler{taskSlots: make(chan struct{}, 1)}
+	var mu sync.Mutex
+	current := 0
+	maxConcurrent := 0
+	started := make(chan struct{}, 2)
+	allowFinish := make(chan struct{})
+
+	run := func() {
+		h.withTaskSlot(func() {
+			mu.Lock()
+			current++
+			if current > maxConcurrent {
+				maxConcurrent = current
+			}
+			mu.Unlock()
+			started <- struct{}{}
+			<-allowFinish
+			mu.Lock()
+			current--
+			mu.Unlock()
+		})
+	}
+
+	go run()
+	<-started
+	go run()
+
+	select {
+	case <-started:
+		t.Fatal("second task started before slot was released")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	allowFinish <- struct{}{}
+	<-started
+	allowFinish <- struct{}{}
+
+	if maxConcurrent != 1 {
+		t.Fatalf("max concurrent=%d, want 1", maxConcurrent)
 	}
 }

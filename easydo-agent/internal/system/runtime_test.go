@@ -49,7 +49,7 @@ func TestProbeRuntimeCapabilities_HostPrefersLocalRuntime(t *testing.T) {
 	}
 }
 
-func TestProbeRuntimeCapabilities_ContainerWithDockerSocketPrefersHostRuntime(t *testing.T) {
+func TestProbeRuntimeCapabilities_ContainerWithDockerSocketPrefersEmbeddedBuildkit(t *testing.T) {
 	deps := probeDependencies{
 		lookPath: func(name string) (string, error) {
 			switch name {
@@ -74,8 +74,8 @@ func TestProbeRuntimeCapabilities_ContainerWithDockerSocketPrefersHostRuntime(t 
 	if capabilities.ExecutionMode != ExecutionModeContainer {
 		t.Fatalf("execution mode=%s, want %s", capabilities.ExecutionMode, ExecutionModeContainer)
 	}
-	if capabilities.PreferredBuildBackend != BuildBackendHostRuntime {
-		t.Fatalf("preferred backend=%s, want %s", capabilities.PreferredBuildBackend, BuildBackendHostRuntime)
+	if capabilities.PreferredBuildBackend != BuildBackendEmbeddedBuildkit {
+		 t.Fatalf("preferred backend=%s, want %s", capabilities.PreferredBuildBackend, BuildBackendEmbeddedBuildkit)
 	}
 	if !capabilities.DockerSocketAvailable {
 		t.Fatalf("expected docker socket to be detected")

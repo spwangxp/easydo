@@ -61,11 +61,12 @@ type Result struct {
 
 // Executor executes tasks
 type Executor struct {
-	log         *logrus.Logger
-	workspace   *WorkspaceManager
-	runtime     system.RuntimeCapabilities
-	logCallback LogCallback
-	mu          sync.RWMutex
+	log                  *logrus.Logger
+	workspace            *WorkspaceManager
+	runtime              system.RuntimeCapabilities
+	logCallback          LogCallback
+	embeddedBuildkitEnv  map[string]string
+	mu                   sync.RWMutex
 }
 
 type outputCaptureWriter struct {
@@ -188,6 +189,33 @@ func (e *Executor) GetLogCallback() LogCallback {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.logCallback
+}
+
+func (e *Executor) SetEmbeddedBuildkitEnv(env map[string]string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(env) == 0 {
+		e.embeddedBuildkitEnv = nil
+		return
+	}
+	copied := make(map[string]string, len(env))
+	for k, v := range env {
+		copied[k] = v
+	}
+	e.embeddedBuildkitEnv = copied
+}
+
+func (e *Executor) EmbeddedBuildkitEnv() map[string]string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if len(e.embeddedBuildkitEnv) == 0 {
+		return nil
+	}
+	copied := make(map[string]string, len(e.embeddedBuildkitEnv))
+	for k, v := range e.embeddedBuildkitEnv {
+		copied[k] = v
+	}
+	return copied
 }
 
 // Execute executes a task

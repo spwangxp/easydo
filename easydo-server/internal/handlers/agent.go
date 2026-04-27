@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"crypto/rand"
+	"easydo-server/internal/config"
 	"easydo-server/internal/middleware"
 	"easydo-server/internal/models"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -122,6 +124,54 @@ func agentManageAllowed(agent *models.Agent, workspaceID uint64, systemRole stri
 		return true
 	}
 	return workspaceID > 0 && agent.WorkspaceID == workspaceID
+}
+
+func normalizeAgentTaskConcurrency(taskConcurrency int) int {
+	if taskConcurrency <= 0 {
+		return 5
+	}
+	return taskConcurrency
+}
+
+func decodeDockerHubMirrors(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{}
+	}
+	parts := strings.Split(raw, ",")
+	mirrors := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if mirror := strings.TrimSpace(part); mirror != "" {
+			mirrors = append(mirrors, mirror)
+		}
+	}
+	if mirrors == nil {
+		return []string{}
+	}
+	return mirrors
+}
+
+func effectiveDockerHubMirrors(agent *models.Agent, systemDefaults []string) []string {
+	if agent != nil && agent.DockerHubMirrorsConfigured {
+		return decodeDockerHubMirrors(agent.DockerHubMirrors)
+	}
+	if systemDefaults == nil {
+		return []string{}
+	}
+	return systemDefaults
+}
+
+func loadSystemDockerHubMirrors(db *gorm.DB) []string {
+	if db == nil {
+		return []string{}
+	}
+	mirrors, err := models.LoadOrCreateSystemDockerHubMirrors(db, config.BootstrapDockerHubMirrors())
+	if err != nil {
+		return []string{}
+	}
+	if mirrors == nil {
+		return []string{}
+	}
+	return mirrors
 }
 
 func applyPendingAgentScope(query *gorm.DB, workspaceID uint64, systemRole string) *gorm.DB {
@@ -360,37 +410,43 @@ func (h *AgentHandler) GetAgentDetail(c *gin.Context) {
 		return
 	}
 
+	systemDefaults := loadSystemDockerHubMirrors(h.DB)
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": gin.H{
-			"id":                       agent.ID,
-			"name":                     agent.Name,
-			"scope_type":               agent.ScopeType,
-			"workspace_id":             agent.WorkspaceID,
-			"host":                     agent.Host,
-			"port":                     agent.Port,
-			"status":                   agent.Status,
-			"registration_status":      agent.RegistrationStatus,
-			"approved_at":              agent.ApprovedAt,
-			"approved_by":              agent.ApprovedBy,
-			"approved_remark":          agent.ApprovedRemark,
-			"labels":                   agent.Labels,
-			"tags":                     agent.Tags,
-			"version":                  agent.Version,
-			"os":                       agent.OS,
-			"arch":                     agent.Arch,
-			"cpu_cores":                agent.CPUCores,
-			"memory_total":             agent.MemoryTotal,
-			"disk_total":               agent.DiskTotal,
-			"hostname":                 agent.Hostname,
-			"ip_address":               agent.IPAddress,
-			"last_heart_at":            agent.LastHeartAt,
-			"heartbeat_interval":       agent.HeartbeatInterval,
-			"max_concurrent_pipelines": agent.MaxConcurrentPipelines,
-			"owner_id":                 agent.OwnerID,
-			"owner":                    agent.Owner,
-			"created_at":               agent.CreatedAt,
-			"updated_at":               agent.UpdatedAt,
+			"id":                              agent.ID,
+			"name":                            agent.Name,
+			"scope_type":                      agent.ScopeType,
+			"workspace_id":                    agent.WorkspaceID,
+			"host":                            agent.Host,
+			"port":                            agent.Port,
+			"status":                          agent.Status,
+			"registration_status":             agent.RegistrationStatus,
+			"approved_at":                     agent.ApprovedAt,
+			"approved_by":                     agent.ApprovedBy,
+			"approved_remark":                 agent.ApprovedRemark,
+			"labels":                          agent.Labels,
+			"tags":                            agent.Tags,
+			"version":                         agent.Version,
+			"os":                              agent.OS,
+			"arch":                            agent.Arch,
+			"cpu_cores":                       agent.CPUCores,
+			"memory_total":                    agent.MemoryTotal,
+			"disk_total":                      agent.DiskTotal,
+			"hostname":                        agent.Hostname,
+			"ip_address":                      agent.IPAddress,
+			"last_heart_at":                   agent.LastHeartAt,
+			"heartbeat_interval":              agent.HeartbeatInterval,
+			"max_concurrent_pipelines":        agent.MaxConcurrentPipelines,
+			"task_concurrency":                normalizeAgentTaskConcurrency(agent.TaskConcurrency),
+			"dockerhub_mirrors_configured":    agent.DockerHubMirrorsConfigured,
+			"dockerhub_mirrors":               decodeDockerHubMirrors(agent.DockerHubMirrors),
+			"effective_dockerhub_mirrors":     effectiveDockerHubMirrors(&agent, systemDefaults),
+			"system_default_dockerhub_mirrors": systemDefaults,
+			"owner_id":                        agent.OwnerID,
+			"owner":                           agent.Owner,
+			"created_at":                      agent.CreatedAt,
+			"updated_at":                      agent.UpdatedAt,
 		},
 	})
 }
@@ -402,14 +458,17 @@ func (h *AgentHandler) UpdateAgent(c *gin.Context) {
 	systemRole := c.GetString("role")
 
 	var req struct {
-		Name                   string  `json:"name"`
-		Labels                 string  `json:"labels"`
-		Tags                   string  `json:"tags"`
-		Status                 string  `json:"status"`
-		HeartbeatInterval      int     `json:"heartbeat_interval"`
-		MaxConcurrentPipelines int     `json:"max_concurrent_pipelines"`
-		ScopeType              string  `json:"scope_type"`
-		WorkspaceID            *uint64 `json:"workspace_id"`
+		Name                       string   `json:"name"`
+		Labels                     string   `json:"labels"`
+		Tags                       string   `json:"tags"`
+		Status                     string   `json:"status"`
+		HeartbeatInterval          int      `json:"heartbeat_interval"`
+		MaxConcurrentPipelines     *int     `json:"max_concurrent_pipelines"`
+		TaskConcurrency            *int     `json:"task_concurrency"`
+		DockerHubMirrorsConfigured *bool    `json:"dockerhub_mirrors_configured"`
+		DockerHubMirrors           []string `json:"dockerhub_mirrors"`
+		ScopeType                  string   `json:"scope_type"`
+		WorkspaceID                *uint64  `json:"workspace_id"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -455,8 +514,17 @@ func (h *AgentHandler) UpdateAgent(c *gin.Context) {
 	if req.HeartbeatInterval > 0 {
 		updates["heartbeat_interval"] = req.HeartbeatInterval
 	}
-	if req.MaxConcurrentPipelines > 0 {
-		updates["max_concurrent_pipelines"] = normalizeAgentMaxConcurrentPipelines(req.MaxConcurrentPipelines)
+	if req.MaxConcurrentPipelines != nil && *req.MaxConcurrentPipelines > 0 {
+		updates["max_concurrent_pipelines"] = normalizeAgentMaxConcurrentPipelines(*req.MaxConcurrentPipelines)
+	}
+	if req.TaskConcurrency != nil {
+		updates["task_concurrency"] = normalizeAgentTaskConcurrency(*req.TaskConcurrency)
+	}
+	if req.DockerHubMirrorsConfigured != nil {
+		updates["dockerhub_mirrors_configured"] = *req.DockerHubMirrorsConfigured
+	}
+	if req.DockerHubMirrors != nil {
+		updates["dockerhub_mirrors"] = strings.Join(req.DockerHubMirrors, ",")
 	}
 	if scopeChangeRequested {
 		targetScope := agent.ScopeType

@@ -74,19 +74,19 @@ type PipelineConfig struct {
 
 // PipelineNode represents a node in the pipeline
 type PipelineNode struct {
-	ID      string                 `json:"id"`
-	Type    string                 `json:"type"`
-	Name    string                 `json:"name"`
-	Config  map[string]interface{} `json:"config,omitempty"`
-	Params  map[string]interface{} `json:"params,omitempty"`
-	Timeout int                    `json:"timeout"`
+	ID            string                 `json:"id"`
+	Type          string                 `json:"type"`
+	Name          string                 `json:"name"`
+	Config        map[string]interface{} `json:"config,omitempty"`
+	Params        map[string]interface{} `json:"params,omitempty"`
+	Timeout       int                    `json:"timeout"`
+	IgnoreFailure bool                   `json:"ignore_failure,omitempty"`
 }
 
 // PipelineEdge represents an edge in the pipeline DAG
 type PipelineEdge struct {
-	From          string `json:"from"`
-	To            string `json:"to"`
-	IgnoreFailure bool   `json:"ignore_failure"`
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 // PipelineConnection represents a connection (old format)
@@ -98,9 +98,12 @@ type PipelineConnection struct {
 
 // AgentConfig represents agent-specific configuration
 type AgentConfig struct {
-	Workspace string            `json:"workspace"`
-	Timeout   int               `json:"timeout"`
-	EnvVars   map[string]string `json:"env_vars"`
+	Workspace              string            `json:"workspace"`
+	Timeout                int               `json:"timeout"`
+	EnvVars                map[string]string `json:"env_vars"`
+	MaxConcurrentPipelines int               `json:"max_concurrent_pipelines"`
+	TaskConcurrency        int               `json:"task_concurrency"`
+	DockerHubMirrors       []string          `json:"dockerhub_mirrors"`
 }
 
 type TerminalSessionOpenMessage struct {
@@ -146,6 +149,7 @@ type WebSocketClient struct {
 	executor        *task.Executor
 	onReconnect     func()
 	onHeartbeatAck  func(map[string]interface{})
+	onAgentConfig   func(map[string]interface{})
 	ackWaiters      map[string]chan ackResult
 }
 
@@ -217,6 +221,12 @@ func (c *WebSocketClient) SetReconnectHandler(handler func()) {
 func (c *WebSocketClient) SetHeartbeatAckHandler(handler func(map[string]interface{})) {
 	c.mu.Lock()
 	c.onHeartbeatAck = handler
+	c.mu.Unlock()
+}
+
+func (c *WebSocketClient) SetAgentConfigHandler(handler func(map[string]interface{})) {
+	c.mu.Lock()
+	c.onAgentConfig = handler
 	c.mu.Unlock()
 }
 
@@ -566,6 +576,12 @@ func (c *WebSocketClient) handleTaskCancel(payload map[string]interface{}) {
 // handleAgentConfig handles agent configuration update from server
 func (c *WebSocketClient) handleAgentConfig(payload map[string]interface{}) {
 	klog.V(4).Infof("Received agent config update: %+v", payload)
+	c.mu.RLock()
+	handler := c.onAgentConfig
+	c.mu.RUnlock()
+	if handler != nil {
+		handler(payload)
+	}
 }
 
 func (c *WebSocketClient) handleTerminalSessionOpen(payload map[string]interface{}) {

@@ -95,3 +95,27 @@ test('normalizeExecutionTaskOutputs maps result_data onto outputs for initial sn
     duration: 30
   })
 })
+
+test('applyTaskStatusPayload preserves exit code and duration on failed tasks', () => {
+  const updatedTasks = applyTaskStatusPayload([], {
+    task_id: 44,
+    node_id: 'node_2',
+    node_name: 'Build',
+    status: 'execute_failed',
+    exit_code: 7,
+    duration: 19,
+    outputs: {
+      exit_code: 7,
+      duration: 19
+    },
+    error_msg: 'command failed'
+  })
+
+  assert.equal(updatedTasks[0].status, 'execute_failed')
+  assert.equal(updatedTasks[0].exit_code, 7)
+  assert.equal(updatedTasks[0].duration, 19)
+  assert.deepEqual(updatedTasks[0].outputs, {
+    exit_code: 7,
+    duration: 19
+  })
+})

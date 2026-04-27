@@ -12,6 +12,25 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func TestWebSocketClient_HandleAgentConfigInvokesRuntimeConfigHandler(t *testing.T) {
+	client := NewWebSocketClient("http://example.com", 1, "", "")
+	called := false
+	client.SetAgentConfigHandler(func(payload map[string]interface{}) {
+		called = true
+		if payload["task_concurrency"] != 7.0 {
+			t.Fatalf("task_concurrency=%v, want 7", payload["task_concurrency"])
+		}
+	})
+
+	client.handleAgentConfig(map[string]interface{}{
+		"task_concurrency": 7.0,
+	})
+
+	if !called {
+		t.Fatal("expected agent config handler to be invoked")
+	}
+}
+
 func TestWebSocketClient_ReconnectsWithRegisterKeyAfterApprovalBeforeTokenAck(t *testing.T) {
 	var approved atomic.Bool
 	var reconnects atomic.Int32

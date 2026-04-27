@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -82,6 +83,7 @@ func (c *Client) initWebSocket(ctx context.Context) error {
 	// Create WebSocket client
 	c.wsClient = client.NewWebSocketClient(c.cfg.ServerURL, agentID, token, c.register.GetRegisterKey())
 	c.wsClient.SetHeartbeatAckHandler(c.handleWebSocketHeartbeatAck)
+	c.wsClient.SetAgentConfigHandler(c.handleWebSocketRuntimeAgentConfig)
 
 	// Set task handler for WebSocket messages
 	c.wsClient.SetTaskHandler(c.taskHandler)
@@ -154,7 +156,19 @@ func (c *Client) Start(ctx context.Context) error {
 	return nil
 }
 
+func (c *Client) handleWebSocketRuntimeAgentConfig(payload map[string]interface{}) {
+	agentCfg := client.AgentConfig{}
+	if data, err := json.Marshal(payload); err == nil {
+		_ = json.Unmarshal(data, &agentCfg)
+	}
+	if c.taskHandler != nil {
+		c.taskHandler.updateTaskConcurrency(agentCfg)
+	}
+}
+
 func (c *Client) handleWebSocketHeartbeatAck(payload map[string]interface{}) {
+	c.handleWebSocketRuntimeAgentConfig(payload)
+
 	regStatus, _ := payload["registration_status"].(string)
 	token, _ := payload["token"].(string)
 	if regStatus != string(StatusApproved) || token == "" {

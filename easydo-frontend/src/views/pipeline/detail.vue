@@ -250,19 +250,23 @@
                   <el-icon v-else-if="['execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(task.status)" :color="'var(--danger-color)'"><CircleCloseFilled /></el-icon>
                 </div>
                 <div class="task-info">
-                  <div class="task-name">{{ task.name || `任务 #${task.id}` }}</div>
+                  <div class="task-name">
+                    <span>{{ task.name || `任务 #${task.id}` }}</span>
+                    <span v-if="isIgnoredFailureTask(task)" class="task-ignored-hint">已忽略执行失败</span>
+                  </div>
                   <div class="task-meta">
                     <el-tag v-if="task.display_status === 'not_executed'" type="info" size="small">暂未执行</el-tag>
                     <el-tag v-else-if="task.display_status === 'blocked'" type="warning" size="small">已阻塞</el-tag>
                     <span class="task-agent" v-if="task.Agent">{{ task.Agent.name }}</span>
                     <span class="task-start-time">开始: {{ formatDateTime(task.start_time) }}</span>
                     <span class="task-duration" v-if="task.duration > 0">耗时: {{ formatDuration(task.duration) }}</span>
+                    <span class="task-exit-code" v-if="shouldShowTaskExitCode(task)">退出码: {{ getTaskExitCode(task) }}</span>
                   </div>
                   <div class="task-error" v-if="task.error_msg">
                     <el-icon><Warning /></el-icon>
                     {{ task.error_msg }}
                   </div>
-                  <div class="task-outputs" v-if="hasTaskOutputs(task) && task.status === 'execute_success'">
+                  <div class="task-outputs" v-if="hasTaskOutputs(task)">
                     <div class="task-outputs-header">
                       <span>任务输出</span>
                     </div>
@@ -1120,9 +1124,11 @@ const buildRunTasksFromRunRecord = (run) => {
       task_type: node.task_key || '',
       status: normalizedStatus,
       display_status: normalizedStatus,
+      ignore_failure: Boolean(snapshotNode?.ignore_failure),
       start_time: latestAttempt?.start_time || startEvent?.time || 0,
       created_at: latestAttempt?.start_time || startEvent?.time || run?.created_at || 0,
       duration: latestAttempt?.duration || 0,
+      exit_code: latestAttempt?.exit_code ?? outputsByNode[nodeID]?.exit_code ?? null,
       error_msg: latestAttempt?.error_msg || '',
       outputs: outputsByNode[nodeID] || {},
       _order: Number.isFinite(snapshotNode?.__index) ? snapshotNode.__index : index,
@@ -1157,9 +1163,11 @@ const normalizeRunTaskFromApi = (task, index, fallbackTaskMap = new Map()) => {
     task_type: task?.task_type || task?.type || task?.task_key || fallback?.task_type || '',
     status: normalizedStatus,
     display_status: normalizedDisplayStatus,
+    ignore_failure: Boolean(task?.ignore_failure ?? fallback?.ignore_failure),
     start_time: task?.start_time ?? fallback?.start_time ?? 0,
     created_at: task?.created_at ?? fallback?.created_at ?? 0,
     duration: task?.duration ?? fallback?.duration ?? 0,
+    exit_code: task?.exit_code ?? fallback?.exit_code ?? null,
     error_msg: task?.error_msg || fallback?.error_msg || '',
     outputs: task?.outputs || fallback?.outputs || {},
     _order: Number.isFinite(task?._order)
@@ -1845,6 +1853,24 @@ const hasTaskOutputs = (task) => {
   const outputs = getTaskOutputs(task)
   if (!outputs) return false
   return Object.keys(outputs).length > 0
+}
+
+const isIgnoredFailureTask = (task) => {
+  if (!task?.ignore_failure) return false
+  return ['execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(task.status)
+}
+
+const getTaskExitCode = (task) => {
+  if (!task) return null
+  if (task.exit_code !== undefined && task.exit_code !== null) return task.exit_code
+  const outputs = getTaskOutputs(task)
+  if (outputs && outputs.exit_code !== undefined && outputs.exit_code !== null) return outputs.exit_code
+  return null
+}
+
+const shouldShowTaskExitCode = (task) => {
+  const exitCode = getTaskExitCode(task)
+  return exitCode !== null && exitCode !== undefined
 }
 
 // 保存设置
@@ -2754,8 +2780,18 @@ onUnmounted(() => {
                   font-weight: 500;
                   color: var(--text-primary);
                   margin-bottom: 4px;
+                  display: flex;
+                  align-items: center;
+                  gap: 8px;
+                  flex-wrap: wrap;
+
+                  .task-ignored-hint {
+                    font-size: 12px;
+                    font-weight: 400;
+                    color: var(--warning-color);
+                  }
                 }
-                
+
                 .task-meta {
                   font-size: 12px;
                   color: var(--text-muted);
@@ -2763,12 +2799,14 @@ onUnmounted(() => {
                   align-items: center;
                   gap: 12px;
                   flex-wrap: wrap;
-                  
+
                   .task-agent {
                     margin-right: 4px;
                   }
 
-                  .task-start-time {
+                  .task-start-time,
+                  .task-duration,
+                  .task-exit-code {
                     color: var(--text-secondary);
                   }
                 }

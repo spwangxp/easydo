@@ -27,6 +27,27 @@ func TestNormalizeAgentMaxConcurrentPipelines(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentTaskConcurrency(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{name: "negative uses default", in: -1, want: 5},
+		{name: "zero uses default", in: 0, want: 5},
+		{name: "positive keeps value", in: 7, want: 7},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeAgentTaskConcurrency(tt.in)
+			if got != tt.want {
+				t.Fatalf("normalizeAgentTaskConcurrency(%d)=%d, want=%d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSelectAgentWithPipelineCapacity_PicksLeastLoaded(t *testing.T) {
 	db := openHandlerTestDB(t)
 

@@ -1,5 +1,7 @@
 package models
 
+import "strings"
+
 // Agent represents an execution agent that runs on hosts
 type Agent struct {
 	BaseModel
@@ -11,6 +13,9 @@ type Agent struct {
 	Status                 string  `gorm:"size:32;default:'offline'" json:"status"`                                    // online, offline, busy, error
 	RegistrationStatus     string  `gorm:"size:32;default:'pending'" json:"registration_status"`                       // pending, approved, rejected
 	MaxConcurrentPipelines int     `gorm:"column:max_concurrent_pipelines;default:10" json:"max_concurrent_pipelines"` // 最大并发流水线数
+	TaskConcurrency        int     `gorm:"column:task_concurrency;default:5" json:"task_concurrency"`
+	DockerHubMirrors       string  `gorm:"column:dockerhub_mirrors;type:longtext" json:"-"`
+	DockerHubMirrorsConfigured bool `gorm:"column:dockerhub_mirrors_configured;default:false" json:"dockerhub_mirrors_configured"`
 	ApprovedAt             int64   `json:"approved_at"`                                                                // Approval timestamp
 	ApprovedBy             *uint64 `gorm:"index" json:"approved_by"`                                                   // Approver user ID
 	ApprovedRemark         string  `gorm:"type:text" json:"approved_remark"`                                           // Approval remark
@@ -37,6 +42,36 @@ type Agent struct {
 
 	Workspace *Workspace `gorm:"-" json:"workspace,omitempty"`
 	Owner     *User      `gorm:"foreignKey:OwnerID" json:"owner"`
+}
+
+func (a *Agent) EffectiveDockerHubMirrors() []string {
+	if a == nil {
+		return nil
+	}
+	if !a.DockerHubMirrorsConfigured {
+		return nil
+	}
+	mirrors := parseDockerHubMirrorList(a.DockerHubMirrors)
+	if mirrors == nil {
+		return []string{}
+	}
+	return mirrors
+}
+
+func (a *Agent) SetDockerHubMirrors(mirrors []string, configured bool) {
+	if a == nil {
+		return
+	}
+	a.DockerHubMirrorsConfigured = configured
+	if !configured {
+		a.DockerHubMirrors = ""
+		return
+	}
+	if len(mirrors) == 0 {
+		a.DockerHubMirrors = ""
+		return
+	}
+	a.DockerHubMirrors = strings.Join(mirrors, ",")
 }
 
 // AgentStatus constants

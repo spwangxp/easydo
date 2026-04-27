@@ -383,28 +383,28 @@ func containsAt(s, substr string) bool {
 func TestDAGEngine_IgnoreFailure(t *testing.T) {
 	tests := []struct {
 		name                    string
-		edgeIgnoreFailure       bool
+		nodeIgnoreFailure       bool
 		node1Success            bool
 		expectNode2Executable   bool
 		expectBlockingExecution bool
 	}{
 		{
 			name:                    "Node1 success - Node2 can execute",
-			edgeIgnoreFailure:       false,
+			nodeIgnoreFailure:       false,
 			node1Success:            true,
 			expectNode2Executable:   true,
 			expectBlockingExecution: false,
 		},
 		{
 			name:                    "Node1 failed without IgnoreFailure - Node2 blocked",
-			edgeIgnoreFailure:       false,
+			nodeIgnoreFailure:       false,
 			node1Success:            false,
 			expectNode2Executable:   false,
 			expectBlockingExecution: true,
 		},
 		{
 			name:                    "Node1 failed with IgnoreFailure - Node2 can execute",
-			edgeIgnoreFailure:       true,
+			nodeIgnoreFailure:       true,
 			node1Success:            false,
 			expectNode2Executable:   true,
 			expectBlockingExecution: false,
@@ -415,11 +415,11 @@ func TestDAGEngine_IgnoreFailure(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			config := PipelineConfig{
 				Nodes: []PipelineNode{
-					{ID: "1", Type: "shell"},
+					{ID: "1", Type: "shell", IgnoreFailure: tt.nodeIgnoreFailure},
 					{ID: "2", Type: "shell"},
 				},
 				Edges: []PipelineEdge{
-					{From: "1", To: "2", IgnoreFailure: tt.edgeIgnoreFailure},
+					{From: "1", To: "2"},
 				},
 			}
 
@@ -458,8 +458,8 @@ func TestDAGEngine_ComplexDependenciesWithIgnoreFailure(t *testing.T) {
 			{ID: "C", Type: "shell"},
 		},
 		Edges: []PipelineEdge{
-			{From: "A", To: "C", IgnoreFailure: false},
-			{From: "B", To: "C", IgnoreFailure: false},
+			{From: "A", To: "C"},
+			{From: "B", To: "C"},
 		},
 	}
 
@@ -488,13 +488,13 @@ func TestDAGEngine_ComplexDependenciesWithIgnoreFailure(t *testing.T) {
 
 	config2 := PipelineConfig{
 		Nodes: []PipelineNode{
-			{ID: "A", Type: "shell"},
+			{ID: "A", Type: "shell", IgnoreFailure: true},
 			{ID: "B", Type: "shell"},
 			{ID: "C", Type: "shell"},
 		},
 		Edges: []PipelineEdge{
-			{From: "A", To: "C", IgnoreFailure: true},
-			{From: "B", To: "C", IgnoreFailure: false},
+			{From: "A", To: "C"},
+			{From: "B", To: "C"},
 		},
 	}
 
@@ -508,7 +508,7 @@ func TestDAGEngine_ComplexDependenciesWithIgnoreFailure(t *testing.T) {
 
 	executable = engine2.GetExecutableNodes()
 	if len(executable) != 1 || executable[0] != "C" {
-		t.Errorf("Expected node C to be executable (A->C has IgnoreFailure), got %v", executable)
+		t.Errorf("Expected node C to be executable when upstream node A has IgnoreFailure, got %v", executable)
 	}
 }
 

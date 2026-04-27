@@ -1306,18 +1306,16 @@ type PipelineConfig struct {
 
 // PipelineEdge represents an edge in the pipeline DAG (新格式)
 type PipelineEdge struct {
-	From          string `json:"-"`
-	To            string `json:"-"`
-	IgnoreFailure bool   `json:"ignore_failure"` // If true, downstream can execute even if upstream fails
+	From string `json:"-"`
+	To   string `json:"-"`
 }
 
 func (e *PipelineEdge) UnmarshalJSON(data []byte) error {
 	type edgeAlias struct {
-		From          string `json:"from"`
-		To            string `json:"to"`
-		FromNodeID    string `json:"from_node_id"`
-		ToNodeID      string `json:"to_node_id"`
-		IgnoreFailure bool   `json:"ignore_failure"`
+		From       string `json:"from"`
+		To         string `json:"to"`
+		FromNodeID string `json:"from_node_id"`
+		ToNodeID   string `json:"to_node_id"`
 	}
 	var aux edgeAlias
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -1325,19 +1323,16 @@ func (e *PipelineEdge) UnmarshalJSON(data []byte) error {
 	}
 	e.From = firstNonEmptyTaskValue(aux.From, aux.FromNodeID)
 	e.To = firstNonEmptyTaskValue(aux.To, aux.ToNodeID)
-	e.IgnoreFailure = aux.IgnoreFailure
 	return nil
 }
 
 func (e PipelineEdge) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		FromNodeID    string `json:"from_node_id"`
-		ToNodeID      string `json:"to_node_id"`
-		IgnoreFailure bool   `json:"ignore_failure,omitempty"`
+		FromNodeID string `json:"from_node_id"`
+		ToNodeID   string `json:"to_node_id"`
 	}{
-		FromNodeID:    e.From,
-		ToNodeID:      e.To,
-		IgnoreFailure: e.IgnoreFailure,
+		FromNodeID: e.From,
+		ToNodeID:   e.To,
 	})
 }
 
@@ -3732,23 +3727,27 @@ func (h *PipelineHandler) GetRunTasks(c *gin.Context) {
 
 	// 构建依赖图：NodeID -> Upstream NodeIDs
 	upstreamMap := make(map[string][]string)
-	downstreamMap := make(map[string][]string) // For reverse lookup
 
 	for _, edge := range config.getEdges() {
 		upstreamMap[edge.To] = append(upstreamMap[edge.To], edge.From)
-		downstreamMap[edge.From] = append(downstreamMap[edge.From], edge.To)
-	}
-
-	// 获取边的 IgnoreFailure 设置
-	edgeIgnoreFailure := make(map[string]bool) // "from->to" -> ignoreFailure
-	for _, edge := range config.getEdges() {
-		edgeIgnoreFailure[edge.From+"->"+edge.To] = edge.IgnoreFailure
 	}
 
 	// 获取节点的 IgnoreFailure 设置
 	nodeIgnoreFailure := make(map[string]bool)
 	for _, node := range config.Nodes {
 		nodeIgnoreFailure[node.ID] = node.IgnoreFailure
+	}
+
+	isBlockingTaskFailure := func(task *models.AgentTask) bool {
+		if task == nil {
+			return false
+		}
+		switch task.Status {
+		case models.TaskStatusExecuteFailed, models.TaskStatusScheduleFailed:
+			return true
+		default:
+			return false
+		}
 	}
 
 	// 判断任务是否应该被跳过（基于前置任务状态）
@@ -3795,26 +3794,24 @@ func (h *PipelineHandler) GetRunTasks(c *gin.Context) {
 
 		hasBlockingFailure := false
 		for _, upstreamID := range upstreams {
+			if upstreamTask, exists := taskMap[upstreamID]; exists {
+				if isBlockingTaskFailure(upstreamTask) && !nodeIgnoreFailure[upstreamID] {
+					hasBlockingFailure = true
+					break
+				}
+				continue
+			}
+
 			_, upstreamBlocking := checkSkip(upstreamID, visited)
 			if upstreamBlocking {
 				hasBlockingFailure = true
-			}
-		}
-
-		edgeIgnoreFail := false
-		for _, upstreamID := range upstreams {
-			if edgeIgnoreFailure[upstreamID+"->"+nodeID] {
-				edgeIgnoreFail = true
 				break
 			}
 		}
 
-		// 获取当前节点的 IgnoreFailure 设置
-		nodeIgnoreFail := nodeIgnoreFailure[nodeID]
-
 		// 判断当前节点是否可以执行
-		if hasBlockingFailure && !edgeIgnoreFail && !nodeIgnoreFail {
-			// 前置任务失败且未设置IgnoreFailure，当前节点无法执行
+		if hasBlockingFailure {
+			// 前置任务失败且上游节点未设置 IgnoreFailure，当前节点无法执行
 			shouldSkipMap[nodeID] = true
 			canNeverExecuteMap[nodeID] = true
 			return true, true

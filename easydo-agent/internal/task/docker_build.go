@@ -36,7 +36,8 @@ func (e *Executor) dockerBuildScript(params TaskParams, workDir string) (string,
 		runtimeBin := defaultString(e.runtime.PrimaryRuntime, "docker")
 		return buildHostRuntimeScript(runtimeBin, imageName, imageTag, preBuildScript, dockerfile, contextDir, registry, imageRef, push, platformValue), nil
 	default:
-		return buildEmbeddedBuildkitScript(params.TaskID, imageRef, preBuildScript, dockerfile, filepath.Dir(dockerfile), contextDir, registry, push, platformValue), nil
+		mirrors := NormalizeDockerHubMirrors(params.Params["dockerhub_mirrors"])
+		return buildEmbeddedBuildkitScript(e.EmbeddedBuildkitEnv(), params.TaskID, imageRef, preBuildScript, dockerfile, filepath.Dir(dockerfile), contextDir, registry, push, platformValue, mirrors), nil
 	}
 }
 
@@ -101,11 +102,11 @@ fi
 	return script
 }
 
-func buildEmbeddedBuildkitScript(taskID uint64, imageRef, preBuildScript, dockerfile, dockerfileDir, contextDir, registry string, push bool, platforms string) string {
-	runtimeRoot := "$(pwd)/.easydo-buildkit"
-	if taskID > 0 {
-		runtimeRoot = fmt.Sprintf("$(pwd)/.easydo-buildkit/task_%d", taskID)
-	}
+func buildEmbeddedBuildkitScript(buildkitEnv map[string]string, taskID uint64, imageRef, preBuildScript, dockerfile, dockerfileDir, contextDir, registry string, push bool, platforms string, mirrors []string) string {
+	socketPath := defaultString(buildkitEnv["EASYDO_BUILDKIT_SOCKET_PATH"], "$(pwd)/.easydo-buildkit/shared/run/buildkitd.sock")
+	stateDir := defaultString(buildkitEnv["EASYDO_BUILDKIT_STATE_DIR"], "$(pwd)/.easydo-buildkit/shared/state")
+	configPath := defaultString(buildkitEnv["EASYDO_BUILDKIT_CONFIG_PATH"], "$(pwd)/.easydo-buildkit/shared/buildkitd.toml")
+	dockerConfigDir := fmt.Sprintf("$(pwd)/.easydo-buildkit/tasks/task_%d/docker", taskID)
 	outputLine := fmt.Sprintf("OUTPUT_SPEC=\"type=oci,dest=.easydo-artifacts/images/%s.tar\"\nmkdir -p .easydo-artifacts/images", shellSafeFilename(imageRef))
 	if push {
 		outputLine = fmt.Sprintf("OUTPUT_SPEC=\"type=image,name=%s,push=true\"\nif [ -n \"$REGISTRY\" ] && [ -n \"$REGISTRY_USER\" ] && [ -n \"$REGISTRY_PASSWORD\" ]; then\n  mkdir -p \"$DOCKER_CONFIG\"\n  AUTH_B64=$(printf '%%s:%%s' \"$REGISTRY_USER\" \"$REGISTRY_PASSWORD\" | base64 | tr -d '\\n')\n  cat > \"$DOCKER_CONFIG/config.json\" <<EOF\n%s\nEOF\nfi", imageRef, buildRegistryAuthConfigJSON(registry))
@@ -153,41 +154,22 @@ if [ -n "$missing_helpers" ]; then
 fi
 `
 	}
+	mirrorConfigBlock := buildDockerHubMirrorConfigBlock(mirrors)
 	return fmt.Sprintf(`set -e
-RUNTIME_ROOT=%q
-SOCKET_DIR="$RUNTIME_ROOT/run"
-SOCKET_PATH="$SOCKET_DIR/buildkitd.sock"
-STATE_DIR="$RUNTIME_ROOT/state"
-DOCKER_CONFIG="$RUNTIME_ROOT/docker"
-export DOCKER_CONFIG RUNTIME_ROOT
+SOCKET_PATH=%q
+BUILDKIT_STATE_DIR=%q
+BUILDKIT_CONFIG_PATH=%q
+DOCKER_CONFIG=%q
 REGISTRY=%q
 PLATFORMS=%q
 REGISTRY_USER="${EASYDO_CRED_REGISTRY_AUTH_USERNAME:-}"
 REGISTRY_PASSWORD="${EASYDO_CRED_REGISTRY_AUTH_PASSWORD:-${EASYDO_CRED_REGISTRY_AUTH_TOKEN:-}}"
-mkdir -p "$RUNTIME_ROOT" "$SOCKET_DIR" "$STATE_DIR" "$DOCKER_CONFIG" .easydo-artifacts/images
-cleanup() {
-  if [ -n "${BUILDKIT_PID:-}" ]; then
-    kill "$BUILDKIT_PID" >/dev/null 2>&1 || true
-    wait "$BUILDKIT_PID" >/dev/null 2>&1 || true
-  fi
-  rm -rf "$RUNTIME_ROOT"
-}
-trap cleanup EXIT
-%sbuildkitd --addr "unix://$SOCKET_PATH" --root "$STATE_DIR" >"$STATE_DIR/buildkitd.log" 2>&1 &
-BUILDKIT_PID=$!
-for _ in $(seq 1 50); do
-  if buildctl --addr "unix://$SOCKET_PATH" debug workers >/dev/null 2>&1; then
-    break
-  fi
-  sleep 0.2
-done
-if ! buildctl --addr "unix://$SOCKET_PATH" debug workers >/dev/null 2>&1; then
-  echo "buildkitd did not become ready" >&2
-  sed -n '1,200p' "$STATE_DIR/buildkitd.log" >&2 || true
-  exit 1
-fi
+mkdir -p "$DOCKER_CONFIG" .easydo-artifacts/images
 %s
 %s
+%s
+%s
+export DOCKER_CONFIG
 buildctl --addr "unix://$SOCKET_PATH" build \
   --frontend dockerfile.v0 \
   --local context=%q \
@@ -195,7 +177,49 @@ buildctl --addr "unix://$SOCKET_PATH" build \
   --opt platform=%q \
   --opt filename=%q \
   --output "$OUTPUT_SPEC"
-`, runtimeRoot, registry, platforms, qemuCheckBlock, preBuildBlock, outputLine, contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
+`, socketPath, stateDir, configPath, dockerConfigDir, registry, platforms, mirrorConfigBlock, qemuCheckBlock, preBuildBlock, outputLine, contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
+}
+
+func NormalizeDockerHubMirrors(value any) []string {
+	mirrors := make([]string, 0)
+	appendMirror := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		for _, existing := range mirrors {
+			if existing == raw {
+				return
+			}
+		}
+		mirrors = append(mirrors, raw)
+	}
+	switch v := value.(type) {
+	case []string:
+		for _, item := range v {
+			appendMirror(item)
+		}
+	case []any:
+		for _, item := range v {
+			appendMirror(stringifyParam(item))
+		}
+	case string:
+		for _, item := range strings.Split(v, ",") {
+			appendMirror(item)
+		}
+	}
+	return mirrors
+}
+
+func buildDockerHubMirrorConfigBlock(mirrors []string) string {
+	if len(mirrors) == 0 {
+		return ""
+	}
+	escapedMirrors := make([]string, 0, len(mirrors))
+	for _, mirror := range mirrors {
+		escapedMirrors = append(escapedMirrors, fmt.Sprintf("%q", mirror))
+	}
+	return fmt.Sprintf("cat >> \"$BUILDKIT_CONFIG_PATH\" <<'EOF'\n\n[registry.\"docker.io\"]\n  mirrors = [%s]\nEOF", strings.Join(escapedMirrors, ", "))
 }
 
 func defaultString(value, fallback string) string {
@@ -205,14 +229,14 @@ func defaultString(value, fallback string) string {
 	return strings.TrimSpace(value)
 }
 
-func stringifyParam(value interface{}) string {
+func stringifyParam(value any) string {
 	if value == nil {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(value))
 }
 
-func toBool(value interface{}) bool {
+func toBool(value any) bool {
 	switch v := value.(type) {
 	case bool:
 		return v
@@ -271,7 +295,7 @@ func shellSafeFilename(value string) string {
 	return replacer.Replace(value)
 }
 
-func normalizeDockerPlatforms(value interface{}) []string {
+func normalizeDockerPlatforms(value any) []string {
 	items := make([]string, 0, len(defaultDockerPlatforms))
 	appendPlatform := func(raw string) {
 		raw = strings.TrimSpace(raw)
@@ -290,7 +314,7 @@ func normalizeDockerPlatforms(value interface{}) []string {
 		for _, item := range v {
 			appendPlatform(item)
 		}
-	case []interface{}:
+	case []any:
 		for _, item := range v {
 			appendPlatform(stringifyParam(item))
 		}

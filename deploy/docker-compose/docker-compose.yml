@@ -189,7 +189,6 @@ services:
       - AGENT_NAME=easydo-agent-1
     volumes:
       - agent1_data:/data/agent
-      - /var/run/docker.sock:/var/run/docker.sock
     privileged: true
     networks:
       - easydo-network
@@ -211,7 +210,6 @@ services:
       - AGENT_NAME=easydo-agent-2
     volumes:
       - agent2_data:/data/agent
-      - /var/run/docker.sock:/var/run/docker.sock
     privileged: true
     networks:
       - easydo-network

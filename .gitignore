@@ -27,6 +27,7 @@ tests
 test-results
 
 **/node_modules/
+**/docs/
 
 easydo-frontend/node_modules/
 easydo-frontend/dist

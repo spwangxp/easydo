@@ -45,8 +45,6 @@ agent:
   securityContext:
     privileged: true
     allowPrivilegeEscalation: true
-  mountDockerSock: false
-  dockerSockPath: /var/run/docker.sock
   extraVolumes: []
   extraVolumeMounts: []
 

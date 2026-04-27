@@ -19,9 +19,8 @@ type PipelineNode struct {
 }
 
 type PipelineEdge struct {
-	From          string `json:"from"`
-	To            string `json:"to"`
-	IgnoreFailure bool   `json:"ignore_failure"` // 失败时是否继续执行下游节点
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 type PipelineConnection struct {
@@ -158,7 +157,7 @@ func (e *DAGEngine) BuildGraph() error {
 // 1. Its status is pending
 // 2. All its dependencies are met:
 //   - Dependency succeeded, OR
-//   - Dependency failed AND this edge has ignore_failure=true
+//   - Dependency failed AND upstream node has ignore_failure=true
 func (e *DAGEngine) GetExecutableNodes() []string {
 	var result []string
 
@@ -186,13 +185,12 @@ func (e *DAGEngine) GetExecutableNodes() []string {
 					continue
 				}
 
-				// If dependency failed, check edge's IgnoreFailure
-				// If edge has ignore_failure=true, dependency failure is ignored
-				if depStatus == NodeStatusFailed && edge.IgnoreFailure {
+				upstream := e.nodeMap[edge.From]
+				if depStatus == NodeStatusFailed && upstream != nil && upstream.IgnoreFailure {
 					continue
 				}
 
-				// Dependency failed and edge does not ignore failure
+				// Dependency failed and upstream node does not ignore failure
 				allDependenciesMet = false
 				break
 			}
@@ -234,7 +232,7 @@ func (e *DAGEngine) GetNodeStatus(nodeID string) NodeStatus {
 // that are blocking the execution of pending nodes.
 // A failed node blocks execution if:
 // 1. There is a pending node that depends on it
-// 2. The edge does NOT have ignore_failure=true
+// 2. The upstream node does NOT have ignore_failure=true
 func (e *DAGEngine) HasFailedNodesBlockingExecution() bool {
 	for _, node := range e.config.Nodes {
 		if e.nodeStatus[node.ID] == NodeStatusPending {
@@ -247,8 +245,8 @@ func (e *DAGEngine) HasFailedNodesBlockingExecution() bool {
 					if depStatus == NodeStatusPending || depStatus == NodeStatusRunning {
 						break
 					}
-					// If dependency failed and edge does not ignore failure, it's blocking
-					if depStatus == NodeStatusFailed && !edge.IgnoreFailure {
+					upstream := e.nodeMap[edge.From]
+					if depStatus == NodeStatusFailed && (upstream == nil || !upstream.IgnoreFailure) {
 						return true
 					}
 				}
@@ -277,9 +275,12 @@ type PipelineAssignMessage struct {
 }
 
 type AgentConfig struct {
-	Workspace string            `json:"workspace"`
-	Timeout   int               `json:"timeout"`
-	EnvVars   map[string]string `json:"env_vars"`
+	Workspace              string            `json:"workspace"`
+	Timeout                int               `json:"timeout"`
+	EnvVars                map[string]string `json:"env_vars"`
+	MaxConcurrentPipelines int               `json:"max_concurrent_pipelines"`
+	TaskConcurrency        int               `json:"task_concurrency"`
+	DockerHubMirrors       []string          `json:"dockerhub_mirrors"`
 }
 
 func ParsePipelineAssign(data []byte) (*PipelineAssignMessage, error) {

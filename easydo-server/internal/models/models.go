@@ -49,6 +49,15 @@ func InitDB() {
 	if _, err := loadOrCreateMasterKeyWithRetry(DB, dbInitMaxAttempts, dbInitRetryDelay); err != nil {
 		panic("Failed to initialize master key: " + err.Error())
 	}
+
+	if err := initializeSystemSettings(DB); err != nil {
+		panic("Failed to initialize system settings: " + err.Error())
+	}
+}
+
+func initializeSystemSettings(db *gorm.DB) error {
+	_, err := LoadOrCreateSystemDockerHubMirrors(db, config.BootstrapDockerHubMirrors())
+	return err
 }
 
 func openDBWithRetry(dialector gorm.Dialector, cfg *gorm.Config, attempts int, delay time.Duration) (*gorm.DB, error) {
@@ -104,8 +113,8 @@ const (
 	managedSchemaPartial
 )
 
-func managedModels() []interface{} {
-	return []interface{}{
+func managedModels() []any {
+	return []any{
 		&User{},
 		&Workspace{},
 		&WorkspaceMember{},
@@ -144,6 +153,7 @@ func managedModels() []interface{} {
 		&DeploymentRequest{},
 		&DeploymentRecord{},
 		&MasterKey{},
+		&SystemSetting{},
 	}
 }
 
@@ -170,7 +180,7 @@ func validateMigratedSchema(db *gorm.DB) error {
 	return nil
 }
 
-func detectManagedSchemaState(db *gorm.DB, modelsToValidate []interface{}) (managedSchemaState, []string, error) {
+func detectManagedSchemaState(db *gorm.DB, modelsToValidate []any) (managedSchemaState, []string, error) {
 	existingTables := make([]string, 0, len(modelsToValidate))
 	for _, model := range modelsToValidate {
 		if db.Migrator().HasTable(model) {
@@ -189,7 +199,7 @@ func detectManagedSchemaState(db *gorm.DB, modelsToValidate []interface{}) (mana
 }
 
 type columnSync struct {
-	model interface{}
+	model any
 	field string
 }
 
@@ -229,7 +239,7 @@ func missingManagedSchemaColumns(db *gorm.DB) []string {
 	return missing
 }
 
-func modelTableName(db *gorm.DB, model interface{}) string {
+func modelTableName(db *gorm.DB, model any) string {
 	stmt := &gorm.Statement{DB: db}
 	if err := stmt.Parse(model); err == nil && stmt.Schema != nil {
 		return stmt.Schema.Table

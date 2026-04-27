@@ -53,6 +53,13 @@ func Init() {
 	Config.SetDefault("notification.smtp.password", "")
 	Config.SetDefault("notification.smtp.from_address", "")
 	Config.SetDefault("notification.smtp.from_name", "EasyDo")
+	Config.SetDefault("buildkit.bootstrap_dockerhub_mirrors", strings.Join([]string{
+		"https://docker.1ms.run/",
+		"https://hub-mirror.c.163.com/",
+		"https://docker.mirrors.ustc.edu.cn/",
+		"https://docker.m.daocloud.io/",
+		"https://mirror.aliyuncs.com/",
+	}, ","))
 
 	// 2. 从配置文件读取
 	Config.SetConfigName("config")
@@ -108,6 +115,24 @@ func Init() {
 	Config.BindEnv("notification.smtp.password", "NOTIFICATION_SMTP_PASSWORD")
 	Config.BindEnv("notification.smtp.from_address", "NOTIFICATION_SMTP_FROM_ADDRESS")
 	Config.BindEnv("notification.smtp.from_name", "NOTIFICATION_SMTP_FROM_NAME")
+	Config.BindEnv("buildkit.bootstrap_dockerhub_mirrors", "BOOTSTRAP_DOCKERHUB_MIRRORS")
+}
+
+func BootstrapDockerHubMirrors() []string {
+	return splitAndNormalizeMirrorList(Config.GetString("buildkit.bootstrap_dockerhub_mirrors"))
+}
+
+func splitAndNormalizeMirrorList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	mirrors := make([]string, 0, len(parts))
+	for _, part := range parts {
+		mirror := strings.TrimSpace(part)
+		if mirror == "" {
+			continue
+		}
+		mirrors = append(mirrors, mirror)
+	}
+	return mirrors
 }
 
 func GetDSN() string {

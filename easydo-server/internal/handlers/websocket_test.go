@@ -646,10 +646,12 @@ func TestHandleTaskUpdateV2_PersistsResourceBaseInfoFromCollectionTask(t *testin
 
 func TestHeartbeatAckPayload(t *testing.T) {
 	payload := map[string]interface{}{
-		"status":             "ok",
-		"server_time":        float64(time.Now().Unix()),
-		"pending_tasks":      float64(5),
-		"heartbeat_interval": float64(10),
+		"status":                   "ok",
+		"server_time":              float64(time.Now().Unix()),
+		"pending_tasks":            float64(5),
+		"heartbeat_interval":       float64(10),
+		"max_concurrent_pipelines": float64(4),
+		"task_concurrency":         float64(12),
 	}
 
 	msg := WebSocketMessage{
@@ -667,6 +669,31 @@ func TestHeartbeatAckPayload(t *testing.T) {
 	assert.Equal(t, "heartbeat_ack", decoded.Type)
 	assert.Equal(t, "ok", decoded.Payload["status"])
 	assert.Equal(t, float64(5), decoded.Payload["pending_tasks"])
+	assert.Equal(t, float64(4), decoded.Payload["max_concurrent_pipelines"])
+	assert.Equal(t, float64(12), decoded.Payload["task_concurrency"])
+}
+
+func TestBuildHeartbeatAckPayloadIncludesConcurrency(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = previousDB
+	})
+
+	h := NewWebSocketHandler()
+	client := &wsClient{sessionID: "session-1", serverID: "server-1"}
+	agent := &models.Agent{HeartbeatInterval: 10, RegistrationStatus: models.AgentRegistrationStatusApproved, MaxConcurrentPipelines: 4, TaskConcurrency: 7, DockerHubMirrorsConfigured: true, DockerHubMirrors: "https://mirror-a.example"}
+	if err := db.Create(&models.SystemSetting{Key: models.SystemSettingKeyDockerHubMirrors, Value: `[
+		"https://system-mirror.example"
+	]`}).Error; err != nil {
+		t.Fatalf("seed system setting failed: %v", err)
+	}
+
+	payload := h.buildHeartbeatAckPayload(client, agent, 2)
+	assert.Equal(t, 4, payload["max_concurrent_pipelines"])
+	assert.Equal(t, 7, payload["task_concurrency"])
+	assert.Equal(t, []string{"https://mirror-a.example"}, payload["dockerhub_mirrors"])
 }
 
 func TestTaskLogPayload(t *testing.T) {
@@ -1269,6 +1296,128 @@ func TestTriggerDownstreamTasks_VariableSubstitutionNoResultData(t *testing.T) {
 
 	if !strings.Contains(downstream.Script, "${outputs.node_1.git_commit}") {
 		t.Fatalf("expected downstream script to contain unresolved variable when no result data, got: %s", downstream.Script)
+	}
+}
+
+func TestCheckAndUpdatePipelineStatus_IgnoresNodeConfiguredFailure(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	pipelineSnapshot, err := json.Marshal(PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{ID: "build", Type: "shell", Name: "Build", IgnoreFailure: true, Config: map[string]interface{}{"script": "exit 1"}},
+			{ID: "deploy", Type: "shell", Name: "Deploy", Config: map[string]interface{}{"script": "echo deploy"}},
+		},
+		Edges: []PipelineEdge{{From: "build", To: "deploy"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal pipeline snapshot failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		PipelineSnapshot: string(pipelineSnapshot),
+		AgentID:          1,
+		StartTime:        time.Now().Add(-5 * time.Second).Unix(),
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	failedTask := models.AgentTask{
+		WorkspaceID:   1,
+		PipelineRunID: run.ID,
+		NodeID:        "build",
+		TaskType:      "shell",
+		Status:        models.TaskStatusExecuteFailed,
+		ErrorMsg:      "build failed",
+	}
+	if err := db.Create(&failedTask).Error; err != nil {
+		t.Fatalf("create failed task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	handler.triggerDownstreamTasks(run.ID, []models.AgentTask{failedTask})
+	handler.checkAndUpdatePipelineStatus(run.ID)
+
+	var downstream models.AgentTask
+	if err := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, "deploy").First(&downstream).Error; err != nil {
+		t.Fatalf("expected downstream task to be created before status evaluation: %v", err)
+	}
+
+	var reloaded models.PipelineRun
+	if err := db.First(&reloaded, run.ID).Error; err != nil {
+		t.Fatalf("reload pipeline run failed: %v", err)
+	}
+	if reloaded.Status != models.PipelineRunStatusRunning {
+		t.Fatalf("pipeline status=%s, want %s", reloaded.Status, models.PipelineRunStatusRunning)
+	}
+}
+
+func TestTriggerDownstreamTasks_AllowsNodeConfiguredFailureToUnblockDownstream(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	pipelineSnapshot, err := json.Marshal(PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{ID: "build", Type: "shell", Name: "Build", IgnoreFailure: true, Config: map[string]interface{}{"script": "exit 1"}},
+			{ID: "deploy", Type: "shell", Name: "Deploy", Config: map[string]interface{}{"script": "echo deploy"}},
+		},
+		Edges: []PipelineEdge{{From: "build", To: "deploy"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal pipeline snapshot failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		PipelineSnapshot: string(pipelineSnapshot),
+		AgentID:          1,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	failedTask := models.AgentTask{
+		WorkspaceID:   1,
+		PipelineRunID: run.ID,
+		NodeID:        "build",
+		TaskType:      "shell",
+		Status:        models.TaskStatusExecuteFailed,
+		ErrorMsg:      "build failed",
+	}
+	if err := db.Create(&failedTask).Error; err != nil {
+		t.Fatalf("create failed task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	handler.triggerDownstreamTasks(run.ID, []models.AgentTask{failedTask})
+
+	var downstream models.AgentTask
+	if err := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, "deploy").First(&downstream).Error; err != nil {
+		t.Fatalf("expected downstream task to be created despite upstream failure on ignored node: %v", err)
 	}
 }
 

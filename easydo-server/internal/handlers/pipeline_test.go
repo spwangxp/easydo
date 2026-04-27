@@ -156,6 +156,33 @@ func TestPipelineNode_GetNodeConfig(t *testing.T) {
 	}
 }
 
+func TestParsePipelineConfigJSON_PreservesTopLevelIgnoreFailure(t *testing.T) {
+	configJSON := `{
+		"version": "2.0",
+		"nodes": [
+			{
+				"node_id": "node_1",
+				"task_key": "shell",
+				"node_name": "Build",
+				"ignore_failure": true,
+				"params": {"script": "exit 1"}
+			}
+		],
+		"edges": []
+	}`
+
+	config, err := parsePipelineConfigJSON(configJSON)
+	if err != nil {
+		t.Fatalf("parsePipelineConfigJSON failed: %v", err)
+	}
+	if len(config.Nodes) != 1 {
+		t.Fatalf("nodes=%d, want 1", len(config.Nodes))
+	}
+	if !config.Nodes[0].IgnoreFailure {
+		t.Fatalf("node ignore_failure=%v, want true", config.Nodes[0].IgnoreFailure)
+	}
+}
+
 func TestPipelineConfig_ParseAndValidate(t *testing.T) {
 	// Test parsing a valid pipeline config
 	configJSON := `{
@@ -1284,6 +1311,141 @@ func TestGetRunDetail_PrefersRunRecordResolvedNodesAndOutputs(t *testing.T) {
 	}
 	if bytes.Contains(w.Body.Bytes(), []byte("task-row-commit")) {
 		t.Fatalf("expected run detail to avoid task result_data as truth, got %s", w.Body.String())
+	}
+}
+
+func TestGetRunTasks_UsesUpstreamNodeIgnoreFailureForBlockedStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name                  string
+		upstreamIgnoreFailure bool
+		expectedDisplayStatus string
+	}{
+		{
+			name:                  "failed upstream without ignore failure blocks downstream",
+			upstreamIgnoreFailure: false,
+			expectedDisplayStatus: "blocked",
+		},
+		{
+			name:                  "failed upstream with ignore failure leaves downstream pending",
+			upstreamIgnoreFailure: true,
+			expectedDisplayStatus: "not_executed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := openHandlerTestDB(t)
+			h := &PipelineHandler{DB: db}
+			user, workspace := seedCredentialTestUserAndWorkspace(t, db, "run-tasks-user-"+strings.ReplaceAll(tt.name, " ", "-"), models.WorkspaceRoleDeveloper)
+			pipelineConfig := fmt.Sprintf(`{"version":"2.0","nodes":[{"id":"build","type":"shell","name":"Build","ignore_failure":%t,"config":{"script":"exit 1"}},{"id":"deploy","type":"shell","name":"Deploy","config":{"script":"echo deploy"}}],"edges":[{"from":"build","to":"deploy"}]}`,
+				tt.upstreamIgnoreFailure,
+			)
+			pipeline := models.Pipeline{
+				Name:        "run-tasks-pipeline",
+				WorkspaceID: workspace.ID,
+				OwnerID:     user.ID,
+				Config:      pipelineConfig,
+			}
+			if err := db.Create(&pipeline).Error; err != nil {
+				t.Fatalf("create pipeline failed: %v", err)
+			}
+
+			run := models.PipelineRun{
+				WorkspaceID:      workspace.ID,
+				PipelineID:       pipeline.ID,
+				BuildNumber:      1,
+				Status:           models.PipelineRunStatusFailed,
+				TriggerType:      "manual",
+				Config:           pipeline.Config,
+				PipelineSnapshot: pipeline.Config,
+			}
+			if err := db.Create(&run).Error; err != nil {
+				t.Fatalf("create run failed: %v", err)
+			}
+
+			failedTask := models.AgentTask{
+				WorkspaceID:   workspace.ID,
+				AgentID:       1,
+				PipelineRunID: run.ID,
+				NodeID:        "build",
+				TaskType:      "shell",
+				Name:          "Build",
+				Status:        models.TaskStatusExecuteFailed,
+				ExitCode:      7,
+				Duration:      12,
+				ErrorMsg:      "build failed",
+			}
+			if err := db.Create(&failedTask).Error; err != nil {
+				t.Fatalf("create failed task failed: %v", err)
+			}
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/pipelines/1/runs/1/tasks", nil)
+			c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}, {Key: "run_id", Value: strconv.FormatUint(run.ID, 10)}}
+			c.Set("workspace_id", workspace.ID)
+
+			h.GetRunTasks(c)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+			}
+
+			var resp struct {
+				Code int `json:"code"`
+				Data struct {
+					List []struct {
+						NodeID        string `json:"node_id"`
+						Status        string `json:"status"`
+						DisplayStatus string `json:"display_status"`
+						ExitCode      int    `json:"exit_code"`
+						Duration      int    `json:"duration"`
+					} `json:"list"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal response failed: %v body=%s", err, w.Body.String())
+			}
+
+			var buildTask *struct {
+				NodeID        string `json:"node_id"`
+				Status        string `json:"status"`
+				DisplayStatus string `json:"display_status"`
+				ExitCode      int    `json:"exit_code"`
+				Duration      int    `json:"duration"`
+			}
+			var deployTask *struct {
+				NodeID        string `json:"node_id"`
+				Status        string `json:"status"`
+				DisplayStatus string `json:"display_status"`
+				ExitCode      int    `json:"exit_code"`
+				Duration      int    `json:"duration"`
+			}
+			for i := range resp.Data.List {
+				task := &resp.Data.List[i]
+				switch task.NodeID {
+				case "build":
+					buildTask = task
+				case "deploy":
+					deployTask = task
+				}
+			}
+
+			if buildTask == nil || deployTask == nil {
+				t.Fatalf("expected build and deploy tasks in response, got %#v", resp.Data.List)
+			}
+			if buildTask.DisplayStatus != models.TaskStatusExecuteFailed {
+				t.Fatalf("build display_status=%s, want %s", buildTask.DisplayStatus, models.TaskStatusExecuteFailed)
+			}
+			if buildTask.ExitCode != 7 || buildTask.Duration != 12 {
+				t.Fatalf("build exit_code/duration=(%d,%d), want (7,12)", buildTask.ExitCode, buildTask.Duration)
+			}
+			if deployTask.DisplayStatus != tt.expectedDisplayStatus {
+				t.Fatalf("deploy display_status=%s, want %s", deployTask.DisplayStatus, tt.expectedDisplayStatus)
+			}
+		})
 	}
 }
 

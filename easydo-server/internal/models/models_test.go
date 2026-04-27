@@ -11,6 +11,7 @@ import (
 	"easydo-server/internal/config"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -131,18 +132,125 @@ func TestManagedModelsIncludeNotificationDomainModels(t *testing.T) {
 	for _, model := range managed {
 		managedTypes[reflect.TypeOf(model)] = struct{}{}
 	}
-	required := []interface{}{
+	required := []any{
 		&NotificationEvent{},
 		&NotificationAudience{},
 		&Notification{},
 		&InboxMessage{},
 		&NotificationDelivery{},
 		&NotificationPreference{},
+		&SystemSetting{},
 	}
 	for _, model := range required {
 		if _, ok := managedTypes[reflect.TypeOf(model)]; !ok {
 			t.Fatalf("managedModels missing %T", model)
 		}
+	}
+}
+
+func TestLoadOrCreateSystemDockerHubMirrorsSeedsAndReusesPersistedDefaults(t *testing.T) {
+	db := openModelsTestDB(t)
+	if err := db.AutoMigrate(&SystemSetting{}); err != nil {
+		t.Fatalf("automigrate system settings failed: %v", err)
+	}
+
+	mirrors, err := LoadOrCreateSystemDockerHubMirrors(db, []string{" https://mirror-a.example ", "", "https://mirror-b.example"})
+	if err != nil {
+		t.Fatalf("initial LoadOrCreateSystemDockerHubMirrors failed: %v", err)
+	}
+	if !reflect.DeepEqual(mirrors, []string{"https://mirror-a.example", "https://mirror-b.example"}) {
+		t.Fatalf("mirrors=%v, want seeded defaults", mirrors)
+	}
+
+	if err := db.Model(&SystemSetting{}).Where("key = ?", SystemSettingKeyDockerHubMirrors).Update("value", `["https://mirror-c.example"]`).Error; err != nil {
+		t.Fatalf("update system setting failed: %v", err)
+	}
+
+	reloaded, err := LoadOrCreateSystemDockerHubMirrors(db, []string{"https://mirror-d.example"})
+	if err != nil {
+		t.Fatalf("reload LoadOrCreateSystemDockerHubMirrors failed: %v", err)
+	}
+	if !reflect.DeepEqual(reloaded, []string{"https://mirror-c.example"}) {
+		t.Fatalf("mirrors=%v, want persisted value", reloaded)
+	}
+}
+
+func TestInitializeSystemSettingsSeedsBootstrapDockerHubMirrorsOnce(t *testing.T) {
+	db := openModelsTestDB(t)
+	if err := db.AutoMigrate(&SystemSetting{}); err != nil {
+		t.Fatalf("automigrate system settings failed: %v", err)
+	}
+
+	original := config.Config.GetString("buildkit.bootstrap_dockerhub_mirrors")
+	config.Config.Set("buildkit.bootstrap_dockerhub_mirrors", " https://mirror-a.example , , https://mirror-b.example ")
+	defer config.Config.Set("buildkit.bootstrap_dockerhub_mirrors", original)
+
+	if err := initializeSystemSettings(db); err != nil {
+		t.Fatalf("initializeSystemSettings failed: %v", err)
+	}
+
+	var setting SystemSetting
+	if err := db.Where("key = ?", SystemSettingKeyDockerHubMirrors).First(&setting).Error; err != nil {
+		t.Fatalf("load seeded system setting failed: %v", err)
+	}
+	if setting.Value != `["https://mirror-a.example","https://mirror-b.example"]` {
+		t.Fatalf("stored value=%s, want seeded bootstrap mirrors", setting.Value)
+	}
+
+	var count int64
+	if err := db.Model(&SystemSetting{}).Where("key = ?", SystemSettingKeyDockerHubMirrors).Count(&count).Error; err != nil {
+		t.Fatalf("count system settings failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("system setting row count=%d, want 1", count)
+	}
+}
+
+func TestInitializeSystemSettingsDoesNotOverwritePersistedDockerHubMirrors(t *testing.T) {
+	db := openModelsTestDB(t)
+	if err := db.AutoMigrate(&SystemSetting{}); err != nil {
+		t.Fatalf("automigrate system settings failed: %v", err)
+	}
+
+	if err := db.Create(&SystemSetting{Key: SystemSettingKeyDockerHubMirrors, Value: `["https://persisted.example"]`}).Error; err != nil {
+		t.Fatalf("create persisted system setting failed: %v", err)
+	}
+
+	original := config.Config.GetString("buildkit.bootstrap_dockerhub_mirrors")
+	config.Config.Set("buildkit.bootstrap_dockerhub_mirrors", "https://bootstrap.example")
+	defer config.Config.Set("buildkit.bootstrap_dockerhub_mirrors", original)
+
+	if err := initializeSystemSettings(db); err != nil {
+		t.Fatalf("initializeSystemSettings failed: %v", err)
+	}
+
+	var setting SystemSetting
+	if err := db.Where("key = ?", SystemSettingKeyDockerHubMirrors).First(&setting).Error; err != nil {
+		t.Fatalf("load persisted system setting failed: %v", err)
+	}
+	if setting.Value != `["https://persisted.example"]` {
+		t.Fatalf("stored value=%s, want existing persisted mirrors", setting.Value)
+	}
+
+	var count int64
+	if err := db.Model(&SystemSetting{}).Where("key = ?", SystemSettingKeyDockerHubMirrors).Count(&count).Error; err != nil {
+		t.Fatalf("count system settings failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("system setting row count=%d, want 1", count)
+	}
+}
+
+func TestSystemSettingLookupQuotesReservedKeyColumnForMySQL(t *testing.T) {
+	db := openModelsTestDB(t)
+	stmt := db.ToSQL(func(tx *gorm.DB) *gorm.DB {
+		var setting SystemSetting
+		return tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Scopes(systemSettingKeyScope(SystemSettingKeyDockerHubMirrors)).
+			First(&setting)
+	})
+	if !strings.Contains(stmt, "`key` =") {
+		t.Fatalf("sql=%s, want quoted key column", stmt)
 	}
 }
 
