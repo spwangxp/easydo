@@ -1,12 +1,14 @@
 <template>
   <div class="messages-container">
-    <div class="messages-header">
-      <div>
-        <h1 class="page-title">消息</h1>
-        <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
-      </div>
-      <el-button type="text" :disabled="notificationStore.unreadCount === 0 || loading" @click="handleMarkAllRead">全部已读</el-button>
-    </div>
+    <PageHeader>
+      <template #title><h1>消息</h1></template>
+      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</template>
+      <template #actions>
+        <PageHeaderActions>
+          <el-button type="text" :disabled="notificationStore.unreadCount === 0 || loading" @click="handleMarkAllRead">全部已读</el-button>
+        </PageHeaderActions>
+      </template>
+    </PageHeader>
     
     <div class="messages-layout">
       <aside class="messages-sidebar">
@@ -72,6 +74,8 @@ import {
 import { getNotificationInbox, markAllNotificationsRead, markNotificationRead } from '@/api/notification'
 import { useNotificationStore } from '@/stores/notification'
 import { useUserStore } from '@/stores/user'
+import PageHeader from '../store/components/PageHeader.vue'
+import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 
 const userStore = useUserStore()
 const notificationStore = useNotificationStore()
@@ -277,25 +281,6 @@ onUnmounted(() => {
 
 .messages-container {
   animation: float-up 0.45s ease both;
-
-  .messages-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 20px;
-
-    .page-title {
-      font-family: $font-family-display;
-      font-size: 32px;
-      font-weight: 760;
-      letter-spacing: -0.03em;
-      color: var(--text-primary);
-    }
-
-    :deep(.el-button--text) {
-      color: var(--primary-color);
-    }
-  }
 
   .messages-layout {
     display: flex;

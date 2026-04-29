@@ -1,15 +1,17 @@
 <template>
   <div class="pipeline-container">
-    <div class="pipeline-header">
-      <div>
-        <h1 class="page-title">流水线</h1>
-        <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
-      </div>
-      <el-button type="primary" @click="handleCreate">
-        <el-icon><Plus /></el-icon>
-        新建流水线
-      </el-button>
-    </div>
+    <PageHeader>
+      <template #title><h1>流水线</h1></template>
+      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</template>
+      <template #actions>
+        <PageHeaderActions>
+          <el-button type="primary" @click="handleCreate">
+            <el-icon><Plus /></el-icon>
+            新建流水线
+          </el-button>
+        </PageHeaderActions>
+      </template>
+    </PageHeader>
     
     <div class="pipeline-filters">
       <div class="filter-tabs">
@@ -357,6 +359,8 @@ import {
 import { getPipelineList, getPipelineDetail, createPipeline, runPipeline, toggleFavorite as apiToggleFavorite, deletePipeline } from '@/api/pipeline'
 import { getProjectList } from '@/api/project'
 import { useUserStore } from '@/stores/user'
+import PageHeader from '../store/components/PageHeader.vue'
+import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 import { buildRunInputsPayload, createRunInputs, getManualRunNodes } from './runtimeConfig'
 
 const userStore = useUserStore()
@@ -636,26 +640,6 @@ const handleDeleteConfirm = async () => {
 
 .pipeline-container {
   animation: float-up 0.45s ease both;
-
-  .pipeline-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 20px;
-
-    .page-title {
-      font-family: $font-family-display;
-      font-size: 32px;
-      font-weight: 760;
-      letter-spacing: -0.03em;
-      color: var(--text-primary);
-    }
-
-    :deep(.el-button--primary) {
-      height: 42px;
-      padding: 0 20px;
-    }
-  }
 
   .pipeline-filters {
     display: flex;

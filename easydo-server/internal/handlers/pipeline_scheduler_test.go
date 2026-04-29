@@ -269,7 +269,7 @@ func TestAssignOneQueuedRun_SyncsDeploymentRequestStatusToRunning(t *testing.T) 
 		WorkspaceID:        workspace.ID,
 		TemplateID:         1,
 		TemplateVersionID:  1,
-		TemplateType:       models.StoreTemplateTypeLLM,
+		TemplateType:       models.StoreTemplateTypeAI,
 		TargetResourceID:   1,
 		TargetResourceType: models.ResourceTypeVM,
 		Status:             models.DeploymentRequestStatusQueued,

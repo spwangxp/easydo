@@ -1,12 +1,12 @@
 <template>
   <div class="agent-container">
-    <div class="agent-header">
-      <div>
-        <h1 class="page-title">执行器管理</h1>
-        <div class="page-subtitle">{{ workspaceLabel }}</div>
+    <PageHeader>
+      <template #title><h1>执行器管理</h1></template>
+      <template #subtitle>
+        {{ workspaceLabel }}
         <div class="page-guidance">{{ workspaceRegistrationHint }}</div>
-      </div>
-    </div>
+      </template>
+    </PageHeader>
 
     <div class="agent-filters">
       <div class="filter-tabs">
@@ -698,6 +698,7 @@ import {
 } from '@element-plus/icons-vue'
 import { getAgentList, getAgentDetail, updateAgent, deleteAgent, getAgentHeartbeats, refreshAgentToken, approveAgent, rejectAgent, removeAgent, getPendingAgents } from '@/api/agent'
 import { getTaskDispatchList } from '@/api/task'
+import PageHeader from '../store/components/PageHeader.vue'
 import { normalizeMirrorList, deriveMirrorEditorText, buildMirrorSubmitPayload } from './mirrorSettings'
 
 const userStore = useUserStore()
@@ -1434,26 +1435,11 @@ onUnmounted(() => {
 @import '@/assets/styles/variables.scss';
 
 .agent-container {
-  .agent-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 28px;
-
-    .page-title {
-      font-family: $font-family-display;
-      font-size: 28px;
-      font-weight: 700;
-      color: var(--text-primary);
-      letter-spacing: -0.02em;
-    }
-
-    .page-guidance {
-      margin-top: 8px;
-      font-size: 13px;
-      line-height: 1.6;
-      color: var(--text-muted);
-    }
+  .page-guidance {
+    margin-top: 8px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
   }
 
   .agent-filters {

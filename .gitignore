@@ -28,6 +28,7 @@ test-results
 
 **/node_modules/
 **/docs/
+.playwright-mcp
 
 easydo-frontend/node_modules/
 easydo-frontend/dist
@@ -37,3 +38,4 @@ Thumbs.db
 
 docs/*
 .superpowers/
+.worktrees/

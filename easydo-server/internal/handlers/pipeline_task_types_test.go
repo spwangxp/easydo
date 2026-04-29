@@ -11,6 +11,61 @@ import (
 	"easydo-server/internal/models"
 )
 
+func TestBuildAgentTaskParams_UsesExecutorPayloadForAITasks(t *testing.T) {
+	nodeConfig := map[string]interface{}{"input_text": "raw"}
+	executorPayload := map[string]interface{}{
+		"mode":          "ai-task",
+		"ai_session_id": float64(88),
+		"scenario":      "mr_quality_check",
+		"request":       map[string]interface{}{"input_text": "normalized"},
+	}
+
+	params := buildAgentTaskParams(nodeConfig, executorPayload)
+	if params["scenario"] != "mr_quality_check" {
+		t.Fatalf("expected ai executor payload to be used, got=%#v", params)
+	}
+	if _, exists := params["request"]; !exists {
+		t.Fatalf("expected nested request payload for ai task, got=%#v", params)
+	}
+
+	shellAIParams := buildAgentTaskParams(nodeConfig, executorPayload)
+	if shellAIParams["scenario"] != "mr_quality_check" {
+		t.Fatalf("expected ai-task payload to be preserved even for shell task type, got=%#v", shellAIParams)
+	}
+
+	nonAIParams := buildAgentTaskParams(nodeConfig, map[string]interface{}{"script": "echo hi"})
+	if nonAIParams["input_text"] != "raw" {
+		t.Fatalf("expected non-ai tasks to keep node config, got=%#v", nonAIParams)
+	}
+}
+
+func TestGetTaskDefinition_UsesAITaskExecutionModeForAIJobs(t *testing.T) {
+	for _, taskType := range []string{"mr_quality_check", "requirement_defect_assistant"} {
+		def, ok := getTaskDefinition(taskType)
+		if !ok {
+			t.Fatalf("expected typed task definition for %s", taskType)
+		}
+		if def.ExecutionSpec.Mode != "ai-task" {
+			t.Fatalf("expected ai-task execution mode for %s, got %s", taskType, def.ExecutionSpec.Mode)
+		}
+		if def.ExecutionSpec.ScriptTemplate != "" {
+			t.Fatalf("expected empty script template for %s, got %q", taskType, def.ExecutionSpec.ScriptTemplate)
+		}
+	}
+}
+
+func TestGetTaskDefinition_NonAITasksDoNotUseAITaskExecutionMode(t *testing.T) {
+	for _, taskType := range []string{"git_clone", "docker", "shell"} {
+		def, ok := getTaskDefinition(taskType)
+		if !ok {
+			t.Fatalf("expected typed task definition for %s", taskType)
+		}
+		if def.ExecutionSpec.Mode == "ai-task" {
+			t.Fatalf("expected non-ai task %s to avoid ai-task execution mode", taskType)
+		}
+	}
+}
+
 func TestGetPipelineTaskDefinitionExposeTypedContract(t *testing.T) {
 	def, ok := getTaskDefinition("git_clone")
 	if !ok {
@@ -422,6 +477,33 @@ func TestTaskCredentialSlots(t *testing.T) {
 	}
 	if !sshSlot.allowsCategory(models.CategoryGitHub) || !sshSlot.allowsCategory(models.CategoryCustom) {
 		t.Fatalf("ssh_auth should not restrict SSH credentials by category")
+	}
+}
+
+func TestAIPipelineTaskDefinitions(t *testing.T) {
+	_, mrDef, ok := getPipelineTaskDefinition("mr_quality_check")
+	if !ok {
+		t.Fatalf("expected mr_quality_check definition")
+	}
+	if mrDef.ExecMode != taskExecModeAgent {
+		t.Fatalf("expected mr_quality_check to be agent executed")
+	}
+	if len(mrDef.FieldsSchema) == 0 || len(mrDef.OutputsSchema) == 0 {
+		t.Fatalf("expected mr_quality_check to expose fields and outputs schema")
+	}
+
+	_, reqDef, ok := getPipelineTaskDefinition("requirement_defect_assistant")
+	if !ok {
+		t.Fatalf("expected requirement_defect_assistant definition")
+	}
+	if reqDef.ExecMode != taskExecModeAgent {
+		t.Fatalf("expected requirement_defect_assistant to be agent executed")
+	}
+	if _, script, err := renderPipelineAgentScript("mr_quality_check", map[string]interface{}{"input_text": "demo"}); err != nil || script != "" {
+		t.Fatalf("expected AI pipeline task to render empty script without error, got script=%q err=%v", script, err)
+	}
+	if _, script, err := renderPipelineAgentScript("requirement_defect_assistant", map[string]interface{}{"input_text": "demo"}); err != nil || script != "" {
+		t.Fatalf("expected ai-task execution mode to render empty script without error, got script=%q err=%v", script, err)
 	}
 }
 

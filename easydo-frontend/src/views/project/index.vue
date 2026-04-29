@@ -1,15 +1,17 @@
 <template>
   <div class="project-container">
-    <div class="project-header">
-      <div>
-        <h1 class="page-title">项目</h1>
-        <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
-      </div>
-      <el-button type="primary" @click="handleCreate">
-        <el-icon><Plus /></el-icon>
-        添加项目
-      </el-button>
-    </div>
+    <PageHeader>
+      <template #title><h1>项目</h1></template>
+      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</template>
+      <template #actions>
+        <PageHeaderActions>
+          <el-button type="primary" @click="handleCreate">
+            <el-icon><Plus /></el-icon>
+            添加项目
+          </el-button>
+        </PageHeaderActions>
+      </template>
+    </PageHeader>
 
     <div class="project-filters">
       <div class="filter-tabs">
@@ -218,6 +220,8 @@ import {
 } from '@element-plus/icons-vue'
 import { getProjectList, createProject, updateProject, deleteProject, toggleFavorite } from '@/api/project'
 import { useUserStore } from '@/stores/user'
+import PageHeader from '../store/components/PageHeader.vue'
+import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 
 const userStore = useUserStore()
 
@@ -499,26 +503,6 @@ onMounted(() => {
 .project-container {
   animation: float-up 0.45s ease both;
 
-  .project-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 20px;
-
-    .page-title {
-      font-family: $font-family-display;
-      font-size: 32px;
-      font-weight: 760;
-      letter-spacing: -0.03em;
-      color: var(--text-primary);
-    }
-
-    :deep(.el-button--primary) {
-      height: 42px;
-      padding: 0 20px;
-    }
-  }
-
   .project-filters {
     display: flex;
     align-items: center;
@@ -712,14 +696,9 @@ onMounted(() => {
 
 @media (max-width: 768px) {
   .project-container {
-    .project-header {
+    .project-filters {
       flex-direction: column;
-      align-items: flex-start;
-      gap: 10px;
-
-      .page-title {
-        font-size: 27px;
-      }
+      align-items: stretch;
     }
   }
 }

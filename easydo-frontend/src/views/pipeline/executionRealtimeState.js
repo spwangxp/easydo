@@ -13,6 +13,33 @@ const parseJSONRecord = (value) => {
   }
 }
 
+export const isAITaskOutputs = (outputs = {}) => {
+  if (!outputs || typeof outputs !== 'object' || Array.isArray(outputs)) return false
+  return Boolean(
+    outputs.summary !== undefined
+    || outputs.quality_score !== undefined
+    || outputs.issues_count !== undefined
+    || outputs.defect_count !== undefined
+    || outputs.issues !== undefined
+    || outputs.defects !== undefined
+    || outputs.suggestions !== undefined
+  )
+}
+
+export const getTaskOutputDisplayKind = (task = {}) => {
+  const taskType = String(task?.task_type || task?.type || task?.task_key || '').trim()
+  if (taskType) return taskType
+  if (isAITaskOutputs(task?.outputs)) {
+    if (task?.outputs?.quality_score !== undefined || task?.outputs?.issues_count !== undefined || task?.outputs?.issues !== undefined) {
+      return 'mr_quality_check'
+    }
+    if (task?.outputs?.defect_count !== undefined || task?.outputs?.defects !== undefined || task?.outputs?.suggestions !== undefined) {
+      return 'requirement_defect_assistant'
+    }
+  }
+  return ''
+}
+
 export const buildTaskOutputsFromPayload = (payload = {}) => {
   const directOutputs = parseJSONRecord(payload.outputs)
   if (directOutputs) return directOutputs

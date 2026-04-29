@@ -944,6 +944,44 @@ fi`,
 			{Key: "message_id", Label: "消息ID", Type: "number", Description: "Created in-app message ID"},
 		},
 	},
+	"mr_quality_check": {
+		CanonicalType: "mr_quality_check",
+		Name:          "MR 质量检测",
+		Description:   "Use AI session execution to review merge request quality and produce structured findings.",
+		Category:      "ai",
+		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "agent_id", Label: "AI Agent", Type: "number", Required: true, UIComponent: "input"},
+			{Key: "runtime_profile_id", Label: "Runtime Profile", Type: "number", Required: true, UIComponent: "input"},
+			{Key: "input_text", Label: "检测内容", Type: "text", Required: true, UIComponent: "textarea"},
+			{Key: "output_language", Label: "输出语言", Type: "string", UIComponent: "input", Default: "zh-CN"},
+		},
+		OutputsSchema: []models.TaskDefinitionOutput{
+			{Key: "summary", Label: "总结", Type: "string", Description: "AI summary for the MR review"},
+			{Key: "quality_score", Label: "质量评分", Type: "number", Description: "Quality score from 0 to 100"},
+			{Key: "issues", Label: "问题列表", Type: "array", Description: "Structured issue list"},
+			{Key: "issues_count", Label: "问题数量", Type: "number", Description: "Total issue count"},
+		},
+	},
+	"requirement_defect_assistant": {
+		CanonicalType: "requirement_defect_assistant",
+		Name:          "需求缺陷助手",
+		Description:   "Use AI session execution to inspect requirement text and produce defect analysis.",
+		Category:      "ai",
+		ExecMode:      taskExecModeAgent,
+		FieldsSchema: []models.TaskDefinitionField{
+			{Key: "agent_id", Label: "AI Agent", Type: "number", Required: true, UIComponent: "input"},
+			{Key: "runtime_profile_id", Label: "Runtime Profile", Type: "number", Required: true, UIComponent: "input"},
+			{Key: "input_text", Label: "需求内容", Type: "text", Required: true, UIComponent: "textarea"},
+			{Key: "output_language", Label: "输出语言", Type: "string", UIComponent: "input", Default: "zh-CN"},
+		},
+		OutputsSchema: []models.TaskDefinitionOutput{
+			{Key: "summary", Label: "总结", Type: "string", Description: "AI summary for the requirement analysis"},
+			{Key: "defects", Label: "缺陷列表", Type: "array", Description: "Structured requirement defects"},
+			{Key: "defect_count", Label: "缺陷数量", Type: "number", Description: "Total defect count"},
+			{Key: "suggestions", Label: "建议", Type: "array", Description: "Improvement suggestions"},
+		},
+	},
 }
 
 var pipelineTaskTypeAliases = map[string]string{
@@ -1027,6 +1065,9 @@ func getTaskDefinition(taskType string) (models.TaskDefinition, bool) {
 	executionMode := "server_handler"
 	if def.ExecMode == taskExecModeAgent {
 		executionMode = "shell_template"
+		if def.Category == "ai" && strings.TrimSpace(def.ShellTemplate) == "" {
+			executionMode = "ai-task"
+		}
 	}
 	return models.TaskDefinition{
 		TaskKey:         canonical,
@@ -1125,6 +1166,9 @@ func renderPipelineAgentScript(taskType string, nodeConfig map[string]interface{
 		return "", "", fmt.Errorf("unsupported task type: %s", taskType)
 	}
 	if def.ExecMode != taskExecModeAgent {
+		return canonical, "", nil
+	}
+	if typedDef, ok := getTaskDefinition(canonical); ok && typedDef.ExecutionSpec.Mode == "ai-task" {
 		return canonical, "", nil
 	}
 

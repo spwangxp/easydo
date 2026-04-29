@@ -16,6 +16,103 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+func TestBuildAITaskPrompt_IncludesOutputLanguageInstruction(t *testing.T) {
+	prompt := buildAITaskPrompt(aiTaskPayload{
+		Scenario: "mr_quality_check",
+		Request: map[string]interface{}{
+			"input_text":      "review this MR",
+			"output_language": "en-US",
+		},
+	})
+	if !strings.Contains(prompt, "Use en-US for all human-readable text fields") {
+		t.Fatalf("expected prompt to include output language instruction, got=%s", prompt)
+	}
+}
+
+func TestExecuteAITask_UsesTaskTypeAndRawParamsAsFallbackPayload(t *testing.T) {
+	executor := &Executor{}
+	result := executor.executeAITask(context.Background(), TaskParams{
+		TaskID:   101,
+		TaskType: "mr_quality_check",
+		Params: map[string]interface{}{
+			"input_text":      "TODO: verify follow-up",
+			"output_language": "zh-CN",
+		},
+	})
+	if result == nil {
+		t.Fatal("expected ai task result")
+	}
+	if result.StructuredOutput["summary"] == nil {
+		t.Fatalf("expected structured summary, got=%#v", result.StructuredOutput)
+	}
+	if result.StructuredOutput["issues_count"] == nil {
+		t.Fatalf("expected mr structured outputs, got=%#v", result.StructuredOutput)
+	}
+}
+
+func TestExecuteAITask_UsesNestedRequestPayload(t *testing.T) {
+	executor := &Executor{}
+	result := executor.executeAITask(context.Background(), TaskParams{
+		TaskID:   102,
+		TaskType: "mr_quality_check",
+		Params: map[string]interface{}{
+			"ai_session_id": float64(9),
+			"scenario":      "mr_quality_check",
+			"request": map[string]interface{}{
+				"input_text":      "TODO: check nested request path",
+				"output_language": "en-US",
+			},
+		},
+	})
+	if result == nil {
+		t.Fatal("expected ai task result")
+	}
+	if result.StructuredOutput["issues_count"] == nil {
+		t.Fatalf("expected nested request payload to produce mr outputs, got=%#v", result.StructuredOutput)
+	}
+}
+
+func TestExecute_UsesAITaskModeFromParams(t *testing.T) {
+	executor := NewExecutor(logrus.New(), t.TempDir(), system.RuntimeCapabilities{})
+	result := executor.Execute(context.Background(), TaskParams{
+		TaskID:   103,
+		TaskType: "shell",
+		Params: map[string]interface{}{
+			"mode":          "ai-task",
+			"ai_session_id": float64(7),
+			"scenario":      "mr_quality_check",
+			"request": map[string]interface{}{
+				"input_text": "TODO: verify execution mode routing",
+			},
+		},
+	})
+	if result == nil {
+		t.Fatal("expected task result")
+	}
+	if result.StructuredOutput["issues_count"] == nil {
+		t.Fatalf("expected ai-task execution mode to route to structured AI result, got=%#v", result.StructuredOutput)
+	}
+}
+
+func TestIsAITaskPayload(t *testing.T) {
+	tests := []struct {
+		name     string
+		taskType string
+		params   map[string]interface{}
+		want     bool
+	}{
+		{name: "mode ai-task", taskType: "shell", params: map[string]interface{}{"mode": "ai-task"}, want: true},
+		{name: "scenario mr review", taskType: "shell", params: map[string]interface{}{"scenario": "mr_quality_check"}, want: true},
+		{name: "legacy ai task type", taskType: "requirement_defect_assistant", want: true},
+		{name: "ordinary shell", taskType: "shell", params: map[string]interface{}{"mode": "shell"}, want: false},
+	}
+	for _, tt := range tests {
+		if got := IsAITaskPayload(tt.taskType, tt.params); got != tt.want {
+			t.Fatalf("%s: IsAITaskPayload()=%v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
 func TestParseParams_PreservesEnvVarsWhenJSONContainsNonStringValues(t *testing.T) {
 	params, err := ParseParams(map[string]interface{}{
 		"id":       float64(1),

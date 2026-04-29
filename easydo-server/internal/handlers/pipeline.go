@@ -1791,13 +1791,23 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 	if wd, ok := nodeConfig["working_dir"].(string); ok {
 		workDir = wd
 	}
+	envMap := mergeNodeEnv(nodeConfig)
+	createdBy := triggerUserID
+	if createdBy == 0 {
+		createdBy = run.TriggerUserID
+	}
+	executorPayload := buildExecutorPayload(script, workDir, envMap)
+	aiSession, executorPayload, err := h.prepareAIExecutorPayload(db, run, node, canonicalType, nodeConfig, createdBy, envMap, executorPayload)
+	if err != nil {
+		fmt.Printf("Failed to prepare ai executor payload for node %s: %v\n", node.ID, err)
+		return false, nil
+	}
 	envVars := ""
-	if env, ok := nodeConfig["env"].(map[string]interface{}); ok {
-		envJSON, _ := json.Marshal(env)
+	if len(envMap) > 0 {
+		envJSON, _ := json.Marshal(envMap)
 		envVars = string(envJSON)
 	}
-	envMap, _ := nodeConfig["env"].(map[string]interface{})
-	upsertResolvedNodeSnapshot(db, run.ID, *node, models.TaskStatusQueued, resolvedInputs, buildExecutorPayload(script, workDir, envMap))
+	upsertResolvedNodeSnapshot(db, run.ID, *node, models.TaskStatusQueued, resolvedInputs, executorPayload)
 
 	repoURL, repoBranch, repoCommit, repoPath := "", "", "", ""
 	if canonicalType == "git_clone" {
@@ -1818,6 +1828,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 	var task models.AgentTask
 	result := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, node.ID).First(&task)
 	if result.Error != nil {
+		taskParams := buildAgentTaskParams(nodeConfig, executorPayload)
 		task = models.AgentTask{
 			AgentID:       agentID,
 			WorkspaceID:   run.WorkspaceID,
@@ -1825,7 +1836,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 			NodeID:        node.ID,
 			TaskType:      canonicalType,
 			Name:          node.Name,
-			Params:        h.jsonEncode(nodeConfig),
+			Params:        h.jsonEncode(taskParams),
 			Script:        script,
 			WorkDir:       workDir,
 			EnvVars:       envVars,
@@ -1837,14 +1848,17 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 			RepoCommit:    repoCommit,
 			RepoPath:      repoPath,
 		}
+		if aiSession != nil {
+		}
 		if err := createAgentTaskWithExplicitMaxRetries(db, &task); err != nil {
 			fmt.Printf("Failed to create task for node %s: %v\n", node.ID, err)
 			return false, nil
 		}
 	} else {
+		taskParams := buildAgentTaskParams(nodeConfig, executorPayload)
 		task.AgentID = agentID
 		task.TaskType = canonicalType
-		task.Params = h.jsonEncode(nodeConfig)
+		task.Params = h.jsonEncode(taskParams)
 		task.Script = script
 		task.WorkDir = workDir
 		task.EnvVars = envVars
@@ -1855,10 +1869,15 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 		task.RepoBranch = repoBranch
 		task.RepoCommit = repoCommit
 		task.RepoPath = repoPath
+		if aiSession != nil {
+		}
 		if err := db.Save(&task).Error; err != nil {
 			fmt.Printf("Failed to update task %d: %v\n", task.ID, err)
 			return false, nil
 		}
+	}
+	if aiSession != nil {
+		_ = db.Model(aiSession).Update("task_id", task.ID).Error
 	}
 	updateResolvedNodeAttempts(db, task)
 	appendRunEvent(db, run.ID, "node_assigned", map[string]interface{}{"node_id": node.ID, "task_id": task.ID, "agent_id": agentID})
@@ -2968,6 +2987,251 @@ func parsePipelineRunJSONField(raw string, emptyDefault interface{}) interface{}
 		return emptyDefault
 	}
 	return parsed
+}
+
+func buildAISessionRequestPayload(run *models.PipelineRun, node *PipelineNode, scenario string, nodeConfig map[string]interface{}) map[string]interface{} {
+	payload := map[string]interface{}{
+		"scenario":        scenario,
+		"input_text":      toString(nodeConfig["input_text"]),
+		"output_language": firstNonEmptyTaskValue(toString(nodeConfig["output_language"]), "zh-CN"),
+	}
+	if run != nil {
+		payload["pipeline_run_id"] = run.ID
+		payload["workspace_id"] = run.WorkspaceID
+	}
+	if node != nil {
+		payload["node_id"] = node.ID
+		payload["node_name"] = node.Name
+	}
+	for _, key := range []string{"mr_url", "mr_title", "source_branch", "target_branch", "requirement_title", "requirement_id"} {
+		if value := strings.TrimSpace(toString(nodeConfig[key])); value != "" {
+			payload[key] = value
+		}
+	}
+	return payload
+}
+
+func buildAIExecutorPayload(session models.AISession) map[string]interface{} {
+	payload := map[string]interface{}{
+		"mode":               "ai-task",
+		"ai_session_id":      session.ID,
+		"scenario":           session.Scenario,
+		"runtime_profile_id": session.RuntimeProfileID,
+		"provider_id":        session.ProviderID,
+		"model_id":           session.ModelID,
+		"binding_id":         session.BindingID,
+		"agent_id":           session.AgentID,
+	}
+	if parsed := parsePipelineRunJSONField(session.RequestJSON, map[string]interface{}{}); parsed != nil {
+		payload["request"] = parsed
+	}
+	return payload
+}
+
+func (h *PipelineHandler) prepareAIExecutorPayload(db *gorm.DB, run *models.PipelineRun, node *PipelineNode, canonicalType string, nodeConfig map[string]interface{}, createdBy uint64, envMap map[string]interface{}, executorPayload map[string]interface{}) (*models.AISession, map[string]interface{}, error) {
+	def, ok := getTaskDefinition(canonicalType)
+	if !ok || def.ExecutionSpec.Mode != "ai-task" {
+		return nil, executorPayload, nil
+	}
+	aiSession, err := h.createAISessionForNode(db, run, node, canonicalType, nodeConfig, createdBy)
+	if err != nil {
+		return nil, executorPayload, err
+	}
+	payload := buildAIExecutorPayload(*aiSession)
+	if err := injectAIProviderRuntimeEnv(db, run.WorkspaceID, aiSession, envMap); err != nil {
+		return nil, executorPayload, err
+	}
+	return aiSession, payload, nil
+}
+
+func buildAgentTaskParams(nodeConfig map[string]interface{}, executorPayload map[string]interface{}) map[string]interface{} {
+	if len(executorPayload) > 0 && strings.TrimSpace(toString(executorPayload["mode"])) == "ai-task" {
+		return executorPayload
+	}
+	return nodeConfig
+}
+
+func resolveRuntimeProfileBinding(db *gorm.DB, workspaceID uint64, profile *models.AIRuntimeProfile) (*models.AIModelBinding, error) {
+	if db == nil || profile == nil || profile.ID == 0 {
+		return nil, nil
+	}
+	var bindingPriority []map[string]interface{}
+	if strings.TrimSpace(profile.BindingPriorityJSON) != "" {
+		if err := json.Unmarshal([]byte(profile.BindingPriorityJSON), &bindingPriority); err != nil {
+			return nil, fmt.Errorf("invalid binding priority")
+		}
+	}
+	type candidateBinding struct {
+		bindingID uint64
+		priority  int64
+	}
+	candidates := make([]candidateBinding, 0, len(bindingPriority))
+	for _, item := range bindingPriority {
+		if enabled, ok := item["enabled"].(bool); ok && !enabled {
+			continue
+		}
+		bindingID := toUint64Value(item["binding_id"])
+		if bindingID == 0 {
+			continue
+		}
+		priority := int64(0)
+		switch value := item["priority"].(type) {
+		case float64:
+			priority = int64(value)
+		case int:
+			priority = int64(value)
+		case int64:
+			priority = value
+		}
+		candidates = append(candidates, candidateBinding{bindingID: bindingID, priority: priority})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].priority < candidates[j].priority
+	})
+	for _, candidate := range candidates {
+		var binding models.AIModelBinding
+		if err := db.Where("workspace_id = ? AND id = ?", workspaceID, candidate.bindingID).First(&binding).Error; err != nil {
+			continue
+		}
+		if binding.Status != models.AIModelBindingStatusActive || binding.ModelID != profile.ModelID {
+			continue
+		}
+		return &binding, nil
+	}
+	return nil, nil
+}
+
+func injectAIProviderRuntimeEnv(db *gorm.DB, workspaceID uint64, session *models.AISession, envMap map[string]interface{}) error {
+	if db == nil || session == nil {
+		return nil
+	}
+	if envMap == nil {
+		return nil
+	}
+
+	var provider models.AIProvider
+	if err := db.Where("id = ? AND workspace_id = ?", session.ProviderID, workspaceID).First(&provider).Error; err != nil {
+		return fmt.Errorf("load ai provider failed: %w", err)
+	}
+	if provider.Status != models.AIProviderStatusActive {
+		return fmt.Errorf("ai provider %d is not active", provider.ID)
+	}
+
+	if strings.TrimSpace(provider.BaseURL) != "" {
+		envMap["OPENAI_BASE_URL"] = strings.TrimSpace(provider.BaseURL)
+	}
+
+	modelName := ""
+	if session.BindingID > 0 {
+		var binding models.AIModelBinding
+		if err := db.Where("id = ? AND workspace_id = ?", session.BindingID, workspaceID).First(&binding).Error; err != nil {
+			return fmt.Errorf("load ai binding failed: %w", err)
+		}
+		if binding.Status != models.AIModelBindingStatusActive || binding.ProviderID != session.ProviderID || binding.ModelID != session.ModelID {
+			return fmt.Errorf("ai binding %d is invalid for current session", binding.ID)
+		}
+		if key := strings.TrimSpace(binding.ProviderModelKey); key != "" {
+			modelName = key
+		}
+	}
+	if modelName == "" && session.ModelID > 0 {
+		var model models.AIModelCatalog
+		if err := db.Where("id = ?", session.ModelID).First(&model).Error; err != nil {
+			return fmt.Errorf("load llm model failed: %w", err)
+		}
+		if name := strings.TrimSpace(model.SourceModelID); name != "" {
+			modelName = name
+		} else if name := strings.TrimSpace(model.Name); name != "" {
+			modelName = name
+		}
+	}
+	if modelName != "" {
+		envMap["OPENAI_MODEL"] = modelName
+	}
+
+	if provider.CredentialID == 0 {
+		return nil
+	}
+
+	var credential models.Credential
+	if err := db.Where("id = ? AND workspace_id = ?", provider.CredentialID, workspaceID).First(&credential).Error; err != nil {
+		return fmt.Errorf("load ai provider credential failed: %w", err)
+	}
+	if !credential.IsUsable() {
+		return fmt.Errorf("ai provider credential %d is not active", credential.ID)
+	}
+
+	decrypted, err := services.NewCredentialEncryptionService().DecryptCredentialData(credential.EncryptedPayload)
+	if err != nil {
+		return fmt.Errorf("decrypt ai provider credential failed: %w", err)
+	}
+	if apiKey := pickCredentialSecretValue(decrypted, "api_key", "token", "access_token", "password", "client_secret"); apiKey != "" {
+		envMap["OPENAI_API_KEY"] = apiKey
+	}
+	return nil
+}
+
+func (h *PipelineHandler) createAISessionForNode(db *gorm.DB, run *models.PipelineRun, node *PipelineNode, scenario string, nodeConfig map[string]interface{}, createdBy uint64) (*models.AISession, error) {
+	if db == nil || run == nil || node == nil {
+		return nil, fmt.Errorf("invalid ai session context")
+	}
+	runtimeProfileID := toUint64Value(nodeConfig["runtime_profile_id"])
+	var runtimeProfile models.AIRuntimeProfile
+	if runtimeProfileID > 0 {
+		if err := db.Where("id = ? AND workspace_id = ?", runtimeProfileID, run.WorkspaceID).First(&runtimeProfile).Error; err != nil {
+			return nil, fmt.Errorf("runtime profile not found")
+		}
+		if runtimeProfile.Status == models.AIRuntimeProfileStatusDisabled {
+			return nil, fmt.Errorf("runtime profile disabled")
+		}
+	}
+	bindingID := uint64(0)
+	providerID := uint64(0)
+	modelID := toUint64Value(nodeConfig["model_id"])
+	agentID := toUint64Value(nodeConfig["agent_id"])
+	if runtimeProfileID > 0 {
+		modelID = runtimeProfile.ModelID
+		agentID = runtimeProfile.AgentID
+		if binding, err := resolveRuntimeProfileBinding(db, run.WorkspaceID, &runtimeProfile); err != nil {
+			return nil, err
+		} else if binding != nil {
+			bindingID = binding.ID
+		}
+	}
+	if bindingID == 0 {
+		bindingID = toUint64Value(nodeConfig["binding_id"])
+	}
+	if bindingID > 0 {
+		var binding models.AIModelBinding
+		if err := db.Where("id = ? AND workspace_id = ?", bindingID, run.WorkspaceID).First(&binding).Error; err != nil {
+			return nil, fmt.Errorf("binding not found")
+		}
+		providerID = binding.ProviderID
+		if modelID == 0 {
+			modelID = binding.ModelID
+		}
+	}
+	if providerID == 0 {
+		providerID = toUint64Value(nodeConfig["provider_id"])
+	}
+	session := &models.AISession{
+		WorkspaceID:      run.WorkspaceID,
+		PipelineRunID:    run.ID,
+		NodeID:           node.ID,
+		Scenario:         scenario,
+		Status:           models.AISessionStatusQueued,
+		RuntimeProfileID: runtimeProfileID,
+		ProviderID:       providerID,
+		ModelID:          modelID,
+		BindingID:        bindingID,
+		AgentID:          agentID,
+		RequestJSON:      h.jsonEncode(buildAISessionRequestPayload(run, node, scenario, nodeConfig)),
+		CreatedBy:        createdBy,
+	}
+	if err := db.Create(session).Error; err != nil {
+		return nil, err
+	}
+	return session, nil
 }
 
 func pipelineRunDetailPayload(run models.PipelineRun) gin.H {

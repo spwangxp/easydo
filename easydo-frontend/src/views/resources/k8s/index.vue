@@ -1,19 +1,19 @@
 <template>
   <div class="k8s-browser-page">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">K8s 资源浏览</h1>
-        <p class="page-subtitle">
-          在资源管理下直接浏览 {{ overview?.name || `集群 #${resourceId}` }} 的命名空间与资源，并将安全操作统一写入资源审计。
-          当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}
-        </p>
-      </div>
-      <div class="header-actions">
-        <el-button @click="goBackToResources">返回资源管理</el-button>
-        <el-button v-if="selectedNamespace" @click="goToDeployRecords">发布记录</el-button>
-        <el-button v-if="selectedNamespace" type="primary" @click="goToStoreDeploy">前往商店部署</el-button>
-      </div>
-    </div>
+    <PageHeader>
+      <template #title><h1>K8s 资源浏览</h1></template>
+      <template #subtitle>
+        在资源管理下直接浏览 {{ overview?.name || `集群 #${resourceId}` }} 的命名空间与资源，并将安全操作统一写入资源审计。
+        当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}
+      </template>
+      <template #actions>
+        <PageHeaderActions>
+          <el-button @click="goBackToResources">返回资源管理</el-button>
+          <el-button v-if="selectedNamespace" @click="goToDeployRecords">发布记录</el-button>
+          <el-button v-if="selectedNamespace" type="primary" @click="goToStoreDeploy">前往商店部署</el-button>
+        </PageHeaderActions>
+      </template>
+    </PageHeader>
 
     <K8sOverviewPanel :overview="overview" :loading="loadingOverview" />
 
@@ -72,6 +72,8 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useUserStore } from '@/stores/user'
+import PageHeader from '../../store/components/PageHeader.vue'
+import PageHeaderActions from '../../store/components/PageHeaderActions.vue'
 import {
   createResourceK8sAction,
   getResourceActionAudits,
@@ -382,33 +384,9 @@ onMounted(async () => {
   padding: $space-6;
 }
 
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: $space-4;
-}
-
-.page-title {
-  margin: 0;
-  font-family: $font-family-display;
-  font-size: 32px;
-  font-weight: 760;
-  letter-spacing: -0.03em;
-  color: var(--text-primary);
-}
-
-.page-subtitle {
-  margin: $space-2 0 0;
+:deep(.page-header-subtitle) {
   max-width: 920px;
-  color: var(--text-secondary);
   line-height: 1.8;
-}
-
-.header-actions {
-  display: flex;
-  gap: $space-3;
-  flex-wrap: wrap;
 }
 
 .namespace-context {
@@ -466,7 +444,6 @@ onMounted(async () => {
     padding: $space-4;
   }
 
-  .page-header,
   .namespace-context {
     flex-direction: column;
     align-items: flex-start;

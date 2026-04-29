@@ -52,11 +52,12 @@ type LogCallback func(taskID uint64, level, message, source string, lineNumber i
 
 // Result represents the result of task execution
 type Result struct {
-	ExitCode int           `json:"exit_code"`
-	Stdout   string        `json:"stdout"`
-	Stderr   string        `json:"stderr"`
-	Error    string        `json:"error"`
-	Duration time.Duration `json:"duration"`
+	ExitCode         int                    `json:"exit_code"`
+	Stdout           string                 `json:"stdout"`
+	Stderr           string                 `json:"stderr"`
+	Error            string                 `json:"error"`
+	Duration         time.Duration          `json:"duration"`
+	StructuredOutput map[string]interface{} `json:"structured_output,omitempty"`
 }
 
 // Executor executes tasks
@@ -260,6 +261,10 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams) *Result {
 			return &Result{ExitCode: -1, Error: err.Error(), Duration: time.Since(startTime)}
 		}
 		params.Script = dockerScript
+	}
+
+	if isAITaskParams(params) {
+		return e.executeAITask(ctx, params)
 	}
 
 	// Write task file

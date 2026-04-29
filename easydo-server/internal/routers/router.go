@@ -263,12 +263,40 @@ func InitRouter() *gin.Engine {
 			appStore.POST("/:id/variants/:version_id/preview", storeTemplateHandler.PreviewAppVariant)
 		}
 
-		llmModels := api.Group("/store/llm-models")
-		llmModels.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		aiModels := api.Group("/store/ai-models")
+		aiModels.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
 		{
-			llmModelHandler := handlers.NewLLMModelHandler()
-			llmModels.GET("", llmModelHandler.ListModels)
-			llmModels.POST("/import", llmModelHandler.ImportModel)
+			aiModelHandler := handlers.NewAIModelCatalogHandler()
+			aiModels.GET("", aiModelHandler.ListModels)
+			aiModels.POST("/import", aiModelHandler.ImportModel)
+		}
+
+		aiProviders := api.Group("/store/ai-providers")
+		aiProviders.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		{
+			aiProviderHandler := handlers.NewAIProviderHandler()
+			aiProviders.GET("", aiProviderHandler.ListProviders)
+			aiProviders.POST("", aiProviderHandler.CreateProvider)
+			aiProviders.PUT("/:id", aiProviderHandler.UpdateProvider)
+			aiProviders.DELETE("/:id", aiProviderHandler.DeleteProvider)
+			aiProviders.GET("/:id/model-bindings", aiProviderHandler.ListBindings)
+			aiProviders.POST("/:id/model-bindings", aiProviderHandler.CreateBinding)
+			aiProviders.PUT("/:id/model-bindings/:binding_id", aiProviderHandler.UpdateBinding)
+			aiProviders.DELETE("/:id/model-bindings/:binding_id", aiProviderHandler.DeleteBinding)
+		}
+
+		aiAgents := api.Group("/ai/agents")
+		aiAgents.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		{
+			aiAgentHandler := handlers.NewAIAgentHandler()
+			aiAgents.GET("", aiAgentHandler.ListAgents)
+			aiAgents.POST("", aiAgentHandler.CreateAgent)
+			aiAgents.PUT("/:id", aiAgentHandler.UpdateAgent)
+			aiAgents.DELETE("/:id", aiAgentHandler.DeleteAgent)
+			aiAgents.GET("/:id/runtime-profiles", aiAgentHandler.ListRuntimeProfiles)
+			aiAgents.POST("/:id/runtime-profiles", aiAgentHandler.CreateRuntimeProfile)
+			aiAgents.PUT("/:id/runtime-profiles/:profile_id", aiAgentHandler.UpdateRuntimeProfile)
+			aiAgents.DELETE("/:id/runtime-profiles/:profile_id", aiAgentHandler.DeleteRuntimeProfile)
 		}
 
 		deployments := api.Group("/deployments")

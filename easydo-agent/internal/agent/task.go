@@ -884,6 +884,9 @@ func (th *TaskHandler) buildTaskResultPayload(task *Task, result *task.Result) (
 	if result != nil {
 		payload["stdout_size"] = len(result.Stdout)
 		payload["stderr_size"] = len(result.Stderr)
+		for k, v := range result.StructuredOutput {
+			payload[k] = v
+		}
 	}
 	if result == nil {
 		return payload, status, errorMsg
@@ -920,6 +923,9 @@ func getTaskOutputs(t *Task, result *task.Result) map[string]interface{} {
 	if t == nil {
 		return outputs
 	}
+	if isAITaskOutputTask(t) {
+		return getAITaskOutputs(result)
+	}
 
 	switch t.TaskType {
 	case "git_clone":
@@ -935,6 +941,31 @@ func getTaskOutputs(t *Task, result *task.Result) map[string]interface{} {
 	case "shell":
 		return getShellOutputs(t, result)
 	}
+	return outputs
+}
+
+func isAITaskOutputTask(t *Task) bool {
+	if t == nil {
+		return false
+	}
+	return task.IsAITaskPayload(t.TaskType, task.ParseStructuredParamsJSON(t.Params))
+}
+
+func getAITaskOutputs(result *task.Result) map[string]interface{} {
+	outputs := make(map[string]interface{})
+	if result == nil {
+		return outputs
+	}
+	if len(result.StructuredOutput) > 0 {
+		for k, v := range result.StructuredOutput {
+			outputs[k] = v
+		}
+		return outputs
+	}
+	if strings.TrimSpace(result.Stdout) == "" {
+		return outputs
+	}
+	_ = json.Unmarshal([]byte(result.Stdout), &outputs)
 	return outputs
 }
 

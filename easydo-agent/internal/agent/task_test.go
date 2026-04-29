@@ -612,3 +612,51 @@ func TestTaskHandlerWithTaskSlotRunsTasksSequentiallyWhenLimitIsOne(t *testing.T
 		t.Fatalf("max concurrent=%d, want 1", maxConcurrent)
 	}
 }
+
+func TestBuildTaskResultPayload_AITaskStructuredOutputs(t *testing.T) {
+	h := &TaskHandler{}
+	task := &Task{ID: 66, TaskType: "mr_quality_check"}
+	result := &agenttask.Result{
+		ExitCode: 0,
+		Stdout:   `{"summary":"ok","quality_score":92,"issues":[],"issues_count":0}`,
+		Duration: time.Second,
+	}
+
+	payload, status, errorMsg := h.buildTaskResultPayload(task, result)
+	if status != "execute_success" {
+		t.Fatalf("status=%s, want execute_success", status)
+	}
+	if errorMsg != "" {
+		t.Fatalf("errorMsg=%q, want empty", errorMsg)
+	}
+	if payload["summary"] != "ok" {
+		t.Fatalf("summary=%v, want ok", payload["summary"])
+	}
+	if payload["quality_score"] != float64(92) {
+		t.Fatalf("quality_score=%v, want 92", payload["quality_score"])
+	}
+}
+
+func TestBuildTaskResultPayload_AITaskStructuredOutputsForShellMode(t *testing.T) {
+	h := &TaskHandler{}
+	task := &Task{ID: 67, TaskType: "shell", Params: `{"mode":"ai-task","scenario":"mr_quality_check"}`}
+	result := &agenttask.Result{
+		ExitCode: 0,
+		Stdout:   `{"summary":"ok","quality_score":92,"issues":[],"issues_count":0}`,
+		Duration: time.Second,
+	}
+
+	payload, status, errorMsg := h.buildTaskResultPayload(task, result)
+	if status != "execute_success" {
+		t.Fatalf("status=%s, want execute_success", status)
+	}
+	if errorMsg != "" {
+		t.Fatalf("errorMsg=%q, want empty", errorMsg)
+	}
+	if payload["summary"] != "ok" {
+		t.Fatalf("summary=%v, want ok", payload["summary"])
+	}
+	if payload["quality_score"] != float64(92) {
+		t.Fatalf("quality_score=%v, want 92", payload["quality_score"])
+	}
+}

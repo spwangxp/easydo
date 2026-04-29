@@ -1,18 +1,18 @@
 <template>
   <div class="deploy-container">
-    <div class="deploy-header">
-      <div>
-        <h1 class="page-title">发布</h1>
-        <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
-      </div>
-      <div class="deploy-header-actions">
-        <el-button v-if="deployScopeContext?.backLink" @click="goBackToScopedK8sBrowser">返回 K8s 浏览器</el-button>
-        <el-button type="primary" @click="handleCreate">
-          <el-icon><Plus /></el-icon>
-          新建发布
-        </el-button>
-      </div>
-    </div>
+    <PageHeader>
+      <template #title><h1>发布</h1></template>
+      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</template>
+      <template #actions>
+        <PageHeaderActions>
+          <el-button v-if="deployScopeContext?.backLink" @click="goBackToScopedK8sBrowser">返回 K8s 浏览器</el-button>
+          <el-button type="primary" @click="handleCreate">
+            <el-icon><Plus /></el-icon>
+            新建发布
+          </el-button>
+        </PageHeaderActions>
+      </template>
+    </PageHeader>
 
     <div v-if="deployScopeContext" class="deploy-scope-card">
       <div>
@@ -202,7 +202,7 @@
           <div class="detail-meta-grid">
             <div class="meta-item">
               <span class="meta-label">模板类型</span>
-              <span class="meta-value">{{ selectedDeployment.template_type === 'llm' ? 'LLM 商店' : '应用商店' }}</span>
+				<span class="meta-value">{{ selectedDeployment.template_type === 'llm' ? 'AI 商店' : '应用商店' }}</span>
             </div>
             <div class="meta-item">
               <span class="meta-label">目标资源类型</span>
@@ -284,6 +284,8 @@ import { getResourceList } from '@/api/resource'
 import { getProjectList } from '@/api/project'
 import { getPipelineRunDetail } from '@/api/pipeline'
 import LogViewer from '@/views/pipeline/components/LogViewer.vue'
+import PageHeader from '../store/components/PageHeader.vue'
+import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 import { buildResourceK8sRouteLocation, resolveNamespaceFromParameterSnapshot } from '@/views/resources/k8s/utils'
 import {
   Plus,
@@ -721,21 +723,6 @@ onUnmounted(() => {
   }
 }
 
-.deploy-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-  gap: 16px;
-}
-
-.deploy-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
 .deploy-scope-card {
   display: flex;
   justify-content: space-between;
@@ -764,20 +751,6 @@ onUnmounted(() => {
 }
 
 .deploy-scope-hint {
-  color: var(--text-secondary);
-}
-
-.page-title {
-  margin: 0;
-  font-family: $font-family-display;
-  font-size: 32px;
-  font-weight: 760;
-  letter-spacing: -0.03em;
-  color: var(--text-primary);
-}
-
-.page-subtitle {
-  margin-top: 8px;
   color: var(--text-secondary);
 }
 
@@ -1118,20 +1091,10 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) {
-  .deploy-header,
   .deploy-overview,
   .detail-summary-grid,
   .detail-meta-grid {
     grid-template-columns: 1fr;
-  }
-
-  .deploy-header {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .page-title {
-    font-size: 27px;
   }
 }
 </style>

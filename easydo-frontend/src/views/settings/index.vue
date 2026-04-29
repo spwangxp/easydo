@@ -1,8 +1,8 @@
 <template>
   <div class="settings-container">
-    <div class="settings-header">
-      <h1 class="page-title">设置</h1>
-    </div>
+    <PageHeader>
+      <template #title><h1>设置</h1></template>
+    </PageHeader>
     
     <div class="settings-layout">
       <aside class="settings-sidebar">
@@ -354,6 +354,124 @@
             </div>
           </div>
         </div>
+
+        <div v-if="activeMenu === 'ai'" class="settings-section">
+          <div class="section-header-row">
+            <div>
+              <h2 class="section-title">AI Agent 管理</h2>
+              <div class="workspace-role">仅系统管理员和当前工作空间 Owner 可编辑 AI Agent / AI 运行策略。</div>
+            </div>
+            <el-button v-if="canManageAI" type="primary" @click="openAgentDialog()">新建 AI Agent</el-button>
+          </div>
+
+          <div v-if="!canManageAI" class="empty-hint">当前角色仅可查看，无法编辑 AI Agent 配置。</div>
+
+            <el-table :data="aiAgents" style="width: 100%">
+            <el-table-column prop="name" label="AI Agent" min-width="180" />
+            <el-table-column prop="scenario" label="场景" width="180" />
+            <el-table-column prop="status" label="状态" width="120" />
+            <el-table-column label="运行策略数" min-width="180">
+              <template #default="{ row }">
+                {{ Array.isArray(row.runtime_profiles) ? row.runtime_profiles.length : 0 }}
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="280" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openProfilesDialog(row)">运行策略</el-button>
+                  <el-button v-if="canManageAI" link type="primary" @click="openAgentDialog(row)">编辑</el-button>
+                  <el-button v-if="canManageAI" link type="danger" @click="removeAgent(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <el-dialog v-model="agentDialogVisible" :title="agentForm.id ? '编辑 AI Agent' : '新建 AI Agent'" width="560px">
+            <el-form :model="agentForm" label-width="100px">
+              <el-form-item label="名称">
+                <el-input v-model="agentForm.name" />
+              </el-form-item>
+              <el-form-item label="场景">
+                <el-select v-model="agentForm.scenario" style="width: 100%">
+                  <el-option label="MR 质量检测" value="mr_quality_check" />
+                  <el-option label="需求缺陷助手" value="requirement_defect_assistant" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="状态">
+                <el-select v-model="agentForm.status" style="width: 100%">
+                  <el-option label="Draft" value="draft" />
+                  <el-option label="Active" value="active" />
+                  <el-option label="Archived" value="archived" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="描述">
+                <el-input v-model="agentForm.description" type="textarea" :rows="3" />
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="agentDialogVisible = false">取消</el-button>
+              <el-button type="primary" :loading="agentSaving" @click="submitAgent">保存</el-button>
+            </template>
+          </el-dialog>
+
+          <el-dialog v-model="profilesDialogVisible" :title="`运行策略 - ${activeDefinition?.name || ''}`" width="1000px">
+            <div class="dialog-actions" v-if="canManageAI">
+              <el-button type="primary" @click="openProfileDialog()">新增运行策略</el-button>
+            </div>
+            <el-table :data="activeRuntimeProfiles" style="width: 100%">
+              <el-table-column prop="name" label="名称" min-width="180" />
+              <el-table-column label="模型" width="180">
+                <template #default="{ row }">
+                  {{ aiModels.find(item => Number(item.id) === Number(row.model_id))?.display_name || aiModels.find(item => Number(item.id) === Number(row.model_id))?.name || row.model_id }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="fallback_enabled" label="允许降级" width="120">
+                <template #default="{ row }">
+                  <el-tag :type="row.fallback_enabled ? 'success' : 'info'" size="small">{{ row.fallback_enabled ? '是' : '否' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="status" label="状态" width="120" />
+              <el-table-column prop="binding_priority_json" label="模型绑定顺序" min-width="260" show-overflow-tooltip />
+              <el-table-column label="操作" width="180">
+                <template #default="{ row }">
+                  <el-button v-if="canManageAI" link type="primary" @click="openProfileDialog(row)">编辑</el-button>
+                  <el-button v-if="canManageAI" link type="danger" @click="removeProfile(row)">删除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-dialog>
+
+          <el-dialog v-model="profileDialogVisible" :title="profileForm.id ? '编辑运行策略' : '新增运行策略'" width="780px">
+            <el-form :model="profileForm" label-width="140px">
+              <el-form-item label="名称">
+                <el-input v-model="profileForm.name" placeholder="例如 MR Review Default" />
+              </el-form-item>
+              <el-form-item label="模型">
+                <el-select v-model="profileForm.model_id" style="width: 100%" clearable>
+                  <el-option v-for="model in aiModels" :key="model.id" :label="model.display_name || model.name" :value="model.id" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="模型绑定顺序(JSON)">
+                <el-input v-model="profileForm.binding_priority_json" type="textarea" :rows="6" placeholder='[{"binding_id":1,"priority":1,"enabled":true,"fallback_on_error":true}]' />
+              </el-form-item>
+              <el-form-item label="运行参数(JSON)">
+                <el-input v-model="profileForm.runtime_settings_json" type="textarea" :rows="4" placeholder='{"output_language":"zh-CN"}' />
+              </el-form-item>
+              <el-form-item label="状态">
+                <el-select v-model="profileForm.status" style="width: 100%">
+                  <el-option label="Draft" value="draft" />
+                  <el-option label="Active" value="active" />
+                  <el-option label="Disabled" value="disabled" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="允许降级">
+                <el-switch v-model="profileForm.fallback_enabled" />
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="profileDialogVisible = false">取消</el-button>
+              <el-button type="primary" :loading="profileSaving" @click="submitProfile">保存</el-button>
+            </template>
+          </el-dialog>
+        </div>
       </main>
     </div>
   </div>
@@ -371,7 +489,21 @@ import {
   upsertNotificationPreference,
   upsertNotificationPreferenceInList
 } from '@/api/notification'
+import {
+  getAIAgents,
+  createAIAgent,
+  updateAIAgent,
+  deleteAIAgent,
+  getAIRuntimeProfiles,
+  createAIRuntimeProfile,
+  updateAIRuntimeProfile,
+  deleteAIRuntimeProfile,
+  getAIProviders,
+  getAIModelBindings,
+  getAIModelCatalog
+} from '@/api/store'
 import { createWorkspace, createWorkspaceInvitation, getWorkspaceInvitations, getWorkspaceList, getWorkspaceMembers, removeWorkspaceMember, revokeWorkspaceInvitation, updateWorkspaceMember } from '@/api/workspace'
+import PageHeader from '../store/components/PageHeader.vue'
 import { createUser } from '@/api/user'
 import { 
   Setting, 
@@ -399,6 +531,16 @@ const createUserLoading = ref(false)
 const createWorkspaceDialogVisible = ref(false)
 const createWorkspaceLoading = ref(false)
 const workspaceOptions = ref([])
+const aiAgents = ref([])
+const aiProviders = ref([])
+const aiModels = ref([])
+const agentDialogVisible = ref(false)
+const agentSaving = ref(false)
+const profilesDialogVisible = ref(false)
+const profileDialogVisible = ref(false)
+const profileSaving = ref(false)
+const activeAgent = ref(null)
+const activeRuntimeProfiles = ref([])
 const notificationEventGroups = computed(() => {
   return NOTIFICATION_EVENT_GROUPS.map(group => ({
     ...group,
@@ -429,12 +571,15 @@ const createWorkspaceForm = reactive({
   slug: '',
   description: ''
 })
+const agentForm = reactive({ id: 0, name: '', description: '', scenario: 'mr_quality_check', status: 'draft' })
+const profileForm = reactive({ id: 0, name: '', model_id: undefined, binding_priority_json: '[]', runtime_settings_json: '{}', fallback_enabled: true, status: 'draft' })
 
 const menuItems = [
   { key: 'basic', name: '基本设置', icon: Setting },
   { key: 'security', name: '安全设置', icon: Lock },
   { key: 'notifications', name: '通知设置', icon: Bell },
   { key: 'users', name: '用户管理', icon: User },
+  { key: 'ai', name: 'AI Agent', icon: Search },
   { key: 'integrations', name: '第三方集成', icon: Link }
 ]
 
@@ -449,6 +594,8 @@ const showDevicesDialog = ref(false)
 const canManageMembers = computed(() => userStore.hasPermission('workspace.member.manage'))
 const isPlatformAdmin = computed(() => userStore.userInfo?.role === 'admin')
 const canCreateUsers = computed(() => isPlatformAdmin.value || canManageMembers.value)
+const canManageAI = computed(() => isPlatformAdmin.value || userStore.currentWorkspace?.role === 'owner')
+const modelOptions = computed(() => aiModels.value)
 const createUserRoleOptions = computed(() => {
   if (isPlatformAdmin.value || userStore.currentWorkspace?.role === 'owner') {
     return [
@@ -504,6 +651,152 @@ const loadWorkspaceManagementData = async () => {
 
 const saveSettings = () => {
   ElMessage.success('当前阶段未实现基础设置保存')
+}
+
+const resetAgentForm = () => {
+	agentForm.id = 0
+	agentForm.name = ''
+	agentForm.description = ''
+	agentForm.scenario = 'mr_quality_check'
+	agentForm.status = 'draft'
+}
+
+const resetProfileForm = () => {
+  profileForm.id = 0
+  profileForm.name = ''
+  profileForm.model_id = undefined
+  profileForm.binding_priority_json = '[]'
+  profileForm.runtime_settings_json = '{}'
+  profileForm.fallback_enabled = true
+  profileForm.status = 'draft'
+}
+
+const loadAIManagementData = async () => {
+  try {
+    const [definitionsRes, providersRes, modelsRes] = await Promise.all([
+      getAIAgents(),
+      getAIProviders(),
+      getAIModelCatalog()
+    ])
+		aiAgents.value = Array.isArray(definitionsRes.data) ? definitionsRes.data : []
+    aiProviders.value = Array.isArray(providersRes.data) ? providersRes.data : []
+    aiModels.value = Array.isArray(modelsRes.data) ? modelsRes.data : []
+  } catch (error) {
+    ElMessage.error('加载 AI 管理数据失败')
+  }
+}
+
+const openAgentDialog = (row = null) => {
+	resetAgentForm()
+	if (row) {
+		agentForm.id = row.id
+		agentForm.name = row.name || ''
+		agentForm.description = row.description || ''
+		agentForm.scenario = row.scenario || 'mr_quality_check'
+		agentForm.status = row.status || 'draft'
+	}
+	agentDialogVisible.value = true
+}
+
+const submitAgent = async () => {
+	agentSaving.value = true
+	try {
+		const payload = {
+			name: agentForm.name,
+			description: agentForm.description,
+			scenario: agentForm.scenario,
+			status: agentForm.status
+		}
+		if (agentForm.id) {
+			await updateAIAgent(agentForm.id, payload)
+		} else {
+			await createAIAgent(payload)
+		}
+		agentDialogVisible.value = false
+		await loadAIManagementData()
+		ElMessage.success('AI Agent 已保存')
+	} catch (error) {
+		ElMessage.error('保存 AI Agent 失败')
+	} finally {
+		agentSaving.value = false
+	}
+}
+
+const removeAgent = async (row) => {
+  try {
+    await ElMessageBox.confirm(`确认删除 AI Agent ${row.name} 吗？`, '删除 AI Agent', { type: 'warning' })
+    await deleteAIAgent(row.id)
+    await loadAIManagementData()
+    ElMessage.success('AI Agent 已删除')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error('删除 AI Agent 失败')
+    }
+  }
+}
+
+const openProfilesDialog = async (row) => {
+	activeAgent.value = row
+	const res = await getAIRuntimeProfiles(row.id)
+	activeRuntimeProfiles.value = Array.isArray(res.data) ? res.data : []
+	profilesDialogVisible.value = true
+}
+
+const openProfileDialog = (row = null) => {
+  resetProfileForm()
+  if (row) {
+    profileForm.id = row.id
+    profileForm.name = row.name || ''
+    profileForm.model_id = row.model_id || undefined
+    profileForm.binding_priority_json = row.binding_priority_json || '[]'
+    profileForm.runtime_settings_json = row.runtime_settings_json || '{}'
+    profileForm.fallback_enabled = Boolean(row.fallback_enabled)
+    profileForm.status = row.status || 'draft'
+  }
+  profileDialogVisible.value = true
+}
+
+const submitProfile = async () => {
+	if (!activeAgent.value) return
+  profileSaving.value = true
+  try {
+    const payload = {
+      name: profileForm.name,
+      model_id: profileForm.model_id,
+      binding_priority_json: JSON.parse(profileForm.binding_priority_json || '[]'),
+      runtime_settings_json: JSON.parse(profileForm.runtime_settings_json || '{}'),
+      fallback_enabled: profileForm.fallback_enabled,
+      status: profileForm.status
+    }
+    if (profileForm.id) {
+		await updateAIRuntimeProfile(activeAgent.value.id, profileForm.id, payload)
+		} else {
+			await createAIRuntimeProfile(activeAgent.value.id, payload)
+		}
+		profileDialogVisible.value = false
+		await openProfilesDialog(activeAgent.value)
+    await loadAIManagementData()
+    ElMessage.success('运行策略已保存')
+  } catch (error) {
+    ElMessage.error('保存运行策略失败')
+  } finally {
+    profileSaving.value = false
+  }
+}
+
+const removeProfile = async (row) => {
+	if (!activeAgent.value) return
+  try {
+    await ElMessageBox.confirm(`确认删除运行策略 ${row.name} 吗？`, '删除运行策略', { type: 'warning' })
+		await deleteAIRuntimeProfile(activeAgent.value.id, row.id)
+		await openProfilesDialog(activeAgent.value)
+    await loadAIManagementData()
+    ElMessage.success('运行策略已删除')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error('删除运行策略失败')
+    }
+  }
 }
 
 const getPreferenceSavingKey = (workspaceId, eventType, channel) => {
@@ -792,6 +1085,9 @@ watch(() => [activeMenu.value, userStore.currentWorkspaceId], async ([menu]) => 
   if (menu === 'notifications') {
     await loadNotificationPreferences()
   }
+  if (menu === 'ai') {
+    await loadAIManagementData()
+  }
 }, { immediate: true })
 </script>
 
@@ -799,18 +1095,6 @@ watch(() => [activeMenu.value, userStore.currentWorkspaceId], async ([menu]) => 
 @import '@/assets/styles/variables.scss';
 
 .settings-container {
-  .settings-header {
-    margin-bottom: 28px;
-    
-    .page-title {
-      font-family: $font-family-display;
-      font-size: 28px;
-      font-weight: 700;
-      color: var(--text-primary);
-      letter-spacing: -0.02em;
-    }
-  }
-  
   .settings-layout {
     display: flex;
     gap: 24px;

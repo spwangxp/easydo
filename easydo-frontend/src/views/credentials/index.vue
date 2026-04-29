@@ -1,18 +1,22 @@
 <template>
   <div class="credentials-page">
-    <div class="page-header">
-      <div>
-        <h2>
+    <PageHeader>
+      <template #title>
+        <h1>
           <el-icon><Key /></el-icon>
           凭据管理
-        </h2>
-        <p>统一管理工作空间内可供流水线和服务任务使用的认证凭据。</p>
-      </div>
-      <el-button v-if="canWriteCredentials" type="primary" @click="showCreateDialog">
-        <el-icon><Plus /></el-icon>
-        新建凭据
-      </el-button>
-    </div>
+        </h1>
+      </template>
+      <template #subtitle>统一管理工作空间内可供流水线和服务任务使用的认证凭据。</template>
+      <template #actions>
+        <PageHeaderActions>
+          <el-button v-if="canWriteCredentials" type="primary" @click="showCreateDialog">
+            <el-icon><Plus /></el-icon>
+            新建凭据
+          </el-button>
+        </PageHeaderActions>
+      </template>
+    </PageHeader>
 
     <div class="stats-grid">
       <el-card>
@@ -191,6 +195,8 @@ import {
   verifyCredential
 } from '@/api/credential'
 import CredentialForm from './components/CredentialForm.vue'
+import PageHeader from '../store/components/PageHeader.vue'
+import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 
 const userStore = useUserStore()
 const route = useRoute()
@@ -528,22 +534,13 @@ onMounted(async () => {
   padding: 24px;
 }
 
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 20px;
-}
-
-.page-header h2 {
+:deep(.page-header-title h1) {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 0 8px;
 }
 
-.page-header p {
-  margin: 0;
+:deep(.page-header-subtitle) {
   color: var(--text-muted);
 }
 

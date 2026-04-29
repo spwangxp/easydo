@@ -593,7 +593,7 @@ func TestStoreTemplateHandler_ListTemplateVersionsScopesToWorkspace(t *testing.T
 	template := models.StoreTemplate{
 		WorkspaceID:        workspaceA.ID,
 		Name:               "platform-k8s-template",
-		TemplateType:       models.StoreTemplateTypeLLM,
+		TemplateType:       models.StoreTemplateTypeAI,
 		TargetResourceType: models.ResourceTypeK8sCluster,
 		Source:             models.StoreTemplateSourcePlatform,
 		Status:             models.StoreTemplateStatusPublished,
@@ -962,7 +962,7 @@ func TestDeploymentHandler_FailedRunSyncsDeploymentRequestStatus(t *testing.T) {
 		WorkspaceID:        workspace.ID,
 		TemplateID:         1,
 		TemplateVersionID:  1,
-		TemplateType:       models.StoreTemplateTypeLLM,
+		TemplateType:       models.StoreTemplateTypeAI,
 		TargetResourceID:   1,
 		TargetResourceType: models.ResourceTypeVM,
 		Status:             models.DeploymentRequestStatusQueued,
@@ -1028,7 +1028,7 @@ func TestStoreTemplateHandler_ListTemplateVersionsIncludesParameterMetadata(t *t
 	template := models.StoreTemplate{
 		WorkspaceID:        workspace.ID,
 		Name:               "ollama-template",
-		TemplateType:       models.StoreTemplateTypeLLM,
+		TemplateType:       models.StoreTemplateTypeAI,
 		TargetResourceType: models.ResourceTypeVM,
 		Source:             models.StoreTemplateSourceWorkspace,
 		Status:             models.StoreTemplateStatusPublished,
@@ -1792,8 +1792,8 @@ func TestDeploymentHandler_CreateDeploymentRequestBuildsDirectAppRuns(t *testing
 	if vmReq.PipelineID == 0 {
 		t.Fatalf("expected vm direct deployment request to persist hidden pipeline id")
 	}
-	if vmReq.LLMModelID != 0 {
-		t.Fatalf("expected vm app deployment request llm_model_id to remain unset, got=%d", vmReq.LLMModelID)
+	if vmReq.AIModelID != 0 {
+		t.Fatalf("expected vm app deployment request ai_model_id to remain unset, got=%d", vmReq.AIModelID)
 	}
 	var vmRun models.PipelineRun
 	if err := db.First(&vmRun, vmReq.PipelineRunID).Error; err != nil {
@@ -1839,8 +1839,8 @@ func TestDeploymentHandler_CreateDeploymentRequestBuildsDirectAppRuns(t *testing
 	if k8sReq.PipelineID == 0 {
 		t.Fatalf("expected k8s direct deployment request to persist hidden pipeline id")
 	}
-	if k8sReq.LLMModelID != 0 {
-		t.Fatalf("expected k8s app deployment request llm_model_id to remain unset, got=%d", k8sReq.LLMModelID)
+	if k8sReq.AIModelID != 0 {
+		t.Fatalf("expected k8s app deployment request ai_model_id to remain unset, got=%d", k8sReq.AIModelID)
 	}
 	var k8sRun models.PipelineRun
 	if err := db.First(&k8sRun, k8sReq.PipelineRunID).Error; err != nil {
@@ -1877,7 +1877,7 @@ func TestLLMModelHandler_AdminImportAndListCatalog(t *testing.T) {
 		t.Fatalf("update admin role failed: %v", err)
 	}
 
-	h := NewLLMModelHandler()
+	h := NewAIModelCatalogHandler()
 	importBody := mustJSON(t, map[string]interface{}{
 		"source":          "huggingface",
 		"source_model_id": "Qwen/Qwen2.5-7B-Instruct",
@@ -1901,12 +1901,12 @@ func TestLLMModelHandler_AdminImportAndListCatalog(t *testing.T) {
 			},
 		},
 	})
-	importResp := performResourceStoreRequest(t, h.ImportModel, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodPost, "/api/store/llm-models/import", importBody)
+	importResp := performResourceStoreRequest(t, h.ImportModel, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodPost, "/api/store/ai-models/import", importBody)
 	if importResp.Code != http.StatusOK {
 		t.Fatalf("expected import model success, got=%d body=%s", importResp.Code, importResp.Body.String())
 	}
 
-	listResp := performResourceStoreRequest(t, h.ListModels, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodGet, "/api/store/llm-models", nil)
+	listResp := performResourceStoreRequest(t, h.ListModels, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodGet, "/api/store/ai-models", nil)
 	if listResp.Code != http.StatusOK {
 		t.Fatalf("expected list models success, got=%d body=%s", listResp.Code, listResp.Body.String())
 	}
@@ -1945,7 +1945,7 @@ func TestLLMModelHandler_ListModelsBackfillsParameterSizeFromMetadata(t *testing
 	if err != nil {
 		t.Fatalf("marshal metadata failed: %v", err)
 	}
-	model := models.LLMModelCatalog{
+	model := models.AIModelCatalog{
 		Name:          "Qwen3.5-2B",
 		DisplayName:   "Qwen3.5-2B",
 		Source:        "huggingface",
@@ -1957,8 +1957,8 @@ func TestLLMModelHandler_ListModelsBackfillsParameterSizeFromMetadata(t *testing
 		t.Fatalf("create llm model failed: %v", err)
 	}
 
-	h := NewLLMModelHandler()
-	listResp := performResourceStoreRequest(t, h.ListModels, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodGet, "/api/store/llm-models", nil)
+	h := NewAIModelCatalogHandler()
+	listResp := performResourceStoreRequest(t, h.ListModels, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodGet, "/api/store/ai-models", nil)
 	if listResp.Code != http.StatusOK {
 		t.Fatalf("expected list models success, got=%d body=%s", listResp.Code, listResp.Body.String())
 	}
@@ -1988,7 +1988,7 @@ func TestLLMModelHandler_ReimportUpdatesParameterSize(t *testing.T) {
 			},
 		},
 	}
-	original := models.LLMModelCatalog{
+	original := models.AIModelCatalog{
 		Name:          "Qwen2.5-7B-Instruct",
 		DisplayName:   "Qwen2.5-7B-Instruct",
 		Source:        "huggingface",
@@ -2001,7 +2001,7 @@ func TestLLMModelHandler_ReimportUpdatesParameterSize(t *testing.T) {
 		t.Fatalf("create llm model failed: %v", err)
 	}
 
-	h := NewLLMModelHandler()
+	h := NewAIModelCatalogHandler()
 	reimportBody := mustJSON(t, map[string]interface{}{
 		"source":          "huggingface",
 		"source_model_id": "Qwen/Qwen2.5-7B-Instruct",
@@ -2014,12 +2014,12 @@ func TestLLMModelHandler_ReimportUpdatesParameterSize(t *testing.T) {
 			},
 		},
 	})
-	reimportResp := performResourceStoreRequest(t, h.ImportModel, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodPost, "/api/store/llm-models/import", reimportBody)
+	reimportResp := performResourceStoreRequest(t, h.ImportModel, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodPost, "/api/store/ai-models/import", reimportBody)
 	if reimportResp.Code != http.StatusOK {
 		t.Fatalf("expected reimport model success, got=%d body=%s", reimportResp.Code, reimportResp.Body.String())
 	}
 
-	var stored models.LLMModelCatalog
+	var stored models.AIModelCatalog
 	if err := db.First(&stored, original.ID).Error; err != nil {
 		t.Fatalf("load reimported llm model failed: %v", err)
 	}
@@ -2044,7 +2044,7 @@ func TestLLMModelHandler_ImportModelScopeModelResolvesNestedParameterSize(t *tes
 		t.Fatalf("update admin role failed: %v", err)
 	}
 
-	h := NewLLMModelHandler()
+	h := NewAIModelCatalogHandler()
 	importBody := mustJSON(t, map[string]interface{}{
 		"source":          "modelscope",
 		"source_model_id": "Qwen/Qwen3.5-27B",
@@ -2059,7 +2059,7 @@ func TestLLMModelHandler_ImportModelScopeModelResolvesNestedParameterSize(t *tes
 			},
 		},
 	})
-	importResp := performResourceStoreRequest(t, h.ImportModel, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodPost, "/api/store/llm-models/import", importBody)
+	importResp := performResourceStoreRequest(t, h.ImportModel, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodPost, "/api/store/ai-models/import", importBody)
 	if importResp.Code != http.StatusOK {
 		t.Fatalf("expected ModelScope import success, got=%d body=%s", importResp.Code, importResp.Body.String())
 	}
@@ -2067,7 +2067,7 @@ func TestLLMModelHandler_ImportModelScopeModelResolvesNestedParameterSize(t *tes
 		t.Fatalf("expected ModelScope import response to include nested parameter_size, got=%s", importResp.Body.String())
 	}
 
-	listResp := performResourceStoreRequest(t, h.ListModels, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodGet, "/api/store/llm-models", nil)
+	listResp := performResourceStoreRequest(t, h.ListModels, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodGet, "/api/store/ai-models", nil)
 	if listResp.Code != http.StatusOK {
 		t.Fatalf("expected list models success, got=%d body=%s", listResp.Code, listResp.Body.String())
 	}
@@ -2124,7 +2124,7 @@ func TestDeploymentHandler_CreateDeploymentRequestSnapshotsSelectedLLMModel(t *t
 		t.Fatalf("create resource failed: %v", err)
 	}
 
-	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "Ollama", TemplateType: models.StoreTemplateTypeLLM, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourceWorkspace, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
+	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "Ollama", TemplateType: models.StoreTemplateTypeAI, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourceWorkspace, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
 	if err := db.Create(&template).Error; err != nil {
 		t.Fatalf("create template failed: %v", err)
 	}
@@ -2132,7 +2132,7 @@ func TestDeploymentHandler_CreateDeploymentRequestSnapshotsSelectedLLMModel(t *t
 	if err := db.Create(&version).Error; err != nil {
 		t.Fatalf("create version failed: %v", err)
 	}
-	model := models.LLMModelCatalog{
+	model := models.AIModelCatalog{
 		Name:          "Qwen2.5-7B-Instruct",
 		Source:        "huggingface",
 		SourceModelID: "Qwen/Qwen2.5-7B-Instruct",
@@ -2149,7 +2149,7 @@ func TestDeploymentHandler_CreateDeploymentRequestSnapshotsSelectedLLMModel(t *t
 	requestBody := mustJSON(t, map[string]interface{}{
 		"template_version_id": version.ID,
 		"target_resource_id":  resource.ID,
-		"llm_model_id":        model.ID,
+		"ai_model_id":         model.ID,
 		"parameters": map[string]interface{}{
 			"image_tag":              "latest",
 			"gpu_memory_utilization": "0.95",
@@ -2164,11 +2164,11 @@ func TestDeploymentHandler_CreateDeploymentRequestSnapshotsSelectedLLMModel(t *t
 	if err := db.First(&req, responseDataID(t, createResp.Body.Bytes())).Error; err != nil {
 		t.Fatalf("load deployment request failed: %v", err)
 	}
-	if req.LLMModelID != model.ID {
-		t.Fatalf("expected deployment request llm_model_id=%d, got=%d", model.ID, req.LLMModelID)
+	if req.AIModelID != model.ID {
+		t.Fatalf("expected deployment request ai_model_id=%d, got=%d", model.ID, req.AIModelID)
 	}
-	if !bytes.Contains([]byte(req.LLMModelSnapshot), []byte("Qwen/Qwen2.5-7B-Instruct")) {
-		t.Fatalf("expected llm model snapshot to include source model id, got=%s", req.LLMModelSnapshot)
+	if !bytes.Contains([]byte(req.AIModelSnapshot), []byte("Qwen/Qwen2.5-7B-Instruct")) {
+		t.Fatalf("expected ai model snapshot to include source model id, got=%s", req.AIModelSnapshot)
 	}
 	var run models.PipelineRun
 	if err := db.First(&run, req.PipelineRunID).Error; err != nil {
@@ -2227,7 +2227,7 @@ func TestDeploymentHandler_CreateDeploymentRequestResolvesPlatformLikeVLLMDefaul
 		t.Fatalf("create resource failed: %v", err)
 	}
 
-	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeLLM, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourceWorkspace, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
+	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeAI, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourceWorkspace, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
 	if err := db.Create(&template).Error; err != nil {
 		t.Fatalf("create template failed: %v", err)
 	}
@@ -2248,7 +2248,7 @@ func TestDeploymentHandler_CreateDeploymentRequestResolvesPlatformLikeVLLMDefaul
 	if err := db.Create(&parameters).Error; err != nil {
 		t.Fatalf("create vllm parameters failed: %v", err)
 	}
-	model := models.LLMModelCatalog{Name: "Qwen2.5-7B-Instruct", Source: "huggingface", SourceModelID: "Qwen/Qwen2.5-7B-Instruct", ImportedBy: maintainer.ID}
+	model := models.AIModelCatalog{Name: "Qwen2.5-7B-Instruct", Source: "huggingface", SourceModelID: "Qwen/Qwen2.5-7B-Instruct", ImportedBy: maintainer.ID}
 	if err := db.Create(&model).Error; err != nil {
 		t.Fatalf("create llm model failed: %v", err)
 	}
@@ -2257,7 +2257,7 @@ func TestDeploymentHandler_CreateDeploymentRequestResolvesPlatformLikeVLLMDefaul
 	requestBody := mustJSON(t, map[string]interface{}{
 		"template_version_id": version.ID,
 		"target_resource_id":  resource.ID,
-		"llm_model_id":        model.ID,
+		"ai_model_id":         model.ID,
 		"parameters": map[string]interface{}{
 			"model_path":             "/srv/models/Qwen/Qwen2.5-7B-Instruct",
 			"host_model_dir":         "/srv/models",
@@ -2360,7 +2360,7 @@ func TestDeploymentHandler_CreateDeploymentRequestResolvesEmptyOptionalVLLMInput
 		t.Fatalf("create resource failed: %v", err)
 	}
 
-	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM empty", TemplateType: models.StoreTemplateTypeLLM, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourceWorkspace, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
+	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM empty", TemplateType: models.StoreTemplateTypeAI, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourceWorkspace, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
 	if err := db.Create(&template).Error; err != nil {
 		t.Fatalf("create template failed: %v", err)
 	}
@@ -2376,7 +2376,7 @@ func TestDeploymentHandler_CreateDeploymentRequestResolvesEmptyOptionalVLLMInput
 	if err := db.Create(&parameters).Error; err != nil {
 		t.Fatalf("create vllm parameters failed: %v", err)
 	}
-	model := models.LLMModelCatalog{Name: "Qwen2.5-7B-Instruct", Source: "huggingface", SourceModelID: "Qwen/Qwen2.5-7B-Instruct", ImportedBy: maintainer.ID}
+	model := models.AIModelCatalog{Name: "Qwen2.5-7B-Instruct", Source: "huggingface", SourceModelID: "Qwen/Qwen2.5-7B-Instruct", ImportedBy: maintainer.ID}
 	if err := db.Create(&model).Error; err != nil {
 		t.Fatalf("create llm model failed: %v", err)
 	}
@@ -2385,7 +2385,7 @@ func TestDeploymentHandler_CreateDeploymentRequestResolvesEmptyOptionalVLLMInput
 	requestBody := mustJSON(t, map[string]interface{}{
 		"template_version_id": version.ID,
 		"target_resource_id":  resource.ID,
-		"llm_model_id":        model.ID,
+		"ai_model_id":         model.ID,
 		"parameters": map[string]interface{}{
 			"model_path": "/srv/models/Qwen/Qwen2.5-7B-Instruct",
 		},
@@ -2462,7 +2462,7 @@ func TestDeploymentHandler_CreateDeploymentRequestAllowsRemoteVLLMModelWithoutMo
 		t.Fatalf("create resource failed: %v", err)
 	}
 
-	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeLLM, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourceWorkspace, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
+	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeAI, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourceWorkspace, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
 	if err := db.Create(&template).Error; err != nil {
 		t.Fatalf("create template failed: %v", err)
 	}
@@ -2479,7 +2479,7 @@ func TestDeploymentHandler_CreateDeploymentRequestAllowsRemoteVLLMModelWithoutMo
 	if err := db.Create(&parameters).Error; err != nil {
 		t.Fatalf("create vllm parameters failed: %v", err)
 	}
-	model := models.LLMModelCatalog{Name: "Qwen2.5-7B-Instruct", Source: "huggingface", SourceModelID: "Qwen/Qwen2.5-7B-Instruct", ImportedBy: maintainer.ID}
+	model := models.AIModelCatalog{Name: "Qwen2.5-7B-Instruct", Source: "huggingface", SourceModelID: "Qwen/Qwen2.5-7B-Instruct", ImportedBy: maintainer.ID}
 	if err := db.Create(&model).Error; err != nil {
 		t.Fatalf("create llm model failed: %v", err)
 	}
@@ -2488,7 +2488,7 @@ func TestDeploymentHandler_CreateDeploymentRequestAllowsRemoteVLLMModelWithoutMo
 	requestBody := mustJSON(t, map[string]interface{}{
 		"template_version_id": version.ID,
 		"target_resource_id":  resource.ID,
-		"llm_model_id":        model.ID,
+		"ai_model_id":         model.ID,
 		"parameters":          map[string]interface{}{},
 	})
 	createResp := performResourceStoreRequest(t, h.CreateDeploymentRequest, developer.ID, "user", workspace.ID, models.WorkspaceRoleDeveloper, http.MethodPost, "/api/deployments/requests", requestBody)
@@ -2560,7 +2560,7 @@ func TestDeploymentHandler_CreateDeploymentRequestResolvesEmptyRemoteVLLMMountPl
 		t.Fatalf("create resource failed: %v", err)
 	}
 
-	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeLLM, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourceWorkspace, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
+	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeAI, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourceWorkspace, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
 	if err := db.Create(&template).Error; err != nil {
 		t.Fatalf("create template failed: %v", err)
 	}
@@ -2575,7 +2575,7 @@ func TestDeploymentHandler_CreateDeploymentRequestResolvesEmptyRemoteVLLMMountPl
 	if err := db.Create(&parameters).Error; err != nil {
 		t.Fatalf("create vllm parameters failed: %v", err)
 	}
-	model := models.LLMModelCatalog{Name: "Qwen2.5-7B-Instruct", Source: "huggingface", SourceModelID: "Qwen/Qwen2.5-7B-Instruct", ImportedBy: maintainer.ID}
+	model := models.AIModelCatalog{Name: "Qwen2.5-7B-Instruct", Source: "huggingface", SourceModelID: "Qwen/Qwen2.5-7B-Instruct", ImportedBy: maintainer.ID}
 	if err := db.Create(&model).Error; err != nil {
 		t.Fatalf("create llm model failed: %v", err)
 	}
@@ -2584,7 +2584,7 @@ func TestDeploymentHandler_CreateDeploymentRequestResolvesEmptyRemoteVLLMMountPl
 	requestBody := mustJSON(t, map[string]interface{}{
 		"template_version_id": version.ID,
 		"target_resource_id":  resource.ID,
-		"llm_model_id":        model.ID,
+		"ai_model_id":         model.ID,
 		"parameters":          map[string]interface{}{},
 	})
 	createResp := performResourceStoreRequest(t, h.CreateDeploymentRequest, developer.ID, "user", workspace.ID, models.WorkspaceRoleDeveloper, http.MethodPost, "/api/deployments/requests", requestBody)
@@ -2658,7 +2658,7 @@ func TestDeploymentHandler_CreateDeploymentRequestUsesUserProvidedMountedPaths(t
 		t.Fatalf("create resource failed: %v", err)
 	}
 
-	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeLLM, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
+	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeAI, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
 	if err := db.Create(&template).Error; err != nil {
 		t.Fatalf("create template failed: %v", err)
 	}
@@ -2673,7 +2673,7 @@ func TestDeploymentHandler_CreateDeploymentRequestUsesUserProvidedMountedPaths(t
 	if err := db.Create(&parameters).Error; err != nil {
 		t.Fatalf("create vllm parameters failed: %v", err)
 	}
-	model := models.LLMModelCatalog{Name: "Qwen2.5-7B-Instruct", Source: "huggingface", SourceModelID: "Qwen/Qwen2.5-7B-Instruct", ImportedBy: maintainer.ID}
+	model := models.AIModelCatalog{Name: "Qwen2.5-7B-Instruct", Source: "huggingface", SourceModelID: "Qwen/Qwen2.5-7B-Instruct", ImportedBy: maintainer.ID}
 	if err := db.Create(&model).Error; err != nil {
 		t.Fatalf("create llm model failed: %v", err)
 	}
@@ -2682,7 +2682,7 @@ func TestDeploymentHandler_CreateDeploymentRequestUsesUserProvidedMountedPaths(t
 	requestBody := mustJSON(t, map[string]interface{}{
 		"template_version_id": version.ID,
 		"target_resource_id":  resource.ID,
-		"llm_model_id":        model.ID,
+		"ai_model_id":         model.ID,
 		"parameters": map[string]interface{}{
 			"host_model_dir":      "/srv/models/custom/Qwen3.5-2B",
 			"container_model_dir": "/models/custom/Qwen3.5-2B",
@@ -2763,7 +2763,7 @@ func TestDeploymentHandler_CreateDeploymentRequestSanitizesPlatformVLLMContainer
 		t.Fatalf("create resource failed: %v", err)
 	}
 
-	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeLLM, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
+	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeAI, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
 	if err := db.Create(&template).Error; err != nil {
 		t.Fatalf("create template failed: %v", err)
 	}
@@ -2781,7 +2781,7 @@ func TestDeploymentHandler_CreateDeploymentRequestSanitizesPlatformVLLMContainer
 	if err := db.Create(&parameters).Error; err != nil {
 		t.Fatalf("create vllm parameters failed: %v", err)
 	}
-	model := models.LLMModelCatalog{Name: "Qwen2.5-0.5B-Instruct", Source: "huggingface", SourceModelID: "Qwen/Qwen2.5-0.5B-Instruct", ImportedBy: maintainer.ID}
+	model := models.AIModelCatalog{Name: "Qwen2.5-0.5B-Instruct", Source: "huggingface", SourceModelID: "Qwen/Qwen2.5-0.5B-Instruct", ImportedBy: maintainer.ID}
 	if err := db.Create(&model).Error; err != nil {
 		t.Fatalf("create llm model failed: %v", err)
 	}
@@ -2790,7 +2790,7 @@ func TestDeploymentHandler_CreateDeploymentRequestSanitizesPlatformVLLMContainer
 	requestBody := mustJSON(t, map[string]interface{}{
 		"template_version_id": version.ID,
 		"target_resource_id":  resource.ID,
-		"llm_model_id":        model.ID,
+		"ai_model_id":         model.ID,
 		"parameters": map[string]interface{}{
 			"image_tag": "nightly",
 		},
@@ -2859,7 +2859,7 @@ func TestDeploymentHandler_CreateDeploymentRequestAppliesSelectedGPUsToPlatformV
 		t.Fatalf("create resource failed: %v", err)
 	}
 
-	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeLLM, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
+	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeAI, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
 	if err := db.Create(&template).Error; err != nil {
 		t.Fatalf("create template failed: %v", err)
 	}
@@ -2867,7 +2867,7 @@ func TestDeploymentHandler_CreateDeploymentRequestAppliesSelectedGPUsToPlatformV
 	if err := db.Create(&version).Error; err != nil {
 		t.Fatalf("create version failed: %v", err)
 	}
-	model := models.LLMModelCatalog{Name: "Qwen3.5-2B", Source: "huggingface", SourceModelID: "Qwen/Qwen3.5-2B", ImportedBy: maintainer.ID}
+	model := models.AIModelCatalog{Name: "Qwen3.5-2B", Source: "huggingface", SourceModelID: "Qwen/Qwen3.5-2B", ImportedBy: maintainer.ID}
 	if err := db.Create(&model).Error; err != nil {
 		t.Fatalf("create llm model failed: %v", err)
 	}
@@ -2876,7 +2876,7 @@ func TestDeploymentHandler_CreateDeploymentRequestAppliesSelectedGPUsToPlatformV
 	requestBody := mustJSON(t, map[string]interface{}{
 		"template_version_id": version.ID,
 		"target_resource_id":  resource.ID,
-		"llm_model_id":        model.ID,
+		"ai_model_id":         model.ID,
 		"parameters": map[string]interface{}{
 			"gpu_indices": "2,3",
 		},
@@ -2934,7 +2934,7 @@ func TestDeploymentHandler_CreateDeploymentRequestAppliesSelectedGPUsToPlatformO
 		t.Fatalf("create resource failed: %v", err)
 	}
 
-	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "Ollama", TemplateType: models.StoreTemplateTypeLLM, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
+	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "Ollama", TemplateType: models.StoreTemplateTypeAI, TargetResourceType: models.ResourceTypeVM, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
 	if err := db.Create(&template).Error; err != nil {
 		t.Fatalf("create template failed: %v", err)
 	}
@@ -2946,13 +2946,13 @@ func TestDeploymentHandler_CreateDeploymentRequestAppliesSelectedGPUsToPlatformO
 	if err := db.Create(&parameters).Error; err != nil {
 		t.Fatalf("create ollama parameters failed: %v", err)
 	}
-	model := models.LLMModelCatalog{Name: "Qwen3.5-2B", Source: "huggingface", SourceModelID: "Qwen/Qwen3.5-2B", ImportedBy: maintainer.ID}
+	model := models.AIModelCatalog{Name: "Qwen3.5-2B", Source: "huggingface", SourceModelID: "Qwen/Qwen3.5-2B", ImportedBy: maintainer.ID}
 	if err := db.Create(&model).Error; err != nil {
 		t.Fatalf("create llm model failed: %v", err)
 	}
 
 	h := NewDeploymentHandler()
-	requestBody := mustJSON(t, map[string]interface{}{"template_version_id": version.ID, "target_resource_id": resource.ID, "llm_model_id": model.ID, "parameters": map[string]interface{}{"gpu_indices": "2,3"}})
+	requestBody := mustJSON(t, map[string]interface{}{"template_version_id": version.ID, "target_resource_id": resource.ID, "ai_model_id": model.ID, "parameters": map[string]interface{}{"gpu_indices": "2,3"}})
 	createResp := performResourceStoreRequest(t, h.CreateDeploymentRequest, developer.ID, "user", workspace.ID, models.WorkspaceRoleDeveloper, http.MethodPost, "/api/deployments/requests", requestBody)
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("expected create deployment request success, got=%d body=%s", createResp.Code, createResp.Body.String())
@@ -2998,7 +2998,7 @@ func TestDeploymentHandler_CreateDeploymentRequestAppliesSelectedGPUsToPlatformV
 		t.Fatalf("create resource failed: %v", err)
 	}
 
-	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeLLM, TargetResourceType: models.ResourceTypeK8sCluster, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
+	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "vLLM", TemplateType: models.StoreTemplateTypeAI, TargetResourceType: models.ResourceTypeK8sCluster, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
 	if err := db.Create(&template).Error; err != nil {
 		t.Fatalf("create template failed: %v", err)
 	}
@@ -3010,13 +3010,13 @@ func TestDeploymentHandler_CreateDeploymentRequestAppliesSelectedGPUsToPlatformV
 	if err := db.Create(&parameters).Error; err != nil {
 		t.Fatalf("create vllm k8s parameters failed: %v", err)
 	}
-	model := models.LLMModelCatalog{Name: "Qwen3.5-2B", Source: "huggingface", SourceModelID: "Qwen/Qwen3.5-2B", ImportedBy: maintainer.ID}
+	model := models.AIModelCatalog{Name: "Qwen3.5-2B", Source: "huggingface", SourceModelID: "Qwen/Qwen3.5-2B", ImportedBy: maintainer.ID}
 	if err := db.Create(&model).Error; err != nil {
 		t.Fatalf("create llm model failed: %v", err)
 	}
 
 	h := NewDeploymentHandler()
-	requestBody := mustJSON(t, map[string]interface{}{"template_version_id": version.ID, "target_resource_id": resource.ID, "llm_model_id": model.ID, "parameters": map[string]interface{}{"gpu_indices": "2,3"}})
+	requestBody := mustJSON(t, map[string]interface{}{"template_version_id": version.ID, "target_resource_id": resource.ID, "ai_model_id": model.ID, "parameters": map[string]interface{}{"gpu_indices": "2,3"}})
 	createResp := performResourceStoreRequest(t, h.CreateDeploymentRequest, developer.ID, "user", workspace.ID, models.WorkspaceRoleDeveloper, http.MethodPost, "/api/deployments/requests", requestBody)
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("expected create deployment request success, got=%d body=%s", createResp.Code, createResp.Body.String())
@@ -3065,7 +3065,7 @@ func TestDeploymentHandler_CreateDeploymentRequestAppliesSelectedGPUsToPlatformO
 		t.Fatalf("create resource failed: %v", err)
 	}
 
-	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "Ollama", TemplateType: models.StoreTemplateTypeLLM, TargetResourceType: models.ResourceTypeK8sCluster, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
+	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "Ollama", TemplateType: models.StoreTemplateTypeAI, TargetResourceType: models.ResourceTypeK8sCluster, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
 	if err := db.Create(&template).Error; err != nil {
 		t.Fatalf("create template failed: %v", err)
 	}
@@ -3077,13 +3077,13 @@ func TestDeploymentHandler_CreateDeploymentRequestAppliesSelectedGPUsToPlatformO
 	if err := db.Create(&parameters).Error; err != nil {
 		t.Fatalf("create ollama k8s parameters failed: %v", err)
 	}
-	model := models.LLMModelCatalog{Name: "Qwen3.5-2B", Source: "huggingface", SourceModelID: "Qwen/Qwen3.5-2B", ImportedBy: maintainer.ID}
+	model := models.AIModelCatalog{Name: "Qwen3.5-2B", Source: "huggingface", SourceModelID: "Qwen/Qwen3.5-2B", ImportedBy: maintainer.ID}
 	if err := db.Create(&model).Error; err != nil {
 		t.Fatalf("create llm model failed: %v", err)
 	}
 
 	h := NewDeploymentHandler()
-	requestBody := mustJSON(t, map[string]interface{}{"template_version_id": version.ID, "target_resource_id": resource.ID, "llm_model_id": model.ID, "parameters": map[string]interface{}{"gpu_indices": "2,3"}})
+	requestBody := mustJSON(t, map[string]interface{}{"template_version_id": version.ID, "target_resource_id": resource.ID, "ai_model_id": model.ID, "parameters": map[string]interface{}{"gpu_indices": "2,3"}})
 	createResp := performResourceStoreRequest(t, h.CreateDeploymentRequest, developer.ID, "user", workspace.ID, models.WorkspaceRoleDeveloper, http.MethodPost, "/api/deployments/requests", requestBody)
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("expected create deployment request success, got=%d body=%s", createResp.Code, createResp.Body.String())
@@ -3129,7 +3129,7 @@ func TestDeploymentHandler_CreateDeploymentRequestAppliesSelectedGPUsToPlatformS
 		t.Fatalf("create resource failed: %v", err)
 	}
 
-	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "SGLang", TemplateType: models.StoreTemplateTypeLLM, TargetResourceType: models.ResourceTypeK8sCluster, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
+	template := models.StoreTemplate{WorkspaceID: workspace.ID, Name: "SGLang", TemplateType: models.StoreTemplateTypeAI, TargetResourceType: models.ResourceTypeK8sCluster, Source: models.StoreTemplateSourcePlatform, Status: models.StoreTemplateStatusPublished, CreatedBy: maintainer.ID}
 	if err := db.Create(&template).Error; err != nil {
 		t.Fatalf("create template failed: %v", err)
 	}
@@ -3141,13 +3141,13 @@ func TestDeploymentHandler_CreateDeploymentRequestAppliesSelectedGPUsToPlatformS
 	if err := db.Create(&parameters).Error; err != nil {
 		t.Fatalf("create sglang k8s parameters failed: %v", err)
 	}
-	model := models.LLMModelCatalog{Name: "Qwen3.5-2B", Source: "huggingface", SourceModelID: "Qwen/Qwen3.5-2B", ImportedBy: maintainer.ID}
+	model := models.AIModelCatalog{Name: "Qwen3.5-2B", Source: "huggingface", SourceModelID: "Qwen/Qwen3.5-2B", ImportedBy: maintainer.ID}
 	if err := db.Create(&model).Error; err != nil {
 		t.Fatalf("create llm model failed: %v", err)
 	}
 
 	h := NewDeploymentHandler()
-	requestBody := mustJSON(t, map[string]interface{}{"template_version_id": version.ID, "target_resource_id": resource.ID, "llm_model_id": model.ID, "parameters": map[string]interface{}{"gpu_indices": "2,3"}})
+	requestBody := mustJSON(t, map[string]interface{}{"template_version_id": version.ID, "target_resource_id": resource.ID, "ai_model_id": model.ID, "parameters": map[string]interface{}{"gpu_indices": "2,3"}})
 	createResp := performResourceStoreRequest(t, h.CreateDeploymentRequest, developer.ID, "user", workspace.ID, models.WorkspaceRoleDeveloper, http.MethodPost, "/api/deployments/requests", requestBody)
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("expected create deployment request success, got=%d body=%s", createResp.Code, createResp.Body.String())

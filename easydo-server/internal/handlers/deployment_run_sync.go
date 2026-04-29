@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 
 	"easydo-server/internal/models"
@@ -44,6 +46,9 @@ func syncDeploymentStateFromRun(db *gorm.DB, run *models.PipelineRun) {
 	}
 	var request models.DeploymentRequest
 	if err := db.Where("pipeline_run_id = ?", run.ID).First(&request).Error; err == nil {
+		if deploymentStatus == models.DeploymentRequestStatusSuccess {
+			syncSelfDeployAIProviderAndBinding(db, &request)
+		}
 		eventType := deploymentRequestEventType(deploymentStatus)
 		if eventType != "" {
 			emitDeploymentRequestNotification(db, &request, eventType, deploymentRequestEventTitle(deploymentStatus), deploymentRequestEventContent(deploymentStatus))
@@ -87,4 +92,127 @@ func canUseDeploymentBoundCredential(db *gorm.DB, credential *models.Credential,
 		return false
 	}
 	return count > 0
+}
+
+func syncSelfDeployAIProviderAndBinding(db *gorm.DB, request *models.DeploymentRequest) {
+	if db == nil || request == nil || request.ID == 0 || request.AIModelID == 0 {
+		return
+	}
+
+	var deploymentResource models.Resource
+	if err := db.First(&deploymentResource, request.TargetResourceID).Error; err != nil {
+		return
+	}
+	baseURL := buildSelfDeployProviderBaseURL(&deploymentResource)
+	if baseURL == "" {
+		return
+	}
+
+	providerName := buildSelfDeployProviderName(db, request, &deploymentResource)
+	metadataJSON := marshalJSONOrEmpty(map[string]interface{}{
+		"deployment_request_id": request.ID,
+		"resource_id":           request.TargetResourceID,
+		"pipeline_run_id":       request.PipelineRunID,
+		"template_version_id":   request.TemplateVersionID,
+		"ai_model_id":           request.AIModelID,
+	})
+
+	provider := models.AIProvider{}
+	providerErr := db.Where("workspace_id = ? AND provider_type = ? AND base_url = ?", request.WorkspaceID, "self_deploy", baseURL).Where("metadata_json LIKE ?", fmt.Sprintf("%%\"ai_model_id\":%d%%", request.AIModelID)).First(&provider).Error
+	if providerErr != nil {
+		provider = models.AIProvider{
+			WorkspaceID:  request.WorkspaceID,
+			Name:         providerName,
+			Description:  "Auto materialized from successful self-deploy LLM deployment",
+			ProviderType: "self_deploy",
+			BaseURL:      baseURL,
+			MetadataJSON: metadataJSON,
+			Status:       models.AIProviderStatusActive,
+			CreatedBy:    request.RequestedBy,
+		}
+		if err := db.Create(&provider).Error; err != nil {
+			return
+		}
+	} else {
+		_ = db.Model(&provider).Updates(map[string]interface{}{
+			"name":          providerName,
+			"metadata_json": metadataJSON,
+			"status":        models.AIProviderStatusActive,
+		}).Error
+	}
+
+	binding := models.AIModelBinding{}
+	bindingErr := db.Where("workspace_id = ? AND provider_id = ? AND model_id = ?", request.WorkspaceID, provider.ID, request.AIModelID).First(&binding).Error
+	if bindingErr != nil {
+		binding = models.AIModelBinding{
+			WorkspaceID:      request.WorkspaceID,
+			ModelID:          request.AIModelID,
+			ProviderID:       provider.ID,
+			ProviderModelKey: extractSelfDeployAIProviderModelKey(request),
+			MetadataJSON:     metadataJSON,
+			Status:           models.AIModelBindingStatusActive,
+			CreatedBy:        request.RequestedBy,
+		}
+		_ = db.Create(&binding).Error
+	} else {
+		_ = db.Model(&binding).Updates(map[string]interface{}{
+			"provider_model_key": extractSelfDeployAIProviderModelKey(request),
+			"metadata_json":      metadataJSON,
+			"status":             models.AIModelBindingStatusActive,
+		}).Error
+	}
+}
+
+func buildSelfDeployProviderBaseURL(resource *models.Resource) string {
+	if resource == nil {
+		return ""
+	}
+	endpoint := strings.TrimSpace(resource.Endpoint)
+	if endpoint == "" {
+		return ""
+	}
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		if strings.HasSuffix(endpoint, "/v1") {
+			return endpoint
+		}
+		return strings.TrimRight(endpoint, "/") + "/v1"
+	}
+	return fmt.Sprintf("http://%s/v1", strings.TrimRight(endpoint, "/"))
+}
+
+func buildSelfDeployProviderName(db *gorm.DB, request *models.DeploymentRequest, resource *models.Resource) string {
+	resourceName := "resource"
+	if resource != nil && strings.TrimSpace(resource.Name) != "" {
+		resourceName = strings.TrimSpace(resource.Name)
+	}
+	modelName := fmt.Sprintf("model-%d", request.AIModelID)
+	if db != nil && request.AIModelID > 0 {
+		var model models.AIModelCatalog
+		if err := db.First(&model, request.AIModelID).Error; err == nil {
+			if strings.TrimSpace(model.DisplayName) != "" {
+				modelName = strings.TrimSpace(model.DisplayName)
+			} else if strings.TrimSpace(model.Name) != "" {
+				modelName = strings.TrimSpace(model.Name)
+			}
+		}
+	}
+	return fmt.Sprintf("%s · %s", resourceName, modelName)
+}
+
+func extractSelfDeployAIProviderModelKey(request *models.DeploymentRequest) string {
+	if request == nil {
+		return ""
+	}
+	if strings.TrimSpace(request.AIModelSnapshot) != "" {
+		var snapshot map[string]interface{}
+		if err := json.Unmarshal([]byte(request.AIModelSnapshot), &snapshot); err == nil {
+			if sourceID := strings.TrimSpace(fmt.Sprint(snapshot["source_model_id"])); sourceID != "" {
+				return sourceID
+			}
+			if name := strings.TrimSpace(fmt.Sprint(snapshot["name"])); name != "" {
+				return name
+			}
+		}
+	}
+	return fmt.Sprintf("model-%d", request.AIModelID)
 }

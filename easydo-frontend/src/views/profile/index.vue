@@ -1,9 +1,9 @@
 <template>
   <div class="profile-container">
-    <div class="profile-header">
-      <h1 class="page-title">个人中心</h1>
-      <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
-    </div>
+    <PageHeader>
+      <template #title><h1>个人中心</h1></template>
+      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</template>
+    </PageHeader>
     
     <div class="profile-layout">
       <aside class="profile-sidebar">
@@ -202,6 +202,7 @@
 import { ref, reactive, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useUserStore } from '@/stores/user'
+import PageHeader from '../store/components/PageHeader.vue'
 import {
   NOTIFICATION_CHANNELS,
   NOTIFICATION_EVENT_GROUPS,
@@ -375,16 +376,6 @@ watch(() => userStore.currentWorkspaceId, async () => {
 
 <style lang="scss" scoped>
 .profile-container {
-  .profile-header {
-    margin-bottom: 20px;
-    
-    .page-title {
-      font-size: 24px;
-      font-weight: 600;
-      color: var(--text-primary);
-    }
-  }
-  
   .profile-layout {
     display: flex;
     gap: 20px;

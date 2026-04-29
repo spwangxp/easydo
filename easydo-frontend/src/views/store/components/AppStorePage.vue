@@ -1,30 +1,25 @@
 <template>
   <div class="app-store-page">
-    <section class="store-header-card">
-      <div class="page-header">
-        <div>
-          <h1 class="page-title">商店</h1>
-          <div class="page-subtitle">
-            {{ selectedApp ? '当前正在查看应用详情，可直接管理版本、参数和部署入口。' : '按功能分类浏览应用，外层只保留关键信息，进入详情后再管理版本与部署。' }}
-          </div>
-        </div>
-        <div class="header-actions">
+    <PageHeader>
+      <template #title>
+        <StoreKindSwitch :model-value="storeKind" @update:model-value="handleStoreTabChange" />
+      </template>
+      <template #subtitle>
+        {{ selectedApp ? '当前正在查看应用详情，可直接管理版本、参数和部署入口。' : '按功能分类浏览应用，外层只保留关键信息，进入详情后再管理版本与部署。' }}
+      </template>
+      <template #actions>
+        <PageHeaderActions>
           <template v-if="selectedApp">
-            <el-button size="small" @click="resetSelection">返回目录</el-button>
-            <el-button size="small" @click="loadVariants(selectedApp.id)">刷新版本</el-button>
+            <el-button @click="resetSelection">返回目录</el-button>
+            <el-button @click="loadVariants(selectedApp.id)">刷新版本</el-button>
           </template>
           <template v-else>
-            <el-button size="small" @click="loadInitialData">刷新</el-button>
-            <el-button size="small" type="primary" @click="openAppDialog()">新增应用</el-button>
+            <el-button @click="loadInitialData">刷新</el-button>
+            <el-button type="primary" @click="openAppDialog()">新增应用</el-button>
           </template>
-        </div>
-      </div>
-
-      <el-tabs :model-value="storeKind" class="store-kind-tabs" @tab-change="handleStoreTabChange">
-        <el-tab-pane label="应用商店" name="app" />
-        <el-tab-pane label="LLM 商店" name="llm" />
-      </el-tabs>
-    </section>
+        </PageHeaderActions>
+      </template>
+    </PageHeader>
 
     <template v-if="!selectedApp">
       <section class="catalog-shell">
@@ -236,8 +231,7 @@
             </div>
             <div v-if="variantForm.chart_source_type !== 'upload'" class="chart-resolve-toolbar">
               <el-button
-                size="small"
-                type="primary"
+                               type="primary"
                 plain
                 :loading="chartResolveState.status === 'resolving'"
                 :disabled="!canResolveRemoteChart()"
@@ -483,6 +477,9 @@ import {
   updateTemplate,
   updateTemplateVersion
 } from '@/api/store'
+import PageHeaderActions from './PageHeaderActions.vue'
+import StoreKindSwitch from './StoreKindSwitch.vue'
+import PageHeader from './PageHeader.vue'
 import {
   createParameterRow,
   normalizeChartSourcePayload,
@@ -658,7 +655,7 @@ function createParameterViewRow() {
 
 function handleStoreTabChange(tabName) {
   if (tabName === 'app') return
-  router.push('/store/llms')
+	router.push('/store/ai')
 }
 
 function categoryLabel(value) {
@@ -1152,7 +1149,6 @@ function formatDiffText(line) {
   padding: 0;
 }
 
-.store-header-card,
 .card-shell,
 .panel-card {
   border-radius: 24px;
@@ -1163,29 +1159,15 @@ function formatDiffText(line) {
   -webkit-backdrop-filter: blur(18px);
 }
 
-.store-header-card {
-  padding: 22px 22px 18px;
-  margin-bottom: 16px;
-}
-
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-}
-
-.page-title,
 .detail-header h2 {
   margin: 0;
   font-family: "Outfit", "Plus Jakarta Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
-  font-size: 32px;
-  font-weight: 760;
-  letter-spacing: -0.03em;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
   color: var(--text-primary);
 }
 
-.page-subtitle,
 .detail-path,
 .preview-label,
 .panel-heading p,
@@ -1212,20 +1194,6 @@ function formatDiffText(line) {
 
 .upload-status.error {
   color: var(--color-danger);
-}
-
-.page-subtitle {
-  margin-top: 8px;
-}
-
-.header-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.store-kind-tabs {
-  margin-top: 18px;
 }
 
 .catalog-shell {

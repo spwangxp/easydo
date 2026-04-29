@@ -76,10 +76,10 @@ const routes = [
         meta: { permission: 'store.template.read' }
       },
       {
-        path: 'store/llms',
-        name: 'LLMStore',
-        component: () => import('@/views/store/llms.vue'),
-        meta: { permission: 'store.template.read' }
+		path: 'store/ai',
+		name: 'AIStore',
+		component: () => import('@/views/store/ai-store.vue'),
+		meta: { permission: 'store.template.read' }
       },
       {
         path: 'statistics',

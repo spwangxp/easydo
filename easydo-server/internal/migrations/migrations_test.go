@@ -249,20 +249,20 @@ func TestRunRejectsFailedPriorMigration(t *testing.T) {
 	}
 }
 
-func TestDiscoverEmbeddedMigrationsIncludesAgentExecutorSettingsMigration(t *testing.T) {
+func TestDiscoverEmbeddedMigrationsIncludesAIAgentFoundationMigration(t *testing.T) {
 	migrations, err := discoverMigrations(dbmigrations.Files)
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 3 {
-		t.Fatalf("embedded migration count=%d, want 3", len(migrations))
+	if len(migrations) != 4 {
+		t.Fatalf("embedded migration count=%d, want 4", len(migrations))
 	}
 	latest := migrations[len(migrations)-1]
-	if latest.Version != 3 {
-		t.Fatalf("latest migration version=%d, want 3", latest.Version)
+	if latest.Version != 4 {
+		t.Fatalf("latest migration version=%d, want 4", latest.Version)
 	}
-	if latest.Script != "V3__agent_buildkit_executor_settings.sql" {
-		t.Fatalf("latest migration script=%s, want V3__agent_buildkit_executor_settings.sql", latest.Script)
+	if latest.Script != "V4__ai_agent_foundation.sql" {
+		t.Fatalf("latest migration script=%s, want V4__ai_agent_foundation.sql", latest.Script)
 	}
 }
 
@@ -285,8 +285,8 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 3 {
-		t.Fatalf("embedded migration count=%d, want 3", len(migrations))
+	if len(migrations) != 4 {
+		t.Fatalf("embedded migration count=%d, want 4", len(migrations))
 	}
 	if migrations[0].VersionText != "1" || migrations[0].Script != "V1__schema.sql" {
 		t.Fatalf("unexpected first embedded migration: %+v", migrations[0])
@@ -297,7 +297,10 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if migrations[2].VersionText != "3" || migrations[2].Script != "V3__agent_buildkit_executor_settings.sql" {
 		t.Fatalf("unexpected third embedded migration: %+v", migrations[2])
 	}
-	if len(migrations[0].Statements) == 0 || len(migrations[1].Statements) == 0 || len(migrations[2].Statements) == 0 {
+	if migrations[3].VersionText != "4" || migrations[3].Script != "V4__ai_agent_foundation.sql" {
+		t.Fatalf("unexpected fourth embedded migration: %+v", migrations[3])
+	}
+	if len(migrations[0].Statements) == 0 || len(migrations[1].Statements) == 0 || len(migrations[2].Statements) == 0 || len(migrations[3].Statements) == 0 {
 		t.Fatalf("expected parsed statements for embedded migrations, got %+v", migrations)
 	}
 }
@@ -421,6 +424,37 @@ func TestEmbeddedAgentBuildkitExecutorSettingsMigrationDeclaresAgentAndSystemSet
 	}
 }
 
+func TestEmbeddedSchemaKeepsAIFoundationOutOfV1(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
+	if err != nil {
+		t.Fatalf("read V1 schema failed: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{"CREATE TABLE `llm_model_catalogs`", "`llm_model_id` bigint unsigned DEFAULT NULL", "`llm_model_snapshot` longtext"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected V1 schema to keep main baseline %q", expected)
+		}
+	}
+	for _, unexpected := range []string{"CREATE TABLE `ai_providers`", "CREATE TABLE `ai_model_bindings`", "CREATE TABLE `ai_agents`", "CREATE TABLE `ai_runtime_profiles`", "CREATE TABLE `ai_sessions`", "CREATE TABLE `ai_model_catalogs`", "`ai_model_id` bigint unsigned DEFAULT NULL", "`ai_model_snapshot` longtext"} {
+		if strings.Contains(text, unexpected) {
+			t.Fatalf("expected V1 schema to exclude AI foundation fragment %q", unexpected)
+		}
+	}
+}
+
+func TestEmbeddedAIAgentFoundationMigrationDeclaresConsolidatedAIMigration(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V4__ai_agent_foundation.sql")
+	if err != nil {
+		t.Fatalf("read V4 migration failed: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{"RENAME TABLE `llm_model_catalogs` TO `ai_model_catalogs`", "CHANGE COLUMN `llm_model_id` `ai_model_id`", "CHANGE COLUMN `llm_model_snapshot` `ai_model_snapshot`", "CREATE TABLE `ai_providers`", "CREATE TABLE `ai_model_bindings`", "CREATE TABLE `ai_agents`", "CREATE TABLE `ai_runtime_profiles`", "CREATE TABLE `ai_sessions`", "UPDATE `store_templates` SET `template_type` = 'ai' WHERE `template_type` = 'llm'", "UPDATE `deployment_requests` SET `template_type` = 'ai' WHERE `template_type` = 'llm'"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected V4 migration to contain %q, got %s", expected, text)
+		}
+	}
+}
+
 func TestCalculateChecksumUsesSigned32BitRange(t *testing.T) {
 	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
 	if err != nil {
@@ -428,8 +462,8 @@ func TestCalculateChecksumUsesSigned32BitRange(t *testing.T) {
 	}
 
 	got := calculateChecksum(content)
-	if got >= 0 {
-		t.Fatalf("checksum=%d, want signed 32-bit overflow result below zero", got)
+	if got == 0 {
+		t.Fatalf("checksum=%d, want non-zero signed 32-bit checksum", got)
 	}
 }
 

@@ -1,9 +1,9 @@
 <template>
   <div class="pending-container">
-    <div class="pending-header">
-      <h1 class="page-title">待接纳执行器</h1>
-      <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '平台级' }}</div>
-    </div>
+    <PageHeader>
+      <template #title><h1>待接纳执行器</h1></template>
+      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '平台级' }}</template>
+    </PageHeader>
 
     <div class="pending-table" v-loading="loading">
       <el-table :data="pendingList" style="width: 100%" row-key="id">
@@ -162,6 +162,7 @@ import { ElMessage } from 'element-plus'
 import { useUserStore } from '@/stores/user'
 import { Monitor, Cpu, Grid, Warning } from '@element-plus/icons-vue'
 import { getPendingAgents, approveAgent, rejectAgent } from '@/api/agent'
+import PageHeader from '../store/components/PageHeader.vue'
 
 const userStore = useUserStore()
 const loading = ref(false)
@@ -332,19 +333,6 @@ watch(routeRefresh, () => {
   .pending-header {
     margin-bottom: 18px;
 
-    .page-title {
-      font-family: $font-family-display;
-      font-size: 32px;
-      font-weight: 760;
-      letter-spacing: -0.03em;
-      color: var(--text-primary);
-    }
-
-    .page-subtitle {
-      margin-top: 8px;
-      color: var(--text-secondary);
-      font-size: 13px;
-    }
   }
 
   .pending-table {

@@ -1,21 +1,21 @@
 <template>
   <div class="statistics-container">
-    <div class="statistics-header">
-      <div>
-        <h1 class="page-title">统计</h1>
-        <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
-      </div>
-      <div class="date-range-picker">
-        <el-date-picker
-          v-model="dateRange"
-          type="daterange"
-          range-separator="-"
-          start-placeholder="开始日期"
-          end-placeholder="结束日期"
-          size="default"
-        />
-      </div>
-    </div>
+    <PageHeader>
+      <template #title><h1>统计</h1></template>
+      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</template>
+      <template #actions>
+        <PageHeaderActions>
+          <el-date-picker
+            v-model="dateRange"
+            type="daterange"
+            range-separator="-"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            size="default"
+          />
+        </PageHeaderActions>
+      </template>
+    </PageHeader>
     
     <div class="stats-overview" v-loading="loading">
       <div class="stat-card">
@@ -190,6 +190,8 @@ import {
 import { getStatsOverview, getStatsTrend, getTopPipelines } from '@/api/statistics'
 import { ElMessage } from 'element-plus'
 import { useUserStore } from '@/stores/user'
+import PageHeader from '../store/components/PageHeader.vue'
+import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 import {
   buildStatisticsDateParams,
   getDefaultStatisticsDateRange
@@ -341,21 +343,6 @@ onMounted(() => {
 
 .statistics-container {
   animation: float-up 0.45s ease both;
-
-  .statistics-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 20px;
-  }
-
-  .page-title {
-    font-family: $font-family-display;
-    font-size: 32px;
-    font-weight: 760;
-    letter-spacing: -0.03em;
-    color: var(--text-primary);
-  }
 
   .stats-overview {
     display: grid;

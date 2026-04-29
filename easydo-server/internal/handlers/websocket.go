@@ -1083,6 +1083,7 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 	// Automatic retry/failover: only when task failed and retries remain.
 	// Final failure after retries will be handled by ignore_failure semantics at pipeline level.
 	if willRetry {
+		updateAISessionStateForTask(models.DB, &task, taskUpdatePayloadV2{Status: models.TaskStatusRunning}, now)
 		nextRetry := task.RetryCount + 1
 		retryUpdates := map[string]interface{}{
 			"status":           models.TaskStatusQueued,
@@ -1151,6 +1152,8 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 		return
 	}
 
+	updateAISessionStateForTask(models.DB, &task, update, now)
+
 	h.checkAgentStatus(client.agentID)
 	h.persistResourceBaseInfoTaskResult(&task, update)
 
@@ -1164,6 +1167,72 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 	if !ackSent {
 		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, true, "", nil)
 	}
+}
+
+func updateAISessionStateForTask(db *gorm.DB, task *models.AgentTask, update taskUpdatePayloadV2, now int64) {
+	if db == nil || task == nil || task.ID == 0 {
+		return
+	}
+
+	aiSessionID := extractAISessionIDFromTask(task)
+	if aiSessionID == 0 {
+		return
+	}
+
+	updates := map[string]interface{}{}
+	switch update.Status {
+	case models.TaskStatusRunning:
+		updates["status"] = models.AISessionStatusRunning
+		var session models.AISession
+		if err := db.Select("started_at").First(&session, aiSessionID).Error; err == nil && session.StartedAt == 0 {
+			updates["started_at"] = now
+		}
+	case models.TaskStatusExecuteSuccess:
+		updates["status"] = models.AISessionStatusCompleted
+		updates["completed_at"] = now
+		updates["error_msg"] = ""
+		if update.Result != nil {
+			if data, err := json.Marshal(update.Result); err == nil {
+				updates["response_json"] = string(data)
+			}
+		}
+	case models.TaskStatusExecuteFailed, models.TaskStatusScheduleFailed:
+		updates["status"] = models.AISessionStatusFailed
+		updates["completed_at"] = now
+		updates["error_msg"] = strings.TrimSpace(update.ErrorMsg)
+		if update.Result != nil {
+			if data, err := json.Marshal(update.Result); err == nil {
+				updates["response_json"] = string(data)
+			}
+		}
+	case models.TaskStatusCancelled:
+		updates["status"] = models.AISessionStatusCancelled
+		updates["completed_at"] = now
+		updates["error_msg"] = strings.TrimSpace(update.ErrorMsg)
+		if update.Result != nil {
+			if data, err := json.Marshal(update.Result); err == nil {
+				updates["response_json"] = string(data)
+			}
+		}
+	default:
+		return
+	}
+
+	if len(updates) == 0 {
+		return
+	}
+	_ = db.Model(&models.AISession{}).Where("id = ?", aiSessionID).Updates(updates).Error
+}
+
+func extractAISessionIDFromTask(task *models.AgentTask) uint64 {
+	if task == nil || strings.TrimSpace(task.Params) == "" {
+		return 0
+	}
+	var params map[string]interface{}
+	if err := json.Unmarshal([]byte(task.Params), &params); err != nil {
+		return 0
+	}
+	return toUint64Value(params["ai_session_id"])
 }
 
 func (h *WebSocketHandler) persistResourceBaseInfoTaskResult(task *models.AgentTask, update taskUpdatePayloadV2) {

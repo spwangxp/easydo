@@ -62,6 +62,29 @@ test('splitParametersByAdvanced separates basic and advanced rows', () => {
   assert.equal(grouped.advanced[0].name, 'master.count')
 })
 
+test('app store deploy form uses shared store parameter fields component', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const { dirname, join } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const currentDir = dirname(fileURLToPath(import.meta.url))
+  const source = await readFile(join(currentDir, 'components/StoreTemplatePage.vue'), 'utf8')
+
+  assert.match(source, /import\s+StoreParameterFields\s+from\s+'\.\/StoreParameterFields\.vue'/)
+  assert.match(source, /<StoreParameterFields/)
+})
+
+test('app store uses shared header actions component', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const { dirname, join } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const currentDir = dirname(fileURLToPath(import.meta.url))
+  const source = await readFile(join(currentDir, 'components/AppStorePage.vue'), 'utf8')
+
+  assert.match(source, /import\s+StoreHeaderActions\s+from\s+'\.\/StoreHeaderActions\.vue'/)
+  assert.match(source, /<StoreHeaderActions>/)
+  assert.doesNotMatch(source, /<div class="store-tabs-actions">/)
+})
+
 test('buildChartSourcePayload keeps upload metadata only for upload source', () => {
   const repoPayload = buildChartSourcePayload({
     infra_type: 'k8s',

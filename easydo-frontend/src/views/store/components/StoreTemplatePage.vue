@@ -1,18 +1,18 @@
 <template>
   <div class="store-page">
     <div class="store-header-card">
-      <div class="page-header">
-        <div>
-          <h1 class="page-title">商店</h1>
-          <div class="page-subtitle">{{ pageSubtitle }}</div>
-        </div>
-        <div v-if="canManageTemplates" class="header-actions">
-          <el-button v-if="isLLMStore" @click="openImportModelDialog">导入模型</el-button>
-          <el-button type="primary" @click="openTemplateDialog">
-            {{ isLLMStore ? '新建工作空间部署工具' : '新建工作空间模板' }}
-          </el-button>
-        </div>
-      </div>
+      <PageHeader>
+        <template #title><h1>商店</h1></template>
+        <template #subtitle>{{ pageSubtitle }}</template>
+        <template #actions>
+          <PageHeaderActions v-if="canManageTemplates">
+            <el-button v-if="isLLMStore" @click="openImportModelDialog">导入模型</el-button>
+            <el-button type="primary" @click="openTemplateDialog">
+              {{ isLLMStore ? '新建工作空间部署工具' : '新建工作空间模板' }}
+            </el-button>
+          </PageHeaderActions>
+        </template>
+      </PageHeader>
 
       <el-tabs :model-value="storeKind" class="store-kind-tabs" @tab-change="handleStoreTabChange">
         <el-tab-pane label="应用商店" name="app" />
@@ -379,158 +379,14 @@
               <el-tag v-if="deployParameterFields.length > 0" type="info">{{ deployParameterFields.length }} 项</el-tag>
             </div>
 
-            <div v-if="basicDeployParameterFields.length > 0" class="parameter-grid">
-              <div
-                v-for="field in basicDeployParameterFields"
-                :key="field.key"
-                class="parameter-field"
-                :class="{ full: field.fullWidth }"
-              >
-                <el-form-item :required="field.required">
-                  <template #label>
-                    <span class="parameter-label">
-                        <span>{{ field.label }}</span>
-                        <span v-if="field.description" class="parameter-recommendation">{{ field.description }}</span>
-                        <el-tooltip v-if="field.extraTip" :content="field.extraTip" placement="top" effect="dark">
-                          <el-icon class="parameter-help-icon"><QuestionFilled /></el-icon>
-                        </el-tooltip>
-                      <el-tag v-if="field.mutable === false" size="small" effect="plain">只读</el-tag>
-                    </span>
-                  </template>
-                  <el-input
-                    v-if="field.type === 'text' || field.type === 'password'"
-                    v-model="deployForm.parameters[field.key]"
-                    :type="field.type === 'password' ? 'password' : 'text'"
-                    :show-password="field.type === 'password'"
-                    :placeholder="field.placeholder"
-                    :disabled="field.mutable === false"
-                  />
-                  <el-input
-                    v-else-if="field.type === 'textarea' || field.type === 'json'"
-                    v-model="deployForm.parameters[field.key]"
-                    type="textarea"
-                    :rows="field.rows"
-                    :placeholder="field.placeholder"
-                    :disabled="field.mutable === false"
-                  />
-                  <el-input-number
-                    v-else-if="field.type === 'number'"
-                    v-model="deployForm.parameters[field.key]"
-                    :min="field.min"
-                    :max="field.max"
-                    :step="field.step"
-                    class="parameter-number"
-                    :disabled="field.mutable === false"
-                  />
-                  <el-switch
-                    v-else-if="field.type === 'switch'"
-                    v-model="deployForm.parameters[field.key]"
-                    :disabled="field.mutable === false"
-                  />
-                  <el-select
-                    v-else-if="field.type === 'select'"
-                    v-model="deployForm.parameters[field.key]"
-                    :placeholder="field.placeholder || '请选择'"
-                    style="width: 100%"
-                    :disabled="field.mutable === false"
-                  >
-                    <el-option
-                      v-for="option in field.options"
-                      :key="`${field.key}-${option.value}`"
-                      :label="option.label"
-                      :value="option.value"
-                    />
-                  </el-select>
-                  <el-input
-                    v-else
-                    v-model="deployForm.parameters[field.key]"
-                    :placeholder="field.placeholder"
-                    :disabled="field.mutable === false"
-                  />
-                </el-form-item>
-              </div>
-            </div>
-
-            <el-collapse v-if="advancedDeployParameterFields.length > 0" v-model="advancedPanels" class="advanced-parameter-collapse">
-              <el-collapse-item :title="`高阶参数（${advancedDeployParameterFields.length} 项）`" name="advanced">
-                <div class="parameter-grid advanced-grid">
-                  <div
-                    v-for="field in advancedDeployParameterFields"
-                    :key="field.key"
-                    class="parameter-field"
-                    :class="{ full: field.fullWidth }"
-                  >
-                    <el-form-item :required="field.required">
-                      <template #label>
-                        <span class="parameter-label">
-                          <span>{{ field.label }}</span>
-                          <span v-if="field.description" class="parameter-recommendation">{{ field.description }}</span>
-                          <el-tooltip v-if="field.extraTip" :content="field.extraTip" placement="top" effect="dark">
-                            <el-icon class="parameter-help-icon"><QuestionFilled /></el-icon>
-                          </el-tooltip>
-                          <el-tag v-if="field.mutable === false" size="small" effect="plain">只读</el-tag>
-                        </span>
-                      </template>
-                      <el-input
-                        v-if="field.type === 'text' || field.type === 'password'"
-                        v-model="deployForm.parameters[field.key]"
-                        :type="field.type === 'password' ? 'password' : 'text'"
-                        :show-password="field.type === 'password'"
-                        :placeholder="field.placeholder"
-                        :disabled="field.mutable === false"
-                      />
-                      <el-input
-                        v-else-if="field.type === 'textarea' || field.type === 'json'"
-                        v-model="deployForm.parameters[field.key]"
-                        type="textarea"
-                        :rows="field.rows"
-                        :placeholder="field.placeholder"
-                        :disabled="field.mutable === false"
-                      />
-                      <el-input-number
-                        v-else-if="field.type === 'number'"
-                        v-model="deployForm.parameters[field.key]"
-                        :min="field.min"
-                        :max="field.max"
-                        :step="field.step"
-                        class="parameter-number"
-                        :disabled="field.mutable === false"
-                      />
-                      <el-switch
-                        v-else-if="field.type === 'switch'"
-                        v-model="deployForm.parameters[field.key]"
-                        :disabled="field.mutable === false"
-                      />
-                      <el-select
-                        v-else-if="field.type === 'select'"
-                        v-model="deployForm.parameters[field.key]"
-                        :placeholder="field.placeholder || '请选择'"
-                        style="width: 100%"
-                        :disabled="field.mutable === false"
-                      >
-                        <el-option
-                          v-for="option in field.options"
-                          :key="`${field.key}-${option.value}`"
-                          :label="option.label"
-                          :value="option.value"
-                        />
-                      </el-select>
-                      <el-input
-                        v-else
-                        v-model="deployForm.parameters[field.key]"
-                        :placeholder="field.placeholder"
-                        :disabled="field.mutable === false"
-                      />
-                    </el-form-item>
-                  </div>
-                </div>
-              </el-collapse-item>
-            </el-collapse>
-
-            <el-empty
-              v-else-if="basicDeployParameterFields.length === 0 && advancedDeployParameterFields.length === 0"
-              :description="isLLMStore ? '当前版本未返回额外参数，提交时将附带所选本地模型信息。' : '当前版本未返回额外参数，将沿用默认部署参数。'"
-              :image-size="76"
+            <StoreParameterFields
+              v-model="deployForm.parameters"
+              :basic-fields="basicDeployParameterFields"
+              :advanced-fields="advancedDeployParameterFields"
+              :advanced-title="`高阶参数（${advancedDeployParameterFields.length} 项）`"
+              :default-open-advanced="advancedDeployParameterFields.length > 0"
+              :show-empty="true"
+              :empty-description="isLLMStore ? '当前版本未返回额外参数，提交时将附带所选本地模型信息。' : '当前版本未返回额外参数，将沿用默认部署参数。'"
             />
           </div>
         </el-form>
@@ -547,8 +403,8 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { QuestionFilled } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
+import StoreParameterFields from './StoreParameterFields.vue'
 import { getResourceList } from '@/api/resource'
 import { createDeploymentRequest } from '@/api/deployment'
 import { applyNamespacePreset, buildResourceK8sRouteLocation } from '@/views/resources/k8s/utils'
@@ -556,13 +412,15 @@ import {
   createTemplate,
   createTemplateVersion,
   deleteTemplate,
-  importLocalLlmModel,
-  getLocalLlmCatalog,
+  importLocalAIModel,
+  getLocalAICatalog,
   getTemplateList,
   getTemplateVersions
 } from '@/api/store'
 import { getPipelineList } from '@/api/pipeline'
 import { extractCanonicalParameters } from '../appStoreHelpers'
+import PageHeader from './PageHeader.vue'
+import PageHeaderActions from './PageHeaderActions.vue'
 
 const props = defineProps({
   storeKind: { type: String, required: true }
@@ -580,7 +438,6 @@ const templateDialogVisible = ref(false)
 const versionDialogVisible = ref(false)
 const deployDialogVisible = ref(false)
 const importDialogVisible = ref(false)
-const advancedPanels = ref([])
 const templates = ref([])
 const resources = ref([])
 const pipelines = ref([])
@@ -766,9 +623,9 @@ const deployVramEstimate = computed(() => {
 })
 
 const handleStoreTabChange = (tabName) => {
-  if ((tabName === 'app' && route.path === '/store/apps') || (tabName === 'llm' && route.path === '/store/llms')) return
+  if ((tabName === 'app' && route.path === '/store/apps') || (tabName === 'llm' && route.path === '/store/ai')) return
   router.push({
-    path: tabName === 'llm' ? '/store/llms' : '/store/apps',
+    path: tabName === 'llm' ? '/store/ai' : '/store/apps',
     query: resourceScopedDeployContext.value ? { ...route.query } : undefined
   })
 }
@@ -802,7 +659,7 @@ const loadData = async () => {
     ]
 
     if (isLLMStore.value) {
-      requests.push(getLocalLlmCatalog())
+      requests.push(getLocalAICatalog())
     }
 
     const [templateRes, resourceRes, pipelineRes, llmCatalogRes] = await Promise.all(requests)
@@ -837,7 +694,7 @@ const submitImportModel = async () => {
   }
   importingModel.value = true
   try {
-    await importLocalLlmModel({
+    await importLocalAIModel({
       source: importForm.source,
       source_model_id: importForm.source_model_id.trim()
     })
@@ -910,7 +767,6 @@ const resetDeployDialog = (templateName = '') => {
   deployForm.parameters = isLLMStore.value ? {} : buildFallbackParameterValues(templateName)
   deployParameterFields.value = isLLMStore.value ? [] : buildFallbackParameterFields(templateName)
   templateVersions.value = []
-  advancedPanels.value = []
   selectedGpuDeviceKeys.value = []
 }
 
@@ -1000,7 +856,6 @@ const handleDeployVersionChange = async (versionId) => {
 
   deployParameterFields.value = fields
   deployForm.parameters = buildParameterValues(fields, deployForm.parameters, selectedTemplate.value?.name || '')
-  advancedPanels.value = fields.some(field => field.advanced === true) ? ['advanced'] : []
   syncSelectedModelIntoParameters()
   syncSelectedGpuIntoParameters()
   applyExternalDeployContext()
@@ -1092,7 +947,7 @@ const submitDeployment = async () => {
     await createDeploymentRequest({
       template_version_id: deployForm.template_version_id,
       target_resource_id: deployForm.target_resource_id,
-      llm_model_id: isLLMStore.value ? deployForm.model_id : undefined,
+      ai_model_id: isLLMStore.value ? deployForm.model_id : undefined,
       parameters: buildSubmissionParameters()
     })
     ElMessage.success('部署请求已创建')
@@ -1686,33 +1541,6 @@ onMounted(loadData)
   padding: 22px 22px 18px;
 }
 
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: $space-4;
-}
-
-.header-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: $space-3;
-}
-
-.page-title {
-  margin: 0;
-  font-family: $font-family-display;
-  font-size: 32px;
-  font-weight: 760;
-  letter-spacing: -0.03em;
-  color: var(--text-primary);
-}
-
-.page-subtitle {
-  margin-top: $space-2;
-  color: var(--text-secondary);
-}
-
 .store-kind-tabs {
   margin-top: 18px;
 }
@@ -1957,48 +1785,6 @@ onMounted(loadData)
   line-height: 1.45;
 }
 
-.parameter-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 12px;
-}
-
-.advanced-parameter-collapse {
-  margin-top: $space-4;
-}
-
-.parameter-field {
-  &.full {
-    grid-column: 1 / -1;
-  }
-}
-
-.parameter-label {
-  display: inline-flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
-  font-size: 13px;
-  line-height: 1.35;
-}
-
-.parameter-help-icon {
-  color: var(--text-muted);
-  cursor: help;
-}
-
-.parameter-recommendation {
-  color: var(--text-muted);
-}
-
-.parameter-number {
-  width: 100%;
-}
-
-:deep(.parameter-number .el-input__wrapper) {
-  width: 100%;
-}
-
 :deep(.deploy-form .el-form-item) {
   margin-bottom: 12px;
 }
@@ -2021,7 +1807,6 @@ onMounted(loadData)
 }
 
 @media (max-width: 900px) {
-  .page-header,
   .resource-scope-card,
   .catalog-header,
   .parameter-header {

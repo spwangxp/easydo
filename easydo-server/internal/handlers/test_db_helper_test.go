@@ -92,7 +92,7 @@ func openHandlerTestDB(t *testing.T) *gorm.DB {
 		&models.StoreTemplate{},
 		&models.StoreTemplateVersion{},
 		&models.TemplateParameter{},
-		&models.LLMModelCatalog{},
+		&models.AIModelCatalog{},
 		&models.DeploymentRequest{},
 		&models.DeploymentRecord{},
 		&models.MasterKey{},

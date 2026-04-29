@@ -117,18 +117,176 @@ export function uploadTemplateVersionChart(templateId, versionId, file) {
   })
 }
 
-export function getLocalLlmCatalog(params) {
+export function getAIModelCatalog(params) {
   return request({
-    url: '/store/llm-models',
-    method: 'get',
-    params
-  })
+		url: '/store/ai-models',
+		method: 'get',
+		params
+	})
 }
 
-export function importLocalLlmModel(data) {
+export function importAIModel(data) {
   return request({
-    url: '/store/llm-models/import',
-    method: 'post',
-    data
-  })
+		url: '/store/ai-models/import',
+		method: 'post',
+		data
+	})
+}
+
+export function getAIProviders() {
+	return request({
+		url: '/store/ai-providers',
+		method: 'get'
+	})
+}
+
+export function createAIProvider(data) {
+	return request({
+		url: '/store/ai-providers',
+		method: 'post',
+		data
+	})
+}
+
+export function updateAIProvider(id, data) {
+	return request({
+		url: `/store/ai-providers/${id}`,
+		method: 'put',
+		data
+	})
+}
+
+export function deleteAIProvider(id) {
+	return request({
+		url: `/store/ai-providers/${id}`,
+		method: 'delete'
+	})
+}
+
+export function getAIModelBindings(providerId) {
+	return request({
+		url: `/store/ai-providers/${providerId}/model-bindings`,
+		method: 'get'
+	})
+}
+
+export function createAIModelBinding(providerId, data) {
+	return request({
+		url: `/store/ai-providers/${providerId}/model-bindings`,
+		method: 'post',
+		data
+	})
+}
+
+export function updateAIModelBinding(providerId, bindingId, data) {
+	return request({
+		url: `/store/ai-providers/${providerId}/model-bindings/${bindingId}`,
+		method: 'put',
+		data
+	})
+}
+
+export function deleteAIModelBinding(providerId, bindingId) {
+	return request({
+		url: `/store/ai-providers/${providerId}/model-bindings/${bindingId}`,
+		method: 'delete'
+	})
+}
+
+export function getAIAgents() {
+	return request({
+		url: '/ai/agents',
+		method: 'get'
+	})
+}
+
+export function createAIAgent(data) {
+	return request({
+		url: '/ai/agents',
+		method: 'post',
+		data
+	})
+}
+
+export function updateAIAgent(id, data) {
+	return request({
+		url: `/ai/agents/${id}`,
+		method: 'put',
+		data
+	})
+}
+
+export function deleteAIAgent(id) {
+	return request({
+		url: `/ai/agents/${id}`,
+		method: 'delete'
+	})
+}
+
+export function getAIRuntimeProfiles(id) {
+	return request({
+		url: `/ai/agents/${id}/runtime-profiles`,
+		method: 'get'
+	})
+}
+
+export function createAIRuntimeProfile(id, data) {
+	return request({
+		url: `/ai/agents/${id}/runtime-profiles`,
+		method: 'post',
+		data
+	})
+}
+
+export function updateAIRuntimeProfile(id, profileId, data) {
+	return request({
+		url: `/ai/agents/${id}/runtime-profiles/${profileId}`,
+		method: 'put',
+		data
+	})
+}
+
+export function deleteAIRuntimeProfile(id, profileId) {
+	return request({
+		url: `/ai/agents/${id}/runtime-profiles/${profileId}`,
+		method: 'delete'
+	})
+}
+
+export function listAIModels(params) {
+	return getAIModelCatalog(params)
+}
+
+export function importLocalAIModel(data) {
+	return importAIModel(data)
+}
+
+export function listAIProviders() {
+	return getAIProviders()
+}
+
+export function listAIAgents() {
+	return getAIAgents()
+}
+
+export async function listAIRuntimeProfiles() {
+	const agentRes = await getAIAgents()
+	const agents = Array.isArray(agentRes?.data) ? agentRes.data : []
+	const runtimeProfilesByAgent = await Promise.all(
+		agents
+			.filter((agent) => agent?.id != null)
+			.map(async (agent) => {
+				const runtimeRes = await getAIRuntimeProfiles(agent.id)
+				const profiles = Array.isArray(runtimeRes?.data) ? runtimeRes.data : []
+				return profiles.map((profile) => ({
+					...profile,
+					agent_id: profile.agent_id ?? agent.id,
+					agent_name: profile.agent_name ?? agent.name
+				}))
+			})
+	)
+
+	return {
+		data: runtimeProfilesByAgent.flat()
+	}
 }

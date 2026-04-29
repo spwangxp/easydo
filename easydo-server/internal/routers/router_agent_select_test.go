@@ -30,6 +30,12 @@ func TestInitRouter_UsesConfiguredGinMode(t *testing.T) {
 	config.Init()
 	config.Config.Set("server.mode", "release")
 
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("InitRouter should not panic: %v", r)
+		}
+	}()
+
 	_ = InitRouter()
 
 	if got := gin.Mode(); got != gin.ReleaseMode {

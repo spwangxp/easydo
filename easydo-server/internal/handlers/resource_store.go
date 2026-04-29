@@ -44,7 +44,7 @@ type DeploymentHandler struct {
 	DB *gorm.DB
 }
 
-type LLMModelHandler struct {
+type AIModelCatalogHandler struct {
 	DB *gorm.DB
 }
 
@@ -60,8 +60,8 @@ func NewDeploymentHandler() *DeploymentHandler {
 	return &DeploymentHandler{DB: models.DB}
 }
 
-func NewLLMModelHandler() *LLMModelHandler {
-	return &LLMModelHandler{DB: models.DB}
+func NewAIModelCatalogHandler() *AIModelCatalogHandler {
+	return &AIModelCatalogHandler{DB: models.DB}
 }
 
 type createResourceRequest struct {
@@ -662,7 +662,7 @@ func (h *StoreTemplateHandler) CreateTemplate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "模板名称不能为空"})
 		return
 	}
-	if req.TemplateType != models.StoreTemplateTypeApp && req.TemplateType != models.StoreTemplateTypeLLM {
+	if req.TemplateType != models.StoreTemplateTypeApp && req.TemplateType != models.StoreTemplateTypeAI {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "模板类型无效"})
 		return
 	}
@@ -2147,7 +2147,7 @@ func resolveEffectiveChartSource(metadata *appVariantK8sMetadata) *appVariantCha
 	return metadata.ChartSource
 }
 
-func (h *LLMModelHandler) ListModels(c *gin.Context) {
+func (h *AIModelCatalogHandler) ListModels(c *gin.Context) {
 	workspaceID, _ := getRequestWorkspace(c)
 	userID, role := getRequestUser(c)
 	if workspaceID == 0 || !userCanAccessWorkspace(h.DB, workspaceID, userID, role) {
@@ -2155,9 +2155,9 @@ func (h *LLMModelHandler) ListModels(c *gin.Context) {
 		return
 	}
 
-	var catalog []models.LLMModelCatalog
+	var catalog []models.AIModelCatalog
 	query := h.DB.Order("updated_at DESC, id DESC")
-	if source := normalizeLLMModelCatalogSource(c.Query("source")); source != "" {
+	if source := normalizeAIModelCatalogSource(c.Query("source")); source != "" {
 		query = query.Where("source = ?", source)
 	}
 	if err := query.Find(&catalog).Error; err != nil {
@@ -2175,14 +2175,14 @@ func (h *LLMModelHandler) ListModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": catalog})
 }
 
-func (h *LLMModelHandler) ImportModel(c *gin.Context) {
+func (h *AIModelCatalogHandler) ImportModel(c *gin.Context) {
 	userID, role := getRequestUser(c)
 	if !isAdminRole(role) {
 		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "仅管理员可导入模型"})
 		return
 	}
 
-	var req importLLMModelRequest
+	var req importAIModelRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
 		return
@@ -2192,7 +2192,7 @@ func (h *LLMModelHandler) ImportModel(c *gin.Context) {
 		return
 	}
 	if req.Metadata == nil {
-		fetched, err := fetchImportedLLMModelMetadata(req.Source, req.SourceModelID)
+		fetched, err := fetchImportedAIModelMetadata(req.Source, req.SourceModelID)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
 			return
@@ -2207,13 +2207,13 @@ func (h *LLMModelHandler) ImportModel(c *gin.Context) {
 		req.Metadata = fetched.Metadata
 	}
 
-	model, err := buildImportedLLMModelCatalog(req, userID)
+	model, err := buildImportedAIModelCatalog(req, userID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
 		return
 	}
 
-	var existing models.LLMModelCatalog
+	var existing models.AIModelCatalog
 	err = h.DB.Where("source = ? AND source_model_id = ?", model.Source, model.SourceModelID).First(&existing).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "加载模型目录失败"})
@@ -2247,11 +2247,11 @@ func (h *LLMModelHandler) ImportModel(c *gin.Context) {
 type createDeploymentRequestRequest struct {
 	TemplateVersionID uint64                 `json:"template_version_id"`
 	TargetResourceID  uint64                 `json:"target_resource_id"`
-	LLMModelID        uint64                 `json:"llm_model_id"`
+	AIModelID         uint64                 `json:"ai_model_id"`
 	Parameters        map[string]interface{} `json:"parameters"`
 }
 
-type importLLMModelRequest struct {
+type importAIModelRequest struct {
 	Source        string                 `json:"source"`
 	SourceModelID string                 `json:"source_model_id"`
 	Name          string                 `json:"name"`
@@ -2481,25 +2481,25 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 		}
 	}
 
-	var llmModel *models.LLMModelCatalog
-	if version.Template.TemplateType == models.StoreTemplateTypeLLM {
-		if req.LLMModelID == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "LLM 模板部署必须选择模型"})
+	var aiModel *models.AIModelCatalog
+	if version.Template.TemplateType == models.StoreTemplateTypeAI {
+		if req.AIModelID == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "AI 模型部署必须选择模型"})
 			return
 		}
-		selectedModel := models.LLMModelCatalog{}
-		if err := h.DB.First(&selectedModel, req.LLMModelID).Error; err != nil {
+		selectedModel := models.AIModelCatalog{}
+		if err := h.DB.First(&selectedModel, req.AIModelID).Error; err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "所选模型不存在"})
 			return
 		}
-		llmModel = &selectedModel
+		aiModel = &selectedModel
 	}
 	resolvedParameters, err := resolveDeploymentParameters(&version, req.Parameters)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "部署参数无效: " + err.Error()})
 		return
 	}
-	resolvedParameters, err = resolveRuntimeModelMountParameters(&resource, version.Template, llmModel, resolvedParameters)
+	resolvedParameters, err = resolveRuntimeModelMountParameters(&resource, version.Template, aiModel, resolvedParameters)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "部署参数无效: " + err.Error()})
 		return
@@ -2520,7 +2520,7 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "绑定流水线配置解析失败: " + err.Error()})
 			return
 		}
-		resolvedConfig, err = h.resolveDeploymentPipelineConfig(&pipeline, version.Template, &resource, llmModel, resolvedParameters)
+		resolvedConfig, err = h.resolveDeploymentPipelineConfig(&pipeline, version.Template, &resource, aiModel, resolvedParameters)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "部署配置解析失败: " + err.Error()})
 			return
@@ -2534,9 +2534,9 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 	parameterSnapshot, _ := json.Marshal(resolvedParameters)
 	resourceSnapshot, _ := json.Marshal(resource)
 	versionSnapshot, _ := json.Marshal(version)
-	llmModelSnapshot := []byte{}
-	if llmModel != nil {
-		llmModelSnapshot, _ = json.Marshal(llmModel)
+	aiModelSnapshot := []byte{}
+	if aiModel != nil {
+		aiModelSnapshot, _ = json.Marshal(aiModel)
 	}
 
 	triggerUsername := c.GetString("username")
@@ -2554,12 +2554,12 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 		ParameterSnapshot:       string(parameterSnapshot),
 		ResourceSnapshot:        string(resourceSnapshot),
 		TemplateVersionSnapshot: string(versionSnapshot),
-		LLMModelSnapshot:        string(llmModelSnapshot),
+		AIModelSnapshot:         string(aiModelSnapshot),
 		Status:                  models.DeploymentRequestStatusValidating,
 		RequestedBy:             userID,
 	}
-	if llmModel != nil {
-		request.LLMModelID = llmModel.ID
+	if aiModel != nil {
+		request.AIModelID = aiModel.ID
 	}
 	resourceEnv := resource.Environment
 	if resourceEnv == "" && !directAppDeployment {
@@ -2570,7 +2570,7 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 	}
 
 	ph := &PipelineHandler{DB: h.DB}
-	runtimeInputs := buildDeploymentRuntimeInputs(authoredConfig, &resource, llmModel, resolvedParameters)
+	runtimeInputs := buildDeploymentRuntimeInputs(authoredConfig, &resource, aiModel, resolvedParameters)
 	runPipeline := models.Pipeline{BaseModel: pipeline.BaseModel, Name: pipeline.Name, Description: pipeline.Description, WorkspaceID: pipeline.WorkspaceID, ProjectID: pipeline.ProjectID, OwnerID: pipeline.OwnerID, Environment: resourceEnv, ManagementHidden: pipeline.ManagementHidden}
 	run, buildNumber, err := ph.launchPipelineRun(runPipeline, authoredConfig, pipelineRunTriggerContext{
 		TriggerType:     "deployment_request",
@@ -2596,8 +2596,8 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 	request.PipelineRunID = run.ID
 	request.Status = requestStatus
 	createRequestDB := h.DB
-	if llmModel == nil {
-		createRequestDB = createRequestDB.Omit("LLMModelID")
+	if aiModel == nil {
+		createRequestDB = createRequestDB.Omit("AIModelID")
 	}
 	if err := createRequestDB.Create(&request).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "创建部署请求失败"})
@@ -2619,7 +2619,7 @@ func (h *DeploymentHandler) CreateDeploymentRequest(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": request})
 }
 
-func (h *DeploymentHandler) resolveDeploymentPipelineConfig(pipeline *models.Pipeline, template *models.StoreTemplate, resource *models.Resource, llmModel *models.LLMModelCatalog, parameters map[string]interface{}) (PipelineConfig, error) {
+func (h *DeploymentHandler) resolveDeploymentPipelineConfig(pipeline *models.Pipeline, template *models.StoreTemplate, resource *models.Resource, llmModel *models.AIModelCatalog, parameters map[string]interface{}) (PipelineConfig, error) {
 	config, err := (&PipelineHandler{DB: h.DB}).loadPipelineDefinitionConfig(h.DB, *pipeline)
 	if err != nil {
 		return PipelineConfig{}, err
@@ -2647,7 +2647,7 @@ func (h *DeploymentHandler) resolveDeploymentPipelineConfig(pipeline *models.Pip
 	return config, nil
 }
 
-func buildDeploymentRuntimeInputs(config PipelineConfig, resource *models.Resource, llmModel *models.LLMModelCatalog, parameters map[string]interface{}) map[string]map[string]interface{} {
+func buildDeploymentRuntimeInputs(config PipelineConfig, resource *models.Resource, llmModel *models.AIModelCatalog, parameters map[string]interface{}) map[string]map[string]interface{} {
 	baseInputs := buildDeploymentInputs(resource, llmModel, parameters)
 	if len(baseInputs) == 0 {
 		return nil
@@ -2662,7 +2662,7 @@ func buildDeploymentRuntimeInputs(config PipelineConfig, resource *models.Resour
 var resolvedVLLMSwapSpacePattern = regexp.MustCompile(`if \[ -n "[^"]*" \]; then(?: |\n  )VLLM_ARGS="\$VLLM_ARGS --swap-space [^"]*";? fi\n?`)
 
 func sanitizeResolvedVLLMVMScript(template *models.StoreTemplate, nodeConfig map[string]interface{}) map[string]interface{} {
-	if template == nil || template.TemplateType != models.StoreTemplateTypeLLM || template.TargetResourceType != models.ResourceTypeVM {
+	if template == nil || template.TemplateType != models.StoreTemplateTypeAI || template.TargetResourceType != models.ResourceTypeVM {
 		return nodeConfig
 	}
 	if strings.TrimSpace(template.Name) != "vLLM" {
@@ -2678,11 +2678,11 @@ func sanitizeResolvedVLLMVMScript(template *models.StoreTemplate, nodeConfig map
 	return nodeConfig
 }
 
-func applyPlatformLLMGPUSelection(template *models.StoreTemplate, resource *models.Resource, llmModel *models.LLMModelCatalog, parameters map[string]interface{}, nodeConfig map[string]interface{}) map[string]interface{} {
+func applyPlatformLLMGPUSelection(template *models.StoreTemplate, resource *models.Resource, llmModel *models.AIModelCatalog, parameters map[string]interface{}, nodeConfig map[string]interface{}) map[string]interface{} {
 	if template == nil || resource == nil || nodeConfig == nil {
 		return nodeConfig
 	}
-	if template.TemplateType != models.StoreTemplateTypeLLM || template.Source != models.StoreTemplateSourcePlatform {
+	if template.TemplateType != models.StoreTemplateTypeAI || template.Source != models.StoreTemplateSourcePlatform {
 		return nodeConfig
 	}
 	templateName := strings.TrimSpace(template.Name)
@@ -2815,7 +2815,7 @@ spec:
 EOF`, appName, appName, appName, appName, imageName, imageTag, port, keepAlive, numParallel, origin, selection.VisibleDevices, selection.VisibleDevices, port, selection.Count, appName, appName, port, port)
 }
 
-func buildSGLangK8sCommand(parameters map[string]interface{}, llmModel *models.LLMModelCatalog, selection selectedGPUConfig) string {
+func buildSGLangK8sCommand(parameters map[string]interface{}, llmModel *models.AIModelCatalog, selection selectedGPUConfig) string {
 	appName := defaultIfEmpty(strings.TrimSpace(convertToString(parameters["app_name"])), "sglang-service")
 	imageName := defaultIfEmpty(strings.TrimSpace(convertToString(parameters["image_name"])), "lmsysorg/sglang")
 	imageTag := defaultIfEmpty(strings.TrimSpace(convertToString(parameters["image_tag"])), "latest")
@@ -2878,7 +2878,7 @@ spec:
 EOF`, appName, appName, appName, appName, imageName, imageTag, launch, selection.VisibleDevices, selection.VisibleDevices, port, selection.Count, appName, appName, port, port)
 }
 
-func buildDeploymentInputs(resource *models.Resource, llmModel *models.LLMModelCatalog, parameters map[string]interface{}) map[string]interface{} {
+func buildDeploymentInputs(resource *models.Resource, llmModel *models.AIModelCatalog, parameters map[string]interface{}) map[string]interface{} {
 	inputs := map[string]interface{}{}
 	for k, v := range parameters {
 		inputs[k] = v
@@ -2988,7 +2988,7 @@ func resolveDeploymentParameters(version *models.StoreTemplateVersion, submitted
 			}
 			continue
 		}
-		if version != nil && version.Template != nil && version.Template.TemplateType == models.StoreTemplateTypeLLM && isImplicitLLMGPUParameter(key) {
+		if version != nil && version.Template != nil && version.Template.TemplateType == models.StoreTemplateTypeAI && isImplicitLLMGPUParameter(key) {
 			if normalized, ok := normalizeImplicitLLMGPUParameter(key, value); ok {
 				resolved[key] = normalized
 			}
@@ -3190,13 +3190,13 @@ func isEmptyParameterValue(value interface{}) bool {
 	return false
 }
 
-func resolveRuntimeModelMountParameters(resource *models.Resource, template *models.StoreTemplate, llmModel *models.LLMModelCatalog, parameters map[string]interface{}) (map[string]interface{}, error) {
+func resolveRuntimeModelMountParameters(resource *models.Resource, template *models.StoreTemplate, llmModel *models.AIModelCatalog, parameters map[string]interface{}) (map[string]interface{}, error) {
 	resolved := cloneMap(parameters)
 	_ = llmModel
 	if resource == nil || template == nil {
 		return resolved, nil
 	}
-	if template.TemplateType != models.StoreTemplateTypeLLM || template.Name != "vLLM" || resource.Type != models.ResourceTypeVM {
+	if template.TemplateType != models.StoreTemplateTypeAI || template.Name != "vLLM" || resource.Type != models.ResourceTypeVM {
 		return resolved, nil
 	}
 	modelPath := strings.TrimSpace(convertToString(resolved["model_path"]))
@@ -3260,7 +3260,7 @@ func resolveMountedModelPath(hostModelDir, containerModelDir, hostModelPath stri
 	return filepath.ToSlash(filepath.Join(containerRoot, rel)), nil
 }
 
-func normalizeLLMModelCatalogSource(source string) string {
+func normalizeAIModelCatalogSource(source string) string {
 	switch strings.ToLower(strings.TrimSpace(source)) {
 	case "huggingface", "hf":
 		return "huggingface"
@@ -3271,10 +3271,10 @@ func normalizeLLMModelCatalogSource(source string) string {
 	}
 }
 
-func buildImportedLLMModelCatalog(req importLLMModelRequest, importedBy uint64) (models.LLMModelCatalog, error) {
-	source := normalizeLLMModelCatalogSource(req.Source)
+func buildImportedAIModelCatalog(req importAIModelRequest, importedBy uint64) (models.AIModelCatalog, error) {
+	source := normalizeAIModelCatalogSource(req.Source)
 	if source == "" {
-		return models.LLMModelCatalog{}, fmt.Errorf("模型来源仅支持 huggingface 或 modelscope")
+		return models.AIModelCatalog{}, fmt.Errorf("模型来源仅支持 huggingface 或 modelscope")
 	}
 	metadata := req.Metadata
 	if metadata == nil {
@@ -3286,7 +3286,7 @@ func buildImportedLLMModelCatalog(req importLLMModelRequest, importedBy uint64) 
 		stringValue(metadata["modelId"]),
 	))
 	if sourceModelID == "" {
-		return models.LLMModelCatalog{}, fmt.Errorf("模型来源标识不能为空")
+		return models.AIModelCatalog{}, fmt.Errorf("模型来源标识不能为空")
 	}
 	name := defaultIfEmpty(strings.TrimSpace(req.Name), firstNonEmptyString(
 		stringValue(metadata["name"]),
@@ -3295,7 +3295,7 @@ func buildImportedLLMModelCatalog(req importLLMModelRequest, importedBy uint64) 
 		lastPathSegment(sourceModelID),
 	))
 	if name == "" {
-		return models.LLMModelCatalog{}, fmt.Errorf("模型名称不能为空")
+		return models.AIModelCatalog{}, fmt.Errorf("模型名称不能为空")
 	}
 	tags := req.Tags
 	if len(tags) == 0 {
@@ -3303,11 +3303,11 @@ func buildImportedLLMModelCatalog(req importLLMModelRequest, importedBy uint64) 
 	}
 	tagsJSON, err := json.Marshal(tags)
 	if err != nil {
-		return models.LLMModelCatalog{}, fmt.Errorf("模型标签序列化失败")
+		return models.AIModelCatalog{}, fmt.Errorf("模型标签序列化失败")
 	}
 	metadataJSON, err := json.Marshal(metadata)
 	if err != nil {
-		return models.LLMModelCatalog{}, fmt.Errorf("模型元数据序列化失败")
+		return models.AIModelCatalog{}, fmt.Errorf("模型元数据序列化失败")
 	}
 	parameterSize := defaultIfEmpty(strings.TrimSpace(req.ParameterSize), resolveImportedModelParameterSize(metadata))
 	if parameterSize != "" {
@@ -3317,10 +3317,10 @@ func buildImportedLLMModelCatalog(req importLLMModelRequest, importedBy uint64) 
 		}
 		metadataJSON, err = json.Marshal(metadata)
 		if err != nil {
-			return models.LLMModelCatalog{}, fmt.Errorf("模型元数据序列化失败")
+			return models.AIModelCatalog{}, fmt.Errorf("模型元数据序列化失败")
 		}
 	}
-	return models.LLMModelCatalog{
+	return models.AIModelCatalog{
 		Name:          name,
 		DisplayName:   defaultIfEmpty(strings.TrimSpace(req.DisplayName), name),
 		Source:        source,
@@ -3340,7 +3340,7 @@ func buildImportedLLMModelCatalog(req importLLMModelRequest, importedBy uint64) 
 	}, nil
 }
 
-type importedLLMModelMetadata struct {
+type importedAIModelMetadata struct {
 	Name          string
 	DisplayName   string
 	ParameterSize string
@@ -3350,13 +3350,13 @@ type importedLLMModelMetadata struct {
 	Metadata      map[string]interface{}
 }
 
-func fetchImportedLLMModelMetadata(source string, sourceModelID string) (importedLLMModelMetadata, error) {
-	source = normalizeLLMModelCatalogSource(source)
+func fetchImportedAIModelMetadata(source string, sourceModelID string) (importedAIModelMetadata, error) {
+	source = normalizeAIModelCatalogSource(source)
 	if source == "" {
-		return importedLLMModelMetadata{}, fmt.Errorf("模型来源仅支持 huggingface 或 modelscope")
+		return importedAIModelMetadata{}, fmt.Errorf("模型来源仅支持 huggingface 或 modelscope")
 	}
 	if strings.TrimSpace(sourceModelID) == "" {
-		return importedLLMModelMetadata{}, fmt.Errorf("模型来源标识不能为空")
+		return importedAIModelMetadata{}, fmt.Errorf("模型来源标识不能为空")
 	}
 	switch source {
 	case "huggingface":
@@ -3364,18 +3364,18 @@ func fetchImportedLLMModelMetadata(source string, sourceModelID string) (importe
 	case "modelscope":
 		return fetchModelScopeModelMetadata(sourceModelID)
 	default:
-		return importedLLMModelMetadata{}, fmt.Errorf("模型来源仅支持 huggingface 或 modelscope")
+		return importedAIModelMetadata{}, fmt.Errorf("模型来源仅支持 huggingface 或 modelscope")
 	}
 }
 
-func fetchHuggingFaceModelMetadata(sourceModelID string) (importedLLMModelMetadata, error) {
+func fetchHuggingFaceModelMetadata(sourceModelID string) (importedAIModelMetadata, error) {
 	var payload map[string]interface{}
 	if err := fetchJSONPayload("https://huggingface.co/api/models/"+escapeModelPathSegment(sourceModelID), &payload); err != nil {
-		return importedLLMModelMetadata{}, fmt.Errorf("拉取 Hugging Face 模型元数据失败: %w", err)
+		return importedAIModelMetadata{}, fmt.Errorf("拉取 Hugging Face 模型元数据失败: %w", err)
 	}
 	tags := stringSliceValue(payload["tags"])
 	modelID := defaultIfEmpty(stringValue(payload["id"]), defaultIfEmpty(stringValue(payload["modelId"]), sourceModelID))
-	return importedLLMModelMetadata{
+	return importedAIModelMetadata{
 		Name:          defaultIfEmpty(lastPathSegment(modelID), modelID),
 		DisplayName:   defaultIfEmpty(lastPathSegment(modelID), modelID),
 		ParameterSize: resolveImportedModelParameterSize(payload),
@@ -3386,18 +3386,18 @@ func fetchHuggingFaceModelMetadata(sourceModelID string) (importedLLMModelMetada
 	}, nil
 }
 
-func fetchModelScopeModelMetadata(sourceModelID string) (importedLLMModelMetadata, error) {
+func fetchModelScopeModelMetadata(sourceModelID string) (importedAIModelMetadata, error) {
 	var payload map[string]interface{}
 	if err := fetchJSONPayload("https://www.modelscope.cn/api/v1/models/"+escapeModelPathSegment(sourceModelID), &payload); err != nil {
-		return importedLLMModelMetadata{}, fmt.Errorf("拉取 ModelScope 模型元数据失败: %w", err)
+		return importedAIModelMetadata{}, fmt.Errorf("拉取 ModelScope 模型元数据失败: %w", err)
 	}
 	data, ok := payload["Data"].(map[string]interface{})
 	if !ok || len(data) == 0 {
-		return importedLLMModelMetadata{}, fmt.Errorf("ModelScope 模型元数据格式无效")
+		return importedAIModelMetadata{}, fmt.Errorf("ModelScope 模型元数据格式无效")
 	}
 	tags := uniqueStrings(append(stringSliceValue(data["Libraries"]), stringSliceValue(data["Language"])...))
 	name := defaultIfEmpty(stringValue(data["Name"]), defaultIfEmpty(stringValue(data["ChineseName"]), lastPathSegment(sourceModelID)))
-	return importedLLMModelMetadata{
+	return importedAIModelMetadata{
 		Name:          name,
 		DisplayName:   defaultIfEmpty(stringValue(data["ChineseName"]), name),
 		ParameterSize: resolveImportedModelParameterSize(data),

@@ -1,15 +1,17 @@
 <template>
   <div class="resource-page">
-    <div class="page-header">
-      <div>
-        <h2>资源管理</h2>
-        <p>
-          统一管理工作空间内的 VM 与 K8s 集群资源，发布流程会直接复用这里绑定好的接入凭据。
-          当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}
-        </p>
-      </div>
-      <el-button v-if="canManage" type="primary" @click="openCreateDialog">新建资源</el-button>
-    </div>
+    <PageHeader>
+      <template #title><h1>资源管理</h1></template>
+      <template #subtitle>
+        统一管理工作空间内的 VM 与 K8s 集群资源，发布流程会直接复用这里绑定好的接入凭据。
+        当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}
+      </template>
+      <template #actions>
+        <PageHeaderActions>
+          <el-button v-if="canManage" type="primary" @click="openCreateDialog">新建资源</el-button>
+        </PageHeaderActions>
+      </template>
+    </PageHeader>
 
     <div class="filter-bar">
       <el-input v-model="filters.keyword" placeholder="搜索资源名称" clearable class="search-input" />
@@ -121,6 +123,8 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useUserStore } from '@/stores/user'
+import PageHeader from '../store/components/PageHeader.vue'
+import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 import {
   bindResourceCredential,
   createResource,
@@ -484,28 +488,10 @@ onMounted(fetchResources)
   padding: $space-6;
 }
 
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: $space-4;
-  margin-bottom: $space-5;
-
-  h2 {
-    margin: 0 0 $space-2;
-    font-family: $font-family-display;
-    font-size: 30px;
-    font-weight: 760;
-    letter-spacing: -0.03em;
-    color: var(--text-primary);
-  }
-
-  p {
-    margin: 0;
-    max-width: 760px;
-    color: var(--text-muted);
-    line-height: 1.7;
-  }
+:deep(.page-header-subtitle) {
+  max-width: 760px;
+  color: var(--text-muted);
+  line-height: 1.7;
 }
 
 .filter-bar {
@@ -552,11 +538,6 @@ onMounted(fetchResources)
 @media (max-width: 768px) {
   .resource-page {
     padding: $space-4;
-  }
-
-  .page-header {
-    flex-direction: column;
-    align-items: flex-start;
   }
 
   .search-input,

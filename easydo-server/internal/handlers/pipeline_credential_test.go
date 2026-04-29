@@ -419,7 +419,7 @@ func TestInjectCredentialEnv_AllowsResourceBoundDeploymentCredentialForRequester
 		WorkspaceID:        workspace.ID,
 		TemplateID:         1,
 		TemplateVersionID:  1,
-		TemplateType:       models.StoreTemplateTypeLLM,
+		TemplateType:       models.StoreTemplateTypeAI,
 		TargetResourceID:   resource.ID,
 		TargetResourceType: models.ResourceTypeVM,
 		Status:             models.DeploymentRequestStatusQueued,

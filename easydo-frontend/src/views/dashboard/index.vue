@@ -1,17 +1,17 @@
 <template>
   <div class="dashboard-container">
-    <div class="dashboard-header">
-      <div>
-        <h1 class="page-title">工作台</h1>
-        <div class="page-subtitle">当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</div>
-      </div>
-      <div class="header-actions">
-        <el-button type="primary" @click="handleCreatePipeline">
-          <el-icon><Plus /></el-icon>
-          新建流水线
-        </el-button>
-      </div>
-    </div>
+    <PageHeader>
+      <template #title><h1>工作台</h1></template>
+      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</template>
+      <template #actions>
+        <PageHeaderActions>
+          <el-button type="primary" @click="handleCreatePipeline">
+            <el-icon><Plus /></el-icon>
+            新建流水线
+          </el-button>
+        </PageHeaderActions>
+      </template>
+    </PageHeader>
     
     <div class="stats-overview" v-loading="loading">
       <div class="stat-card">
@@ -241,6 +241,8 @@ import { getPipelineList, getPipelineHistory } from '@/api/pipeline'
 import { getProjectList } from '@/api/project'
 import { getTaskDispatchList } from '@/api/task'
 import { useUserStore } from '@/stores/user'
+import PageHeader from '../store/components/PageHeader.vue'
+import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -529,26 +531,6 @@ const viewAllPipelines = () => {
 
 .dashboard-container {
   animation: float-up 0.45s ease both;
-
-  .dashboard-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 22px;
-
-    .page-title {
-      font-family: $font-family-display;
-      font-size: 32px;
-      font-weight: 760;
-      letter-spacing: -0.03em;
-      color: var(--text-primary);
-    }
-
-    .header-actions :deep(.el-button--primary) {
-      height: 42px;
-      padding: 0 18px;
-    }
-  }
 
   .stats-overview {
     display: grid;

@@ -107,7 +107,7 @@ type StoreTemplateType string
 
 const (
 	StoreTemplateTypeApp StoreTemplateType = "app"
-	StoreTemplateTypeLLM StoreTemplateType = "llm"
+	StoreTemplateTypeAI  StoreTemplateType = "ai"
 )
 
 type StoreTemplateSource string
@@ -181,7 +181,7 @@ type TemplateParameter struct {
 	TemplateVersion *StoreTemplateVersion `gorm:"foreignKey:TemplateVersionID" json:"template_version,omitempty"`
 }
 
-type LLMModelCatalog struct {
+type AIModelCatalog struct {
 	BaseModel
 	Name          string `gorm:"size:128;not null;index" json:"name"`
 	DisplayName   string `gorm:"size:255" json:"display_name"`
@@ -195,6 +195,10 @@ type LLMModelCatalog struct {
 	ImportedBy    uint64 `gorm:"not null;index" json:"imported_by"`
 
 	Importer *User `gorm:"foreignKey:ImportedBy" json:"importer,omitempty"`
+}
+
+func (AIModelCatalog) TableName() string {
+	return "ai_model_catalogs"
 }
 
 type DeploymentRequestStatus string
@@ -221,8 +225,8 @@ type DeploymentRequest struct {
 	ParameterSnapshot       string                  `gorm:"type:longtext" json:"parameter_snapshot"`
 	ResourceSnapshot        string                  `gorm:"type:longtext" json:"resource_snapshot"`
 	TemplateVersionSnapshot string                  `gorm:"type:longtext" json:"template_version_snapshot"`
-	LLMModelID              uint64                  `gorm:"index" json:"llm_model_id"`
-	LLMModelSnapshot        string                  `gorm:"type:longtext" json:"llm_model_snapshot"`
+	AIModelID               uint64                  `gorm:"index" json:"ai_model_id"`
+	AIModelSnapshot         string                  `gorm:"type:longtext" json:"ai_model_snapshot"`
 	ValidationError         string                  `gorm:"type:text" json:"validation_error"`
 	Status                  DeploymentRequestStatus `gorm:"size:32;not null;index" json:"status"`
 	PipelineID              uint64                  `gorm:"index" json:"pipeline_id"`
@@ -233,7 +237,7 @@ type DeploymentRequest struct {
 	Project         *Project              `gorm:"foreignKey:ProjectID" json:"project,omitempty"`
 	Template        *StoreTemplate        `gorm:"foreignKey:TemplateID" json:"template,omitempty"`
 	TemplateVersion *StoreTemplateVersion `gorm:"foreignKey:TemplateVersionID" json:"template_version,omitempty"`
-	LLMModel        *LLMModelCatalog      `gorm:"foreignKey:LLMModelID" json:"llm_model,omitempty"`
+	AIModel         *AIModelCatalog       `gorm:"foreignKey:AIModelID" json:"ai_model,omitempty"`
 	TargetResource  *Resource             `gorm:"foreignKey:TargetResourceID" json:"target_resource,omitempty"`
 	Requester       *User                 `gorm:"foreignKey:RequestedBy" json:"requester,omitempty"`
 	Records         []DeploymentRecord    `gorm:"foreignKey:RequestID" json:"records,omitempty"`
