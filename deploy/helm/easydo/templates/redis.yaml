@@ -1,20 +1,14 @@
 {{- if .Values.redis.enabled }}
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ include "easydo.redisFullname" . }}-data
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: {{ .Values.redis.persistence.size }}
----
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ include "easydo.redisFullname" . }}
 spec:
+  serviceName: {{ include "easydo.redisFullname" . }}
   replicas: 1
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   selector:
     matchLabels:
       {{- include "easydo.selectorLabels" . | nindent 6 }}
@@ -34,10 +28,17 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: {{ include "easydo.redisFullname" . }}-data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [{{ .Values.redis.persistence.accessMode | quote }}]
+        {{- with .Values.redis.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.redis.persistence.size }}
 ---
 apiVersion: v1
 kind: Service

@@ -474,10 +474,15 @@ func (h *TaskHandler) CancelTask(c *gin.Context) {
 		return
 	}
 
+	shouldNotifyAgent := task.Status == models.TaskStatusAcked || task.Status == models.TaskStatusRunning
 	h.DB.Model(&task).Updates(map[string]interface{}{
 		"status":   models.TaskStatusCancelled,
 		"end_time": time.Now().Unix(),
 	})
+
+	if shouldNotifyAgent {
+		_ = SharedWebSocketHandler().sendTaskCancel(task)
+	}
 
 	// Update agent status
 	var agent models.Agent

@@ -36,8 +36,7 @@ func (e *Executor) dockerBuildScript(params TaskParams, workDir string) (string,
 		runtimeBin := defaultString(e.runtime.PrimaryRuntime, "docker")
 		return buildHostRuntimeScript(runtimeBin, imageName, imageTag, preBuildScript, dockerfile, contextDir, registry, imageRef, push, platformValue), nil
 	default:
-		mirrors := NormalizeDockerHubMirrors(params.Params["dockerhub_mirrors"])
-		return buildEmbeddedBuildkitScript(e.EmbeddedBuildkitEnv(), params.TaskID, imageRef, preBuildScript, dockerfile, filepath.Dir(dockerfile), contextDir, registry, push, platformValue, mirrors), nil
+		return buildEmbeddedBuildkitScript(e.EmbeddedBuildkitEnv(), params.TaskID, imageRef, preBuildScript, dockerfile, filepath.Dir(dockerfile), contextDir, registry, push, platformValue), nil
 	}
 }
 
@@ -102,7 +101,7 @@ fi
 	return script
 }
 
-func buildEmbeddedBuildkitScript(buildkitEnv map[string]string, taskID uint64, imageRef, preBuildScript, dockerfile, dockerfileDir, contextDir, registry string, push bool, platforms string, mirrors []string) string {
+func buildEmbeddedBuildkitScript(buildkitEnv map[string]string, taskID uint64, imageRef, preBuildScript, dockerfile, dockerfileDir, contextDir, registry string, push bool, platforms string) string {
 	socketPath := defaultString(buildkitEnv["EASYDO_BUILDKIT_SOCKET_PATH"], "$(pwd)/.easydo-buildkit/shared/run/buildkitd.sock")
 	stateDir := defaultString(buildkitEnv["EASYDO_BUILDKIT_STATE_DIR"], "$(pwd)/.easydo-buildkit/shared/state")
 	configPath := defaultString(buildkitEnv["EASYDO_BUILDKIT_CONFIG_PATH"], "$(pwd)/.easydo-buildkit/shared/buildkitd.toml")
@@ -154,7 +153,6 @@ if [ -n "$missing_helpers" ]; then
 fi
 `
 	}
-	mirrorConfigBlock := buildDockerHubMirrorConfigBlock(mirrors)
 	return fmt.Sprintf(`set -e
 SOCKET_PATH=%q
 BUILDKIT_STATE_DIR=%q
@@ -168,7 +166,6 @@ mkdir -p "$DOCKER_CONFIG" .easydo-artifacts/images
 %s
 %s
 %s
-%s
 export DOCKER_CONFIG
 buildctl --addr "unix://$SOCKET_PATH" build \
   --frontend dockerfile.v0 \
@@ -177,7 +174,7 @@ buildctl --addr "unix://$SOCKET_PATH" build \
   --opt platform=%q \
   --opt filename=%q \
   --output "$OUTPUT_SPEC"
-`, socketPath, stateDir, configPath, dockerConfigDir, registry, platforms, mirrorConfigBlock, qemuCheckBlock, preBuildBlock, outputLine, contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
+`, socketPath, stateDir, configPath, dockerConfigDir, registry, platforms, qemuCheckBlock, preBuildBlock, outputLine, contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
 }
 
 func NormalizeDockerHubMirrors(value any) []string {
@@ -209,17 +206,6 @@ func NormalizeDockerHubMirrors(value any) []string {
 		}
 	}
 	return mirrors
-}
-
-func buildDockerHubMirrorConfigBlock(mirrors []string) string {
-	if len(mirrors) == 0 {
-		return ""
-	}
-	escapedMirrors := make([]string, 0, len(mirrors))
-	for _, mirror := range mirrors {
-		escapedMirrors = append(escapedMirrors, fmt.Sprintf("%q", mirror))
-	}
-	return fmt.Sprintf("cat >> \"$BUILDKIT_CONFIG_PATH\" <<'EOF'\n\n[registry.\"docker.io\"]\n  mirrors = [%s]\nEOF", strings.Join(escapedMirrors, ", "))
 }
 
 func defaultString(value, fallback string) string {

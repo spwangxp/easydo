@@ -438,7 +438,7 @@ func TestDockerBuildScript_EmbeddedBuildkitUsesConfiguredSocketPaths(t *testing.
 	}
 }
 
-func TestDockerBuildScript_EmbeddedBuildkitGeneratesDockerHubMirrorConfigFromTaskParams(t *testing.T) {
+func TestDockerBuildScript_EmbeddedBuildkitDoesNotMutateSharedConfigFromTaskParams(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
 	script, err := executor.dockerBuildScript(TaskParams{TaskID: 777, Params: map[string]interface{}{
 		"image_name":         "demo/app",
@@ -452,14 +452,20 @@ func TestDockerBuildScript_EmbeddedBuildkitGeneratesDockerHubMirrorConfigFromTas
 	}
 	for _, expected := range []string{
 		`BUILDKIT_CONFIG_PATH="$(pwd)/.easydo-buildkit/shared/buildkitd.toml"`,
-		`[registry."docker.io"]`,
-		`mirrors = [`,
-		`"https://mirror-a.example"`,
-		`"https://mirror-b.example"`,
-		`cat >> "$BUILDKIT_CONFIG_PATH" <<'EOF'`,
+		`buildctl --addr "unix://$SOCKET_PATH" build \`,
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("expected embedded buildkit script to include %s, got:\n%s", expected, script)
+		}
+	}
+	for _, unexpected := range []string{
+		`cat >> "$BUILDKIT_CONFIG_PATH" <<'EOF'`,
+		`[registry."docker.io"]`,
+		`"https://mirror-a.example"`,
+		`"https://mirror-b.example"`,
+	} {
+		if strings.Contains(script, unexpected) {
+			t.Fatalf("expected embedded buildkit script not to include %s, got:\n%s", unexpected, script)
 		}
 	}
 	if strings.Contains(script, `docker info --format '{{json .RegistryConfig.IndexConfigs}}'`) {

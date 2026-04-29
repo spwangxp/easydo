@@ -1,11 +1,15 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ include "easydo.agentFullname" . }}
   labels:
     {{- include "easydo.labels" . | nindent 4 }}
 spec:
+  serviceName: {{ include "easydo.agentFullname" . }}
   replicas: {{ .Values.agent.replicaCount }}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   selector:
     matchLabels:
       {{- include "easydo.selectorLabels" . | nindent 6 }}
@@ -31,17 +35,30 @@ spec:
           env:
             - name: EASYDO_SERVER_URL
               value: {{ .Values.agent.env.serverURL | quote }}
-            - name: AGENT_NAME
-              value: "{{ .Values.agent.env.namePrefix }}-$(POD_NAME)"
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-          {{- with .Values.agent.extraVolumeMounts }}
+            - name: AGENT_NAME
+              value: "$(POD_NAME)"
           volumeMounts:
+            - name: data
+              mountPath: /data/agent
+            {{- with .Values.agent.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- end }}
       {{- with .Values.agent.extraVolumes }}
       volumes:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [{{ .Values.agent.persistence.accessMode | quote }}]
+        {{- with .Values.agent.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.agent.persistence.size }}

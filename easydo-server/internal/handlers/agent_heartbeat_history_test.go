@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"easydo-server/internal/models"
+	"easydo-server/pkg/utils"
 	"github.com/gin-gonic/gin"
 )
 
@@ -146,6 +147,7 @@ func TestGetAgentHeartbeats_FallbacksToMemory(t *testing.T) {
 func TestHeartbeat_PersistsHeartbeatRecord(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	resetHeartbeatHistoryForTest()
+	resetHeartbeatSamplingForTest()
 
 	db := openHandlerTestDB(t)
 	h := &AgentHandler{DB: db}
@@ -162,7 +164,7 @@ func TestHeartbeat_PersistsHeartbeatRecord(t *testing.T) {
 		t.Fatalf("create agent failed: %v", err)
 	}
 
-	reqBody := map[string]interface{}{
+	reqBody := map[string]any{
 		"agent_id":      agent.ID,
 		"token":         agent.Token,
 		"timestamp":     time.Now().Unix(),
@@ -194,5 +196,142 @@ func TestHeartbeat_PersistsHeartbeatRecord(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("heartbeat record count=%d, want=1", count)
+	}
+}
+
+func TestHeartbeat_SamplesDatabaseWritesButKeepsFullMemoryHistory(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetHeartbeatHistoryForTest()
+	resetHeartbeatSamplingForTest()
+
+	db := openHandlerTestDB(t)
+	h := &AgentHandler{DB: db}
+
+	agent := models.Agent{
+		Name:               "heartbeat-agent-sampled",
+		Host:               "host",
+		Port:               9004,
+		Token:              "token-sampled",
+		Status:             models.AgentStatusOnline,
+		RegistrationStatus: models.AgentRegistrationStatusApproved,
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+
+	sendHeartbeat := func(ts int64) {
+		reqBody := map[string]any{
+			"agent_id":      agent.ID,
+			"token":         agent.Token,
+			"timestamp":     ts,
+			"cpu_usage":     21.5,
+			"memory_usage":  35.7,
+			"disk_usage":    49.2,
+			"load_avg":      "0.1,0.2,0.3",
+			"tasks_running": 3,
+		}
+		body, err := json.Marshal(reqBody)
+		if err != nil {
+			t.Fatalf("marshal request failed: %v", err)
+		}
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/agents/heartbeat", bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.Heartbeat(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		}
+	}
+
+	baseTs := time.Now().Unix()
+	sendHeartbeat(baseTs)
+	sendHeartbeat(baseTs + 10)
+	sendHeartbeat(baseTs + 20)
+
+	var count int64
+	if err := db.Model(&models.AgentHeartbeat{}).Where("agent_id = ?", agent.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count heartbeat records failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("heartbeat record count=%d, want=1", count)
+	}
+
+	memoryHeartbeats, total := SharedWebSocketHandler().GetHeartbeats(agent.ID, 1, 10)
+	if total != 3 || len(memoryHeartbeats) != 3 {
+		t.Fatalf("memory heartbeat total=%d len=%d, want=3", total, len(memoryHeartbeats))
+	}
+
+	sendHeartbeat(baseTs + 61)
+	if err := db.Model(&models.AgentHeartbeat{}).Where("agent_id = ?", agent.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count heartbeat records after sample window failed: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("heartbeat record count after sample window=%d, want=2", count)
+	}
+}
+
+func TestHeartbeat_DebouncesQueuedRunScheduling(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetHeartbeatHistoryForTest()
+	resetHeartbeatSamplingForTest()
+	resetHeartbeatSchedulerDebounceForTest()
+
+	originalRedis := utils.RedisClient
+	utils.RedisClient = nil
+	defer func() { utils.RedisClient = originalRedis }()
+
+	db := openHandlerTestDB(t)
+	h := &AgentHandler{DB: db}
+
+	agent := models.Agent{
+		Name:               "heartbeat-agent-debounce",
+		Host:               "host",
+		Port:               9005,
+		Token:              "token-debounce",
+		Status:             models.AgentStatusOnline,
+		RegistrationStatus: models.AgentRegistrationStatusApproved,
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+
+	sendHeartbeat := func(ts int64) {
+		reqBody := map[string]any{
+			"agent_id":      agent.ID,
+			"token":         agent.Token,
+			"timestamp":     ts,
+			"cpu_usage":     21.5,
+			"memory_usage":  35.7,
+			"disk_usage":    49.2,
+			"load_avg":      "0.1,0.2,0.3",
+			"tasks_running": 0,
+		}
+		body, err := json.Marshal(reqBody)
+		if err != nil {
+			t.Fatalf("marshal request failed: %v", err)
+		}
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/agents/heartbeat", bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.Heartbeat(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		}
+	}
+
+	baseTs := time.Now().Unix()
+	sendHeartbeat(baseTs)
+	sendHeartbeat(baseTs + 10)
+	sendHeartbeat(baseTs + 20)
+
+	if got := heartbeatSchedulerDebounceCount(); got != 1 {
+		t.Fatalf("heartbeat scheduler debounce count=%d, want=1", got)
+	}
+
+	sendHeartbeat(baseTs + 61)
+	if got := heartbeatSchedulerDebounceCount(); got != 2 {
+		t.Fatalf("heartbeat scheduler debounce count after window=%d, want=2", got)
 	}
 }

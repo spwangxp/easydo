@@ -729,7 +729,9 @@ func (h *WebSocketHandler) handleAgentHeartbeat(client *wsClient, agent *models.
 	client.mu.Unlock()
 
 	h.redrivePendingTasksForConnectedAgent(client)
-	go NewPipelineHandler().scheduleQueuedPipelineRuns(models.DB)
+	if shouldScheduleQueuedRunsFromHeartbeat(client.agentID, agentTimestamp) {
+		go NewPipelineHandler().scheduleQueuedPipelineRuns(models.DB)
+	}
 }
 
 func (h *WebSocketHandler) buildHeartbeatAckPayload(client *wsClient, agent *models.Agent, pendingTasks int) map[string]interface{} {
@@ -1855,6 +1857,18 @@ func (h *WebSocketHandler) BroadcastTaskStatus(runID, taskID uint64, nodeID, sta
 }
 
 // BroadcastRunStatus broadcasts pipeline run status to all frontend clients
+func (h *WebSocketHandler) sendTaskCancel(task models.AgentTask) bool {
+	if task.AgentID == 0 || task.ID == 0 {
+		return false
+	}
+	return h.sendMessageToAgent(task.AgentID, "task_cancel", map[string]interface{}{
+		"task_id":   task.ID,
+		"run_id":    task.PipelineRunID,
+		"node_id":   task.NodeID,
+		"timestamp": time.Now().Unix(),
+	})
+}
+
 func (h *WebSocketHandler) BroadcastRunStatus(runID uint64, status, errorMsg string, duration ...int) {
 	payload := map[string]interface{}{
 		"run_id":    runID,
@@ -2485,6 +2499,7 @@ func (h *WebSocketHandler) cancelRunningTasksForFailedPipeline(runID uint64, age
 			continue
 		}
 
+		shouldNotifyAgent := task.Status == models.TaskStatusAcked || task.Status == models.TaskStatusRunning
 		duration := 0
 		if task.StartTime > 0 {
 			duration = int(now - task.StartTime)
@@ -2504,6 +2519,9 @@ func (h *WebSocketHandler) cancelRunningTasksForFailedPipeline(runID uint64, age
 		task.EndTime = now
 		task.Duration = duration
 		syncLiveTaskStateFromTask(task, "")
+		if shouldNotifyAgent {
+			_ = h.sendTaskCancel(*task)
+		}
 
 		h.BroadcastTaskStatus(runID, task.ID, task.NodeID, models.TaskStatusCancelled, 0, "流水线已失败，任务被取消", "")
 	}

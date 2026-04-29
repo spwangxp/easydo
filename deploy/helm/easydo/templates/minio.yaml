@@ -1,20 +1,14 @@
 {{- if .Values.minio.enabled }}
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ include "easydo.minioFullname" . }}-data
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: {{ .Values.minio.persistence.size }}
----
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ include "easydo.minioFullname" . }}
 spec:
+  serviceName: {{ include "easydo.minioFullname" . }}
   replicas: 1
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   selector:
     matchLabels:
       {{- include "easydo.selectorLabels" . | nindent 6 }}
@@ -41,10 +35,17 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: {{ include "easydo.minioFullname" . }}-data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [{{ .Values.minio.persistence.accessMode | quote }}]
+        {{- with .Values.minio.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.minio.persistence.size }}
 ---
 apiVersion: v1
 kind: Service

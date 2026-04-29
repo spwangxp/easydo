@@ -41,6 +41,8 @@ type TaskHandler struct {
 	stopChan              chan struct{}
 	runCtx                context.Context
 	inFlight              sync.Map
+	runningTasks          sync.Map
+	cancelledTasks        sync.Map
 	pendingMu             sync.Mutex
 	pendingWS             []pendingWebSocketMessage
 	taskSlots             chan struct{}
@@ -52,6 +54,11 @@ type TaskHandler struct {
 type pendingWebSocketMessage struct {
 	messageType string
 	payload     map[string]interface{}
+}
+
+type runningTaskExecution struct {
+	cancel    context.CancelFunc
+	cancelled atomic.Bool
 }
 
 // NewTaskHandler creates a new task handler
@@ -239,6 +246,10 @@ func (th *TaskHandler) HandleTaskAssign(msg *client.TaskAssignMessage) error {
 		return nil
 	}
 
+	if _, cancelled := th.cancelledTasks.Load(t.ID); cancelled {
+		th.log.Infof("Skip cancelled task assignment: task_id=%d", t.ID)
+		return nil
+	}
 	if _, loaded := th.inFlight.LoadOrStore(t.ID, struct{}{}); loaded {
 		th.log.Debugf("Task %d already in-flight, skip duplicate assignment", t.ID)
 		return nil
@@ -250,11 +261,17 @@ func (th *TaskHandler) HandleTaskAssign(msg *client.TaskAssignMessage) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	taskCtx, cancel := context.WithCancel(ctx)
+	execution := &runningTaskExecution{cancel: cancel}
+	th.runningTasks.Store(t.ID, execution)
 
 	go func(task Task) {
 		defer th.inFlight.Delete(task.ID)
+		defer th.runningTasks.Delete(task.ID)
+		defer th.cancelledTasks.Delete(task.ID)
+		defer cancel()
 		th.withTaskSlot(func() {
-			th.executeTask(ctx, &task)
+			th.executeTask(taskCtx, &task)
 		})
 	}(t)
 
@@ -295,9 +312,23 @@ func (th *TaskHandler) HandlePipelineAssign(msg *client.PipelineAssignMessage) e
 
 // HandleTaskCancel handles task cancellation from server via WebSocket
 func (th *TaskHandler) HandleTaskCancel(taskID uint64) error {
-	th.log.Infof("Handling task cancellation: task_id=%d", taskID)
-	// TODO: Implement task cancellation logic
-	return nil
+	if th.log != nil {
+		th.log.Infof("Handling task cancellation: task_id=%d", taskID)
+	}
+	if value, ok := th.runningTasks.Load(taskID); ok {
+		execution, ok := value.(*runningTaskExecution)
+		if !ok || execution == nil || execution.cancel == nil {
+			return fmt.Errorf("task %d has no cancellable execution", taskID)
+		}
+		execution.cancelled.Store(true)
+		execution.cancel()
+		return nil
+	}
+	th.cancelledTasks.Store(taskID, struct{}{})
+	if _, ok := th.inFlight.Load(taskID); ok {
+		return nil
+	}
+	return fmt.Errorf("task %d is not running", taskID)
 }
 
 // executePipeline executes a pipeline based on the assignment message
@@ -801,6 +832,11 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 		th.executor.SetEmbeddedBuildkitEnv(th.embeddedBuildkit.Env())
 	}
 
+	if _, cancelled := th.cancelledTasks.Load(task.ID); cancelled {
+		th.log.Infof("Task %d was cancelled before execution started", task.ID)
+		return
+	}
+
 	// Report task as running first. If this fails, keep task pending server-side and wait for redispatch.
 	if err := th.reportTaskUpdateV2(task, attempt, "running", 0, "", 0, nil); err != nil {
 		th.log.Warnf("Failed to report v2 task start: %v", err)
@@ -822,6 +858,16 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 
 	// Execute the task with workspace support
 	result := th.executor.Execute(ctx, *params)
+
+	if value, ok := th.runningTasks.Load(task.ID); ok {
+		if execution, ok := value.(*runningTaskExecution); ok && execution != nil && execution.cancelled.Load() {
+			if err := th.reportTaskLogEndV2(task, attempt, atomic.LoadInt64(&logSeq)); err != nil {
+				th.log.Debugf("Failed to report v2 log end: %v", err)
+			}
+			th.log.Infof("Task %d stopped after cancellation", task.ID)
+			return
+		}
+	}
 
 	finalResult, status, errorMsg := th.buildTaskResultPayload(task, result)
 	if err := th.reportTaskUpdateV2(task, attempt, status, result.ExitCode, errorMsg, result.Duration.Milliseconds(), finalResult); err != nil {

@@ -1002,6 +1002,9 @@ func (h *PipelineHandler) CancelPipelineRun(c *gin.Context) {
 		return
 	}
 
+	var cancelledTasks []models.AgentTask
+	var tasksToNotify []models.AgentTask
+
 	err = h.DB.Transaction(func(tx *gorm.DB) error {
 		var tasks []models.AgentTask
 		if err := tx.Where("pipeline_run_id = ? AND status NOT IN ?",
@@ -1022,34 +1025,29 @@ func (h *PipelineHandler) CancelPipelineRun(c *gin.Context) {
 				continue
 			}
 
+			shouldNotifyAgent := task.Status == models.TaskStatusAcked || task.Status == models.TaskStatusRunning
+			duration := 0
+			if task.StartTime > 0 {
+				duration = int(now - task.StartTime)
+			}
+
 			updates := map[string]interface{}{
 				"status":   models.TaskStatusCancelled,
 				"end_time": now,
+				"duration": duration,
 			}
-			if task.StartTime > 0 {
-				updates["duration"] = int(now - task.StartTime)
-			}
-
 			if err := tx.Model(task).Updates(updates).Error; err != nil {
 				return fmt.Errorf("更新任务 %d 状态失败: %w", task.ID, err)
 			}
 
 			task.Status = models.TaskStatusCancelled
 			task.EndTime = now
-			if task.StartTime > 0 {
-				task.Duration = int(now - task.StartTime)
-			}
+			task.Duration = duration
 			syncLiveTaskStateFromTask(task, "")
-
-			SharedWebSocketHandler().BroadcastTaskStatus(
-				runIDNum,
-				task.ID,
-				task.NodeID,
-				models.TaskStatusCancelled,
-				0,
-				"任务已被取消",
-				"",
-			)
+			cancelledTasks = append(cancelledTasks, *task)
+			if shouldNotifyAgent {
+				tasksToNotify = append(tasksToNotify, *task)
+			}
 		}
 
 		duration := 0
@@ -1075,6 +1073,21 @@ func (h *PipelineHandler) CancelPipelineRun(c *gin.Context) {
 			"message": "取消流水线运行失败: " + err.Error(),
 		})
 		return
+	}
+
+	for _, task := range tasksToNotify {
+		_ = SharedWebSocketHandler().sendTaskCancel(task)
+	}
+	for _, task := range cancelledTasks {
+		SharedWebSocketHandler().BroadcastTaskStatus(
+			runIDNum,
+			task.ID,
+			task.NodeID,
+			models.TaskStatusCancelled,
+			0,
+			"任务已被取消",
+			"",
+		)
 	}
 
 	run.Status = models.PipelineRunStatusCancelled

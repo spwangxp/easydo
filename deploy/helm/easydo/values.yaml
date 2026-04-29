@@ -45,6 +45,10 @@ agent:
   securityContext:
     privileged: true
     allowPrivilegeEscalation: true
+  persistence:
+    accessMode: ReadWriteOnce
+    size: 20Gi
+    storageClassName: ""
   extraVolumes: []
   extraVolumeMounts: []
 
@@ -60,7 +64,23 @@ mariadb:
   service:
     port: 3306
   persistence:
+    accessMode: ReadWriteOnce
     size: 10Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  config:
+    innodb_buffer_pool_size: 1073741824
+    innodb_flush_log_at_trx_commit: 2
+    sync_binlog: 0
+    performance_schema: "ON"
+    slow_query_log: "ON"
+    long_query_time: 0.2
 
 redis:
   enabled: true
@@ -71,7 +91,9 @@ redis:
   service:
     port: 6379
   persistence:
+    accessMode: ReadWriteOnce
     size: 5Gi
+    storageClassName: ""
 
 minio:
   enabled: true
@@ -86,7 +108,9 @@ minio:
     apiPort: 9000
     consolePort: 9001
   persistence:
+    accessMode: ReadWriteOnce
     size: 10Gi
+    storageClassName: ""
 
 ingress:
   enabled: true

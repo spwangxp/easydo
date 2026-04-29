@@ -1,20 +1,30 @@
 {{- if .Values.mariadb.enabled }}
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: ConfigMap
 metadata:
-  name: {{ include "easydo.mariadbFullname" . }}-data
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: {{ .Values.mariadb.persistence.size }}
+  name: {{ include "easydo.mariadbFullname" . }}-config
+  labels:
+    {{- include "easydo.labels" . | nindent 4 }}
+data:
+  zz-easydo.cnf: |
+    [mysqld]
+    innodb_buffer_pool_size={{ .Values.mariadb.config.innodb_buffer_pool_size }}
+    innodb_flush_log_at_trx_commit={{ .Values.mariadb.config.innodb_flush_log_at_trx_commit }}
+    sync_binlog={{ .Values.mariadb.config.sync_binlog }}
+    performance_schema={{ .Values.mariadb.config.performance_schema }}
+    slow_query_log={{ .Values.mariadb.config.slow_query_log }}
+    long_query_time={{ .Values.mariadb.config.long_query_time }}
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ include "easydo.mariadbFullname" . }}
 spec:
+  serviceName: {{ include "easydo.mariadbFullname" . }}
   replicas: 1
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   selector:
     matchLabels:
       {{- include "easydo.selectorLabels" . | nindent 6 }}
@@ -36,13 +46,29 @@ spec:
               value: {{ .Values.mariadb.auth.database | quote }}
           ports:
             - containerPort: {{ .Values.mariadb.service.port }}
+          resources:
+            {{- toYaml .Values.mariadb.resources | nindent 12 }}
           volumeMounts:
             - name: data
               mountPath: /var/lib/mysql
+            - name: config
+              mountPath: /etc/mysql/conf.d/zz-easydo.cnf
+              subPath: zz-easydo.cnf
       volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: {{ include "easydo.mariadbFullname" . }}-data
+        - name: config
+          configMap:
+            name: {{ include "easydo.mariadbFullname" . }}-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [{{ .Values.mariadb.persistence.accessMode | quote }}]
+        {{- with .Values.mariadb.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.mariadb.persistence.size }}
 ---
 apiVersion: v1
 kind: Service

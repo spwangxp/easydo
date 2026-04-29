@@ -770,7 +770,7 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 		},
 	})
 
-	if agent.RegistrationStatus == models.AgentRegistrationStatusApproved {
+	if agent.RegistrationStatus == models.AgentRegistrationStatusApproved && shouldScheduleQueuedRunsFromHeartbeat(agent.ID, agentTimestamp) {
 		go NewPipelineHandler().scheduleQueuedPipelineRuns(h.DB)
 	}
 }
