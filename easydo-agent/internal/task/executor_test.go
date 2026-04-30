@@ -3,11 +3,13 @@ package task
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -15,6 +17,28 @@ import (
 	"easydo-agent/internal/system"
 	"github.com/sirupsen/logrus"
 )
+
+func processTerminated(pid int) (bool, string, error) {
+	killErr := syscall.Kill(pid, 0)
+	if errors.Is(killErr, syscall.ESRCH) {
+		return true, "", killErr
+	}
+	if killErr != nil {
+		return false, "", killErr
+	}
+	statBytes, readErr := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return true, "", readErr
+		}
+		return false, "", readErr
+	}
+	fields := strings.Fields(string(statBytes))
+	if len(fields) >= 3 {
+		return fields[2] == "Z", fields[2], nil
+	}
+	return false, "", nil
+}
 
 func TestBuildAITaskPrompt_IncludesOutputLanguageInstruction(t *testing.T) {
 	prompt := buildAITaskPrompt(aiTaskPayload{
@@ -38,7 +62,7 @@ func TestExecuteAITask_UsesTaskTypeAndRawParamsAsFallbackPayload(t *testing.T) {
 			"input_text":      "TODO: verify follow-up",
 			"output_language": "zh-CN",
 		},
-	})
+	}, nil)
 	if result == nil {
 		t.Fatal("expected ai task result")
 	}
@@ -63,12 +87,37 @@ func TestExecuteAITask_UsesNestedRequestPayload(t *testing.T) {
 				"output_language": "en-US",
 			},
 		},
-	})
+	}, nil)
 	if result == nil {
 		t.Fatal("expected ai task result")
 	}
 	if result.StructuredOutput["issues_count"] == nil {
 		t.Fatalf("expected nested request payload to produce mr outputs, got=%#v", result.StructuredOutput)
+	}
+}
+
+func TestExecuteAITask_UsesPassedCallback(t *testing.T) {
+	executor := &Executor{}
+	var got []string
+	callback := func(taskID uint64, level, message, source string, lineNumber int) {
+		got = append(got, fmt.Sprintf("%d|%s|%s|%s|%d", taskID, level, source, message, lineNumber))
+	}
+
+	result := executor.executeAITask(context.Background(), TaskParams{
+		TaskID:   104,
+		TaskType: "mr_quality_check",
+		Params: map[string]interface{}{
+			"input_text": "TODO: callback path",
+		},
+	}, callback)
+	if result == nil {
+		t.Fatal("expected ai task result")
+	}
+	if len(got) == 0 {
+		t.Fatal("expected callback events")
+	}
+	if !strings.Contains(got[0], "104|info|system|starting ai-task scenario=mr_quality_check") {
+		t.Fatalf("unexpected first callback event: %q", got[0])
 	}
 }
 
@@ -85,12 +134,81 @@ func TestExecute_UsesAITaskModeFromParams(t *testing.T) {
 				"input_text": "TODO: verify execution mode routing",
 			},
 		},
-	})
+	}, nil)
 	if result == nil {
 		t.Fatal("expected task result")
 	}
 	if result.StructuredOutput["issues_count"] == nil {
 		t.Fatalf("expected ai-task execution mode to route to structured AI result, got=%#v", result.StructuredOutput)
+	}
+}
+
+func TestExecutorConcurrentLogCallbacks(t *testing.T) {
+	executor := NewExecutor(logrus.New(), t.TempDir(), system.RuntimeCapabilities{})
+	workspacePath := t.TempDir()
+	executor.workspace = NewWorkspaceManager(workspacePath, logrus.New())
+
+	taskA := TaskParams{
+		TaskID:        201,
+		PipelineRunID: 1,
+		TaskType:      "shell",
+		Name:          "task-a",
+		Script:        `printf 'task-a\n'; sleep 0.2; printf 'task-a-done\n'`,
+		Timeout:       5,
+	}
+	taskB := TaskParams{
+		TaskID:        202,
+		PipelineRunID: 2,
+		TaskType:      "shell",
+		Name:          "task-b",
+		Script:        `sleep 0.05; printf 'task-b\n'; printf 'task-b-done\n'`,
+		Timeout:       5,
+	}
+
+	var mu sync.Mutex
+	logs := map[uint64][]string{}
+	makeCallback := func(owner uint64) LogCallback {
+		return func(taskID uint64, level, message, source string, lineNumber int) {
+			if taskID != owner {
+				return
+			}
+			mu.Lock()
+			logs[owner] = append(logs[owner], fmt.Sprintf("%s:%s", source, message))
+			mu.Unlock()
+		}
+	}
+
+	readyForTaskB := make(chan struct{})
+	startTaskA := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		callback := makeCallback(taskA.TaskID)
+		close(readyForTaskB)
+		<-startTaskA
+		_ = executor.Execute(context.Background(), taskA, callback)
+	}()
+	go func() {
+		defer wg.Done()
+		<-readyForTaskB
+		callback := makeCallback(taskB.TaskID)
+		close(startTaskA)
+		_ = executor.Execute(context.Background(), taskB, callback)
+	}()
+	wg.Wait()
+
+	if len(logs[taskA.TaskID]) == 0 {
+		t.Fatalf("expected task A logs, got none: %#v", logs)
+	}
+	if len(logs[taskB.TaskID]) == 0 {
+		t.Fatalf("expected task B logs, got none: %#v", logs)
+	}
+	if got := strings.Join(logs[taskA.TaskID], "\n"); !strings.Contains(got, "task-a") || !strings.Contains(got, "task-a-done") {
+		t.Fatalf("expected task A callback to capture both lines, got=%q", got)
+	}
+	if got := strings.Join(logs[taskB.TaskID], "\n"); !strings.Contains(got, "task-b") || !strings.Contains(got, "task-b-done") {
+		t.Fatalf("expected task B callback to capture both lines, got=%q", got)
 	}
 }
 
@@ -137,7 +255,7 @@ func TestParseParams_PreservesEnvVarsWhenJSONContainsNonStringValues(t *testing.
 
 func TestRunScript_PreservesSystemPathWhenCustomEnvProvided(t *testing.T) {
 	executor := &Executor{}
-	stdout, stderr, err := executor.runScript(context.Background(), 1, `command -v sh >/dev/null && printf '%s' "$PATH"`, "/tmp", map[string]string{"EASYDO_FLAG": "1"})
+	stdout, stderr, err := executor.runScript(context.Background(), 1, `command -v sh >/dev/null && printf '%s' "$PATH"`, "/tmp", map[string]string{"EASYDO_FLAG": "1"}, nil)
 	if err != nil {
 		t.Fatalf("expected runScript to preserve PATH, got err=%v stderr=%s", err, stderr)
 	}
@@ -153,6 +271,7 @@ func TestRunScript_PreservesLongSingleLineStdout(t *testing.T) {
 		1,
 		`dd if=/dev/zero bs=70000 count=1 2>/dev/null | tr '\000' 'a'; printf '\n'`,
 		"/tmp",
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -250,7 +369,7 @@ func TestRunScript_KillsBackgroundProcessGroupOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	_, _, err := executor.runScript(ctx, 1, `sh -c 'trap "" HUP TERM INT; while true; do sleep 1; done' >/dev/null 2>&1 & child=$!; echo $child > "`+pidFile+`"; wait`, tmpDir, nil)
+	_, _, err := executor.runScript(ctx, 1, `sh -c 'trap "" HUP TERM INT; while true; do sleep 1; done' >/dev/null 2>&1 & child=$!; echo $child > "`+pidFile+`"; wait`, tmpDir, nil, nil)
 	if err == nil {
 		t.Fatal("expected context cancellation error")
 	}
@@ -263,8 +382,8 @@ func TestRunScript_KillsBackgroundProcessGroupOnContextCancel(t *testing.T) {
 			if convErr != nil {
 				t.Fatalf("invalid child pid %q: %v", string(data), convErr)
 			}
-			killErr := syscall.Kill(pid, 0)
-			if errors.Is(killErr, syscall.ESRCH) {
+			terminated, _, killErr := processTerminated(pid)
+			if terminated {
 				break
 			}
 			if killErr != nil {

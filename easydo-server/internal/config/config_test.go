@@ -41,3 +41,29 @@ func TestBootstrapDockerHubMirrors_EmptyEnvReturnsBuiltInDefaults(t *testing.T) 
 		t.Fatalf("mirrors=%v, want=%v", got, want)
 	}
 }
+
+func TestValidateMultiReplicaRequirements_AllowsDerivedInternalURL(t *testing.T) {
+	Init()
+	Config.Set("server.id", "easydo-server-0")
+	Config.Set("server.internal_url", "")
+	Config.Set("server.internal_token", "shared-secret")
+
+	if err := ValidateMultiReplicaRequirements(); err != nil {
+		t.Fatalf("expected derived internal url configuration to pass, got err=%v", err)
+	}
+}
+
+func TestValidateMultiReplicaRequirements_RequiresServerIDAndInternalToken(t *testing.T) {
+	Init()
+	Config.Set("server.id", "")
+	Config.Set("server.internal_url", "")
+	Config.Set("server.internal_token", "")
+
+	err := ValidateMultiReplicaRequirements()
+	if err == nil {
+		t.Fatal("expected missing server.id and server.internal_token to fail validation")
+	}
+	if err.Error() != "multi-replica configuration missing required settings: server.id, server.internal_token" {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}

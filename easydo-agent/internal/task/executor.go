@@ -62,12 +62,11 @@ type Result struct {
 
 // Executor executes tasks
 type Executor struct {
-	log                  *logrus.Logger
-	workspace            *WorkspaceManager
-	runtime              system.RuntimeCapabilities
-	logCallback          LogCallback
-	embeddedBuildkitEnv  map[string]string
-	mu                   sync.RWMutex
+	log                 *logrus.Logger
+	workspace           *WorkspaceManager
+	runtime             system.RuntimeCapabilities
+	embeddedBuildkitEnv map[string]string
+	mu                  sync.RWMutex
 }
 
 type outputCaptureWriter struct {
@@ -178,20 +177,6 @@ func (e *Executor) WorkspaceManager() *WorkspaceManager {
 	return e.workspace
 }
 
-// SetLogCallback sets the callback for log reporting
-func (e *Executor) SetLogCallback(callback LogCallback) {
-	e.mu.Lock()
-	e.logCallback = callback
-	e.mu.Unlock()
-}
-
-// GetLogCallback returns the current log callback
-func (e *Executor) GetLogCallback() LogCallback {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.logCallback
-}
-
 func (e *Executor) SetEmbeddedBuildkitEnv(env map[string]string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -220,7 +205,7 @@ func (e *Executor) EmbeddedBuildkitEnv() map[string]string {
 }
 
 // Execute executes a task
-func (e *Executor) Execute(ctx context.Context, params TaskParams) *Result {
+func (e *Executor) Execute(ctx context.Context, params TaskParams, callback LogCallback) *Result {
 	startTime := time.Now()
 
 	e.log.Infof("Executing task: id=%d, name=%s, type=%s, timeout=%d",
@@ -264,7 +249,7 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams) *Result {
 	}
 
 	if isAITaskParams(params) {
-		return e.executeAITask(ctx, params)
+		return e.executeAITask(ctx, params, callback)
 	}
 
 	// Write task file
@@ -282,7 +267,7 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams) *Result {
 	e.log.Infof("Task %d executing in workspace: %s", params.TaskID, workDir)
 
 	// Execute the script in the workspace directory
-	stdout, stderr, err := e.runScript(execCtx, params.TaskID, params.Script, workDir, params.EnvVars)
+	stdout, stderr, err := e.runScript(execCtx, params.TaskID, params.Script, workDir, params.EnvVars, callback)
 
 	duration := time.Since(startTime)
 
@@ -305,7 +290,7 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams) *Result {
 }
 
 // runScript executes a shell script and captures output
-func (e *Executor) runScript(ctx context.Context, taskID uint64, script, workDir string, envVars map[string]string) (string, string, error) {
+func (e *Executor) runScript(ctx context.Context, taskID uint64, script, workDir string, envVars map[string]string, callback LogCallback) (string, string, error) {
 	env := append([]string{}, os.Environ()...)
 	seen := make(map[string]int, len(env))
 	for i, item := range env {
@@ -339,7 +324,6 @@ func (e *Executor) runScript(ctx context.Context, taskID uint64, script, workDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	var stdoutBuf, stderrBuf bytes.Buffer
-	callback := e.GetLogCallback()
 	stdoutWriter := &outputCaptureWriter{executor: e, buf: &stdoutBuf, level: "info", source: "stdout", taskID: taskID, callback: callback}
 	stderrWriter := &outputCaptureWriter{executor: e, buf: &stderrBuf, level: "error", source: "stderr", taskID: taskID, callback: callback}
 	cmd.Stdout = stdoutWriter

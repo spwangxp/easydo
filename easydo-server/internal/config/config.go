@@ -147,12 +147,9 @@ func GetDSN() string {
 }
 
 func ValidateMultiReplicaRequirements() error {
-	missing := make([]string, 0, 3)
+	missing := make([]string, 0, 2)
 	if strings.TrimSpace(Config.GetString("server.id")) == "" {
 		missing = append(missing, "server.id")
-	}
-	if strings.TrimSpace(Config.GetString("server.internal_url")) == "" {
-		missing = append(missing, "server.internal_url")
 	}
 	if strings.TrimSpace(Config.GetString("server.internal_token")) == "" {
 		missing = append(missing, "server.internal_token")

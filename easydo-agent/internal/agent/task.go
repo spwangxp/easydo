@@ -473,18 +473,18 @@ func (th *TaskHandler) executeNode(runID uint64, node *task.PipelineNode) (*task
 
 		// Set up log callback for this node
 		nodeLineNumbers := make(map[string]int)
-		th.executor.SetLogCallback(func(logTaskID uint64, level, message, source string, lineNumber int) {
+		callback := func(logTaskID uint64, level, message, source string, lineNumber int) {
 			// Only report logs for the current task (supports parallel execution)
 			if logTaskID != params.TaskID {
 				return
 			}
 			nodeLineNumbers[node.ID]++
 			th.reportPipelineLog(runID, 0, level, message, source)
-		})
+		}
 
 		// Execute the task
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(params.Timeout)*time.Second)
-		result := th.executor.Execute(ctx, *params)
+		result := th.executor.Execute(ctx, *params, callback)
 		cancel()
 
 		lastResult = result
@@ -845,7 +845,7 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 
 	// Set up log callback for real-time log reporting
 	var logSeq int64
-	th.executor.SetLogCallback(func(logTaskID uint64, level, message, source string, _ int) {
+	callback := func(logTaskID uint64, level, message, source string, _ int) {
 		// Only report logs for the current task (supports parallel execution)
 		if logTaskID != task.ID {
 			return
@@ -854,10 +854,10 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 		if err := th.reportTaskLogChunkV2(task, attempt, seq, source, message); err != nil {
 			th.log.Warnf("Failed to report v2 log: %v", err)
 		}
-	})
+	}
 
 	// Execute the task with workspace support
-	result := th.executor.Execute(ctx, *params)
+	result := th.executor.Execute(ctx, *params, callback)
 
 	if value, ok := th.runningTasks.Load(task.ID); ok {
 		if execution, ok := value.(*runningTaskExecution); ok && execution != nil && execution.cancelled.Load() {

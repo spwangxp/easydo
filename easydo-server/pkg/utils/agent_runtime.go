@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,8 +17,9 @@ import (
 )
 
 var (
-	serverIDOnce sync.Once
-	serverID     string
+	serverIDOnce       sync.Once
+	serverID           string
+	discoverRuntimeIPv4 = defaultDiscoverRuntimeIPv4
 )
 
 const (
@@ -48,18 +52,65 @@ type AgentPresence struct {
 	Metadata          map[string]string `json:"metadata,omitempty"`
 }
 
+func ValidateServerInternalURL(raw string) (string, error) {
+	value := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("parse server internal url: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("server internal url must use http or https")
+	}
+	hostname := strings.TrimSpace(parsed.Hostname())
+	if hostname == "" {
+		return "", fmt.Errorf("server internal url must include hostname")
+	}
+	if serverID := strings.TrimSpace(ServerID()); serverID != "" && strings.EqualFold(hostname, serverID) {
+		return "", fmt.Errorf("server internal url hostname %q matches server.id and is not reachable cross-replica", hostname)
+	}
+	return value, nil
+}
+
 func ServerInternalURL() string {
+	port := "8080"
 	if config.Config == nil {
-		return "http://127.0.0.1:8080"
+		return "http://127.0.0.1:" + port
 	}
-	if v := strings.TrimSpace(config.Config.GetString("server.internal_url")); v != "" {
-		return strings.TrimRight(v, "/")
+	if configuredPort := strings.TrimSpace(config.Config.GetString("server.port")); configuredPort != "" {
+		port = configuredPort
 	}
-	port := strings.TrimSpace(config.Config.GetString("server.port"))
-	if port == "" {
-		port = "8080"
+	if validated, err := ValidateServerInternalURL(config.Config.GetString("server.internal_url")); err == nil && validated != "" {
+		return validated
+	}
+	if podIP := strings.TrimSpace(os.Getenv("POD_IP")); podIP != "" {
+		return "http://" + podIP + ":" + port
+	}
+	if runtimeIP, err := discoverRuntimeIPv4(); err == nil && strings.TrimSpace(runtimeIP) != "" {
+		return "http://" + runtimeIP + ":" + port
 	}
 	return "http://127.0.0.1:" + port
+}
+
+func defaultDiscoverRuntimeIPv4() (string, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", fmt.Errorf("list interface addrs: %w", err)
+	}
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet == nil || ipNet.IP == nil {
+			continue
+		}
+		ip := ipNet.IP.To4()
+		if ip == nil || ip.IsLoopback() {
+			continue
+		}
+		return ip.String(), nil
+	}
+	return "", fmt.Errorf("no non-loopback ipv4 address found")
 }
 
 func ServerInternalToken() string {

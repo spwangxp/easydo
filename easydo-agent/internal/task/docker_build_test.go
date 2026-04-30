@@ -22,7 +22,7 @@ func TestDockerBuildScript_HostRuntimeUsesDetectedRuntime(t *testing.T) {
 	}
 }
 
-func TestDockerBuildScript_EmbeddedBuildkitUsesSharedRuntimeRoot(t *testing.T) {
+func TestDockerBuildScript_EmbeddedBuildkitUsesSharedDaemonPaths(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
 	script, err := executor.dockerBuildScript(TaskParams{TaskID: 987, Params: map[string]interface{}{
 		"image_name": "demo/app",
@@ -33,11 +33,14 @@ func TestDockerBuildScript_EmbeddedBuildkitUsesSharedRuntimeRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dockerBuildScript returned error: %v", err)
 	}
-	if !strings.Contains(script, `RUNTIME_ROOT="$(pwd)/.easydo-buildkit/shared"`) {
-		t.Fatalf("expected embedded buildkit runtime root to be shared, got:\n%s", script)
-	}
-	if strings.Contains(script, `/task_987`) {
-		t.Fatalf("expected embedded buildkit runtime root not to be task scoped, got:\n%s", script)
+	for _, expected := range []string{
+		`SOCKET_PATH="$(pwd)/.easydo-buildkit/shared/run/buildkitd.sock"`,
+		`BUILDKIT_STATE_DIR="$(pwd)/.easydo-buildkit/shared/state"`,
+		`BUILDKIT_CONFIG_PATH="$(pwd)/.easydo-buildkit/shared/buildkitd.toml"`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("expected embedded buildkit script to include %s, got:\n%s", expected, script)
+		}
 	}
 }
 
@@ -57,7 +60,7 @@ func TestDockerBuildScript_EmbeddedBuildkitKeepsSharedRuntimeRoot(t *testing.T) 
 	}
 }
 
-func TestDockerBuildScript_EmbeddedBuildkitRemovesDirectoryLockOnCleanup(t *testing.T) {
+func TestDockerBuildScript_EmbeddedBuildkitDoesNotManageSharedLockLifecycle(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
 	script, err := executor.dockerBuildScript(TaskParams{TaskID: 655, Params: map[string]interface{}{
 		"image_name": "demo/app",
@@ -68,11 +71,15 @@ func TestDockerBuildScript_EmbeddedBuildkitRemovesDirectoryLockOnCleanup(t *test
 	if err != nil {
 		t.Fatalf("dockerBuildScript returned error: %v", err)
 	}
-	if strings.Contains(script, `rm -f "$LOCK_FILE"`) {
-		t.Fatalf("expected embedded buildkit cleanup not to remove lock dir as a file, got:\n%s", script)
-	}
-	if !strings.Contains(script, `rmdir "$LOCK_FILE" >/dev/null 2>&1 || true`) {
-		t.Fatalf("expected embedded buildkit cleanup to remove directory lock, got:\n%s", script)
+	for _, unexpected := range []string{
+		`LOCK_FILE`,
+		`mkdir "$LOCK_FILE"`,
+		`rm -f "$LOCK_FILE"`,
+		`rmdir "$LOCK_FILE" >/dev/null 2>&1 || true`,
+	} {
+		if strings.Contains(script, unexpected) {
+			t.Fatalf("expected embedded buildkit task script not to manage shared lock lifecycle with %s, got:\n%s", unexpected, script)
+		}
 	}
 }
 

@@ -16,6 +16,28 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+func processTerminated(pid int) (bool, string, error) {
+	killErr := syscall.Kill(pid, 0)
+	if errors.Is(killErr, syscall.ESRCH) {
+		return true, "", killErr
+	}
+	if killErr != nil {
+		return false, "", killErr
+	}
+	statBytes, readErr := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return true, "", readErr
+		}
+		return false, "", readErr
+	}
+	fields := strings.Fields(string(statBytes))
+	if len(fields) >= 3 {
+		return fields[2] == "Z", fields[2], nil
+	}
+	return false, "", nil
+}
+
 func TestHandleTaskCancel_CancelsRunningTaskProcessGroup(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	cfg := &config.Config{}
@@ -49,7 +71,7 @@ func TestHandleTaskCancel_CancelsRunningTaskProcessGroup(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.executor.Execute(taskCtx, *params)
+		h.executor.Execute(taskCtx, *params, nil)
 	}()
 
 	deadline := time.Now().Add(3 * time.Second)
@@ -82,8 +104,9 @@ func TestHandleTaskCancel_CancelsRunningTaskProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse child pid failed: %v", err)
 	}
-	if killErr := syscall.Kill(pid, 0); !errors.Is(killErr, syscall.ESRCH) {
-		t.Fatalf("expected child process to be gone after cancellation, kill err=%v", killErr)
+	terminated, state, killErr := processTerminated(pid)
+	if !terminated {
+		t.Fatalf("expected child process to be terminated after cancellation, state=%q killErr=%v", state, killErr)
 	}
 }
 

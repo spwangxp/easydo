@@ -430,7 +430,7 @@ func (h *TaskHandler) fetchCrossServerLiveTaskLogs(ctx context.Context, task mod
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch live logs from owner server %s at %s: %w", presence.ServerID, strings.TrimRight(presence.ServerURL, "/"), err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

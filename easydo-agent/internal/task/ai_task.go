@@ -132,7 +132,7 @@ func maxFloat(a, b float64) float64 {
 	return b
 }
 
-func (e *Executor) executeAITask(ctx context.Context, params TaskParams) *Result {
+func (e *Executor) executeAITask(ctx context.Context, params TaskParams, callback LogCallback) *Result {
 	startTime := time.Now()
 	payload := aiTaskPayload{}
 	if params.Params != nil {
@@ -150,7 +150,6 @@ func (e *Executor) executeAITask(ctx context.Context, params TaskParams) *Result
 		payload.Request = params.Params
 	}
 	prompt := buildAITaskPrompt(payload)
-	callback := e.GetLogCallback()
 	if callback != nil {
 		callback(params.TaskID, "info", fmt.Sprintf("starting ai-task scenario=%s ai_session_id=%d", payload.Scenario, payload.AISessionID), "system", 1)
 	}

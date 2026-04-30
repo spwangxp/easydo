@@ -37,8 +37,6 @@ spec:
                   fieldPath: metadata.name
             - name: SERVER_PUBLIC_URL
               value: {{ .Values.server.env.serverPublicURL | quote }}
-            - name: SERVER_INTERNAL_URL
-              value: "http://$(SERVER_ID):{{ .Values.server.service.port }}"
             - name: SERVER_INTERNAL_TOKEN
               value: {{ .Values.server.env.serverInternalToken | quote }}
             - name: DB_HOST

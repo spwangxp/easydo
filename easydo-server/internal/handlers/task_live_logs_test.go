@@ -146,3 +146,51 @@ func TestFetchCrossServerLiveTaskLogs_SkipsWhenPresenceDoesNotMatchOwner(t *test
 		t.Fatalf("expected no logs, got %d", len(logs))
 	}
 }
+
+func TestFetchCrossServerLiveTaskLogs_WrapsOwnerDialError(t *testing.T) {
+	config.Init()
+	config.Config.Set("server.id", "server-local")
+	config.Config.Set("server.internal_token", "shared-secret")
+
+	mini, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis failed: %v", err)
+	}
+	defer mini.Close()
+
+	previousRedis := utils.RedisClient
+	utils.RedisClient = redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	defer func() {
+		if utils.RedisClient != nil {
+			_ = utils.RedisClient.Close()
+		}
+		utils.RedisClient = previousRedis
+	}()
+
+	if err := utils.PutAgentPresence(context.Background(), utils.AgentPresence{
+		AgentID:           9,
+		AgentSessionID:    "session-9",
+		ServerID:          "server-owner",
+		ServerURL:         "http://127.0.0.1:1",
+		Status:            models.AgentStatusOnline,
+		LastHeartbeatAt:   123,
+		HeartbeatInterval: 10,
+	}); err != nil {
+		t.Fatalf("put presence failed: %v", err)
+	}
+
+	_, err = NewTaskHandler().fetchCrossServerLiveTaskLogs(context.Background(), models.AgentTask{
+		BaseModel:      models.BaseModel{ID: 101},
+		AgentID:        9,
+		PipelineRunID:  77,
+		OwnerServerID:  "server-owner",
+		AgentSessionID: "session-9",
+		Status:         models.TaskStatusRunning,
+	}, 0)
+	if err == nil {
+		t.Fatal("expected dial error")
+	}
+	if got := err.Error(); got != "fetch live logs from owner server server-owner at http://127.0.0.1:1: Get \"http://127.0.0.1:1/internal/tasks/101/live-logs?since_seq=0\": dial tcp 127.0.0.1:1: connect: connection refused" {
+		t.Fatalf("unexpected error: %s", got)
+	}
+}
