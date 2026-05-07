@@ -1252,7 +1252,27 @@ func (h *WebSocketHandler) persistResourceBaseInfoTaskResult(task *models.AgentT
 			updates["base_info_status"] = "failed"
 			updates["base_info_last_error"] = parseErr.Error()
 		} else {
-			updates["base_info"] = baseInfoJSON
+			mergedBaseInfoJSON := baseInfoJSON
+			runtimeLabels := loadMergedResourceRuntimeLabels(models.DB, task.WorkspaceID, payload.Collection.ResourceID)
+			if len(runtimeLabels) > 0 {
+				var baseInfoV3 ResourceBaseInfoV3
+				if err := json.Unmarshal([]byte(baseInfoJSON), &baseInfoV3); err == nil && baseInfoV3.SchemaVersion >= 3 {
+					baseInfoV3 = sanitizeResourceBaseInfoV3(baseInfoV3)
+					baseInfoV3 = mergeResourceBaseInfoV3Labels(baseInfoV3, runtimeLabels)
+					if raw, err := json.Marshal(baseInfoV3); err == nil {
+						mergedBaseInfoJSON = string(raw)
+					}
+				} else if payload.Collection.ResourceType == models.ResourceTypeVM {
+					var baseInfoV2 ResourceBaseInfoV2
+					if err := json.Unmarshal([]byte(baseInfoJSON), &baseInfoV2); err == nil {
+						baseInfoV2 = mergeResourceBaseInfoV2Labels(baseInfoV2, runtimeLabels)
+						if raw, err := json.Marshal(baseInfoV2); err == nil {
+							mergedBaseInfoJSON = string(raw)
+						}
+					}
+				}
+			}
+			updates["base_info"] = mergedBaseInfoJSON
 			updates["base_info_status"] = "success"
 			updates["base_info_source"] = source
 			updates["base_info_last_error"] = ""

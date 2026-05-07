@@ -250,6 +250,79 @@ func TestResourceHandler_GetResourceReturnsBaseInfoContract(t *testing.T) {
 	}
 }
 
+func TestResourceHandler_GetResourceMergesRuntimeLabelsIntoBaseInfo(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	viewer, workspace := seedResourceStoreUserAndWorkspace(t, db, "resource-runtime-label-viewer", models.WorkspaceRoleViewer)
+	resource := models.Resource{
+		WorkspaceID: workspace.ID,
+		Name:        "inventory-vm",
+		Type:        models.ResourceTypeVM,
+		Environment: "production",
+		Status:      models.ResourceStatusOnline,
+		Endpoint:    "10.0.0.88:22",
+		CreatedBy:   viewer.ID,
+		BaseInfo:    `{"schemaVersion":2,"status":"success","source":"remote_task","collectedAt":1710000000,"labels":{"tier":"infra","cluster":"blue"},"vm":{"summary":{"gpuCount":1},"labels":{"tier":"infra","cluster":"blue"}}}`,
+	}
+	if err := db.Create(&resource).Error; err != nil {
+		t.Fatalf("create resource failed: %v", err)
+	}
+	if err := db.Create(&models.ResourceRuntimeLabel{
+		WorkspaceID: workspace.ID,
+		ResourceID:  resource.ID,
+		TargetType:  "resource",
+		TargetKey:   "resource:1:vm:inventory-vm",
+		LabelsJSON:  `{"tier":"ops","owner":"platform","region":"cn-hangzhou"}`,
+		CreatedBy:   viewer.ID,
+	}).Error; err != nil {
+		t.Fatalf("create runtime labels failed: %v", err)
+	}
+	if err := db.Create(&models.ResourceRuntimeLabel{
+		WorkspaceID: workspace.ID,
+		ResourceID:  resource.ID,
+		TargetType:  "gpu",
+		TargetKey:   "resource:1:gpu:0",
+		LabelsJSON:  `{"gpuOnly":"yes","owner":"gpu-owner"}`,
+		CreatedBy:   viewer.ID,
+	}).Error; err != nil {
+		t.Fatalf("create gpu runtime labels failed: %v", err)
+	}
+
+	h := NewResourceHandler()
+	resp := performResourceStoreRequest(t, h.GetResource, viewer.ID, "user", workspace.ID, models.WorkspaceRoleViewer, http.MethodGet, "/api/resources/1", nil, pathResourceStoreID(resource.ID))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected get resource success, got=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Data struct {
+			BaseInfo map[string]interface{} `json:"base_info"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("parse resource response failed: %v body=%s", err, resp.Body.String())
+	}
+	labels, _ := payload.Data.BaseInfo["labels"].(map[string]interface{})
+	if labels["owner"] != "platform" {
+		t.Fatalf("expected runtime label owner in base_info.labels, got=%#v body=%s", labels, resp.Body.String())
+	}
+	if labels["tier"] != "infra" {
+		t.Fatalf("expected durable base_info label to win merge, got=%#v body=%s", labels, resp.Body.String())
+	}
+	if labels["region"] != "cn-hangzhou" {
+		t.Fatalf("expected runtime label region in base_info.labels, got=%#v body=%s", labels, resp.Body.String())
+	}
+	if _, exists := payload.Data.BaseInfo["owner"]; exists {
+		t.Fatalf("expected runtime labels to stay under base_info.labels, got=%s", resp.Body.String())
+	}
+	if labels["gpuOnly"] != nil {
+		t.Fatalf("expected non-resource scoped labels to stay out of base_info.labels, got=%#v body=%s", labels, resp.Body.String())
+	}
+}
+
 func TestResourceHandler_RefreshBaseInfoCreatesCollectionTask(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
@@ -270,6 +343,7 @@ func TestResourceHandler_RefreshBaseInfoCreatesCollectionTask(t *testing.T) {
 		Environment: "production",
 		Status:      models.ResourceStatusOnline,
 		Endpoint:    "10.0.0.31:22",
+		Labels:      `{"team":"platform","tier":"infra"}`,
 		CreatedBy:   maintainer.ID,
 	}
 	if err := db.Create(&resource).Error; err != nil {
@@ -310,9 +384,12 @@ func TestResourceHandler_RefreshBaseInfoCreatesCollectionTask(t *testing.T) {
 	if !bytes.Contains([]byte(task.Script), []byte("EASYDO_BASE_INFO_BEGIN")) {
 		t.Fatalf("expected refresh script to emit base info markers, got=%s", task.Script)
 	}
+	if !bytes.Contains([]byte(task.Params), []byte("resource_labels")) {
+		t.Fatalf("expected refresh task params to carry resource labels, got=%s", task.Params)
+	}
 }
 
-func TestParseVMBaseInfoOutput_ParsesScientificNotationTotals(t *testing.T) {
+func TestParseVMBaseInfoOutput_EmitsCanonicalBaseInfoV3(t *testing.T) {
 	stdout := "EASYDO_BASE_INFO_BEGIN\n" +
 		"EASYDO_HOSTNAME=ubuntu\n" +
 		"EASYDO_PRIMARY_IPV4=10.0.0.8\n" +
@@ -320,35 +397,531 @@ func TestParseVMBaseInfoOutput_ParsesScientificNotationTotals(t *testing.T) {
 		"EASYDO_OS_VERSION=22.04\n" +
 		"EASYDO_KERNEL_VERSION=6.5.0-18-generic\n" +
 		"EASYDO_ARCH=x86_64\n" +
-		"EASYDO_CPU_MODEL=Intel(R) Core(TM) i7\n" +
-		"EASYDO_CPU_LOGICAL_CORES=12\n" +
-		"EASYDO_MEMORY_TOTAL_BYTES=6.5536e+10\n" +
+		"EASYDO_CPU_MODEL=Intel(R) Xeon(R)\n" +
+		"EASYDO_CPU_LOGICAL_CORES=16\n" +
+		"EASYDO_CPU_USED_CORES=3.5\n" +
+		"EASYDO_MEMORY_TOTAL_BYTES=68719476736\n" +
+		"EASYDO_MEMORY_USED_BYTES=21474836480\n" +
 		"EASYDO_ROOT_TOTAL_BYTES=485687422976\n" +
-		"EASYDO_TOTAL_DISK_BYTES=2.51251e+12\n" +
-		"EASYDO_GPU_COUNT=0\n" +
+		"EASYDO_TOTAL_DISK_BYTES=2512510000000\n" +
+		"EASYDO_GPU_COUNT=2\n" +
+		"EASYDO_RESOURCE_LABELS_JSON={\"tier\":\"infra\",\"owner\":\"platform\"}\n" +
 		"EASYDO_DISK_ROWS_BEGIN\n" +
 		"NAME=\"nvme0n1p3\" SIZE=\"494598954496\" TYPE=\"part\" FSTYPE=\"ext4\" MOUNTPOINT=\"/\"\n" +
 		"EASYDO_DISK_ROWS_END\n" +
 		"EASYDO_GPU_CSV_BEGIN\n" +
+		"0,NVIDIA H100 PCIe,81920,GPU-aaa,0000:01:00.0,NVIDIA,10240,,75\n" +
+		"1,NVIDIA H100 PCIe,81920,GPU-bbb,0000:02:00.0,NVIDIA,2048,79872,12\n" +
 		"EASYDO_GPU_CSV_END\n" +
+		"EASYDO_RUNTIME_WORKLOADS_BEGIN\n" +
+		"{\"name\":\"trainer\",\"pid\":4242,\"runtime\":\"docker\",\"containerId\":\"ctr-1\",\"containerName\":\"trainer-ctr\"}\n" +
+		"{\"name\":\"trainer\",\"pid\":5252,\"runtime\":\"docker\",\"containerId\":\"ctr-2\",\"containerName\":\"trainer-ctr\"}\n" +
+		"EASYDO_RUNTIME_WORKLOADS_END\n" +
+		"EASYDO_GPU_PROCESS_CSV_BEGIN\n" +
+		"{\"gpuIndex\":0,\"pid\":4242,\"memoryUsedBytes\":8589934592}\n" +
+		"{\"gpuIndex\":1,\"pid\":5252,\"memoryUsedBytes\":2147483648}\n" +
+		"{\"gpuIndex\":9,\"pid\":4242,\"memoryUsedBytes\":123}\n" +
+		"EASYDO_GPU_PROCESS_CSV_END\n" +
 		"EASYDO_BASE_INFO_END\n"
 
-	baseInfoJSON, _, _, err := parseVMBaseInfoOutput(stdout, "remote_task")
+	baseInfoJSON, source, _, err := parseVMBaseInfoOutput(stdout, "remote_task")
 	if err != nil {
 		t.Fatalf("parseVMBaseInfoOutput returned error: %v", err)
 	}
-	var payload map[string]interface{}
+	if source != "remote_task" {
+		t.Fatalf("source=%q, want remote_task", source)
+	}
+	var payload ResourceBaseInfoV3
 	if err := json.Unmarshal([]byte(baseInfoJSON), &payload); err != nil {
-		t.Fatalf("unmarshal base info failed: %v", err)
+		t.Fatalf("unmarshal canonical base info failed: %v", err)
 	}
-	machine, _ := payload["machine"].(map[string]interface{})
-	memory, _ := machine["memory"].(map[string]interface{})
-	storage, _ := machine["storage"].(map[string]interface{})
-	if memory["totalBytes"].(float64) == 0 {
-		t.Fatalf("expected memory total parsed from scientific notation, got payload=%s", baseInfoJSON)
+	if payload.SchemaVersion != 3 || payload.Status != "success" || payload.Source != "remote_task" || payload.CollectedAt == "" {
+		t.Fatalf("unexpected top-level metadata: %+v", payload)
 	}
-	if storage["totalDiskBytes"].(float64) == 0 {
-		t.Fatalf("expected total disk parsed from scientific notation, got payload=%s", baseInfoJSON)
+	if payload.ResourceID != buildResourceBaseInfoResourcePrefix(0) {
+		t.Fatalf("resourceId=%q, want %q", payload.ResourceID, buildResourceBaseInfoResourcePrefix(0))
+	}
+	if len(payload.Entities) != 1 || payload.Entities[0].ID != buildResourceBaseInfoEntityID(0, "host") {
+		t.Fatalf("expected one host entity, got %+v", payload.Entities)
+	}
+	if payload.Labels["tier"] != "infra" || payload.Labels["owner"] != "platform" {
+		t.Fatalf("expected durable labels in canonical top-level labels, got %#v", payload.Labels)
+	}
+	if len(payload.ResourceTypes) != len(approvedResourceBaseInfoResourceTypes()) {
+		t.Fatalf("resourceTypes len=%d, want approved dictionary len=%d", len(payload.ResourceTypes), len(approvedResourceBaseInfoResourceTypes()))
+	}
+	instances := map[string]ResourceBaseInfoResourceInstance{}
+	for _, instance := range payload.ResourceInstances {
+		instances[instance.ID] = instance
+		if instance.ResourceTypeID != "cpu" && instance.ResourceTypeID != "memory" && instance.ResourceTypeID != "gpu" && instance.ResourceTypeID != "storage" {
+			t.Fatalf("unexpected non-canonical resourceTypeId=%q in %+v", instance.ResourceTypeID, instance)
+		}
+		for _, measure := range append(append([]ResourceBaseInfoMeasure{}, instance.Capacity...), instance.Metrics...) {
+			if err := validateResourceBaseInfoMeasureShape(measure); err != nil {
+				t.Fatalf("invalid measure emitted for %s: %v measure=%+v", instance.ID, err, measure)
+			}
+		}
+	}
+	cpuInstance := instances[buildResourceBaseInfoResourceInstanceID(0, "cpu", "pool")]
+	memoryInstance := instances[buildResourceBaseInfoResourceInstanceID(0, "memory", "pool")]
+	storagePool := instances[buildResourceBaseInfoResourceInstanceID(0, "storage", "pool")]
+	storageDisk := instances[buildResourceBaseInfoResourceInstanceID(0, "storage", "nvme0n1p3")]
+	gpu0 := instances[buildResourceBaseInfoResourceInstanceID(0, "gpu", "0")]
+	gpu1 := instances[buildResourceBaseInfoResourceInstanceID(0, "gpu", "1")]
+	if cpuInstance.ResourceTypeID != "cpu" || memoryInstance.ResourceTypeID != "memory" || storagePool.ResourceTypeID != "storage" || storageDisk.ResourceTypeID != "storage" || gpu0.ResourceTypeID != "gpu" || gpu1.ResourceTypeID != "gpu" {
+		t.Fatalf("expected canonical cpu/memory/storage/gpu resource instances, got %+v", payload.ResourceInstances)
+	}
+	if len(cpuInstance.Capacity) < 2 || cpuInstance.Capacity[0].Allocatable == nil || cpuInstance.Capacity[1].Used == nil {
+		t.Fatalf("expected cpu pool allocatable/used measures, got %+v", cpuInstance.Capacity)
+	}
+	if len(memoryInstance.Capacity) < 2 || memoryInstance.Capacity[0].Allocatable == nil || memoryInstance.Capacity[1].Used == nil {
+		t.Fatalf("expected memory pool allocatable/used measures, got %+v", memoryInstance.Capacity)
+	}
+	if len(storagePool.Capacity) < 2 || storagePool.Capacity[0].Capacity == nil || storagePool.Capacity[1].Capacity == nil {
+		t.Fatalf("expected storage pool total/root measures, got %+v", storagePool.Capacity)
+	}
+	if len(storageDisk.Capacity) != 1 || storageDisk.Capacity[0].Capacity == nil {
+		t.Fatalf("expected disk row storage capacity measure, got %+v", storageDisk.Capacity)
+	}
+	if len(storageDisk.Identity) == 0 || len(storageDisk.Spec) == 0 {
+		t.Fatalf("expected disk row storage identity/spec, got %+v", storageDisk)
+	}
+	if len(gpu0.Identity) == 0 || len(gpu0.Spec) == 0 || len(gpu0.Capacity) == 0 || len(gpu0.Metrics) == 0 {
+		t.Fatalf("expected gpu instance identity/spec/capacity/metrics, got %+v", gpu0)
+	}
+	for _, measure := range append(gpu0.Capacity, gpu0.Metrics...) {
+		if measure.Available != nil {
+			t.Fatalf("expected gpu0 available to be omitted when collector did not report it, got %+v", gpu0)
+		}
+	}
+	gpu1HasAvailable := false
+	for _, measure := range append(gpu1.Capacity, gpu1.Metrics...) {
+		if measure.Available != nil {
+			gpu1HasAvailable = true
+		}
+	}
+	if !gpu1HasAvailable {
+		t.Fatalf("expected gpu1 available measure when collector reported it, got %+v", gpu1)
+	}
+	if len(payload.Services) != 2 {
+		t.Fatalf("services len=%d, want 2 workloads", len(payload.Services))
+	}
+	serviceIDs := map[string]struct{}{}
+	for _, service := range payload.Services {
+		serviceIDs[service.ID] = struct{}{}
+		if service.EntityID != buildResourceBaseInfoEntityID(0, "host") {
+			t.Fatalf("service entityId=%q, want host entity", service.EntityID)
+		}
+		if len(service.ResourceInstanceIDs) != 1 {
+			t.Fatalf("expected each runtime workload service to link one emitted gpu instance, got %+v", service)
+		}
+		if service.ResourceInstanceIDs[0] != gpu0.ID && service.ResourceInstanceIDs[0] != gpu1.ID {
+			t.Fatalf("expected service linkage to emitted gpu instance only, got %+v", service)
+		}
+	}
+	if payload.Services[0].ID == payload.Services[1].ID {
+		t.Fatalf("expected duplicate workload names/container names to still produce distinct service ids, got %+v", payload.Services)
+	}
+	if len(payload.Allocations) != 2 {
+		t.Fatalf("allocations len=%d, want 2 emitted gpu references only", len(payload.Allocations))
+	}
+	for _, allocation := range payload.Allocations {
+		if len(allocation.Claims) != 1 {
+			t.Fatalf("expected one claim per allocation, got %+v", allocation)
+		}
+		claim := allocation.Claims[0]
+		if _, ok := serviceIDs[claim.ServiceID]; !ok {
+			t.Fatalf("allocation references unknown service: %+v", allocation)
+		}
+		if claim.ResourceInstanceID != gpu0.ID && claim.ResourceInstanceID != gpu1.ID {
+			t.Fatalf("allocation references unexpected or dangling gpu instance: %+v", allocation)
+		}
+		if len(claim.Dimensions) == 0 {
+			t.Fatalf("expected allocation claim dimensions, got %+v", allocation)
+		}
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(baseInfoJSON), &raw); err != nil {
+		t.Fatalf("unmarshal raw canonical base info failed: %v", err)
+	}
+	for _, banned := range []string{"machine", "vm", "k8s", "nodes", "gpus", "carriers", "matrix", "axes", "cells"} {
+		if _, exists := raw[banned]; exists {
+			t.Fatalf("unexpected banned section %q in canonical payload: %s", banned, baseInfoJSON)
+		}
+	}
+	if serviceRaw, ok := raw["services"].([]interface{}); ok {
+		for _, item := range serviceRaw {
+			serviceMap, _ := item.(map[string]interface{})
+			if _, exists := serviceMap["allocations"]; exists {
+				t.Fatalf("unexpected banned service.allocations section: %s", baseInfoJSON)
+			}
+		}
+	}
+	if instanceRaw, ok := raw["resourceInstances"].([]interface{}); ok {
+		for _, item := range instanceRaw {
+			instanceMap, _ := item.(map[string]interface{})
+			if _, exists := instanceMap["usedBy"]; exists {
+				t.Fatalf("unexpected banned resourceInstance.usedBy section: %s", baseInfoJSON)
+			}
+		}
+	}
+}
+
+func TestBuildResourceBaseInfoJSON_VMCanonicalMergeKeepsOnlyTopLevelDurableLabels(t *testing.T) {
+	paramsJSON, err := json.Marshal(resourceBaseInfoTaskPayload{
+		Collection: resourceBaseInfoCollectionSnapshot{
+			Kind:            "resource_base_info_refresh",
+			ResourceID:      42,
+			ResourceType:    models.ResourceTypeVM,
+			CollectorSource: "remote_task",
+		},
+		NodeConfig: map[string]interface{}{
+			"resource_labels": map[string]interface{}{
+				"tier":       "infra",
+				"owner":      "platform",
+				"resourceId": "bad",
+				"vm":         map[string]interface{}{"bad": true},
+			},
+			"labels": map[string]interface{}{
+				"fromGeneric": "should-not-merge",
+				"owner":       "generic-owner",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal task params failed: %v", err)
+	}
+	stdout := "EASYDO_BASE_INFO_BEGIN\n" +
+		"EASYDO_HOSTNAME=ubuntu\n" +
+		"EASYDO_PRIMARY_IPV4=10.0.0.8\n" +
+		"EASYDO_OS_NAME=Ubuntu 22.04.4 LTS\n" +
+		"EASYDO_OS_VERSION=22.04\n" +
+		"EASYDO_KERNEL_VERSION=6.5.0-18-generic\n" +
+		"EASYDO_ARCH=x86_64\n" +
+		"EASYDO_CPU_MODEL=Intel(R) Xeon(R)\n" +
+		"EASYDO_CPU_LOGICAL_CORES=12\n" +
+		"EASYDO_CPU_USED_CORES=1.5\n" +
+		"EASYDO_MEMORY_TOTAL_BYTES=6.5536e+10\n" +
+		"EASYDO_MEMORY_USED_BYTES=2147483648\n" +
+		"EASYDO_GPU_COUNT=0\n" +
+		"EASYDO_RESOURCE_LABELS_JSON={\"tier\":\"infra\"}\n" +
+		"EASYDO_DISK_ROWS_BEGIN\n" +
+		"EASYDO_DISK_ROWS_END\n" +
+		"EASYDO_GPU_CSV_BEGIN\n" +
+		"EASYDO_GPU_CSV_END\n" +
+		"EASYDO_RUNTIME_WORKLOADS_BEGIN\n" +
+		"EASYDO_RUNTIME_WORKLOADS_END\n" +
+		"EASYDO_GPU_PROCESS_CSV_BEGIN\n" +
+		"EASYDO_GPU_PROCESS_CSV_END\n" +
+		"EASYDO_BASE_INFO_END\n"
+
+	baseInfoJSON, _, _, err := buildResourceBaseInfoJSON(&models.AgentTask{Params: string(paramsJSON)}, map[string]interface{}{"stdout": stdout})
+	if err != nil {
+		t.Fatalf("buildResourceBaseInfoJSON returned error: %v", err)
+	}
+	var payload ResourceBaseInfoV3
+	if err := json.Unmarshal([]byte(baseInfoJSON), &payload); err != nil {
+		t.Fatalf("unmarshal canonical base info failed: %v", err)
+	}
+	if payload.ResourceID != buildResourceBaseInfoResourcePrefix(42) {
+		t.Fatalf("resourceId=%q, want %q", payload.ResourceID, buildResourceBaseInfoResourcePrefix(42))
+	}
+	if payload.Labels["tier"] != "infra" || payload.Labels["owner"] != "platform" {
+		t.Fatalf("expected durable top-level labels merged, got %#v", payload.Labels)
+	}
+	if _, exists := payload.Labels["resourceId"]; exists {
+		t.Fatalf("expected reserved resourceId label to be filtered, got %#v", payload.Labels)
+	}
+	if _, exists := payload.Labels["vm"]; exists {
+		t.Fatalf("expected legacy vm label block to stay out of canonical labels, got %#v", payload.Labels)
+	}
+	if _, exists := payload.Labels["fromGeneric"]; exists {
+		t.Fatalf("expected generic nodeConfig.labels to stay out of canonical labels, got %#v", payload.Labels)
+	}
+	if payload.Labels["owner"] != "platform" {
+		t.Fatalf("expected resource_labels owner to win and generic labels owner to be ignored, got %#v", payload.Labels)
+	}
+}
+
+func TestParseK8sBaseInfoOutput_EmitsCanonicalBaseInfoV3(t *testing.T) {
+	stdout := "EASYDO_K8S_VERSION_BEGIN\n" +
+		`{"serverVersion":{"gitVersion":"v1.29.3"}}` + "\n" +
+		"EASYDO_K8S_VERSION_END\n" +
+		"EASYDO_K8S_NODES_BEGIN\n" +
+		`{"items":[{"metadata":{"name":"node-a","labels":{"node-role.kubernetes.io/control-plane":"","kubernetes.io/hostname":"node-a"},"annotations":{"easydo.io/gpu-cards":"[{\"name\":\"gpu0\",\"uuid\":\"GPU-aaa\",\"busId\":\"0000:81:00.0\",\"vendor\":\"NVIDIA\",\"model\":\"NVIDIA H100 PCIe\",\"memoryBytes\":85899345920}]"}},"status":{"nodeInfo":{"architecture":"amd64","osImage":"Ubuntu 22.04.4 LTS","kubeletVersion":"v1.29.3"},"capacity":{"cpu":"8","memory":"32Gi","pods":"110","nvidia.com/gpu":"1"},"allocatable":{"cpu":"7500m","memory":"30Gi","pods":"100","nvidia.com/gpu":"1"}}},{"metadata":{"name":"node-b","labels":{"node-role.kubernetes.io/worker":""}},"status":{"nodeInfo":{"architecture":"amd64","osImage":"Ubuntu 22.04.4 LTS","kubeletVersion":"v1.29.3"},"capacity":{"cpu":"16","memory":"64Gi","pods":"110"},"allocatable":{"cpu":"15500m","memory":"60Gi","pods":"100"}}}]}` + "\n" +
+		"EASYDO_K8S_NODES_END\n" +
+		"EASYDO_K8S_PODS_BEGIN\n" +
+		`{"items":[{"metadata":{"uid":"pod-uid-1","name":"trainer-a","namespace":"ml"},"spec":{"nodeName":"node-a","containers":[{"name":"trainer","resources":{"requests":{"cpu":"500m","memory":"1Gi","nvidia.com/gpu":"1"}}}]},"status":{"phase":"Running"}},{"metadata":{"uid":"pod-uid-2","name":"trainer-b","namespace":"ml"},"spec":{"nodeName":"node-b","containers":[{"name":"trainer","resources":{"requests":{"cpu":"250m","memory":"512Mi"}}}]},"status":{"phase":"Pending"}},{"metadata":{"name":"missing-uid","namespace":"default"},"spec":{"nodeName":"node-a","containers":[{"name":"sidecar","resources":{"requests":{"cpu":"100m","memory":"128Mi"}}}]},"status":{"phase":"Running"}}]}` + "\n" +
+		"EASYDO_K8S_PODS_END\n"
+
+	baseInfoJSON, source, _, err := parseK8sBaseInfoOutput(stdout, "k8s_api")
+	if err != nil {
+		t.Fatalf("parseK8sBaseInfoOutput returned error: %v", err)
+	}
+	if source != "k8s_api" {
+		t.Fatalf("source=%q, want k8s_api", source)
+	}
+	var payload ResourceBaseInfoV3
+	if err := json.Unmarshal([]byte(baseInfoJSON), &payload); err != nil {
+		t.Fatalf("unmarshal canonical k8s base info failed: %v", err)
+	}
+	if payload.SchemaVersion != 3 || payload.Status != "success" || payload.Source != "k8s_api" || payload.CollectedAt == "" {
+		t.Fatalf("unexpected top-level metadata: %+v", payload)
+	}
+	if payload.ResourceID != buildResourceBaseInfoResourcePrefix(0) {
+		t.Fatalf("resourceId=%q, want %q", payload.ResourceID, buildResourceBaseInfoResourcePrefix(0))
+	}
+	if len(payload.Entities) != 2 {
+		t.Fatalf("entities len=%d, want 2 nodes", len(payload.Entities))
+	}
+	if len(payload.ResourceTypes) != len(approvedResourceBaseInfoResourceTypes()) {
+		t.Fatalf("resourceTypes len=%d, want approved dictionary len=%d", len(payload.ResourceTypes), len(approvedResourceBaseInfoResourceTypes()))
+	}
+	for _, resourceType := range payload.ResourceTypes {
+		approved := false
+		for _, approvedType := range approvedResourceBaseInfoResourceTypes() {
+			if resourceType.ID == approvedType.ID {
+				approved = true
+				break
+			}
+		}
+		if !approved {
+			t.Fatalf("unexpected resourceType id=%q in %+v", resourceType.ID, payload.ResourceTypes)
+		}
+	}
+	instances := map[string]ResourceBaseInfoResourceInstance{}
+	for _, instance := range payload.ResourceInstances {
+		instances[instance.ID] = instance
+		if instance.ResourceTypeID != "cpu" && instance.ResourceTypeID != "memory" && instance.ResourceTypeID != "gpu" {
+			t.Fatalf("unexpected non-canonical resourceTypeId=%q in %+v", instance.ResourceTypeID, instance)
+		}
+		for _, measure := range append(append([]ResourceBaseInfoMeasure{}, instance.Capacity...), instance.Metrics...) {
+			if err := validateResourceBaseInfoMeasureShape(measure); err != nil {
+				t.Fatalf("invalid measure emitted for %s: %v measure=%+v", instance.ID, err, measure)
+			}
+			if measure.Available != nil {
+				t.Fatalf("expected available to be omitted unless directly observable, got %+v in %+v", measure, instance)
+			}
+		}
+	}
+	nodeAEntityID := buildResourceBaseInfoEntityID(0, "node-a")
+	nodeBEntityID := buildResourceBaseInfoEntityID(0, "node-b")
+	cpuA := instances[buildResourceBaseInfoResourceInstanceID(0, "cpu", "node-a-pool")]
+	memoryA := instances[buildResourceBaseInfoResourceInstanceID(0, "memory", "node-a-pool")]
+	cpuB := instances[buildResourceBaseInfoResourceInstanceID(0, "cpu", "node-b-pool")]
+	memoryB := instances[buildResourceBaseInfoResourceInstanceID(0, "memory", "node-b-pool")]
+	gpu0 := instances[buildResourceBaseInfoResourceInstanceID(0, "gpu", "GPU-aaa")]
+	if cpuA.EntityID != nodeAEntityID || memoryA.EntityID != nodeAEntityID || cpuB.EntityID != nodeBEntityID || memoryB.EntityID != nodeBEntityID {
+		t.Fatalf("expected node-scoped cpu/memory pools, got %+v", payload.ResourceInstances)
+	}
+	if len(cpuA.Capacity) < 2 || cpuA.Capacity[0].Allocatable == nil || cpuA.Capacity[1].Used == nil {
+		t.Fatalf("expected node-a cpu pool allocatable/used measures, got %+v", cpuA.Capacity)
+	}
+	if *cpuA.Capacity[0].Allocatable != 7500 || *cpuA.Capacity[1].Used != 500 {
+		t.Fatalf("expected node-a cpu allocatable=7500 used=500, got %+v", cpuA.Capacity)
+	}
+	if len(memoryA.Capacity) < 2 || memoryA.Capacity[0].Allocatable == nil || memoryA.Capacity[1].Used == nil {
+		t.Fatalf("expected node-a memory pool allocatable/used measures, got %+v", memoryA.Capacity)
+	}
+	if *memoryA.Capacity[1].Used != float64(1024*1024*1024) {
+		t.Fatalf("expected node-a memory used from observable pod requests, got %+v", memoryA.Capacity)
+	}
+	if len(gpu0.Identity) == 0 || len(gpu0.Spec) == 0 || len(gpu0.Capacity) != 1 || gpu0.ResourceTypeID != "gpu" || gpu0.EntityID != nodeAEntityID {
+		t.Fatalf("expected gpu card resource instance when identity is observable, got %+v", gpu0)
+	}
+	if len(payload.Services) != 2 {
+		t.Fatalf("services len=%d, want 2 pods with uid only", len(payload.Services))
+	}
+	serviceIDs := map[string]ResourceBaseInfoService{}
+	for _, service := range payload.Services {
+		serviceIDs[service.ID] = service
+		if service.ID != buildResourceBaseInfoServiceID(0, "pod-uid-1") && service.ID != buildResourceBaseInfoServiceID(0, "pod-uid-2") {
+			t.Fatalf("expected service ids derived from pod uid only, got %+v", service)
+		}
+		if len(service.ResourceInstanceIDs) != 0 {
+			t.Fatalf("expected no fabricated card bindings on services, got %+v", service)
+		}
+	}
+	if serviceIDs[buildResourceBaseInfoServiceID(0, "pod-uid-1")].EntityID != nodeAEntityID {
+		t.Fatalf("expected pod-uid-1 service bound to node-a entity, got %+v", serviceIDs[buildResourceBaseInfoServiceID(0, "pod-uid-1")])
+	}
+	if len(payload.Allocations) != 0 {
+		t.Fatalf("expected no allocations when card-level binding is unavailable, got %+v", payload.Allocations)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(baseInfoJSON), &raw); err != nil {
+		t.Fatalf("unmarshal raw canonical base info failed: %v", err)
+	}
+	for _, banned := range []string{"machine", "vm", "k8s", "nodes", "gpus", "carriers", "matrix", "axes", "cells"} {
+		if _, exists := raw[banned]; exists {
+			t.Fatalf("unexpected banned section %q in canonical payload: %s", banned, baseInfoJSON)
+		}
+	}
+	if serviceRaw, ok := raw["services"].([]interface{}); ok {
+		for _, item := range serviceRaw {
+			serviceMap, _ := item.(map[string]interface{})
+			if _, exists := serviceMap["allocations"]; exists {
+				t.Fatalf("unexpected banned service.allocations section: %s", baseInfoJSON)
+			}
+		}
+	}
+	if instanceRaw, ok := raw["resourceInstances"].([]interface{}); ok {
+		for _, item := range instanceRaw {
+			instanceMap, _ := item.(map[string]interface{})
+			if _, exists := instanceMap["usedBy"]; exists {
+				t.Fatalf("unexpected banned resourceInstance.usedBy section: %s", baseInfoJSON)
+			}
+		}
+	}
+}
+
+func TestParseK8sBaseInfoOutput_MergesExplicitAndAnnotationGPUCards(t *testing.T) {
+	stdout := "EASYDO_K8S_VERSION_BEGIN\n" +
+		`{"serverVersion":{"gitVersion":"v1.29.3"}}` + "\n" +
+		"EASYDO_K8S_VERSION_END\n" +
+		"EASYDO_K8S_NODES_BEGIN\n" +
+		`{"items":[{"metadata":{"name":"node-a"},"status":{"nodeInfo":{"architecture":"amd64"},"allocatable":{"cpu":"4000m","memory":"8Gi","pods":"100"}}},{"metadata":{"name":"node-b","annotations":{"easydo.io/gpu-cards":"[{\"name\":\"ann-gpu\",\"uuid\":\"GPU-ann-b\",\"memoryBytes\":24576}]"}},"status":{"nodeInfo":{"architecture":"amd64"},"allocatable":{"cpu":"4000m","memory":"8Gi","pods":"100"}}}]}` + "\n" +
+		"EASYDO_K8S_NODES_END\n" +
+		"EASYDO_K8S_GPU_CARDS_BEGIN\n" +
+		`{"items":[{"nodeName":"node-a","name":"doc-gpu","uuid":"GPU-doc-a","memoryBytes":49152}]}` + "\n" +
+		"EASYDO_K8S_GPU_CARDS_END\n" +
+		`EASYDO_K8S_PODS_BEGIN
+{"items":[]}
+EASYDO_K8S_PODS_END
+`
+
+	baseInfoJSON, _, _, err := parseK8sBaseInfoOutput(stdout, "k8s_api")
+	if err != nil {
+		t.Fatalf("parseK8sBaseInfoOutput returned error: %v", err)
+	}
+	var payload ResourceBaseInfoV3
+	if err := json.Unmarshal([]byte(baseInfoJSON), &payload); err != nil {
+		t.Fatalf("unmarshal canonical k8s base info failed: %v", err)
+	}
+	gpuCount := 0
+	seen := map[string]bool{}
+	for _, instance := range payload.ResourceInstances {
+		if instance.ResourceTypeID != "gpu" {
+			continue
+		}
+		gpuCount++
+		for _, field := range instance.Identity {
+			if field.Name == "uuid" {
+				seen[convertToString(field.Value)] = true
+			}
+		}
+	}
+	if gpuCount != 2 {
+		t.Fatalf("gpu resourceInstances len=%d, want 2 from mixed explicit+annotation sources", gpuCount)
+	}
+	if !seen["GPU-doc-a"] || !seen["GPU-ann-b"] {
+		t.Fatalf("expected both explicit and annotation gpu cards, got %+v", payload.ResourceInstances)
+	}
+}
+
+func TestParseK8sBaseInfoOutput_NodeScopedFallbackGPUIdentityAndBindings(t *testing.T) {
+	stdout := "EASYDO_K8S_VERSION_BEGIN\n" +
+		`{"serverVersion":{"gitVersion":"v1.29.3"}}` + "\n" +
+		"EASYDO_K8S_VERSION_END\n" +
+		"EASYDO_K8S_NODES_BEGIN\n" +
+		`{"items":[{"metadata":{"name":"node-a","annotations":{"easydo.io/gpu-cards":"[{\"name\":\"gpu0\",\"memoryBytes\":24576}]"}},"status":{"nodeInfo":{"architecture":"amd64"},"allocatable":{"cpu":"4000m","memory":"8Gi","pods":"100"}}},{"metadata":{"name":"node-b","annotations":{"easydo.io/gpu-cards":"[{\"name\":\"gpu0\",\"memoryBytes\":24576}]"}},"status":{"nodeInfo":{"architecture":"amd64"},"allocatable":{"cpu":"4000m","memory":"8Gi","pods":"100"}}}]}` + "\n" +
+		"EASYDO_K8S_NODES_END\n" +
+		"EASYDO_K8S_PODS_BEGIN\n" +
+		`{"items":[{"metadata":{"uid":"pod-uid-1","name":"trainer-a","namespace":"ml","annotations":{"easydo.io/gpu-card-ids":"gpu0"}},"spec":{"nodeName":"node-a","containers":[{"name":"trainer","resources":{"requests":{"cpu":"250m","memory":"512Mi"}}}]},"status":{"phase":"Running"}},{"metadata":{"uid":"pod-uid-2","name":"trainer-b","namespace":"ml","annotations":{"easydo.io/gpu-card-ids":"gpu0"}},"spec":{"nodeName":"node-b","containers":[{"name":"trainer","resources":{"requests":{"cpu":"250m","memory":"512Mi"}}}]},"status":{"phase":"Running"}}]}` + "\n" +
+		"EASYDO_K8S_PODS_END\n"
+
+	baseInfoJSON, _, _, err := parseK8sBaseInfoOutput(stdout, "k8s_api")
+	if err != nil {
+		t.Fatalf("parseK8sBaseInfoOutput returned error: %v", err)
+	}
+	var payload ResourceBaseInfoV3
+	if err := json.Unmarshal([]byte(baseInfoJSON), &payload); err != nil {
+		t.Fatalf("unmarshal canonical k8s base info failed: %v", err)
+	}
+	nodeAGPU := buildResourceBaseInfoResourceInstanceID(0, "gpu", k8sGPUCardIdentityKey(k8sGPUCardIdentity{NodeName: "node-a", Name: "gpu0"}))
+	nodeBGPU := buildResourceBaseInfoResourceInstanceID(0, "gpu", k8sGPUCardIdentityKey(k8sGPUCardIdentity{NodeName: "node-b", Name: "gpu0"}))
+	if nodeAGPU == nodeBGPU {
+		t.Fatalf("expected node-scoped fallback gpu ids to differ, got %q", nodeAGPU)
+	}
+	serviceByID := map[string]ResourceBaseInfoService{}
+	for _, service := range payload.Services {
+		serviceByID[service.ID] = service
+	}
+	if got := serviceByID[buildResourceBaseInfoServiceID(0, "pod-uid-1")].ResourceInstanceIDs; len(got) != 1 || got[0] != nodeAGPU {
+		t.Fatalf("expected pod-uid-1 to bind node-a gpu, got %+v", got)
+	}
+	if got := serviceByID[buildResourceBaseInfoServiceID(0, "pod-uid-2")].ResourceInstanceIDs; len(got) != 1 || got[0] != nodeBGPU {
+		t.Fatalf("expected pod-uid-2 to bind node-b gpu, got %+v", got)
+	}
+	allocationTargets := map[string]bool{}
+	for _, allocation := range payload.Allocations {
+		for _, claim := range allocation.Claims {
+			allocationTargets[claim.ResourceInstanceID] = true
+		}
+	}
+	if !allocationTargets[nodeAGPU] || !allocationTargets[nodeBGPU] || len(allocationTargets) != 2 {
+		t.Fatalf("expected distinct node-scoped allocation targets, got %+v", payload.Allocations)
+	}
+}
+
+func TestBuildResourceBaseInfoJSON_K8sCanonicalMergeKeepsOnlyTopLevelDurableLabels(t *testing.T) {
+	paramsJSON, err := json.Marshal(resourceBaseInfoTaskPayload{
+		Collection: resourceBaseInfoCollectionSnapshot{
+			Kind:            "resource_base_info_refresh",
+			ResourceID:      43,
+			ResourceType:    models.ResourceTypeK8sCluster,
+			CollectorSource: "k8s_api",
+		},
+		NodeConfig: map[string]interface{}{
+			"resource_labels": map[string]interface{}{
+				"tier":       "infra",
+				"owner":      "platform",
+				"resourceId": "bad",
+				"k8s":        map[string]interface{}{"bad": true},
+			},
+			"labels": map[string]interface{}{
+				"fromGeneric": "should-not-merge",
+				"owner":       "generic-owner",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal task params failed: %v", err)
+	}
+	stdout := "EASYDO_K8S_VERSION_BEGIN\n" +
+		`{"serverVersion":{"gitVersion":"v1.29.3"}}` + "\n" +
+		"EASYDO_K8S_VERSION_END\n" +
+		"EASYDO_K8S_NODES_BEGIN\n" +
+		`{"items":[{"metadata":{"name":"node-a"},"status":{"nodeInfo":{"architecture":"amd64"},"allocatable":{"cpu":"4000m","memory":"8Gi","pods":"100"}}}]}` + "\n" +
+		"EASYDO_K8S_NODES_END\n" +
+		"EASYDO_K8S_PODS_BEGIN\n" +
+		`{"items":[{"metadata":{"uid":"pod-uid-1","name":"trainer-a","namespace":"ml"},"spec":{"nodeName":"node-a","containers":[{"name":"trainer","resources":{"requests":{"cpu":"250m","memory":"512Mi"}}}]},"status":{"phase":"Running"}}]}` + "\n" +
+		"EASYDO_K8S_PODS_END\n"
+
+	baseInfoJSON, _, _, err := buildResourceBaseInfoJSON(&models.AgentTask{Params: string(paramsJSON)}, map[string]interface{}{"stdout": stdout})
+	if err != nil {
+		t.Fatalf("buildResourceBaseInfoJSON returned error: %v", err)
+	}
+	var payload ResourceBaseInfoV3
+	if err := json.Unmarshal([]byte(baseInfoJSON), &payload); err != nil {
+		t.Fatalf("unmarshal canonical k8s base info failed: %v", err)
+	}
+	if payload.ResourceID != buildResourceBaseInfoResourcePrefix(43) {
+		t.Fatalf("resourceId=%q, want %q", payload.ResourceID, buildResourceBaseInfoResourcePrefix(43))
+	}
+	if payload.Labels["tier"] != "infra" || payload.Labels["owner"] != "platform" {
+		t.Fatalf("expected durable top-level labels merged, got %#v", payload.Labels)
+	}
+	if _, exists := payload.Labels["resourceId"]; exists {
+		t.Fatalf("expected reserved resourceId label to be filtered, got %#v", payload.Labels)
+	}
+	if _, exists := payload.Labels["k8s"]; exists {
+		t.Fatalf("expected legacy k8s label block to stay out of canonical labels, got %#v", payload.Labels)
+	}
+	if _, exists := payload.Labels["fromGeneric"]; exists {
+		t.Fatalf("expected generic nodeConfig.labels to stay out of canonical labels, got %#v", payload.Labels)
 	}
 }
 

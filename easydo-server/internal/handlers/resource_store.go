@@ -231,7 +231,7 @@ func (h *ResourceHandler) CreateResource(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": buildResourceResponse(resource)})
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": buildResourceBaseInfoResponse(resource, h.DB)})
 }
 
 func (h *ResourceHandler) VerifyResourceConnection(c *gin.Context) {
@@ -270,7 +270,7 @@ func (h *ResourceHandler) GetResource(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "资源不存在"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": buildResourceResponse(resource)})
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": buildResourceBaseInfoResponse(resource, h.DB)})
 }
 
 func (h *ResourceHandler) ListResourceCredentialBindings(c *gin.Context) {
@@ -430,7 +430,7 @@ func (h *ResourceHandler) UpdateResource(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": buildResourceResponse(resource)})
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": buildResourceBaseInfoResponse(resource, h.DB)})
 }
 
 func (h *ResourceHandler) RefreshResourceBaseInfo(c *gin.Context) {
@@ -3768,6 +3768,18 @@ func parseResourceBaseInfoTaskPayload(raw string) (resourceBaseInfoTaskPayload, 
 	return payload, nil
 }
 
+func extractResourceBaseInfoTaskLabels(payload resourceBaseInfoTaskPayload) map[string]interface{} {
+	labels := map[string]interface{}{}
+	if payload.NodeConfig != nil {
+		if raw, ok := payload.NodeConfig["resource_labels"].(map[string]interface{}); ok {
+			for key, value := range raw {
+				labels[key] = value
+			}
+		}
+	}
+	return labels
+}
+
 func preferredResourceCredentialBinding(resourceType models.ResourceType, bindings []models.ResourceCredentialBinding) *models.ResourceCredentialBinding {
 	preferredPurpose := resourcePrimaryBindingPurpose(resourceType)
 	for i := range bindings {
@@ -3812,19 +3824,20 @@ printf 'EASYDO_MEMORY_TOTAL_BYTES=%s\n' "$MEMORY_TOTAL"
 printf 'EASYDO_ROOT_TOTAL_BYTES=%s\n' "$ROOT_TOTAL"
 printf 'EASYDO_TOTAL_DISK_BYTES=%s\n' "$DISK_TOTAL"
 printf 'EASYDO_GPU_COUNT=%s\n' "$GPU_COUNT"
+printf 'EASYDO_RESOURCE_LABELS_JSON=%s\n' "${EASYDO_RESOURCE_LABELS_JSON:-}"
 printf '%s\n' 'EASYDO_DISK_ROWS_BEGIN'
 lsblk -b -P -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null || true
 printf '%s\n' 'EASYDO_DISK_ROWS_END'
 printf '%s\n' 'EASYDO_GPU_CSV_BEGIN'
 if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader,nounits 2>/dev/null || true
+  nvidia-smi --query-gpu=index,name,memory.total,uuid,pci.bus_id --format=csv,noheader,nounits 2>/dev/null || true
 fi
 printf '%s\n' 'EASYDO_GPU_CSV_END'
 printf '%s\n' 'EASYDO_BASE_INFO_END'`
 }
 
 func buildK8sBaseInfoCollectionCommand() string {
-	return "printf '%s\\n' 'EASYDO_K8S_VERSION_BEGIN'; kubectl version -o json; printf '%s\\n' 'EASYDO_K8S_VERSION_END'; printf '%s\\n' 'EASYDO_K8S_NODES_BEGIN'; kubectl get nodes -o json; printf '%s\\n' 'EASYDO_K8S_NODES_END'"
+	return "printf '%s\\n' 'EASYDO_K8S_VERSION_BEGIN'; kubectl version -o json; printf '%s\\n' 'EASYDO_K8S_VERSION_END'; printf '%s\\n' 'EASYDO_K8S_NODES_BEGIN'; kubectl get nodes -o json; printf '%s\\n' 'EASYDO_K8S_NODES_END'; printf '%s\\n' 'EASYDO_K8S_PODS_BEGIN'; kubectl get pods -A -o json; printf '%s\\n' 'EASYDO_K8S_PODS_END'"
 }
 
 func (h *ResourceHandler) createResourceBaseInfoTask(workspaceID, userID uint64, role string, resource *models.Resource) (*models.AgentTask, error) {
@@ -3890,6 +3903,11 @@ func (h *ResourceHandler) createResourceBaseInfoTask(workspaceID, userID uint64,
 	if err != nil {
 		return nil, fmt.Errorf("连接凭据不完整: %w", err)
 	}
+	if resource.Labels != "" {
+		labelsJSON := strings.TrimSpace(resource.Labels)
+		envMap["EASYDO_RESOURCE_LABELS_JSON"] = labelsJSON
+		nodeConfig["resource_labels"] = decodeJSONObjectField(labelsJSON, map[string]interface{}{})
+	}
 	if resource.Type == models.ResourceTypeK8sCluster && effectiveEndpoint != "" {
 		prefix := slotEnvPrefix(slotName)
 		envMap[prefix+"SERVER"] = effectiveEndpoint
@@ -3949,83 +3967,284 @@ func buildResourceBaseInfoJSON(task *models.AgentTask, result map[string]interfa
 		return "", payload.Collection.CollectorSource, 0, fmt.Errorf("采集结果为空")
 	}
 	if payload.Collection.ResourceType == models.ResourceTypeK8sCluster {
-		return parseK8sBaseInfoOutput(stdout, payload.Collection.CollectorSource)
+		baseInfo, collectedAt, err := buildCanonicalK8sBaseInfo(payload.Collection.ResourceID, stdout, payload.Collection.CollectorSource)
+		if err != nil {
+			return "", payload.Collection.CollectorSource, 0, err
+		}
+		baseInfo = mergeResourceBaseInfoV3Labels(baseInfo, sanitizeCanonicalResourceLabels(extractResourceBaseInfoTaskLabels(payload)))
+		raw, marshalErr := json.Marshal(sanitizeResourceBaseInfoV3(baseInfo))
+		if marshalErr != nil {
+			return "", payload.Collection.CollectorSource, 0, marshalErr
+		}
+		return string(raw), baseInfo.Source, collectedAt, nil
 	}
-	return parseVMBaseInfoOutput(stdout, payload.Collection.CollectorSource)
+	baseInfo, collectedAt, err := buildCanonicalVMBaseInfo(payload.Collection.ResourceID, stdout, payload.Collection.CollectorSource)
+	if err != nil {
+		return "", payload.Collection.CollectorSource, 0, err
+	}
+	baseInfo = mergeResourceBaseInfoV3Labels(baseInfo, sanitizeCanonicalResourceLabels(extractResourceBaseInfoTaskLabels(payload)))
+	raw, marshalErr := json.Marshal(sanitizeResourceBaseInfoV3(baseInfo))
+	if marshalErr != nil {
+		return "", payload.Collection.CollectorSource, 0, marshalErr
+	}
+	return string(raw), baseInfo.Source, collectedAt, nil
 }
 
 func parseVMBaseInfoOutput(stdout, source string) (string, string, int64, error) {
-	sections := parseMarkedCollectorOutput(stdout)
-	if !sections.hasMainBlock {
-		return "", source, 0, fmt.Errorf("基础资源采集结果缺少主标记")
-	}
-	collectedAt := time.Now().Unix()
-	disks := parseVMBaseInfoDisks(sections.diskRows)
-	gpus := parseVMBaseInfoGPUDevices(sections.gpuRows)
-	payload := map[string]interface{}{
-		"schemaVersion": 1,
-		"status":        "success",
-		"source":        defaultIfEmpty(source, "remote_task"),
-		"collectedAt":   collectedAt,
-		"machine": map[string]interface{}{
-			"hostname":    sections.scalars["EASYDO_HOSTNAME"],
-			"primaryIpv4": sections.scalars["EASYDO_PRIMARY_IPV4"],
-			"os": map[string]interface{}{
-				"name":    sections.scalars["EASYDO_OS_NAME"],
-				"version": sections.scalars["EASYDO_OS_VERSION"],
-			},
-			"kernelVersion": sections.scalars["EASYDO_KERNEL_VERSION"],
-			"arch":          sections.scalars["EASYDO_ARCH"],
-			"cpu": map[string]interface{}{
-				"model":        sections.scalars["EASYDO_CPU_MODEL"],
-				"logicalCores": parseIntValue(sections.scalars["EASYDO_CPU_LOGICAL_CORES"]),
-			},
-			"memory": map[string]interface{}{
-				"totalBytes": parseInt64Value(sections.scalars["EASYDO_MEMORY_TOTAL_BYTES"]),
-			},
-			"storage": map[string]interface{}{
-				"rootTotalBytes": parseInt64Value(sections.scalars["EASYDO_ROOT_TOTAL_BYTES"]),
-				"totalDiskBytes": parseInt64Value(sections.scalars["EASYDO_TOTAL_DISK_BYTES"]),
-				"disks":          disks,
-			},
-			"gpu": map[string]interface{}{
-				"count":   parseIntValue(sections.scalars["EASYDO_GPU_COUNT"]),
-				"devices": gpus,
-			},
-		},
-	}
-	data, err := json.Marshal(payload)
+	baseInfo, collectedAt, err := buildCanonicalVMBaseInfo(0, stdout, source)
 	if err != nil {
 		return "", source, 0, err
 	}
-	return string(data), defaultIfEmpty(source, "remote_task"), collectedAt, nil
+	data, marshalErr := json.Marshal(sanitizeResourceBaseInfoV3(baseInfo))
+	if marshalErr != nil {
+		return "", source, 0, marshalErr
+	}
+	return string(data), baseInfo.Source, collectedAt, nil
+}
+
+func buildCanonicalVMBaseInfo(resourceID uint64, stdout, source string) (ResourceBaseInfoV3, int64, error) {
+	sections := parseMarkedCollectorOutput(stdout)
+	if !sections.hasMainBlock {
+		return ResourceBaseInfoV3{}, 0, fmt.Errorf("基础资源采集结果缺少主标记")
+	}
+	collectedAtTime := time.Now().UTC()
+	collectedAt := collectedAtTime.Unix()
+	hostEntityID := buildResourceBaseInfoEntityID(resourceID, "host")
+	baseInfo := buildResourceBaseInfoV3(resourceID, source)
+	baseInfo.CollectedAt = collectedAtTime.Format(time.RFC3339Nano)
+	baseInfo.Entities = []ResourceBaseInfoEntity{{
+		ID:   hostEntityID,
+		Kind: "host",
+		Name: defaultIfEmpty(sections.scalars["EASYDO_HOSTNAME"], sections.scalars["EASYDO_PRIMARY_IPV4"]),
+		Fields: []ResourceBaseInfoField{
+			newResourceBaseInfoField("hostname", sections.scalars["EASYDO_HOSTNAME"]),
+			newResourceBaseInfoField("primaryIpv4", sections.scalars["EASYDO_PRIMARY_IPV4"]),
+			newResourceBaseInfoField("osName", sections.scalars["EASYDO_OS_NAME"]),
+			newResourceBaseInfoField("osVersion", sections.scalars["EASYDO_OS_VERSION"]),
+			newResourceBaseInfoField("kernelVersion", sections.scalars["EASYDO_KERNEL_VERSION"]),
+			newResourceBaseInfoField("arch", sections.scalars["EASYDO_ARCH"]),
+		},
+	}}
+	baseInfo.ResourceTypes = approvedResourceBaseInfoResourceTypes()
+	baseInfo.Labels = sanitizeCanonicalResourceLabels(decodeResourceRuntimeLabels(sections.scalars["EASYDO_RESOURCE_LABELS_JSON"]))
+
+	cpuAllocatable := parseFloat64Value(sections.scalars["EASYDO_CPU_LOGICAL_CORES"])
+	cpuUsed := parseFloat64Value(sections.scalars["EASYDO_CPU_USED_CORES"])
+	memoryAllocatable := parseFloat64Value(sections.scalars["EASYDO_MEMORY_TOTAL_BYTES"])
+	memoryUsed := parseFloat64Value(sections.scalars["EASYDO_MEMORY_USED_BYTES"])
+	storageTotal := parseFloat64Value(sections.scalars["EASYDO_TOTAL_DISK_BYTES"])
+	storageRootTotal := parseFloat64Value(sections.scalars["EASYDO_ROOT_TOTAL_BYTES"])
+	baseInfo.ResourceInstances = []ResourceBaseInfoResourceInstance{
+		{
+			ID:             buildResourceBaseInfoResourceInstanceID(resourceID, "cpu", "pool"),
+			ResourceTypeID: "cpu",
+			EntityID:       hostEntityID,
+			Identity: []ResourceBaseInfoField{
+				newResourceBaseInfoField("pool", "cpu"),
+			},
+			Spec: []ResourceBaseInfoField{
+				newResourceBaseInfoField("model", sections.scalars["EASYDO_CPU_MODEL"]),
+			},
+			Capacity: []ResourceBaseInfoMeasure{
+				{Name: "logicalCores", Allocatable: float64Ptr(cpuAllocatable)},
+				{Name: "logicalCoresUsed", Used: float64Ptr(cpuUsed)},
+			},
+		},
+		{
+			ID:             buildResourceBaseInfoResourceInstanceID(resourceID, "memory", "pool"),
+			ResourceTypeID: "memory",
+			EntityID:       hostEntityID,
+			Identity: []ResourceBaseInfoField{
+				newResourceBaseInfoField("pool", "memory"),
+			},
+			Capacity: []ResourceBaseInfoMeasure{
+				{Name: "memoryBytes", Allocatable: float64Ptr(memoryAllocatable)},
+				{Name: "memoryBytesUsed", Used: float64Ptr(memoryUsed)},
+			},
+		},
+		{
+			ID:             buildResourceBaseInfoResourceInstanceID(resourceID, "storage", "pool"),
+			ResourceTypeID: "storage",
+			EntityID:       hostEntityID,
+			Identity: []ResourceBaseInfoField{
+				newResourceBaseInfoField("pool", "storage"),
+			},
+			Capacity: []ResourceBaseInfoMeasure{
+				{Name: "diskBytes", Capacity: float64Ptr(storageTotal)},
+				{Name: "rootDiskBytes", Capacity: float64Ptr(storageRootTotal)},
+			},
+			Spec: []ResourceBaseInfoField{},
+		},
+	}
+	for _, disk := range parseVMBaseInfoDisks(sections.diskRows) {
+		key := defaultIfEmpty(stringMapValue(disk, "name"), fmt.Sprintf("disk-%d", len(baseInfo.ResourceInstances)))
+		storageInstance := ResourceBaseInfoResourceInstance{
+			ID:             buildResourceBaseInfoResourceInstanceID(resourceID, "storage", key),
+			ResourceTypeID: "storage",
+			EntityID:       hostEntityID,
+			Identity: []ResourceBaseInfoField{
+				newResourceBaseInfoField("name", stringMapValue(disk, "name")),
+				newResourceBaseInfoField("mountpoint", stringMapValue(disk, "mountpoint")),
+			},
+			Spec: []ResourceBaseInfoField{
+				newResourceBaseInfoField("type", stringMapValue(disk, "type")),
+				newResourceBaseInfoField("fsType", stringMapValue(disk, "fsType")),
+			},
+			Capacity: []ResourceBaseInfoMeasure{
+				newResourceBaseInfoMeasureCapacity("diskBytes", parseFloat64MapValue(disk, "totalBytes")),
+			},
+		}
+		baseInfo.ResourceInstances = append(baseInfo.ResourceInstances, storageInstance)
+	}
+
+	gpuInstanceIDs := map[int]string{}
+	for _, device := range parseVMBaseInfoGPUDevices(sections.gpuRows) {
+		gpuIndex := parseIntValue(fmt.Sprint(device["index"]))
+		instance := ResourceBaseInfoResourceInstance{
+			ID:             buildResourceBaseInfoResourceInstanceID(resourceID, "gpu", fmt.Sprintf("%d", gpuIndex)),
+			ResourceTypeID: "gpu",
+			EntityID:       hostEntityID,
+			Identity: []ResourceBaseInfoField{
+				newResourceBaseInfoField("index", gpuIndex),
+				newResourceBaseInfoField("uuid", stringMapValue(device, "uuid")),
+				newResourceBaseInfoField("busId", stringMapValue(device, "busId")),
+			},
+			Spec: []ResourceBaseInfoField{
+				newResourceBaseInfoField("vendor", stringMapValue(device, "vendor")),
+				newResourceBaseInfoField("model", stringMapValue(device, "model")),
+			},
+			Capacity: []ResourceBaseInfoMeasure{
+				newResourceBaseInfoMeasureCapacity("memoryBytes", parseFloat64MapValue(device, "memoryBytes")),
+			},
+			Metrics: []ResourceBaseInfoMeasure{},
+		}
+		if available, ok := optionalFloat64MapValue(device, "availableMemoryBytes"); ok {
+			instance.Capacity = append(instance.Capacity, newResourceBaseInfoMeasureAvailable("memoryBytesAvailable", available))
+		}
+		if used, ok := optionalFloat64MapValue(device, "usedMemoryBytes"); ok {
+			instance.Metrics = append(instance.Metrics, newResourceBaseInfoMeasureValue("memoryBytesUsed", used))
+		}
+		if utilization, ok := optionalFloat64MapValue(device, "utilizationGpuPercent"); ok {
+			instance.Metrics = append(instance.Metrics, newResourceBaseInfoMeasureValue("utilizationGpuPercent", utilization))
+		}
+		baseInfo.ResourceInstances = append(baseInfo.ResourceInstances, instance)
+		gpuInstanceIDs[gpuIndex] = instance.ID
+	}
+
+	workloads := parseVMRuntimeWorkloads(sections.runtimeWorkloadRows)
+	serviceByPID := map[int]ResourceBaseInfoService{}
+	serviceKeyByPID := map[int]string{}
+	serviceOrder := make([]int, 0, len(workloads))
+	for _, workload := range workloads {
+		pid := parseIntValue(fmt.Sprint(workload["pid"]))
+		serviceKey := buildCanonicalVMServiceKey(workload)
+		serviceKeyByPID[pid] = serviceKey
+		serviceOrder = append(serviceOrder, pid)
+		serviceByPID[pid] = ResourceBaseInfoService{
+			ID:       buildResourceBaseInfoServiceID(resourceID, serviceKey),
+			Name:     defaultIfEmpty(stringValue(workload["name"]), defaultIfEmpty(stringValue(workload["containerName"]), serviceKey)),
+			EntityID: hostEntityID,
+			Fields: []ResourceBaseInfoField{
+				newResourceBaseInfoField("pid", pid),
+				newResourceBaseInfoField("runtime", stringValue(workload["runtime"])),
+				newResourceBaseInfoField("containerId", stringValue(workload["containerId"])),
+				newResourceBaseInfoField("containerName", stringValue(workload["containerName"])),
+			},
+		}
+	}
+
+	allocationByID := map[string]*ResourceBaseInfoAllocation{}
+	for _, proc := range parseVMGPUProcessRows(sections.gpuProcessRows) {
+		pid := parseIntValue(fmt.Sprint(proc["pid"]))
+		service, ok := serviceByPID[pid]
+		if !ok {
+			continue
+		}
+		gpuIndex := parseIntValue(fmt.Sprint(proc["gpuIndex"]))
+		gpuInstanceID, exists := gpuInstanceIDs[gpuIndex]
+		if !exists || strings.TrimSpace(gpuInstanceID) == "" {
+			continue
+		}
+		service.ResourceInstanceIDs = appendUniqueString(service.ResourceInstanceIDs, gpuInstanceID)
+		serviceByPID[pid] = service
+		allocationID := buildResourceBaseInfoAllocationID(resourceID, serviceKeyByPID[pid], gpuInstanceID)
+		allocation := allocationByID[allocationID]
+		if allocation == nil {
+			allocation = &ResourceBaseInfoAllocation{ID: allocationID}
+			allocationByID[allocationID] = allocation
+		}
+		dimensions := []ResourceBaseInfoField{newResourceBaseInfoField("pid", pid)}
+		if used, ok := proc["memoryUsedBytes"]; ok {
+			dimensions = append(dimensions, newResourceBaseInfoField("memoryUsedBytes", used))
+		}
+		allocation.Claims = append(allocation.Claims, ResourceBaseInfoAllocationClaim{
+			ServiceID:          service.ID,
+			ResourceInstanceID: gpuInstanceID,
+			Dimensions:         dimensions,
+		})
+	}
+
+	for _, pid := range serviceOrder {
+		baseInfo.Services = append(baseInfo.Services, serviceByPID[pid])
+	}
+	for _, allocation := range allocationByID {
+		baseInfo.Allocations = append(baseInfo.Allocations, *allocation)
+	}
+	return baseInfo, collectedAt, nil
 }
 
 func parseK8sBaseInfoOutput(stdout, source string) (string, string, int64, error) {
+	baseInfo, collectedAt, err := buildCanonicalK8sBaseInfo(0, stdout, source)
+	if err != nil {
+		return "", source, 0, err
+	}
+	data, marshalErr := json.Marshal(sanitizeResourceBaseInfoV3(baseInfo))
+	if marshalErr != nil {
+		return "", source, 0, marshalErr
+	}
+	return string(data), baseInfo.Source, collectedAt, nil
+}
+
+func buildCanonicalK8sBaseInfo(resourceID uint64, stdout, source string) (ResourceBaseInfoV3, int64, error) {
 	versionRaw := extractMarkedSection(stdout, "EASYDO_K8S_VERSION_BEGIN", "EASYDO_K8S_VERSION_END")
 	nodesRaw := extractMarkedSection(stdout, "EASYDO_K8S_NODES_BEGIN", "EASYDO_K8S_NODES_END")
+	podsRaw := extractMarkedSection(stdout, "EASYDO_K8S_PODS_BEGIN", "EASYDO_K8S_PODS_END")
+	gpuCardsRaw := extractMarkedSection(stdout, "EASYDO_K8S_GPU_CARDS_BEGIN", "EASYDO_K8S_GPU_CARDS_END")
 	if versionRaw == "" || nodesRaw == "" {
-		return "", source, 0, fmt.Errorf("K8s 采集结果缺少必要数据")
+		return ResourceBaseInfoV3{}, 0, fmt.Errorf("K8s 采集结果缺少必要数据")
 	}
 	var versionDoc map[string]interface{}
 	if err := json.Unmarshal([]byte(versionRaw), &versionDoc); err != nil {
-		return "", source, 0, fmt.Errorf("K8s version 数据无效")
+		return ResourceBaseInfoV3{}, 0, fmt.Errorf("K8s version 数据无效")
 	}
 	var nodesDoc map[string]interface{}
 	if err := json.Unmarshal([]byte(nodesRaw), &nodesDoc); err != nil {
-		return "", source, 0, fmt.Errorf("K8s nodes 数据无效")
+		return ResourceBaseInfoV3{}, 0, fmt.Errorf("K8s nodes 数据无效")
 	}
+	podsDoc := map[string]interface{}{}
+	if strings.TrimSpace(podsRaw) != "" {
+		if err := json.Unmarshal([]byte(podsRaw), &podsDoc); err != nil {
+			return ResourceBaseInfoV3{}, 0, fmt.Errorf("K8s pods 数据无效")
+		}
+	}
+	gpuCardsDoc := map[string]interface{}{}
+	if strings.TrimSpace(gpuCardsRaw) != "" {
+		if err := json.Unmarshal([]byte(gpuCardsRaw), &gpuCardsDoc); err != nil {
+			return ResourceBaseInfoV3{}, 0, fmt.Errorf("K8s GPU cards 数据无效")
+		}
+	}
+
+	collectedAtTime := time.Now().UTC()
+	collectedAt := collectedAtTime.Unix()
+	baseInfo := buildResourceBaseInfoV3(resourceID, defaultIfEmpty(source, "k8s_api"))
+	baseInfo.CollectedAt = collectedAtTime.Format(time.RFC3339Nano)
+	baseInfo.ResourceTypes = approvedResourceBaseInfoResourceTypes()
+
+	podUsageByNode := buildK8sPodUsageByNode(podsDoc)
+	gpuCardsByNode := buildK8sGPUCardsByNode(nodesDoc, gpuCardsDoc)
 	items, _ := nodesDoc["items"].([]interface{})
-	nodes := make([]map[string]interface{}, 0, len(items))
-	summary := map[string]interface{}{
-		"nodeCount":              len(items),
-		"cpuCapacityMilli":       int64(0),
-		"cpuAllocatableMilli":    int64(0),
-		"memoryCapacityBytes":    int64(0),
-		"memoryAllocatableBytes": int64(0),
-		"podAllocatable":         int64(0),
-		"gpuAllocatable":         int64(0),
-	}
+	nodeEntityIDByName := map[string]string{}
+	gpuInstanceIDByCardKey := map[string]string{}
 	for _, item := range items {
 		node, ok := item.(map[string]interface{})
 		if !ok {
@@ -4034,58 +4253,346 @@ func parseK8sBaseInfoOutput(stdout, source string) (string, string, int64, error
 		metadata, _ := node["metadata"].(map[string]interface{})
 		status, _ := node["status"].(map[string]interface{})
 		nodeInfo, _ := status["nodeInfo"].(map[string]interface{})
-		capacity, _ := status["capacity"].(map[string]interface{})
 		allocatable, _ := status["allocatable"].(map[string]interface{})
-		cpuCapacity := parseK8sCPUMilli(capacity["cpu"])
-		cpuAllocatable := parseK8sCPUMilli(allocatable["cpu"])
-		memoryCapacity := parseK8sBytes(capacity["memory"])
-		memoryAllocatable := parseK8sBytes(allocatable["memory"])
-		podAllocatable := parseK8sInteger(allocatable["pods"])
-		gpuAllocatable := parseK8sGPUResourceCount(allocatable)
-		summary["cpuCapacityMilli"] = summary["cpuCapacityMilli"].(int64) + cpuCapacity
-		summary["cpuAllocatableMilli"] = summary["cpuAllocatableMilli"].(int64) + cpuAllocatable
-		summary["memoryCapacityBytes"] = summary["memoryCapacityBytes"].(int64) + memoryCapacity
-		summary["memoryAllocatableBytes"] = summary["memoryAllocatableBytes"].(int64) + memoryAllocatable
-		summary["podAllocatable"] = summary["podAllocatable"].(int64) + podAllocatable
-		summary["gpuAllocatable"] = summary["gpuAllocatable"].(int64) + gpuAllocatable
-		nodes = append(nodes, map[string]interface{}{
-			"name":                   stringValue(metadata["name"]),
-			"roles":                  extractK8sNodeRoles(metadata),
-			"arch":                   stringValue(nodeInfo["architecture"]),
-			"osImage":                stringValue(nodeInfo["osImage"]),
-			"kubeletVersion":         stringValue(nodeInfo["kubeletVersion"]),
-			"cpuAllocatableMilli":    cpuAllocatable,
-			"memoryAllocatableBytes": memoryAllocatable,
-			"podAllocatable":         podAllocatable,
-			"gpuAllocatable":         gpuAllocatable,
+		nodeName := stringValue(metadata["name"])
+		if nodeName == "" {
+			continue
+		}
+		entityID := buildResourceBaseInfoEntityID(resourceID, nodeName)
+		nodeEntityIDByName[nodeName] = entityID
+		baseInfo.Entities = append(baseInfo.Entities, ResourceBaseInfoEntity{
+			ID:   entityID,
+			Kind: "node",
+			Name: nodeName,
+			Fields: []ResourceBaseInfoField{
+				newResourceBaseInfoField("roles", extractK8sNodeRoles(metadata)),
+				newResourceBaseInfoField("arch", stringValue(nodeInfo["architecture"])),
+				newResourceBaseInfoField("osImage", stringValue(nodeInfo["osImage"])),
+				newResourceBaseInfoField("kubeletVersion", stringValue(nodeInfo["kubeletVersion"])),
+				newResourceBaseInfoField("serverVersion", nestedMapValue(versionDoc, "serverVersion", "gitVersion")),
+			},
+		})
+		usage := podUsageByNode[nodeName]
+		baseInfo.ResourceInstances = append(baseInfo.ResourceInstances,
+			ResourceBaseInfoResourceInstance{
+				ID:             buildResourceBaseInfoResourceInstanceID(resourceID, "cpu", nodeName+"-pool"),
+				ResourceTypeID: "cpu",
+				EntityID:       entityID,
+				Identity:       []ResourceBaseInfoField{newResourceBaseInfoField("pool", "cpu")},
+				Capacity: []ResourceBaseInfoMeasure{
+					{Name: "cpuMilli", Allocatable: float64Ptr(float64(parseK8sCPUMilli(allocatable["cpu"])))},
+					{Name: "cpuMilliUsed", Used: float64Ptr(float64(usage.CPUMilli))},
+				},
+			},
+			ResourceBaseInfoResourceInstance{
+				ID:             buildResourceBaseInfoResourceInstanceID(resourceID, "memory", nodeName+"-pool"),
+				ResourceTypeID: "memory",
+				EntityID:       entityID,
+				Identity:       []ResourceBaseInfoField{newResourceBaseInfoField("pool", "memory")},
+				Capacity: []ResourceBaseInfoMeasure{
+					{Name: "memoryBytes", Allocatable: float64Ptr(float64(parseK8sBytes(allocatable["memory"])))},
+					{Name: "memoryBytesUsed", Used: float64Ptr(float64(usage.MemoryBytes))},
+				},
+			},
+		)
+		for _, gpu := range gpuCardsByNode[nodeName] {
+			identityKey := k8sGPUCardIdentityKey(gpu)
+			if identityKey == "" {
+				continue
+			}
+			instance := ResourceBaseInfoResourceInstance{
+				ID:             buildResourceBaseInfoResourceInstanceID(resourceID, "gpu", identityKey),
+				ResourceTypeID: "gpu",
+				EntityID:       entityID,
+				Identity: []ResourceBaseInfoField{
+					newResourceBaseInfoField("uuid", gpu.UUID),
+					newResourceBaseInfoField("busId", gpu.BusID),
+					newResourceBaseInfoField("name", gpu.Name),
+					newResourceBaseInfoField("index", gpu.Index),
+				},
+				Spec: []ResourceBaseInfoField{
+					newResourceBaseInfoField("vendor", gpu.Vendor),
+					newResourceBaseInfoField("model", gpu.Model),
+				},
+			}
+			if gpu.MemoryBytes > 0 {
+				instance.Capacity = append(instance.Capacity, newResourceBaseInfoMeasureCapacity("memoryBytes", float64(gpu.MemoryBytes)))
+			}
+			if gpu.UsedMemoryBytes > 0 {
+				instance.Metrics = append(instance.Metrics, newResourceBaseInfoMeasureValue("memoryBytesUsed", float64(gpu.UsedMemoryBytes)))
+			}
+			baseInfo.ResourceInstances = append(baseInfo.ResourceInstances, instance)
+			for _, key := range k8sGPUCardLookupKeys(gpu.NodeName, gpu.UUID, gpu.BusID, gpu.Name, gpu.Index) {
+				if strings.TrimSpace(key) != "" {
+					gpuInstanceIDByCardKey[key] = instance.ID
+				}
+			}
+		}
+	}
+
+	allocationByID := map[string]*ResourceBaseInfoAllocation{}
+	podItems, _ := podsDoc["items"].([]interface{})
+	for _, item := range podItems {
+		pod, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		metadata, _ := pod["metadata"].(map[string]interface{})
+		spec, _ := pod["spec"].(map[string]interface{})
+		uid := stringValue(metadata["uid"])
+		if uid == "" {
+			continue
+		}
+		nodeName := stringValue(spec["nodeName"])
+		service := ResourceBaseInfoService{
+			ID:       buildResourceBaseInfoServiceID(resourceID, uid),
+			Name:     defaultIfEmpty(stringValue(metadata["name"]), uid),
+			EntityID: nodeEntityIDByName[nodeName],
+			Fields: []ResourceBaseInfoField{
+				newResourceBaseInfoField("uid", uid),
+				newResourceBaseInfoField("namespace", stringValue(metadata["namespace"])),
+				newResourceBaseInfoField("nodeName", nodeName),
+				newResourceBaseInfoField("phase", stringValue(nestedMapValue(pod, "status", "phase"))),
+			},
+		}
+		for _, cardID := range parseK8sPodGPUCardBindings(metadata) {
+			gpuInstanceID := resolveK8sGPUInstanceID(gpuInstanceIDByCardKey, nodeName, cardID)
+			if strings.TrimSpace(gpuInstanceID) == "" {
+				continue
+			}
+			service.ResourceInstanceIDs = appendUniqueString(service.ResourceInstanceIDs, gpuInstanceID)
+			allocationID := buildResourceBaseInfoAllocationID(resourceID, uid, gpuInstanceID)
+			allocation := allocationByID[allocationID]
+			if allocation == nil {
+				allocation = &ResourceBaseInfoAllocation{ID: allocationID}
+				allocationByID[allocationID] = allocation
+			}
+			allocation.Claims = append(allocation.Claims, ResourceBaseInfoAllocationClaim{
+				ServiceID:          service.ID,
+				ResourceInstanceID: gpuInstanceID,
+				Dimensions:         []ResourceBaseInfoField{newResourceBaseInfoField("podUid", uid)},
+			})
+		}
+		baseInfo.Services = append(baseInfo.Services, service)
+	}
+	for _, allocation := range allocationByID {
+		baseInfo.Allocations = append(baseInfo.Allocations, *allocation)
+	}
+	return baseInfo, collectedAt, nil
+}
+
+type k8sPodObservableUsage struct {
+	CPUMilli    int64
+	MemoryBytes int64
+}
+
+type k8sGPUCardIdentity struct {
+	NodeName       string `json:"nodeName,omitempty"`
+	Name           string `json:"name,omitempty"`
+	UUID           string `json:"uuid,omitempty"`
+	BusID          string `json:"busId,omitempty"`
+	Index          string `json:"index,omitempty"`
+	Vendor         string `json:"vendor,omitempty"`
+	Model          string `json:"model,omitempty"`
+	MemoryBytes    int64  `json:"memoryBytes,omitempty"`
+	UsedMemoryBytes int64 `json:"memoryUsedBytes,omitempty"`
+}
+
+func buildK8sPodUsageByNode(podsDoc map[string]interface{}) map[string]k8sPodObservableUsage {
+	usageByNode := map[string]k8sPodObservableUsage{}
+	items, _ := podsDoc["items"].([]interface{})
+	for _, item := range items {
+		pod, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		metadata, _ := pod["metadata"].(map[string]interface{})
+		if stringValue(metadata["uid"]) == "" {
+			continue
+		}
+		spec, _ := pod["spec"].(map[string]interface{})
+		nodeName := stringValue(spec["nodeName"])
+		if nodeName == "" {
+			continue
+		}
+		usage := usageByNode[nodeName]
+		containers, _ := spec["containers"].([]interface{})
+		for _, rawContainer := range containers {
+			container, _ := rawContainer.(map[string]interface{})
+			resources, _ := container["resources"].(map[string]interface{})
+			requests, _ := resources["requests"].(map[string]interface{})
+			usage.CPUMilli += parseK8sCPUMilli(requests["cpu"])
+			usage.MemoryBytes += parseK8sBytes(requests["memory"])
+		}
+		usageByNode[nodeName] = usage
+	}
+	return usageByNode
+}
+
+func parseK8sNodeGPUCards(metadata map[string]interface{}) []k8sGPUCardIdentity {
+	annotations, _ := metadata["annotations"].(map[string]interface{})
+	raw := strings.TrimSpace(stringValue(annotations["easydo.io/gpu-cards"]))
+	if raw == "" {
+		return nil
+	}
+	var cards []k8sGPUCardIdentity
+	if err := json.Unmarshal([]byte(raw), &cards); err != nil {
+		return nil
+	}
+	filtered := make([]k8sGPUCardIdentity, 0, len(cards))
+	for _, card := range cards {
+		if !k8sGPUCardHasIdentity(card) {
+			continue
+		}
+		filtered = append(filtered, card)
+	}
+	return filtered
+}
+
+func buildK8sGPUCardsByNode(nodesDoc, gpuCardsDoc map[string]interface{}) map[string][]k8sGPUCardIdentity {
+	cardsByNode := map[string][]k8sGPUCardIdentity{}
+	seenByNode := map[string]map[string]struct{}{}
+	appendCard := func(nodeName string, card k8sGPUCardIdentity) {
+		nodeName = strings.TrimSpace(nodeName)
+		if nodeName == "" || !k8sGPUCardHasIdentity(card) {
+			return
+		}
+		card.NodeName = nodeName
+		identityKey := k8sGPUCardIdentityKey(card)
+		if identityKey == "" {
+			return
+		}
+		if seenByNode[nodeName] == nil {
+			seenByNode[nodeName] = map[string]struct{}{}
+		}
+		if _, exists := seenByNode[nodeName][identityKey]; exists {
+			return
+		}
+		seenByNode[nodeName][identityKey] = struct{}{}
+		cardsByNode[nodeName] = append(cardsByNode[nodeName], card)
+	}
+	items, _ := gpuCardsDoc["items"].([]interface{})
+	for _, item := range items {
+		cardMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		appendCard(stringValue(cardMap["nodeName"]), k8sGPUCardIdentity{
+			Name:            stringValue(cardMap["name"]),
+			UUID:            stringValue(cardMap["uuid"]),
+			BusID:           stringValue(cardMap["busId"]),
+			Index:           stringValue(cardMap["index"]),
+			Vendor:          stringValue(cardMap["vendor"]),
+			Model:           stringValue(cardMap["model"]),
+			MemoryBytes:     parseInt64Value(fmt.Sprint(cardMap["memoryBytes"])),
+			UsedMemoryBytes: parseInt64Value(fmt.Sprint(cardMap["memoryUsedBytes"])),
 		})
 	}
-	collectedAt := time.Now().Unix()
-	payload := map[string]interface{}{
-		"schemaVersion": 1,
-		"status":        "success",
-		"source":        defaultIfEmpty(source, "k8s_api"),
-		"collectedAt":   collectedAt,
-		"k8s": map[string]interface{}{
-			"cluster": map[string]interface{}{
-				"serverVersion": nestedMapValue(versionDoc, "serverVersion", "gitVersion"),
-			},
-			"summary": summary,
-			"nodes":   nodes,
-		},
+	items, _ = nodesDoc["items"].([]interface{})
+	for _, item := range items {
+		node, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		metadata, _ := node["metadata"].(map[string]interface{})
+		nodeName := stringValue(metadata["name"])
+		if nodeName == "" {
+			continue
+		}
+		for _, card := range parseK8sNodeGPUCards(metadata) {
+			appendCard(nodeName, card)
+		}
 	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return "", source, 0, err
+	return cardsByNode
+}
+
+func k8sGPUCardHasIdentity(card k8sGPUCardIdentity) bool {
+	return strings.TrimSpace(defaultIfEmpty(card.UUID, defaultIfEmpty(card.BusID, defaultIfEmpty(card.Name, card.Index)))) != ""
+}
+
+func k8sGPUCardScopedLookupKey(nodeName, key string) string {
+	nodeName = strings.TrimSpace(nodeName)
+	key = strings.TrimSpace(key)
+	if nodeName == "" || key == "" {
+		return ""
 	}
-	return string(data), defaultIfEmpty(source, "k8s_api"), collectedAt, nil
+	return nodeName + "::" + key
+}
+
+func k8sGPUCardLookupKeys(nodeName string, keys ...string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(keys)*2)
+	for _, rawKey := range keys {
+		key := strings.TrimSpace(rawKey)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; !exists {
+			seen[key] = struct{}{}
+			result = append(result, key)
+		}
+		scoped := k8sGPUCardScopedLookupKey(nodeName, key)
+		if scoped == "" {
+			continue
+		}
+		if _, exists := seen[scoped]; exists {
+			continue
+		}
+		seen[scoped] = struct{}{}
+		result = append(result, scoped)
+	}
+	return result
+}
+
+func resolveK8sGPUInstanceID(gpuInstanceIDByCardKey map[string]string, nodeName, cardID string) string {
+	for _, key := range []string{k8sGPUCardScopedLookupKey(nodeName, cardID), strings.TrimSpace(cardID)} {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		if gpuInstanceID := strings.TrimSpace(gpuInstanceIDByCardKey[key]); gpuInstanceID != "" {
+			return gpuInstanceID
+		}
+	}
+	return ""
+}
+
+func k8sGPUCardIdentityKey(card k8sGPUCardIdentity) string {
+	if uuid := strings.TrimSpace(card.UUID); uuid != "" {
+		return uuid
+	}
+	fallback := strings.TrimSpace(defaultIfEmpty(card.BusID, defaultIfEmpty(card.Name, card.Index)))
+	if fallback == "" {
+		return ""
+	}
+	return defaultIfEmpty(k8sGPUCardScopedLookupKey(card.NodeName, fallback), fallback)
+}
+
+func parseK8sPodGPUCardBindings(metadata map[string]interface{}) []string {
+	annotations, _ := metadata["annotations"].(map[string]interface{})
+	raw := strings.TrimSpace(stringValue(annotations["easydo.io/gpu-card-ids"]))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	bindings := make([]string, 0, len(parts))
+	for _, part := range parts {
+		binding := strings.TrimSpace(part)
+		if binding == "" {
+			continue
+		}
+		bindings = append(bindings, binding)
+	}
+	return bindings
 }
 
 type collectorOutputSections struct {
-	hasMainBlock bool
-	scalars      map[string]string
-	diskRows     []string
-	gpuRows      []string
+	hasMainBlock       bool
+	scalars            map[string]string
+	diskRows           []string
+	gpuRows            []string
+	gpuProcessRows     []string
+	runtimeWorkloadRows []string
+	labelRows          []string
 }
 
 func parseMarkedCollectorOutput(stdout string) collectorOutputSections {
@@ -4118,6 +4625,24 @@ func parseMarkedCollectorOutput(stdout string) collectorOutputSections {
 		case "EASYDO_GPU_CSV_END":
 			mode = ""
 			continue
+		case "EASYDO_GPU_PROCESS_CSV_BEGIN":
+			mode = "gpu-process"
+			continue
+		case "EASYDO_GPU_PROCESS_CSV_END":
+			mode = ""
+			continue
+		case "EASYDO_RUNTIME_WORKLOADS_BEGIN":
+			mode = "runtime-workload"
+			continue
+		case "EASYDO_RUNTIME_WORKLOADS_END":
+			mode = ""
+			continue
+		case "EASYDO_LABELS_BEGIN":
+			mode = "labels"
+			continue
+		case "EASYDO_LABELS_END":
+			mode = ""
+			continue
 		}
 		if !inMainBlock {
 			continue
@@ -4127,6 +4652,12 @@ func parseMarkedCollectorOutput(stdout string) collectorOutputSections {
 			sections.diskRows = append(sections.diskRows, line)
 		case "gpu":
 			sections.gpuRows = append(sections.gpuRows, line)
+		case "gpu-process":
+			sections.gpuProcessRows = append(sections.gpuProcessRows, line)
+		case "runtime-workload":
+			sections.runtimeWorkloadRows = append(sections.runtimeWorkloadRows, line)
+		case "labels":
+			sections.labelRows = append(sections.labelRows, line)
 		default:
 			parts := strings.SplitN(line, "=", 2)
 			if len(parts) == 2 {
@@ -4195,12 +4726,42 @@ func parseVMBaseInfoGPUDevices(rows []string) []map[string]interface{} {
 		if len(parts) < 3 {
 			continue
 		}
-		devices = append(devices, map[string]interface{}{
+		device := map[string]interface{}{
 			"index":       parseIntValue(strings.TrimSpace(parts[0])),
-			"vendor":      "nvidia",
 			"model":       strings.TrimSpace(parts[1]),
 			"memoryBytes": parseInt64Value(strings.TrimSpace(parts[2])) * 1024 * 1024,
-		})
+		}
+		if len(parts) > 3 {
+			if uuid := strings.TrimSpace(parts[3]); uuid != "" {
+				device["uuid"] = uuid
+			}
+		}
+		if len(parts) > 4 {
+			if busID := strings.TrimSpace(parts[4]); busID != "" {
+				device["busId"] = busID
+			}
+		}
+		if len(parts) > 5 {
+			if vendor := strings.TrimSpace(parts[5]); vendor != "" {
+				device["vendor"] = vendor
+			}
+		}
+		if len(parts) > 6 {
+			if used := strings.TrimSpace(parts[6]); used != "" {
+				device["usedMemoryBytes"] = parseInt64Value(used) * 1024 * 1024
+			}
+		}
+		if len(parts) > 7 {
+			if available := strings.TrimSpace(parts[7]); available != "" {
+				device["availableMemoryBytes"] = parseInt64Value(available) * 1024 * 1024
+			}
+		}
+		if len(parts) > 8 {
+			if utilization := strings.TrimSpace(parts[8]); utilization != "" {
+				device["utilizationGpuPercent"] = parseFloat64Value(utilization)
+			}
+		}
+		devices = append(devices, device)
 	}
 	return devices
 }
@@ -4222,6 +4783,114 @@ func parseInt64Value(raw string) int64 {
 		return int64(value)
 	}
 	return 0
+}
+
+func parseFloat64Value(raw string) float64 {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0
+	}
+	value, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
+func parseVMRuntimeWorkloads(rows []string) []map[string]interface{} {
+	workloads := make([]map[string]interface{}, 0, len(rows))
+	for _, row := range rows {
+		var item map[string]interface{}
+		if err := json.Unmarshal([]byte(row), &item); err != nil {
+			continue
+		}
+		workloads = append(workloads, item)
+	}
+	return workloads
+}
+
+func parseVMGPUProcessRows(rows []string) []map[string]interface{} {
+	processes := make([]map[string]interface{}, 0, len(rows))
+	for _, row := range rows {
+		var item map[string]interface{}
+		if err := json.Unmarshal([]byte(row), &item); err != nil {
+			continue
+		}
+		processes = append(processes, item)
+	}
+	return processes
+}
+
+func buildCanonicalVMServiceKey(workload map[string]interface{}) string {
+	parts := make([]string, 0, 4)
+	if runtime := strings.TrimSpace(stringValue(workload["runtime"])); runtime != "" {
+		parts = append(parts, runtime)
+	}
+	if name := strings.TrimSpace(stringValue(workload["name"])); name != "" {
+		parts = append(parts, name)
+	}
+	if containerName := strings.TrimSpace(stringValue(workload["containerName"])); containerName != "" {
+		parts = append(parts, containerName)
+	}
+	if containerID := strings.TrimSpace(stringValue(workload["containerId"])); containerID != "" {
+		parts = append(parts, containerID)
+	}
+	if pid := parseIntValue(fmt.Sprint(workload["pid"])); pid > 0 {
+		parts = append(parts, fmt.Sprintf("pid-%d", pid))
+	}
+	if len(parts) == 0 {
+		return "runtime-workload"
+	}
+	return strings.Join(parts, "|")
+}
+
+func sanitizeCanonicalResourceLabels(labels map[string]interface{}) map[string]interface{} {
+	if len(labels) == 0 {
+		return map[string]interface{}{}
+	}
+	clean := make(map[string]interface{}, len(labels))
+	for key, value := range labels {
+		if isReservedResourceBaseInfoLabelKey(key) {
+			continue
+		}
+		if _, nested := value.(map[string]interface{}); nested {
+			continue
+		}
+		clean[key] = value
+	}
+	return clean
+}
+
+func stringMapValue(m map[string]interface{}, key string) string {
+	return stringValue(m[key])
+}
+
+func parseFloat64MapValue(m map[string]interface{}, key string) float64 {
+	return parseFloat64Value(fmt.Sprint(m[key]))
+}
+
+func optionalFloat64MapValue(m map[string]interface{}, key string) (float64, bool) {
+	value, ok := m[key]
+	if !ok || value == nil {
+		return 0, false
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "" {
+		return 0, false
+	}
+	return parseFloat64Value(text), true
+}
+
+func appendUniqueString(items []string, value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return items
+	}
+	for _, item := range items {
+		if item == value {
+			return items
+		}
+	}
+	return append(items, value)
 }
 
 func extractK8sNodeRoles(metadata map[string]interface{}) []string {
