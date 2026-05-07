@@ -254,15 +254,36 @@ func TestDiscoverEmbeddedMigrationsIncludesAIAgentFoundationMigration(t *testing
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 4 {
-		t.Fatalf("embedded migration count=%d, want 4", len(migrations))
+	if len(migrations) != 5 {
+		t.Fatalf("embedded migration count=%d, want 5", len(migrations))
 	}
 	latest := migrations[len(migrations)-1]
-	if latest.Version != 4 {
-		t.Fatalf("latest migration version=%d, want 4", latest.Version)
+	if latest.Version != 5 {
+		t.Fatalf("latest migration version=%d, want 5", latest.Version)
 	}
-	if latest.Script != "V4__ai_agent_foundation.sql" {
-		t.Fatalf("latest migration script=%s, want V4__ai_agent_foundation.sql", latest.Script)
+	if latest.Script != "V5__resource_runtime_labels.sql" {
+		t.Fatalf("latest migration script=%s, want V5__resource_runtime_labels.sql", latest.Script)
+	}
+}
+
+func TestEmbeddedResourceRuntimeLabelsMigrationDeclaresDurableLabelTable(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V5__resource_runtime_labels.sql")
+	if err != nil {
+		t.Fatalf("read V5 migration failed: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{
+		"CREATE TABLE `resource_runtime_labels`",
+		"`resource_id` bigint unsigned NOT NULL",
+		"`target_type` varchar(64) NOT NULL",
+		"`target_key` varchar(255) NOT NULL",
+		"UNIQUE KEY `idx_resource_runtime_labels_target` (`workspace_id`,`resource_id`,`target_type`,`target_key`)",
+		"KEY `idx_resource_runtime_labels_workspace_target` (`workspace_id`,`target_type`,`target_key`)",
+		"KEY `idx_resource_runtime_labels_resource_target` (`resource_id`,`target_type`,`target_key`)",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected V5 migration to contain %q, got %s", expected, text)
+		}
 	}
 }
 
@@ -285,8 +306,8 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 4 {
-		t.Fatalf("embedded migration count=%d, want 4", len(migrations))
+	if len(migrations) != 5 {
+		t.Fatalf("embedded migration count=%d, want 5", len(migrations))
 	}
 	if migrations[0].VersionText != "1" || migrations[0].Script != "V1__schema.sql" {
 		t.Fatalf("unexpected first embedded migration: %+v", migrations[0])
@@ -300,7 +321,10 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if migrations[3].VersionText != "4" || migrations[3].Script != "V4__ai_agent_foundation.sql" {
 		t.Fatalf("unexpected fourth embedded migration: %+v", migrations[3])
 	}
-	if len(migrations[0].Statements) == 0 || len(migrations[1].Statements) == 0 || len(migrations[2].Statements) == 0 || len(migrations[3].Statements) == 0 {
+	if migrations[4].VersionText != "5" || migrations[4].Script != "V5__resource_runtime_labels.sql" {
+		t.Fatalf("unexpected fifth embedded migration: %+v", migrations[4])
+	}
+	if len(migrations[0].Statements) == 0 || len(migrations[1].Statements) == 0 || len(migrations[2].Statements) == 0 || len(migrations[3].Statements) == 0 || len(migrations[4].Statements) == 0 {
 		t.Fatalf("expected parsed statements for embedded migrations, got %+v", migrations)
 	}
 }

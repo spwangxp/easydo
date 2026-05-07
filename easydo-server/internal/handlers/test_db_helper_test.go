@@ -85,6 +85,7 @@ func openHandlerTestDB(t *testing.T) *gorm.DB {
 		&models.CredentialEvent{},
 		&models.PipelineCredentialRef{},
 		&models.Resource{},
+		&models.ResourceRuntimeLabel{},
 		&models.ResourceCredentialBinding{},
 		&models.ResourceTerminalSession{},
 		&models.ResourceHealthSnapshot{},

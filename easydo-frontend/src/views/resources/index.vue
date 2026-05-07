@@ -27,7 +27,18 @@
       <el-button @click="fetchResources">刷新</el-button>
     </div>
 
-    <el-table v-loading="loading" :data="filteredResources">
+    <el-table v-loading="loading" :data="filteredResources" row-key="id">
+      <el-table-column type="expand" width="56">
+        <template #default="{ row }">
+          <div v-if="getRuntimeBaseInfo(row).summary.hasCanonicalData" class="expand-panel">
+            <ResourceGpuMatrixPanel
+              :rows="getRuntimeBaseInfo(row).matrix.rows"
+              :columns="getRuntimeBaseInfo(row).matrix.columns"
+              :cells="getRuntimeBaseInfo(row).matrix.cells"
+            />
+          </div>
+        </template>
+      </el-table-column>
       <el-table-column prop="name" label="资源名称" min-width="180" />
       <el-table-column prop="type" label="类型" width="120">
         <template #default="{ row }">
@@ -92,23 +103,24 @@
 
         <el-descriptions v-if="baseInfoDialogResource.type === 'k8s'" :column="2" border>
           <el-descriptions-item label="资源名称">{{ baseInfoDialogResource.name }}</el-descriptions-item>
-          <el-descriptions-item label="集群版本">{{ baseInfoDialogResource.baseInfo?.k8s?.cluster?.serverVersion || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="节点数">{{ baseInfoDialogResource.baseInfo?.k8s?.summary?.nodeCount || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="可分配 CPU">{{ formatCPUMilli(baseInfoDialogResource.baseInfo?.k8s?.summary?.cpuAllocatableMilli) }}</el-descriptions-item>
-          <el-descriptions-item label="可分配内存">{{ formatBytes(baseInfoDialogResource.baseInfo?.k8s?.summary?.memoryAllocatableBytes) }}</el-descriptions-item>
-          <el-descriptions-item label="可分配 GPU">{{ baseInfoDialogResource.baseInfo?.k8s?.summary?.gpuAllocatable || 0 }}</el-descriptions-item>
+          <el-descriptions-item label="集群版本">{{ getRuntimeBaseInfo(baseInfoDialogResource).detail.clusterSummary.clusterVersion || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="节点数">{{ getRuntimeBaseInfo(baseInfoDialogResource).detail.clusterSummary.nodeCount || 0 }}</el-descriptions-item>
+          <el-descriptions-item label="可分配 CPU">{{ formatCPUMilli(getRuntimeBaseInfo(baseInfoDialogResource).detail.clusterSummary.cpuAllocatableMilli) }}</el-descriptions-item>
+          <el-descriptions-item label="可分配内存">{{ formatBytes(getRuntimeBaseInfo(baseInfoDialogResource).detail.clusterSummary.memoryAllocatableBytes) }}</el-descriptions-item>
+          <el-descriptions-item label="可分配 GPU">{{ getRuntimeBaseInfo(baseInfoDialogResource).detail.clusterSummary.gpuAllocatable || 0 }}</el-descriptions-item>
+          <el-descriptions-item label="节点摘要" :span="2">{{ getNodeSummaryText(baseInfoDialogResource) }}</el-descriptions-item>
         </el-descriptions>
 
         <el-descriptions v-else :column="2" border>
           <el-descriptions-item label="资源名称">{{ baseInfoDialogResource.name }}</el-descriptions-item>
-          <el-descriptions-item label="主机名">{{ baseInfoDialogResource.baseInfo?.machine?.hostname || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="IP 地址">{{ baseInfoDialogResource.baseInfo?.machine?.primaryIpv4 || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="系统">{{ getMachineSystemText(baseInfoDialogResource) }}</el-descriptions-item>
-          <el-descriptions-item label="CPU">{{ getMachineCpuText(baseInfoDialogResource) }}</el-descriptions-item>
-          <el-descriptions-item label="内存">{{ formatBytes(baseInfoDialogResource.baseInfo?.machine?.memory?.totalBytes) }}</el-descriptions-item>
-          <el-descriptions-item label="磁盘">{{ formatBytes(getMachineDiskTotal(baseInfoDialogResource)) }}</el-descriptions-item>
-          <el-descriptions-item label="GPU 数量">{{ `${baseInfoDialogResource.baseInfo?.machine?.gpu?.count || 0}` }}</el-descriptions-item>
-          <el-descriptions-item label="GPU 规格" :span="2">{{ getMachineGpuSpecText(baseInfoDialogResource) }}</el-descriptions-item>
+          <el-descriptions-item label="主机名">{{ getRuntimeBaseInfo(baseInfoDialogResource).detail.hostSummary?.hostname || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="IP 地址">{{ getRuntimeBaseInfo(baseInfoDialogResource).detail.hostSummary?.primaryIpv4 || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="系统">{{ getHostSystemText(baseInfoDialogResource) }}</el-descriptions-item>
+          <el-descriptions-item label="CPU">{{ getHostCpuText(baseInfoDialogResource) }}</el-descriptions-item>
+          <el-descriptions-item label="内存">{{ formatBytes(getRuntimeBaseInfo(baseInfoDialogResource).detail.hostSummary?.memoryBytes) }}</el-descriptions-item>
+          <el-descriptions-item label="磁盘">{{ formatBytes(getHostDiskTotal(baseInfoDialogResource)) }}</el-descriptions-item>
+          <el-descriptions-item label="GPU 数量">{{ `${getRuntimeBaseInfo(baseInfoDialogResource).detail.hostSummary?.gpuCount || 0}` }}</el-descriptions-item>
+          <el-descriptions-item label="GPU 规格" :span="2">{{ getHostGpuSpecText(baseInfoDialogResource) }}</el-descriptions-item>
         </el-descriptions>
       </div>
       <template #footer>
@@ -137,6 +149,8 @@ import {
 } from '@/api/resource'
 import { getTaskDetail } from '@/api/task'
 import ResourceForm from './components/ResourceForm.vue'
+import ResourceGpuMatrixPanel from './components/ResourceGpuMatrixPanel.vue'
+import { normalizeRuntimeBaseInfo } from './runtimeBaseInfo'
 import { createTerminalLaunchPath } from './terminal/terminalPageState'
 
 const router = useRouter()
@@ -220,6 +234,7 @@ const fetchResources = async () => {
   loading.value = true
   try {
     const resourceRes = await getResourceList()
+    runtimeBaseInfoCache.clear()
     resources.value = Array.isArray(resourceRes.data) ? resourceRes.data.map(item => normalizeResource(item)) : []
   } finally {
     loading.value = false
@@ -405,6 +420,8 @@ const getBindingSummaryText = (row) => {
   return `Kubernetes 凭据 · ${binding.purpose || 'cluster_auth'}`
 }
 
+const runtimeBaseInfoCache = new Map()
+
 const environmentText = (value) => ({ development: '开发环境', testing: '测试环境', production: '生产环境' }[value] || value || '-')
 const statusType = (value) => ({ online: 'success', offline: 'info', error: 'danger', archived: 'warning' }[value] || 'info')
 const formatDateTime = (value) => value ? new Date(typeof value === 'number' ? value * 1000 : value).toLocaleString('zh-CN') : '-'
@@ -426,47 +443,72 @@ const formatCPUMilli = (value) => {
   const cores = milli / 1000
   return `${Number.isInteger(cores) ? cores : cores.toFixed(1)} CPU`
 }
-const getMachineDiskTotal = (row) => row?.baseInfo?.machine?.storage?.totalDiskBytes || row?.baseInfo?.machine?.storage?.rootTotalBytes || 0
-const getMachineCpuText = (row) => {
-  const cpu = row?.baseInfo?.machine?.cpu || {}
-  if (!cpu.logicalCores && !cpu.model) return '-'
-  if (!cpu.logicalCores) return cpu.model
-  return cpu.model ? `${cpu.logicalCores} 核 / ${cpu.model}` : `${cpu.logicalCores} 核`
+const getRuntimeBaseInfo = (row) => {
+  const cacheKey = `${row?.id || 0}:${JSON.stringify(row?.baseInfo || {})}`
+  if (!runtimeBaseInfoCache.has(cacheKey)) {
+    runtimeBaseInfoCache.set(cacheKey, normalizeRuntimeBaseInfo(row?.baseInfo || {}))
+  }
+  return runtimeBaseInfoCache.get(cacheKey)
 }
-const getMachineSystemText = (row) => {
-  const machine = row?.baseInfo?.machine || {}
-  return [machine?.os?.name, machine?.arch].filter(Boolean).join(' / ') || '-'
+const getHostDiskTotal = (row) => {
+  const hostSummary = getRuntimeBaseInfo(row).detail.hostSummary
+  return hostSummary?.diskBytes || hostSummary?.rootDiskBytes || 0
 }
-const getMachineGpuSpecText = (row) => {
-  const devices = Array.isArray(row?.baseInfo?.machine?.gpu?.devices) ? row.baseInfo.machine.gpu.devices : []
-  if (devices.length === 0) return '-'
-  return devices.map((device, index) => {
+const getHostCpuText = (row) => {
+  const hostSummary = getRuntimeBaseInfo(row).detail.hostSummary
+  if (!hostSummary?.cpuLogicalCores && !hostSummary?.cpuModel) return '-'
+  if (!hostSummary?.cpuLogicalCores) return hostSummary.cpuModel
+  return hostSummary.cpuModel ? `${hostSummary.cpuLogicalCores} 核 / ${hostSummary.cpuModel}` : `${hostSummary.cpuLogicalCores} 核`
+}
+const getHostSystemText = (row) => {
+  const hostSummary = getRuntimeBaseInfo(row).detail.hostSummary
+  return [hostSummary?.osName, hostSummary?.osVersion, hostSummary?.arch].filter(Boolean).join(' / ') || '-'
+}
+const getHostGpuSpecText = (row) => {
+  const gpuResources = getRuntimeBaseInfo(row).detail.hostSummary?.gpuResources || []
+  if (!gpuResources.length) return '-'
+  return gpuResources.map(resource => {
     const parts = [
-      devices.length > 1 ? `#${device?.index ?? index}` : '',
-      device?.vendor,
-      device?.model,
-      formatBytes(device?.memoryBytes)
+      resource.identityMap?.index !== undefined ? `#${resource.identityMap.index}` : '',
+      resource.specMap?.vendor,
+      resource.specMap?.model,
+      formatBytes(resource.capacityMap?.memoryBytes?.capacity || resource.capacityMap?.memoryBytes?.allocatable || resource.capacityMap?.memoryBytes?.value)
+    ].filter(Boolean)
+    return parts.join(' / ')
+  }).join('；')
+}
+const getNodeSummaryText = (row) => {
+  const nodeSummaries = getRuntimeBaseInfo(row).detail.nodeSummaries || []
+  if (!nodeSummaries.length) return '-'
+  return nodeSummaries.map(node => {
+    const parts = [
+      node.name,
+      node.roles?.length ? node.roles.join(',') : '',
+      formatCPUMilli(node.cpuAllocatableMilli),
+      formatBytes(node.memoryAllocatableBytes),
+      `${node.gpuAllocatable || 0} GPU`
     ].filter(Boolean)
     return parts.join(' / ')
   }).join('；')
 }
 const getBaseInfoSummary = (row) => {
-  const info = row?.baseInfo || {}
+  const runtimeInfo = getRuntimeBaseInfo(row)
+  if (!runtimeInfo.summary.hasCanonicalData) return row?.baseInfoStatus === 'pending' ? '采集中…' : row?.baseInfoStatus === 'failed' ? '采集失败' : '未采集'
   if (row?.type === 'k8s') {
-    const summary = info?.k8s?.summary || {}
-    if (!summary.nodeCount) return row?.baseInfoStatus === 'pending' ? '采集中…' : row?.baseInfoStatus === 'failed' ? '采集失败' : '未采集'
-    return `${summary.nodeCount} 节点 / ${formatCPUMilli(summary.cpuAllocatableMilli)} / ${formatBytes(summary.memoryAllocatableBytes)} / ${summary.gpuAllocatable || 0} GPU`
+    const summary = runtimeInfo.detail.clusterSummary
+    return `${summary.nodeCount || 0} 节点 / ${formatCPUMilli(summary.cpuAllocatableMilli)} / ${formatBytes(summary.memoryAllocatableBytes)} / ${summary.gpuAllocatable || 0} GPU`
   }
-  const machine = info?.machine || {}
-  const cpu = machine?.cpu?.logicalCores
-  const memory = machine?.memory?.totalBytes
-  const disk = getMachineDiskTotal(row)
-  const gpu = machine?.gpu?.count || 0
-  if (!cpu && !memory && !disk && !gpu) return row?.baseInfoStatus === 'pending' ? '采集中…' : row?.baseInfoStatus === 'failed' ? '采集失败' : '未采集'
-  return `${cpu || '-'}C / ${formatBytes(memory)} / ${formatBytes(disk)} / ${gpu} GPU`
+  const hostSummary = runtimeInfo.detail.hostSummary
+  return `${hostSummary?.cpuLogicalCores || '-'}C / ${formatBytes(hostSummary?.memoryBytes)} / ${formatBytes(getHostDiskTotal(row))} / ${hostSummary?.gpuCount || 0} GPU`
 }
 const getBaseInfoMeta = (row) => {
+  const runtimeInfo = getRuntimeBaseInfo(row)
   if (row?.baseInfoStatus === 'failed') return row?.baseInfoLastError || '最近一次采集失败'
+  if (runtimeInfo.source || runtimeInfo.collectedAt) {
+    const sourceText = runtimeInfo.source ? `来源：${runtimeInfo.source}` : ''
+    const timeText = runtimeInfo.collectedAt ? `采集：${formatDateTime(runtimeInfo.collectedAt)}` : ''
+    return [sourceText, timeText].filter(Boolean).join(' · ') || '已采集'
+  }
   if (row?.baseInfoCollectedAt) return `最近采集：${formatDateTime(row.baseInfoCollectedAt)}`
   if (row?.baseInfoStatus === 'pending') return '执行器正在采集基础资源信息'
   return '尚未采集基础资源信息'
@@ -523,6 +565,10 @@ onMounted(fetchResources)
 .binding-meta {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.expand-panel {
+  padding: 8px 12px;
 }
 
 .base-info-detail {

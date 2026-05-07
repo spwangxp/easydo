@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -587,6 +590,26 @@ func TestHandleTaskUpdateV2_PersistsResourceBaseInfoFromCollectionTask(t *testin
 	if err := db.Create(&resource).Error; err != nil {
 		t.Fatalf("create resource failed: %v", err)
 	}
+	if err := db.Create(&models.ResourceRuntimeLabel{
+		WorkspaceID: resource.WorkspaceID,
+		ResourceID:  resource.ID,
+		TargetType:  "resource",
+		TargetKey:   buildResourceBaseInfoResourcePrefix(resource.ID),
+		LabelsJSON:  `{"team":"ops","owner":"runtime"}`,
+		CreatedBy:   1,
+	}).Error; err != nil {
+		t.Fatalf("create runtime labels failed: %v", err)
+	}
+	if err := db.Create(&models.ResourceRuntimeLabel{
+		WorkspaceID: resource.WorkspaceID,
+		ResourceID:  resource.ID,
+		TargetType:  "gpu",
+		TargetKey:   buildResourceBaseInfoGPUID(resource.ID, "0"),
+		LabelsJSON:  `{"gpuOnly":"true"}`,
+		CreatedBy:   1,
+	}).Error; err != nil {
+		t.Fatalf("create gpu runtime labels failed: %v", err)
+	}
 	payload := resourceBaseInfoTaskPayload{
 		Collection: resourceBaseInfoCollectionSnapshot{
 			Kind:         "resource_base_info_refresh",
@@ -621,7 +644,7 @@ func TestHandleTaskUpdateV2_PersistsResourceBaseInfoFromCollectionTask(t *testin
 		"duration_ms":     float64(1200),
 		"idempotency_key": "resource-base-info-success",
 		"result": map[string]interface{}{
-			"stdout": "EASYDO_BASE_INFO_BEGIN\nEASYDO_HOSTNAME=vm-prod-01\nEASYDO_CPU_LOGICAL_CORES=8\nEASYDO_MEMORY_TOTAL_BYTES=34359738368\nEASYDO_TOTAL_DISK_BYTES=536870912000\nEASYDO_GPU_COUNT=1\nEASYDO_DISK_ROWS_BEGIN\nNAME=\"sda\" SIZE=\"536870912000\" TYPE=\"disk\" FSTYPE=\"ext4\" MOUNTPOINT=\"/\"\nEASYDO_DISK_ROWS_END\nEASYDO_GPU_CSV_BEGIN\n0, NVIDIA L40, 46068\nEASYDO_GPU_CSV_END\nEASYDO_BASE_INFO_END\n",
+			"stdout": "EASYDO_BASE_INFO_BEGIN\nEASYDO_HOSTNAME=vm-prod-01\nEASYDO_CPU_LOGICAL_CORES=8\nEASYDO_MEMORY_TOTAL_BYTES=34359738368\nEASYDO_TOTAL_DISK_BYTES=536870912000\nEASYDO_GPU_COUNT=1\nEASYDO_RESOURCE_LABELS_JSON={\"team\":\"platform\",\"tier\":\"infra\"}\nEASYDO_DISK_ROWS_BEGIN\nNAME=\"sda\" SIZE=\"536870912000\" TYPE=\"disk\" FSTYPE=\"ext4\" MOUNTPOINT=\"/\"\nEASYDO_DISK_ROWS_END\nEASYDO_GPU_CSV_BEGIN\n0, NVIDIA L40, 46068, GPU-UUID-0, 0000:00:00.0, NVIDIA\nEASYDO_GPU_CSV_END\nEASYDO_BASE_INFO_END\n",
 			"stderr": "",
 		},
 	})
@@ -636,11 +659,34 @@ func TestHandleTaskUpdateV2_PersistsResourceBaseInfoFromCollectionTask(t *testin
 	if stored.BaseInfoCollectedAt == 0 {
 		t.Fatal("expected base_info_collected_at to be set")
 	}
-	if !strings.Contains(stored.BaseInfo, `"logicalCores":8`) {
-		t.Fatalf("expected logicalCores in stored base_info, got=%s", stored.BaseInfo)
+	var storedBaseInfo ResourceBaseInfoV3
+	if err := json.Unmarshal([]byte(stored.BaseInfo), &storedBaseInfo); err != nil {
+		t.Fatalf("unmarshal stored base_info failed: %v raw=%s", err, stored.BaseInfo)
 	}
-	if !strings.Contains(stored.BaseInfo, `"count":1`) {
-		t.Fatalf("expected gpu count in stored base_info, got=%s", stored.BaseInfo)
+	if storedBaseInfo.SchemaVersion != 3 {
+		t.Fatalf("expected canonical v3 base_info, got=%s", stored.BaseInfo)
+	}
+	if storedBaseInfo.ResourceID != buildResourceBaseInfoResourcePrefix(resource.ID) {
+		t.Fatalf("resourceId=%q, want %q", storedBaseInfo.ResourceID, buildResourceBaseInfoResourcePrefix(resource.ID))
+	}
+	if storedBaseInfo.Labels["team"] != "platform" || storedBaseInfo.Labels["owner"] != "runtime" {
+		t.Fatalf("expected merged top-level labels, got=%#v", storedBaseInfo.Labels)
+	}
+	if _, exists := storedBaseInfo.Labels["gpuOnly"]; exists {
+		t.Fatalf("expected non-resource scoped labels to stay out of persisted base_info, got=%#v", storedBaseInfo.Labels)
+	}
+	gpuFound := false
+	for _, instance := range storedBaseInfo.ResourceInstances {
+		if instance.ResourceTypeID != "gpu" {
+			continue
+		}
+		gpuFound = true
+		if instance.EntityID == "" {
+			t.Fatalf("expected gpu instance to keep canonical entity linkage, got %+v", instance)
+		}
+	}
+	if !gpuFound {
+		t.Fatalf("expected at least one gpu resource instance, got %+v", storedBaseInfo.ResourceInstances)
 	}
 }
 
@@ -1793,7 +1839,76 @@ func TestTaskUpdateV2_AcksBeforeSlowPostPersistWork(t *testing.T) {
 // Before the fix, handleFrontendMessages set a 60-second read deadline on each
 // ReadMessage call, causing the connection to be closed after 60 seconds of inactivity
 // even though the frontend is a receive-only connection that doesn't send messages.
-func TestFrontendWebSocket_ConnectionStaysOpenBeyond60Seconds(t *testing.T) {
+type recordingConn struct {
+	net.Conn
+	mu                  sync.Mutex
+	readDeadlineRecords []readDeadlineRecord
+}
+
+type readDeadlineRecord struct {
+	time  time.Time
+	stack []string
+}
+
+func (c *recordingConn) SetReadDeadline(t time.Time) error {
+	pcs := make([]uintptr, 16)
+	n := runtime.Callers(2, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	stack := make([]string, 0, n)
+	for {
+		frame, more := frames.Next()
+		stack = append(stack, frame.Function)
+		if !more {
+			break
+		}
+	}
+
+	c.mu.Lock()
+	c.readDeadlineRecords = append(c.readDeadlineRecords, readDeadlineRecord{time: t, stack: stack})
+	c.mu.Unlock()
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *recordingConn) readDeadlineCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.readDeadlineRecords)
+}
+
+func (c *recordingConn) frontendSetReadDeadlineCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	count := 0
+	for _, record := range c.readDeadlineRecords {
+		for _, fn := range record.stack {
+			if strings.Contains(fn, "handleFrontendMessages") {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
+type recordingListener struct {
+	net.Listener
+	accepted chan *recordingConn
+}
+
+func (l *recordingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	recorded := &recordingConn{Conn: conn}
+	select {
+	case l.accepted <- recorded:
+	default:
+	}
+	return recorded, nil
+}
+
+func TestFrontendWebSocket_DoesNotSetReadDeadlineForReceiveOnlyClients(t *testing.T) {
 	t.Setenv("JWT_SECRET", "ws-longevity-test-secret")
 	t.Setenv("AUTH_TOKEN_TTL", (4 * time.Hour).String())
 	t.Setenv("AUTH_REFRESH_INTERVAL", (10 * time.Minute).String())
@@ -1826,42 +1941,37 @@ func TestFrontendWebSocket_ConnectionStaysOpenBeyond60Seconds(t *testing.T) {
 	wsHandler := NewWebSocketHandler()
 	userHandler := &UserHandler{DB: db}
 
-	router := gin.New()
-	router.GET("/ws/frontend/pipeline", wsHandler.HandleFrontendConnection)
-	auth := router.Group("/api/auth")
-	auth.POST("/login", userHandler.Login)
+	loginRouter := gin.New()
+	loginRouter.POST("/api/auth/login", userHandler.Login)
+	loginServer := httptest.NewServer(loginRouter)
+	defer loginServer.Close()
 
-	server := httptest.NewServer(router)
-	defer server.Close()
-
-	user := models.User{
-		Username: "ws-longevity-user",
-		Status:   "active",
-		Email:    "ws-longevity@example.com",
+	wsRouter := gin.New()
+	wsRouter.GET("/ws/frontend/pipeline", wsHandler.HandleFrontendConnection)
+	baseListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
 	}
+	recording := &recordingListener{Listener: baseListener, accepted: make(chan *recordingConn, 1)}
+	wsServer := &http.Server{Handler: wsRouter}
+	go func() { _ = wsServer.Serve(recording) }()
+	defer func() {
+		_ = wsServer.Close()
+		_ = recording.Close()
+	}()
+
+	user := models.User{Username: "ws-longevity-user", Status: "active", Email: "ws-longevity@example.com"}
 	if err := user.SetPassword("1qaz2WSX"); err != nil {
 		t.Fatalf("set password failed: %v", err)
 	}
 	if err := db.Create(&user).Error; err != nil {
 		t.Fatalf("create user failed: %v", err)
 	}
-
-	workspace := models.Workspace{
-		Name:      "ws-longevity-workspace",
-		Slug:      "ws-longevity-" + strconv.FormatUint(user.ID, 10),
-		CreatedBy: user.ID,
-		Status:    "active",
-	}
+	workspace := models.Workspace{Name: "ws-longevity-workspace", Slug: "ws-longevity-" + strconv.FormatUint(user.ID, 10), CreatedBy: user.ID, Status: "active"}
 	if err := db.Create(&workspace).Error; err != nil {
 		t.Fatalf("create workspace failed: %v", err)
 	}
-
-	member := models.WorkspaceMember{
-		WorkspaceID: workspace.ID,
-		UserID:      user.ID,
-		Role:        "owner",
-		Status:      "active",
-	}
+	member := models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: user.ID, Role: "owner", Status: "active"}
 	if err := db.Create(&member).Error; err != nil {
 		t.Fatalf("create workspace member failed: %v", err)
 	}
@@ -1871,62 +1981,60 @@ func TestFrontendWebSocket_ConnectionStaysOpenBeyond60Seconds(t *testing.T) {
 	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(loginBytes))
 	loginReq.Header.Set("Content-Type", "application/json")
 	loginW := httptest.NewRecorder()
-	router.ServeHTTP(loginW, loginReq)
+	loginRouter.ServeHTTP(loginW, loginReq)
 	if loginW.Code != http.StatusOK {
 		t.Fatalf("login failed: %s", loginW.Body.String())
 	}
-
 	var loginResp struct {
 		Code int `json:"code"`
-		Data struct {
-			Token string `json:"token"`
-		} `json:"data"`
+		Data struct{ Token string `json:"token"` } `json:"data"`
 	}
 	if err := json.Unmarshal(loginW.Body.Bytes(), &loginResp); err != nil {
 		t.Fatalf("parse login response failed: %v", err)
 	}
-	token := loginResp.Data.Token
-	if token == "" {
+	if loginResp.Data.Token == "" {
 		t.Fatalf("no token received")
 	}
 
-	run := models.PipelineRun{
-		WorkspaceID:   workspace.ID,
-		Status:        models.PipelineRunStatusRunning,
-		Config:        `{"version":"2.0","nodes":[],"edges":[]}`,
-		TriggerType:   "manual",
-		TriggerUserID: user.ID,
-	}
+	run := models.PipelineRun{WorkspaceID: workspace.ID, Status: models.PipelineRunStatusRunning, Config: `{"version":"2.0","nodes":[],"edges":[]}`, TriggerType: "manual", TriggerUserID: user.ID}
 	if err := db.Create(&run).Error; err != nil {
 		t.Fatalf("create pipeline run failed: %v", err)
 	}
 
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/frontend/pipeline?run_id=" + strconv.FormatUint(run.ID, 10) + "&token=" + token
+	wsURL := "ws://" + recording.Addr().String() + "/ws/frontend/pipeline?run_id=" + strconv.FormatUint(run.ID, 10) + "&token=" + loginResp.Data.Token
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("WebSocket dial failed: %v (resp=%v)", err, resp)
 	}
 	defer conn.Close()
-
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("expected 101 Switching Protocols, got %d", resp.StatusCode)
 	}
 
-	// Wait 65 seconds — past the old 60-second read deadline that caused disconnects.
-	// The connection should remain open because handleFrontendMessages no longer sets
-	// any read deadline on frontend WebSocket connections (they are receive-only).
-	time.Sleep(65 * time.Second)
-
-	// Verify connection is still open by setting a read deadline and attempting a read.
-	// If the connection were closed by the server, this would fail immediately.
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	_, _, err = conn.ReadMessage()
-	if err != nil {
-		t.Fatalf("WebSocket connection was closed after 65 seconds (old 60s deadline bug not fixed): %v", err)
+	var accepted *recordingConn
+	select {
+	case accepted = <-recording.accepted:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected websocket server connection")
 	}
 
-	// Clean up the read deadline — connection is confirmed alive
-	conn.SetReadDeadline(time.Time{})
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		if accepted.frontendSetReadDeadlineCalls() > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			goto assertFrontendDeadlines
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+assertFrontendDeadlines:
+	if got := accepted.frontendSetReadDeadlineCalls(); got != 0 {
+		t.Fatalf("expected frontend websocket handler to avoid SetReadDeadline, got %d calls", got)
+	}
 }
 
 // Regression test: when a frontend WebSocket client disconnects, the server must
