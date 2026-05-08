@@ -30,61 +30,76 @@
     <el-table
       v-loading="loading"
       :data="filteredResources"
+      class="compact-table"
       row-key="id"
       :expand-row-keys="expandedGpuRowKeys"
       :row-class-name="resourceRowClassName"
       @expand-change="handleGpuExpandChange"
     >
-      <el-table-column type="expand" width="52">
+      <el-table-column type="expand" width="44">
         <template #default="{ row }">
           <div v-if="canShowGpuMatrix(row) && getRuntimeBaseInfo(row).summary.hasCanonicalData" class="expand-panel">
             <ResourceGpuMatrixPanel :rows="getRuntimeBaseInfo(row).gpuView.rows" />
           </div>
         </template>
       </el-table-column>
-      <el-table-column prop="name" label="资源名称" min-width="180" />
-      <el-table-column prop="type" label="类型" width="120">
+      <el-table-column label="资源" min-width="220">
         <template #default="{ row }">
-          <el-tag :type="row.type === 'vm' ? 'success' : 'primary'">{{ row.type === 'vm' ? 'VM' : 'K8s 集群' }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="environment" label="环境" width="120">
-        <template #default="{ row }">{{ environmentText(row.environment) }}</template>
-      </el-table-column>
-      <el-table-column label="接入凭据" min-width="180">
-        <template #default="{ row }">
-          <div class="binding-cell">
-            <span class="binding-name">{{ getCredentialBindingName(row) }}</span>
-            <span class="binding-meta">{{ getBindingSummaryText(row) }}</span>
+          <div class="resource-identity-cell">
+            <span class="resource-name">{{ row.name || '-' }}</span>
+            <span class="resource-meta">
+              <el-tag size="small" :type="row.type === 'vm' ? 'success' : 'primary'">{{ row.type === 'vm' ? 'VM' : 'K8s 集群' }}</el-tag>
+              <span>{{ environmentText(row.environment) }}</span>
+            </span>
           </div>
         </template>
       </el-table-column>
-      <el-table-column prop="endpoint" label="接入地址" min-width="180" />
+      <el-table-column label="接入信息" min-width="220">
+        <template #default="{ row }">
+          <div class="access-info-cell">
+            <span class="binding-name">{{ getCredentialBindingName(row) }}</span>
+            <span class="binding-meta">{{ getAccessSummaryText(row) }}</span>
+          </div>
+        </template>
+      </el-table-column>
       <el-table-column label="基础资源" min-width="220">
         <template #default="{ row }">
-          <div class="binding-cell">
+          <div class="base-summary-cell">
             <span class="binding-name">{{ getBaseInfoSummary(row) }}</span>
             <span class="binding-meta">{{ getBaseInfoMeta(row) }}</span>
           </div>
         </template>
       </el-table-column>
-      <el-table-column prop="status" label="状态" width="120">
+      <el-table-column prop="status" label="状态" min-width="96">
         <template #default="{ row }">
           <el-tag :type="statusType(row.status)">{{ row.status || '-' }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="updated_at" label="更新时间" width="180">
+      <el-table-column prop="updated_at" label="更新时间" min-width="150" class-name="optional-time-column">
         <template #default="{ row }">{{ formatDateTime(row.updated_at) }}</template>
       </el-table-column>
-      <el-table-column v-if="canManage || canOpenWebTerminal || canBrowseCluster" label="操作" width="620" fixed="right">
+      <el-table-column v-if="canManage || canOpenWebTerminal || canBrowseCluster" label="操作" min-width="220" align="right">
         <template #default="{ row }">
-          <el-button v-if="canManage" link type="info" @click="openBaseInfoDialog(row)">基础资源详情</el-button>
-          <el-button v-if="canManage" link type="success" :loading="refreshingId === row.id" @click="refreshBaseInfo(row)">刷新基础信息</el-button>
-          <el-button v-if="row.type === 'vm'" link type="primary" @click.stop="toggleGpuMatrixRow(row)">{{ isGpuMatrixExpanded(row) ? '收起 GPU视图' : 'GPU视图' }}</el-button>
-          <el-button v-if="canBrowseCluster && row.type === 'k8s'" link type="primary" @click="openK8sBrowser(row)">Browse Cluster</el-button>
-          <el-button v-if="canOpenWebTerminal && row.type === 'vm'" link type="primary" @click="openWebTerminal(row)">Web Terminal</el-button>
-          <el-button v-if="canManage" link type="primary" @click="openEditDialog(row)">编辑</el-button>
-          <el-button v-if="canManage" link type="danger" @click="removeResource(row)">删除</el-button>
+          <div class="resource-actions">
+            <div class="action-line action-line--primary">
+              <el-button v-if="canManage" link size="small" type="info" @click="openBaseInfoDialog(row)">基础资源</el-button>
+              <el-button v-if="canManage" link size="small" type="success" :loading="refreshingId === row.id" @click="refreshBaseInfo(row)">刷新</el-button>
+            </div>
+            <div class="action-line action-line--secondary">
+              <el-button v-if="row.type === 'vm'" link size="small" type="primary" @click.stop="toggleGpuMatrixRow(row)">{{ isGpuMatrixExpanded(row) ? '收起GPU' : 'GPU视图' }}</el-button>
+              <el-button v-if="canBrowseCluster && row.type === 'k8s'" link size="small" type="primary" @click="openK8sBrowser(row)">Browse</el-button>
+              <el-button v-if="canOpenWebTerminal && row.type === 'vm'" link size="small" type="primary" @click="openWebTerminal(row)">Terminal</el-button>
+              <el-dropdown v-if="canManage" class="more-actions" trigger="click" @command="command => handleMoreAction(command, row)">
+                <el-button link size="small" type="primary">更多</el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="edit">编辑</el-dropdown-item>
+                    <el-dropdown-item command="delete">删除</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -333,6 +348,16 @@ const openK8sBrowser = (row) => {
   router.push({ name: 'ResourceK8sBrowser', params: { id: row.id } })
 }
 
+const handleMoreAction = (command, row) => {
+  if (command === 'edit') {
+    openEditDialog(row)
+    return
+  }
+  if (command === 'delete') {
+    removeResource(row)
+  }
+}
+
 const syncResourceCredentialBinding = async (resourceId, credentialId, resourceType) => {
   if (!resourceId || !credentialId) return
   await bindResourceCredential(resourceId, {
@@ -443,6 +468,7 @@ const getBindingSummaryText = (row) => {
   if (row.type === 'vm') return '登录凭据'
   return `Kubernetes 凭据 · ${binding.purpose || 'cluster_auth'}`
 }
+const getAccessSummaryText = (row) => [getBindingSummaryText(row), row?.endpoint].filter(Boolean).join(' · ') || '-'
 
 const runtimeBaseInfoCache = new Map()
 
@@ -575,20 +601,60 @@ onMounted(fetchResources)
   width: 160px;
 }
 
-.binding-cell {
+.resource-identity-cell,
+.access-info-cell,
+.base-summary-cell {
   display: flex;
   flex-direction: column;
-  gap: $space-1;
+  gap: 2px;
+  min-width: 0;
 }
 
+.resource-name,
 .binding-name {
   color: var(--text-primary);
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+.resource-meta,
 .binding-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
   color: var(--text-muted);
   font-size: 12px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-actions {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  max-width: 100%;
+}
+
+.action-line {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px 8px;
+  min-height: 20px;
+}
+
+.action-line :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.more-actions {
+  line-height: 1;
 }
 
 .expand-panel {
@@ -614,6 +680,15 @@ onMounted(fetchResources)
   pointer-events: none;
 }
 
+:deep(.compact-table .el-table__cell) {
+  padding: 6px 0;
+}
+
+:deep(.compact-table .cell) {
+  min-width: 0;
+  line-height: 1.35;
+}
+
 @media (max-width: 768px) {
   .resource-page {
     padding: $space-4;
@@ -622,6 +697,10 @@ onMounted(fetchResources)
   .search-input,
   .filter-select {
     width: 100%;
+  }
+
+  :deep(.optional-time-column) {
+    display: none;
   }
 }
 </style>

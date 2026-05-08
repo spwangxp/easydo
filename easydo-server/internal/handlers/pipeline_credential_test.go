@@ -190,6 +190,20 @@ func TestInjectCredentialEnv_RejectsTypeSpecificMissingPayload(t *testing.T) {
 	}
 }
 
+func TestValidateTaskCredentialPayload_SSHKeyRequiresUsernameForSSH(t *testing.T) {
+	err := validateTaskCredentialPayload("ssh", pipelineTaskDefinitions["ssh"].CredentialSlots[0], models.Credential{
+		Type: models.TypeSSHKey,
+	}, map[string]interface{}{
+		"private_key": "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+	})
+	if err == nil {
+		t.Fatalf("expected ssh key username to be required for ssh task")
+	}
+	if !strings.Contains(err.Error(), "username") {
+		t.Fatalf("expected username validation error, got=%v", err)
+	}
+}
+
 func TestInjectCredentialEnv_GitCloneAccessTokenOnlyPayload(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)

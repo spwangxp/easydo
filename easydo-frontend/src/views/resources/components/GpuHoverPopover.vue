@@ -1,5 +1,5 @@
 <template>
-  <el-popover placement="top" :width="420" trigger="hover" popper-class="gpu-hover-popper">
+  <el-popover placement="top" :width="popoverWidth" trigger="hover" popper-class="gpu-hover-popper">
     <template #reference>
       <slot />
     </template>
@@ -123,6 +123,7 @@ const props = defineProps({
 
 const gpuInfo = computed(() => props.segment?.gpuHover || props.resourceInstance)
 const serviceHover = computed(() => props.segment?.serviceHover || props.service)
+const popoverWidth = 'min(520px, calc(100vw - 32px))'
 
 const formatValue = (value) => {
   if (Array.isArray(value)) return value.join(', ') || '-'
@@ -167,6 +168,7 @@ const formatBytes = (value) => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  max-width: calc(100vw - 32px);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -196,9 +198,10 @@ const formatBytes = (value) => {
 }
 
 .kv-item {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
 
   span {
     color: var(--text-secondary);
@@ -209,6 +212,7 @@ const formatBytes = (value) => {
     color: var(--text-primary);
     text-align: right;
     word-break: break-all;
+    min-width: 0;
   }
 }
 
@@ -220,11 +224,11 @@ const formatBytes = (value) => {
 
 .summary-item {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) repeat(3, auto);
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
   padding-top: 6px;
   border-top: 1px solid var(--border-color-lighter);
-  align-items: center;
+  align-items: start;
 
   &:first-child {
     padding-top: 0;
@@ -240,7 +244,7 @@ const formatBytes = (value) => {
 
   span {
     color: var(--text-secondary);
-    white-space: nowrap;
+    word-break: break-all;
   }
 }
 </style>

@@ -80,13 +80,12 @@
       </div>
 
       <div v-else-if="form.type === 'SSH_KEY'">
-        <el-form-item label="私钥" prop="payload.private_key">
-          <el-input v-model="form.payload.private_key" type="textarea" :rows="6" placeholder="请输入私钥内容" />
-        </el-form-item>
-        <el-form-item label="公钥" prop="payload.public_key">
-          <el-input v-model="form.payload.public_key" type="textarea" :rows="3" placeholder="可选：请输入公钥内容" />
-        </el-form-item>
         <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="用户名" prop="payload.username">
+              <el-input v-model="form.payload.username" placeholder="可选：请输入登录用户名（VM/Web Terminal 必填）" />
+            </el-form-item>
+          </el-col>
           <el-col :span="12">
             <el-form-item label="凭据算法" prop="payload.key_type">
               <el-select v-model="form.payload.key_type" style="width: 100%">
@@ -96,12 +95,16 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
-            <el-form-item label="私钥密码" prop="payload.passphrase">
-              <el-input v-model="form.payload.passphrase" type="password" show-password placeholder="可选：输入私钥密码" />
-            </el-form-item>
-          </el-col>
         </el-row>
+        <el-form-item label="私钥" prop="payload.private_key">
+          <el-input v-model="form.payload.private_key" type="textarea" :rows="6" placeholder="请输入私钥内容" />
+        </el-form-item>
+        <el-form-item label="公钥" prop="payload.public_key">
+          <el-input v-model="form.payload.public_key" type="textarea" :rows="3" placeholder="可选：请输入公钥内容" />
+        </el-form-item>
+        <el-form-item label="私钥密码" prop="payload.passphrase">
+          <el-input v-model="form.payload.passphrase" type="password" show-password placeholder="可选：输入私钥密码" />
+        </el-form-item>
       </div>
 
       <div v-else-if="form.type === 'TOKEN'">
@@ -378,7 +381,7 @@ const rules = computed(() => {
 
 function defaultPayloadByType(type, category = '') {
   if (type === 'PASSWORD') return { username: '', password: '' }
-  if (type === 'SSH_KEY') return { private_key: '', public_key: '', key_type: 'rsa', passphrase: '' }
+  if (type === 'SSH_KEY') return { username: '', private_key: '', public_key: '', key_type: 'rsa', passphrase: '' }
   if (type === 'TOKEN') {
     if (category === 'kubernetes') return { auth_mode: 'kubeconfig', kubeconfig: '', server: '', token: '', namespace: '', ca_cert: '' }
     return { token: '', token_type: 'bearer', username: '' }

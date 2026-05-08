@@ -99,6 +99,54 @@ func TestTerminalSessionHandler_CreateRejectsMissingSSHBinding(t *testing.T) {
 	}
 }
 
+func TestTerminalSessionHandler_CreateRejectsSSHKeyBindingWithoutUsername(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupTerminalSessionTestRedis(t)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	maintainer, workspace := seedResourceStoreUserAndWorkspace(t, db, "terminal-ssh-key-no-username", models.WorkspaceRoleMaintainer)
+	seedApprovedResourceAgent(t, db, workspace.ID)
+	credential := seedResourceVerificationCredential(t, db, workspace.ID, maintainer.ID, models.TypeSSHKey, map[string]interface{}{
+		"private_key": "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+		"key_type":    "rsa",
+	})
+	resource := models.Resource{
+		WorkspaceID: workspace.ID,
+		Name:        "vm-with-ssh-key-no-username",
+		Type:        models.ResourceTypeVM,
+		Environment: "production",
+		Status:      models.ResourceStatusOnline,
+		Endpoint:    "10.0.0.92:22",
+		CreatedBy:   maintainer.ID,
+	}
+	if err := db.Create(&resource).Error; err != nil {
+		t.Fatalf("create resource failed: %v", err)
+	}
+	if err := db.Create(&models.ResourceCredentialBinding{
+		WorkspaceID:  workspace.ID,
+		ResourceID:   resource.ID,
+		CredentialID: credential.ID,
+		Purpose:      "ssh_auth",
+		BoundBy:      maintainer.ID,
+	}).Error; err != nil {
+		t.Fatalf("create binding failed: %v", err)
+	}
+
+	router := newTerminalSessionTestRouter(t, db, NewWebSocketHandler())
+	token := issueTerminalSessionTestToken(t, &maintainer)
+	resp := performTerminalSessionAPIRequest(router, http.MethodPost, fmt.Sprintf("/api/resources/%d/terminal-sessions", resource.ID), workspace.ID, token, nil)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected terminal create with ssh key missing username to fail, got=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "username") {
+		t.Fatalf("expected username validation message, got=%s", resp.Body.String())
+	}
+}
+
 func TestTerminalSessionHandler_CreateListGetCloseAndWorkspaceIsolation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	setupTerminalSessionTestRedis(t)
@@ -625,6 +673,117 @@ func TestTerminalFrontendConnection_OwnerServerRoutingAcrossReplicas(t *testing.
 	}
 	if stored.OwnerServerID != "terminal-server-b" {
 		t.Fatalf("expected terminal session owner_server_id to follow frontend replica, got=%s", stored.OwnerServerID)
+	}
+}
+
+func TestTerminalFrontendConnection_ClosedEventRoutesAcrossReplicas(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupTerminalSessionTestRedis(t)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	maintainer, workspace := seedResourceStoreUserAndWorkspace(t, db, "terminal-close-replica-maintainer", models.WorkspaceRoleMaintainer)
+	agent := seedApprovedResourceAgent(t, db, workspace.ID)
+	credential := seedResourceVerificationCredential(t, db, workspace.ID, maintainer.ID, models.TypePassword, map[string]interface{}{
+		"username": "root",
+		"password": "secret123",
+	})
+	resource := models.Resource{
+		WorkspaceID: workspace.ID,
+		Name:        "terminal-close-replica-vm",
+		Type:        models.ResourceTypeVM,
+		Environment: "production",
+		Status:      models.ResourceStatusOnline,
+		Endpoint:    "10.0.0.61:22",
+		CreatedBy:   maintainer.ID,
+	}
+	if err := db.Create(&resource).Error; err != nil {
+		t.Fatalf("create resource failed: %v", err)
+	}
+	if err := db.Create(&models.ResourceCredentialBinding{
+		WorkspaceID:  workspace.ID,
+		ResourceID:   resource.ID,
+		CredentialID: credential.ID,
+		Purpose:      "ssh_auth",
+		BoundBy:      maintainer.ID,
+	}).Error; err != nil {
+		t.Fatalf("create binding failed: %v", err)
+	}
+
+	handlerA := NewWebSocketHandler()
+	handlerA.serverID = "terminal-server-a"
+	handlerB := NewWebSocketHandler()
+	handlerB.serverID = "terminal-server-b"
+
+	serverA := newTerminalSessionTestServer(t, db, handlerA)
+	defer serverA.Close()
+	serverB := newTerminalSessionTestServer(t, db, handlerB)
+	defer serverB.Close()
+
+	agentConn, _, err := websocket.DefaultDialer.Dial(wsTerminalAgentURL(serverA.URL, fmt.Sprintf("?agent_id=%d&token=%s", agent.ID, agent.Token)), nil)
+	if err != nil {
+		t.Fatalf("dial agent websocket failed: %v", err)
+	}
+	defer agentConn.Close()
+
+	ownerToken := issueTerminalSessionTestToken(t, &maintainer)
+	createResp := performTerminalSessionAPIRequest(serverA.Config.Handler, http.MethodPost, fmt.Sprintf("/api/resources/%d/terminal-sessions", resource.ID), workspace.ID, ownerToken, nil)
+	if createResp.Code != http.StatusOK {
+		t.Fatalf("expected terminal create success, got=%d body=%s", createResp.Code, createResp.Body.String())
+	}
+	created := decodeResponseData[map[string]interface{}](t, createResp.Body.Bytes())
+	sessionID, _ := created["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("expected session_id in create response, body=%s", createResp.Body.String())
+	}
+
+	frontendConn, _, err := websocket.DefaultDialer.Dial(wsTerminalFrontendURL(serverB.URL, fmt.Sprintf("?session_id=%s&token=%s", sessionID, ownerToken)), nil)
+	if err != nil {
+		t.Fatalf("dial terminal frontend websocket on replica B failed: %v", err)
+	}
+	defer frontendConn.Close()
+
+	if err := agentConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set agent read deadline failed: %v", err)
+	}
+	if _, _, err := agentConn.ReadMessage(); err != nil {
+		t.Fatalf("expected terminal open relay to agent, got err=%v", err)
+	}
+
+	agentClosed := WebSocketMessage{Type: "terminal_session_closed", Payload: map[string]interface{}{"session_id": sessionID, "reason": "session_closed"}}
+	agentClosedRaw, _ := json.Marshal(agentClosed)
+	if err := agentConn.WriteMessage(websocket.TextMessage, agentClosedRaw); err != nil {
+		t.Fatalf("write agent close event failed: %v", err)
+	}
+
+	if err := frontendConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set frontend read deadline failed: %v", err)
+	}
+	_, frontendClosedRaw, err := frontendConn.ReadMessage()
+	if err != nil {
+		t.Fatalf("expected owner-routed terminal closed event, got err=%v", err)
+	}
+	if !bytes.Contains(frontendClosedRaw, []byte(`"type":"terminal_closed"`)) {
+		t.Fatalf("expected terminal_closed event, got=%s", string(frontendClosedRaw))
+	}
+	if !bytes.Contains(frontendClosedRaw, []byte(sessionID)) {
+		t.Fatalf("expected terminal_closed payload to include session_id, got=%s", string(frontendClosedRaw))
+	}
+	if !bytes.Contains(frontendClosedRaw, []byte(`"reason":"session_closed"`)) {
+		t.Fatalf("expected terminal_closed payload to include close reason, got=%s", string(frontendClosedRaw))
+	}
+
+	var storedClosed models.ResourceTerminalSession
+	if err := db.Where("session_id = ?", sessionID).First(&storedClosed).Error; err != nil {
+		t.Fatalf("load closed terminal session failed: %v", err)
+	}
+	if storedClosed.Status != models.ResourceTerminalSessionStatusClosed {
+		t.Fatalf("expected closed terminal session status, got=%s", storedClosed.Status)
+	}
+	if storedClosed.CloseReason != "session_closed" {
+		t.Fatalf("expected close reason session_closed, got=%s", storedClosed.CloseReason)
 	}
 }
 

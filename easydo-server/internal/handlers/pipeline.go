@@ -2223,7 +2223,7 @@ func validateTaskCredentialPayload(taskType string, slot taskCredentialSlot, cre
 		case "ssh_auth":
 			switch credential.Type {
 			case models.TypeSSHKey:
-				return requireAll("private_key")
+				return requireAll("username", "private_key")
 			case models.TypePassword:
 				return requireAll("username", "password")
 			}
@@ -2237,7 +2237,7 @@ func validateTaskCredentialPayload(taskType string, slot taskCredentialSlot, cre
 		}
 		switch credential.Type {
 		case models.TypeSSHKey:
-			return requireAll("private_key")
+			return requireAll("username", "private_key")
 		case models.TypePassword:
 			return requireAll("username", "password")
 		}

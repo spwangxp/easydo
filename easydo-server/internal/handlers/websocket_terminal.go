@@ -307,10 +307,12 @@ func (h *WebSocketHandler) handleTerminalAgentMessage(client *wsClient, msgType 
 		frontendType = "terminal_error"
 	case "terminal_session_closed":
 		frontendType = "terminal_closed"
+		ownerServerID := session.OwnerServerID
 		reason := defaultIfEmpty(strings.TrimSpace(getString(payload, "reason")), "agent_closed")
 		closed, closeErr := closeTerminalSessionRecord(models.DB, &session, reason, 0)
 		if closeErr == nil {
 			session = *closed
+			session.OwnerServerID = ownerServerID
 		}
 		payload["reason"] = reason
 	}

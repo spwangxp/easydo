@@ -664,6 +664,7 @@ func TestCredentialHandler_SSHKeyValidationRequiresPrivateKeyAndKeyType(t *testi
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for missing key_type, got %d body=%s", recorder.Code, recorder.Body.String())
 	}
+
 }
 
 func TestCredentialHandler_PasswordValidationRequiresUsernameAndPassword(t *testing.T) {

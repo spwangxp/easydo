@@ -29,7 +29,7 @@
       />
     </div>
 
-    <el-table v-if="items.length > 0" :data="items" row-key="uid" style="width: 100%">
+    <el-table v-if="items.length > 0" :data="items" row-key="uid" class="k8s-compact-table" style="width: 100%">
       <el-table-column label="类型" width="140">
         <template #default="{ row }">
           <el-tag :type="getKindTagType(row.kind)">{{ row.kind }}</el-tag>
@@ -50,7 +50,7 @@
       </el-table-column>
       <el-table-column label="摘要" min-width="280">
         <template #default="{ row }">
-          <span class="resource-summary">{{ row.summaryText }}</span>
+          <span class="clamp-two-lines resource-summary">{{ row.summaryText }}</span>
         </template>
       </el-table-column>
       <el-table-column v-if="canOperate" label="操作" width="140" fixed="right">
@@ -176,6 +176,19 @@ defineEmits(['refresh', 'request-action', 'update:selectedKinds', 'update:keywor
   font-size: 12px;
   color: var(--text-muted);
   line-height: 1.6;
+}
+
+.clamp-two-lines {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+:deep(.k8s-compact-table .el-table__cell) {
+  padding: 6px 0;
 }
 
 .resource-status {

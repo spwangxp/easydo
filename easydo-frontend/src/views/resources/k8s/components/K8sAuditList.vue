@@ -8,7 +8,7 @@
       <el-button @click="$emit('refresh')">刷新审计</el-button>
     </div>
 
-    <el-table v-if="audits.length > 0" :data="audits" style="width: 100%">
+    <el-table v-if="audits.length > 0" :data="audits" class="audit-compact-table" style="width: 100%">
       <el-table-column label="动作" width="140">
         <template #default="{ row }">
           <el-tag :type="getActionType(row.action)">{{ getActionLabel(row.action) }}</el-tag>
@@ -22,7 +22,11 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column prop="reason" label="执行原因" min-width="220" />
+      <el-table-column label="执行原因" min-width="220">
+        <template #default="{ row }">
+          <span class="clamp-two-lines">{{ row.reason || '-' }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="状态" width="120">
         <template #default="{ row }">
           <el-tag :type="getAuditStatusType(row.status)">{{ getAuditStatusLabel(row.status) }}</el-tag>
@@ -30,7 +34,7 @@
       </el-table-column>
       <el-table-column label="结果摘要" min-width="260">
         <template #default="{ row }">
-          <span class="result-summary">{{ row.error_message || row.result_summary || '-' }}</span>
+          <span class="clamp-two-lines result-summary">{{ row.error_message || row.result_summary || '-' }}</span>
         </template>
       </el-table-column>
       <el-table-column label="创建时间" width="180">
@@ -108,6 +112,22 @@ defineEmits(['refresh'])
   font-size: 12px;
   color: var(--text-muted);
   line-height: 1.6;
+}
+
+.clamp-two-lines {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+:deep(.audit-compact-table .el-table__cell) {
+  padding: 6px 0;
 }
 
 @media (max-width: 768px) {

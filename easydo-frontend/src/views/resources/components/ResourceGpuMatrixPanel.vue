@@ -39,6 +39,7 @@ const activeServiceCount = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
 }
 
 .matrix-toolbar {
@@ -46,6 +47,7 @@ const activeServiceCount = computed(() => {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
   font-size: 12px;
 }
 

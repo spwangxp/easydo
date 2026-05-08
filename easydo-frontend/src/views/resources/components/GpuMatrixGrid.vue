@@ -9,26 +9,36 @@
           </div>
         </GpuHoverPopover>
       </div>
-      <div class="gpu-cells">
-        <GpuHoverPopover
-          v-for="cell in row.gpuCells"
-          :key="cell.id"
-          :title="cell.resourceInstance.displayName"
-          :entity="row.entity"
-          :resource-instance="cell.gpuHover"
-          :occupancy="cell.occupancy"
-        >
-          <div class="gpu-cell">
-            <div class="gpu-metrics">
-              <span class="gpu-title">GPU {{ cell.resourceInstance.identityMap?.index ?? '-' }}</span>
-              <span class="gpu-metric">{{ formatTemperature(cell.resourceInstance.metricsMap?.temperatureGpuCelsius?.value) }}</span>
-              <span class="gpu-metric">{{ formatBytes(gpuUsedMemory(cell.resourceInstance, cell.occupancy)) }}</span>
-              <span class="gpu-metric">/ {{ formatBytes(totalMemory(cell.resourceInstance)) }}</span>
+      <div class="gpu-grid-scroll">
+        <div class="gpu-cells" :style="gpuCellGridStyle(row)">
+          <GpuHoverPopover
+            v-for="cell in row.gpuCells"
+            :key="cell.id"
+            :title="cell.resourceInstance.displayName"
+            :entity="row.entity"
+            :resource-instance="cell.gpuHover"
+            :occupancy="cell.occupancy"
+          >
+            <div class="gpu-cell">
+              <div class="gpu-metrics">
+                <span class="gpu-title">GPU {{ cell.resourceInstance.identityMap?.index ?? '-' }}</span>
+                <span class="gpu-metric">{{ formatTemperature(cell.resourceInstance.metricsMap?.temperatureGpuCelsius?.value) }}</span>
+                <span class="gpu-metric">{{ formatBytes(gpuUsedMemory(cell.resourceInstance, cell.occupancy)) }}</span>
+                <span class="gpu-metric">/ {{ formatBytes(totalMemory(cell.resourceInstance)) }}</span>
+              </div>
+              <div class="gpu-segments" :class="{ 'gpu-segments--empty': !cell.segments.length }">
+                <span v-if="!cell.segments.length" class="gpu-empty">空闲</span>
+              </div>
             </div>
-            <div class="gpu-segments" :class="{ 'gpu-segments--empty': !cell.segments.length }">
+          </GpuHoverPopover>
+          <template v-for="(lane, laneIndex) in gpuSegmentLanes(row)" :key="`${row.id}-lane-${laneIndex}`">
+            <div
+              v-for="segment in lane"
+              :key="segment.id"
+              class="gpu-segment-run"
+              :style="gpuSegmentRunStyle(segment, laneIndex)"
+            >
               <GpuHoverPopover
-                v-for="segment in cell.segments"
-                :key="segment.id"
                 :title="segment.label"
                 :entity="row.entity"
                 :resource-instance="segment.gpuHover"
@@ -40,20 +50,25 @@
                     <strong>{{ segment.label }}</strong>
                     <span v-if="segment.caption" class="gpu-segment-caption">{{ segment.caption }}</span>
                   </span>
-                  <span>{{ formatBytes(segment.summary?.memoryUsedBytes) }}</span>
+                  <span class="gpu-segment-memory">
+                    <span v-if="segment.span > 1" class="gpu-segment-breakdown">{{ formatGpuMemoryBreakdown(segment) }}</span>
+                    <span>{{ formatBytes(segment.summary?.memoryUsedBytes) }}</span>
+                  </span>
                 </span>
               </GpuHoverPopover>
-              <span v-if="!cell.segments.length" class="gpu-empty">空闲</span>
             </div>
-          </div>
-        </GpuHoverPopover>
+          </template>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
+import { computed } from 'vue'
+
 import GpuHoverPopover from './GpuHoverPopover.vue'
+import { buildGpuSegmentLanes } from './gpuSegmentRuns.js'
 
 const props = defineProps({
   rows: {
@@ -73,6 +88,10 @@ const colorPalette = [
   '#d35400'
 ]
 
+const segmentLanesByRowId = computed(() => {
+  return new Map(props.rows.map(row => [row.id, buildGpuSegmentLanes(row.gpuCells || [])]))
+})
+
 const hashString = (value) => {
   const text = String(value || '')
   let hash = 0
@@ -90,6 +109,24 @@ const segmentStyle = (segment) => {
     borderColor: color,
     backgroundColor: `${color}1A`
   }
+}
+
+const gpuCellGridStyle = (row) => ({
+  gridTemplateColumns: `repeat(${Math.max(row?.gpuCells?.length || 0, 1)}, minmax(136px, 1fr))`
+})
+
+const gpuSegmentLanes = (row) => segmentLanesByRowId.value.get(row.id) || []
+
+const gpuSegmentRunStyle = (segment, laneIndex) => ({
+  ...segmentStyle(segment),
+  gridColumn: `${segment.startColumn} / span ${segment.span}`,
+  gridRow: `${laneIndex + 2}`
+})
+
+const formatGpuMemoryBreakdown = (segment) => {
+  const usages = segment?.gpuMemoryUsages || []
+  if (!usages.length) return ''
+  return `(${usages.map(item => `${item.gpuLabel}:${formatBytes(item.memoryUsedBytes)}`).join('  ')})`
 }
 
 const totalMemory = (resourceInstance) => Number(resourceInstance?.capacityMap?.memoryBytes?.capacity || resourceInstance?.capacityMap?.memoryBytes?.allocatable || resourceInstance?.capacityMap?.memoryBytes?.value || 0)
@@ -125,7 +162,7 @@ const formatBytes = (value) => {
 
 .gpu-row {
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
+  grid-template-columns: 160px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
 }
@@ -156,18 +193,25 @@ const formatBytes = (value) => {
   }
 }
 
+.gpu-grid-scroll {
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
 .gpu-cells {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 8px;
+  gap: 6px;
+  min-width: max-content;
 }
 
 .gpu-cell {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  min-height: 72px;
-  padding: 8px;
+  gap: 4px;
+  min-height: 62px;
+  max-height: 86px;
+  padding: 6px;
   border: 1px solid var(--border-color-light);
   border-radius: 8px;
   background: var(--bg-card);
@@ -176,7 +220,7 @@ const formatBytes = (value) => {
 .gpu-metrics {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px 6px;
   align-items: center;
   font-size: 11px;
   line-height: 1.25;
@@ -205,9 +249,9 @@ const formatBytes = (value) => {
 .gpu-segment {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
-  padding: 4px 6px;
+  padding: 3px 5px;
   border: 1px solid var(--segment-color);
   border-radius: 6px;
   font-size: 11px;
@@ -221,19 +265,28 @@ const formatBytes = (value) => {
     white-space: nowrap;
   }
 
-  span {
-    color: var(--text-secondary);
-    white-space: nowrap;
-    flex-shrink: 0;
+}
+
+.gpu-segment-run {
+  min-width: 0;
+
+  .gpu-segment {
+    height: 100%;
   }
 }
 
 .gpu-segment-main {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   min-width: 0;
   overflow: hidden;
+  white-space: normal;
+  flex-shrink: 1;
+
+  strong {
+    white-space: normal;
+  }
 }
 
 .gpu-segment-caption {
@@ -244,6 +297,24 @@ const formatBytes = (value) => {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.42);
   flex-shrink: 0;
+}
+
+.gpu-segment-memory {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+
+  span {
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+}
+
+.gpu-segment-breakdown {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .gpu-empty {
