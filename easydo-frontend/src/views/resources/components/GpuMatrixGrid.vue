@@ -1,45 +1,54 @@
 <template>
-  <div class="matrix-shell">
-    <table class="matrix-table">
-      <thead>
-        <tr>
-          <th class="service-col">服务</th>
-          <th v-for="column in columns" :key="column.id" class="gpu-col">
-            <GpuHoverPopover :title="column.displayName" :resource-instance="column" :claims="column.activeClaims">
-              <div class="gpu-head">
-                <strong>{{ getShortGpuTitle(column) }}</strong>
-                <span>{{ column.entity?.name || '-' }}</span>
-              </div>
-            </GpuHoverPopover>
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="row in rows" :key="row.id">
-          <td class="service-col">
-            <GpuHoverPopover :title="row.displayName" :service="row" :claims="row.activeClaims">
-              <div class="service-head">
-                <strong>{{ row.displayName }}</strong>
-                <span>{{ getServiceMeta(row) }}</span>
-              </div>
-            </GpuHoverPopover>
-          </td>
-          <td v-for="column in columns" :key="`${row.id}-${column.id}`" class="matrix-cell">
-            <GpuHoverPopover
-              :title="`${row.displayName} · ${column.displayName}`"
-              :service="row"
-              :resource-instance="column"
-              :claims="getCell(row.id, column.id).claims"
-            >
-              <div class="cell-chip" :class="{ active: getCell(row.id, column.id).claimCount > 0 }">
-                <strong>{{ getCell(row.id, column.id).claimCount || '-' }}</strong>
-                <span>{{ getCellMeta(getCell(row.id, column.id)) }}</span>
-              </div>
-            </GpuHoverPopover>
-          </td>
-        </tr>
-      </tbody>
-    </table>
+  <div class="gpu-grid">
+    <div v-for="row in rows" :key="row.id" class="gpu-row">
+      <div class="node-column">
+        <GpuHoverPopover :title="row.displayName" :entity="row.entity">
+          <div class="node-card">
+            <strong>{{ row.displayName }}</strong>
+            <span>{{ row.gpuCount }} GPU / {{ row.activeServiceCount }} 载体</span>
+          </div>
+        </GpuHoverPopover>
+      </div>
+      <div class="gpu-cells">
+        <GpuHoverPopover
+          v-for="cell in row.gpuCells"
+          :key="cell.id"
+          :title="cell.resourceInstance.displayName"
+          :entity="row.entity"
+          :resource-instance="cell.gpuHover"
+          :occupancy="cell.occupancy"
+        >
+          <div class="gpu-cell">
+            <div class="gpu-metrics">
+              <span class="gpu-title">GPU {{ cell.resourceInstance.identityMap?.index ?? '-' }}</span>
+              <span class="gpu-metric">{{ formatTemperature(cell.resourceInstance.metricsMap?.temperatureGpuCelsius?.value) }}</span>
+              <span class="gpu-metric">{{ formatBytes(gpuUsedMemory(cell.resourceInstance, cell.occupancy)) }}</span>
+              <span class="gpu-metric">/ {{ formatBytes(totalMemory(cell.resourceInstance)) }}</span>
+            </div>
+            <div class="gpu-segments" :class="{ 'gpu-segments--empty': !cell.segments.length }">
+              <GpuHoverPopover
+                v-for="segment in cell.segments"
+                :key="segment.id"
+                :title="segment.label"
+                :entity="row.entity"
+                :resource-instance="segment.gpuHover"
+                :service="segment.serviceHover"
+                :segment="segment"
+              >
+                <span class="gpu-segment" :style="segmentStyle(segment)">
+                  <span class="gpu-segment-main">
+                    <strong>{{ segment.label }}</strong>
+                    <span v-if="segment.caption" class="gpu-segment-caption">{{ segment.caption }}</span>
+                  </span>
+                  <span>{{ formatBytes(segment.summary?.memoryUsedBytes) }}</span>
+                </span>
+              </GpuHoverPopover>
+              <span v-if="!cell.segments.length" class="gpu-empty">空闲</span>
+            </div>
+          </div>
+        </GpuHoverPopover>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -50,105 +59,195 @@ const props = defineProps({
   rows: {
     type: Array,
     default: () => []
-  },
-  columns: {
-    type: Array,
-    default: () => []
-  },
-  cells: {
-    type: Object,
-    default: () => ({})
   }
 })
 
-const getCell = (serviceId, resourceInstanceId) => props.cells[`${serviceId}::${resourceInstanceId}`] || { claims: [], claimCount: 0, summary: {} }
-const getShortGpuTitle = (column) => column.specMap?.model || column.identityMap?.name || `GPU ${column.identityMap?.index ?? '-'}`
-const getServiceMeta = (row) => row.fields?.map(item => `${item.name}=${Array.isArray(item.value) ? item.value.join(',') : item.value}`).join(' · ') || '-'
-const getCellMeta = (cell) => {
-  if (cell.summary?.podUid) return `pod=${cell.summary.podUid}`
-  if (cell.summary?.pid) return `pid=${cell.summary.pid}`
-  return cell.claimCount ? 'allocated' : 'idle'
+const colorPalette = [
+  '#409eff',
+  '#67c23a',
+  '#e6a23c',
+  '#f56c6c',
+  '#909399',
+  '#8e44ad',
+  '#16a085',
+  '#d35400'
+]
+
+const hashString = (value) => {
+  const text = String(value || '')
+  let hash = 0
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(index)
+    hash |= 0
+  }
+  return Math.abs(hash)
 }
+
+const segmentStyle = (segment) => {
+  const color = colorPalette[hashString(segment?.colorKey) % colorPalette.length]
+  return {
+    '--segment-color': color,
+    borderColor: color,
+    backgroundColor: `${color}1A`
+  }
+}
+
+const totalMemory = (resourceInstance) => Number(resourceInstance?.capacityMap?.memoryBytes?.capacity || resourceInstance?.capacityMap?.memoryBytes?.allocatable || resourceInstance?.capacityMap?.memoryBytes?.value || 0)
+
+const gpuUsedMemory = (resourceInstance, occupancy) => Number(resourceInstance?.metricsMap?.memoryBytesUsed?.value || resourceInstance?.metricsMap?.memoryBytesUsed?.used || occupancy?.memoryUsedBytes || 0)
+
+const formatTemperature = (value) => {
+  const number = Number(value)
+  return Number.isFinite(number) ? `${number}°C` : '-'
+}
+
+const formatBytes = (value) => {
+  const size = Number(value || 0)
+  if (!size) return '-'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let current = size
+  let unitIndex = 0
+  while (current >= 1024 && unitIndex < units.length - 1) {
+    current /= 1024
+    unitIndex += 1
+  }
+  return `${current >= 10 || unitIndex === 0 ? current.toFixed(0) : current.toFixed(1)} ${units[unitIndex]}`
+}
+
 </script>
 
 <style lang="scss" scoped>
-.matrix-shell {
-  overflow-x: auto;
+.gpu-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.matrix-table {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-  table-layout: fixed;
-  font-size: 12px;
-
-  th,
-  td {
-    padding: 6px;
-    border: 1px solid var(--border-color-lighter);
-    vertical-align: middle;
-    background: var(--bg-card);
-  }
-
-  th {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    background: var(--bg-elevated);
-  }
+.gpu-row {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
 }
 
-.service-col {
-  min-width: 220px;
-  width: 220px;
+.node-column {
+  min-width: 0;
 }
 
-.gpu-col {
-  min-width: 140px;
-  width: 140px;
-}
-
-.gpu-head,
-.service-head,
-.cell-chip {
+.node-card {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color-light);
+  border-radius: 8px;
+  background: var(--bg-card);
+
+  strong {
+    color: var(--text-primary);
+    font-size: 12px;
+    line-height: 1.25;
+  }
+
+  span {
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.25;
+  }
 }
 
-.gpu-head strong,
-.service-head strong,
-.cell-chip strong {
-  color: var(--text-primary);
-  font-size: 12px;
-  line-height: 1.25;
+.gpu-cells {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
 }
 
-.gpu-head span,
-.service-head span,
-.cell-chip span {
-  color: var(--text-secondary);
+.gpu-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 72px;
+  padding: 8px;
+  border: 1px solid var(--border-color-light);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+
+.gpu-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
   font-size: 11px;
   line-height: 1.25;
-  word-break: break-word;
 }
 
-.matrix-cell {
-  padding: 4px;
+.gpu-title {
+  font-weight: 700;
+  color: var(--text-primary);
 }
 
-.cell-chip {
-  min-height: 42px;
+.gpu-metric {
+  color: var(--text-secondary);
+}
+
+.gpu-segments {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gpu-segments--empty {
+  min-height: 28px;
   justify-content: center;
-  padding: 4px 6px;
-  border-radius: 6px;
-  border: 1px solid var(--border-color-light);
-  background: var(--bg-elevated);
+}
 
-  &.active {
-    border-color: var(--el-color-primary-light-5);
-    background: rgba(64, 158, 255, 0.08);
+.gpu-segment {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 6px;
+  border: 1px solid var(--segment-color);
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.25;
+  min-width: 0;
+
+  strong {
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
+
+  span {
+    color: var(--text-secondary);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+}
+
+.gpu-segment-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.gpu-segment-caption {
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.2;
+  padding: 1px 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.42);
+  flex-shrink: 0;
+}
+
+.gpu-empty {
+  color: var(--text-placeholder);
+  font-size: 11px;
 }
 </style>

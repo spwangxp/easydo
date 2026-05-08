@@ -27,15 +27,18 @@
       <el-button @click="fetchResources">刷新</el-button>
     </div>
 
-    <el-table v-loading="loading" :data="filteredResources" row-key="id">
-      <el-table-column type="expand" width="56">
+    <el-table
+      v-loading="loading"
+      :data="filteredResources"
+      row-key="id"
+      :expand-row-keys="expandedGpuRowKeys"
+      :row-class-name="resourceRowClassName"
+      @expand-change="handleGpuExpandChange"
+    >
+      <el-table-column type="expand" width="52">
         <template #default="{ row }">
-          <div v-if="getRuntimeBaseInfo(row).summary.hasCanonicalData" class="expand-panel">
-            <ResourceGpuMatrixPanel
-              :rows="getRuntimeBaseInfo(row).matrix.rows"
-              :columns="getRuntimeBaseInfo(row).matrix.columns"
-              :cells="getRuntimeBaseInfo(row).matrix.cells"
-            />
+          <div v-if="canShowGpuMatrix(row) && getRuntimeBaseInfo(row).summary.hasCanonicalData" class="expand-panel">
+            <ResourceGpuMatrixPanel :rows="getRuntimeBaseInfo(row).gpuView.rows" />
           </div>
         </template>
       </el-table-column>
@@ -73,10 +76,11 @@
       <el-table-column prop="updated_at" label="更新时间" width="180">
         <template #default="{ row }">{{ formatDateTime(row.updated_at) }}</template>
       </el-table-column>
-      <el-table-column v-if="canManage || canOpenWebTerminal || canBrowseCluster" label="操作" width="520" fixed="right">
+      <el-table-column v-if="canManage || canOpenWebTerminal || canBrowseCluster" label="操作" width="620" fixed="right">
         <template #default="{ row }">
           <el-button v-if="canManage" link type="info" @click="openBaseInfoDialog(row)">基础资源详情</el-button>
           <el-button v-if="canManage" link type="success" :loading="refreshingId === row.id" @click="refreshBaseInfo(row)">刷新基础信息</el-button>
+          <el-button v-if="row.type === 'vm'" link type="primary" @click.stop="toggleGpuMatrixRow(row)">{{ isGpuMatrixExpanded(row) ? '收起 GPU视图' : 'GPU视图' }}</el-button>
           <el-button v-if="canBrowseCluster && row.type === 'k8s'" link type="primary" @click="openK8sBrowser(row)">Browse Cluster</el-button>
           <el-button v-if="canOpenWebTerminal && row.type === 'vm'" link type="primary" @click="openWebTerminal(row)">Web Terminal</el-button>
           <el-button v-if="canManage" link type="primary" @click="openEditDialog(row)">编辑</el-button>
@@ -165,6 +169,7 @@ const filters = reactive({ keyword: '', type: '', environment: '' })
 const refreshingId = ref(0)
 const baseInfoDialogVisible = ref(false)
 const baseInfoDialogResource = ref(null)
+const expandedGpuRowKeys = ref([])
 
 const canManage = computed(() => userStore.hasPermission('resource.write'))
 const canBrowseCluster = computed(() => userStore.hasPermission('resource.read'))
@@ -177,6 +182,22 @@ const filteredResources = computed(() => resources.value.filter(item => {
   if (filters.keyword && !String(item.name || '').toLowerCase().includes(filters.keyword.toLowerCase())) return false
   return true
 }))
+const canShowGpuMatrix = (row) => row?.type === 'vm'
+const isGpuMatrixExpanded = (row) => expandedGpuRowKeys.value.includes(row?.id)
+const toggleGpuMatrixRow = (row) => {
+  if (!canShowGpuMatrix(row)) return
+  expandedGpuRowKeys.value = isGpuMatrixExpanded(row)
+    ? expandedGpuRowKeys.value.filter(id => id !== row.id)
+    : expandedGpuRowKeys.value.concat(row.id)
+}
+const handleGpuExpandChange = (row, expandedRows) => {
+  if (!canShowGpuMatrix(row)) {
+    expandedGpuRowKeys.value = expandedGpuRowKeys.value.filter(id => id !== row?.id)
+    return
+  }
+  expandedGpuRowKeys.value = expandedRows.filter(item => canShowGpuMatrix(item)).map(item => item.id)
+}
+const resourceRowClassName = ({ row }) => canShowGpuMatrix(row) ? 'resource-row--gpu-expandable' : 'resource-row--gpu-non-expandable'
 
 const normalizeObjectField = (value) => {
   if (!value) return {}
@@ -218,7 +239,7 @@ const normalizeResource = (resource = {}) => ({
   bindings: Array.isArray(resource.bindings) ? resource.bindings : [],
   labels: normalizeObjectField(resource.labels),
   metadata: normalizeObjectField(resource.metadata),
-  baseInfo: normalizeObjectField(resource.base_info || resource.baseInfo),
+  baseInfo: normalizeRuntimeBaseInfo(resource.base_info || resource.baseInfo, resource.type),
   baseInfoStatus: resource.base_info_status || resource.baseInfoStatus || '',
   baseInfoSource: resource.base_info_source || resource.baseInfoSource || '',
   baseInfoCollectedAt: resource.base_info_collected_at || resource.baseInfoCollectedAt || 0,
@@ -235,7 +256,10 @@ const fetchResources = async () => {
   try {
     const resourceRes = await getResourceList()
     runtimeBaseInfoCache.clear()
-    resources.value = Array.isArray(resourceRes.data) ? resourceRes.data.map(item => normalizeResource(item)) : []
+    const nextResources = Array.isArray(resourceRes.data) ? resourceRes.data.map(item => normalizeResource(item)) : []
+    resources.value = nextResources
+    const validIds = new Set(nextResources.filter(item => canShowGpuMatrix(item)).map(item => item.id))
+    expandedGpuRowKeys.value = expandedGpuRowKeys.value.filter(id => validIds.has(id))
   } finally {
     loading.value = false
   }
@@ -579,6 +603,15 @@ onMounted(fetchResources)
 
 .base-info-alert {
   margin-bottom: $space-2;
+}
+
+:deep(.el-table__expanded-cell) {
+  padding: 0 !important;
+}
+
+:deep(.resource-row--gpu-non-expandable .el-table__expand-icon) {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 @media (max-width: 768px) {

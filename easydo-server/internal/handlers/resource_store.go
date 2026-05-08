@@ -3800,17 +3800,179 @@ func preferredResourceCredentialBinding(resourceType models.ResourceType, bindin
 
 func buildVMBaseInfoCollectionScript() string {
 	return `set -e
+escape_json() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+trim() {
+  printf '%s' "$1" | xargs
+}
+GPU_VENDOR=""
+GPU_COUNT="0"
+GPU_UUID_INDEX_CSV=""
+GPU_PROCESS_CSV=""
+GPU_DEVICE_CSV=""
+if command -v nvidia-smi >/dev/null 2>&1; then
+  GPU_VENDOR="NVIDIA"
+  GPU_COUNT="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')"
+  GPU_UUID_INDEX_CSV="$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits 2>/dev/null || true)"
+  GPU_PROCESS_CSV="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits 2>/dev/null || true)"
+  GPU_DEVICE_CSV="$(nvidia-smi --query-gpu=index,name,memory.total,uuid,pci.bus_id,memory.used,memory.free,utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>/dev/null || true)"
+elif command -v mx-smi >/dev/null 2>&1; then
+  GPU_VENDOR="MetaX"
+  MX_LIST_FILE="$(mktemp)"
+  MX_MEMORY_FILE="$(mktemp)"
+  MX_USAGE_FILE="$(mktemp)"
+  MX_TEMPERATURE_FILE="$(mktemp)"
+  MX_SUMMARY_FILE="$(mktemp)"
+  mx-smi -L >"$MX_LIST_FILE" 2>/dev/null || true
+  mx-smi --show-memory >"$MX_MEMORY_FILE" 2>/dev/null || true
+  mx-smi --show-usage >"$MX_USAGE_FILE" 2>/dev/null || true
+  mx-smi query -d TEMPERATURE >"$MX_TEMPERATURE_FILE" 2>/dev/null || true
+  mx-smi select -f index temperature >>"$MX_TEMPERATURE_FILE" 2>/dev/null || true
+  mx-smi >"$MX_SUMMARY_FILE" 2>/dev/null || true
+  GPU_UUID_INDEX_CSV="$(awk '
+    /^GPU#[0-9]+/ {
+      gpu_index=$1
+      sub(/^GPU#/, "", gpu_index)
+      uuid=""
+      if (match($0, /UUID: [^)]+/)) {
+        uuid=substr($0, RSTART + 6, RLENGTH - 6)
+      }
+      gsub(/^[ \t]+|[ \t]+$/, "", uuid)
+      if (gpu_index != "" && uuid != "") print gpu_index "," uuid
+    }
+  ' "$MX_LIST_FILE" || true)"
+  GPU_DEVICE_CSV="$(awk '
+    function trim(value) {
+      gsub(/^[ \t]+|[ \t]+$/, "", value)
+      return value
+    }
+    function number_after_colon(line,    parts, value) {
+      split(line, parts, ":")
+      value = parts[2]
+      gsub(/[^0-9.]/, "", value)
+      return value
+    }
+    FILENAME == ARGV[1] {
+      if ($1 ~ /^GPU#[0-9]+$/) {
+        gpu_index=$1
+        sub(/^GPU#/, "", gpu_index)
+        model[gpu_index]=$2
+        bus[gpu_index]=$3
+        uuid[gpu_index]=""
+        if (match($0, /UUID: [^)]+/)) {
+          uuid[gpu_index]=substr($0, RSTART + 6, RLENGTH - 6)
+          uuid[gpu_index]=trim(uuid[gpu_index])
+        }
+        seen[gpu_index]=1
+      }
+      next
+    }
+    FILENAME == ARGV[2] {
+      if ($1 ~ /^GPU#[0-9]+$/) {
+        current=$1
+        sub(/^GPU#/, "", current)
+        seen[current]=1
+      } else if (current != "" && $1 == "vram" && $2 == "total") {
+        total_kb[current]=number_after_colon($0)
+      } else if (current != "" && $1 == "vram" && $2 == "used") {
+        used_kb[current]=number_after_colon($0)
+      }
+      next
+    }
+    FILENAME == ARGV[3] {
+      if ($1 ~ /^GPU#[0-9]+$/) {
+        current=$1
+        sub(/^GPU#/, "", current)
+        seen[current]=1
+      } else if (current != "" && trim($1) == "GPU") {
+        util[current]=number_after_colon($0)
+      }
+      next
+    }
+    FILENAME == ARGV[4] {
+      line=trim($0)
+      if ($1 ~ /^GPU#[0-9]+$/) {
+        current=$1
+        sub(/^GPU#/, "", current)
+        seen[current]=1
+      } else if (match(line, /^[0-9]+[[:space:],]+[0-9.]+([[:space:],]|$)/)) {
+        tempLine=line
+        gsub(/,/, " ", tempLine)
+        split(tempLine, tempParts, /[[:space:]]+/)
+        if (tempParts[1] ~ /^[0-9]+$/ && tempParts[2] != "") {
+          temp[tempParts[1]]=tempParts[2]
+          seen[tempParts[1]]=1
+          current=""
+        }
+      } else if (current != "" && index(line, "Temperature") > 0) {
+        temp[current]=number_after_colon(line)
+      }
+      next
+    }
+    FILENAME == ARGV[5] {
+      line=$0
+      split(line, parts, "|")
+      if (length(parts) < 5) next
+      firstColumn=trim(parts[2])
+      secondColumn=trim(parts[3])
+      thirdColumn=trim(parts[4])
+      if (firstColumn ~ /^[0-9]+[[:space:]]+/ && index(thirdColumn, "MiB") == 0) {
+        split(firstColumn, firstParts, /[[:space:]]+/)
+        currentSummaryIndex=firstParts[1]
+        if (currentSummaryIndex ~ /^[0-9]+$/) seen[currentSummaryIndex]=1
+        next
+      }
+      if (currentSummaryIndex == "") next
+      if (index(thirdColumn, "MiB") == 0 || index(secondColumn, "C") == 0) {
+        currentSummaryIndex=""
+        next
+      }
+      split(secondColumn, secondParts, /[[:space:]]+/)
+      tempValue=secondParts[1]
+      gsub(/[^0-9.]/, "", tempValue)
+      if (tempValue != "") {
+        temp[currentSummaryIndex]=tempValue
+        seen[currentSummaryIndex]=1
+      }
+      currentSummaryIndex=""
+      next
+    }
+    END {
+      for (gpu_index in seen) {
+        total_mib = (total_kb[gpu_index] == "" ? 0 : total_kb[gpu_index] / 1024)
+        used_mib = (used_kb[gpu_index] == "" ? 0 : used_kb[gpu_index] / 1024)
+        free_mib = total_mib - used_mib
+        if (free_mib < 0) free_mib = 0
+        printf "%s,%s,%.0f,%s,%s,MetaX,%.0f,%.0f,%s,%s\n", gpu_index, trim(model[gpu_index]), total_mib, trim(uuid[gpu_index]), trim(bus[gpu_index]), used_mib, free_mib, trim(util[gpu_index]), trim(temp[gpu_index])
+      }
+    }
+  ' "$MX_LIST_FILE" "$MX_MEMORY_FILE" "$MX_USAGE_FILE" "$MX_TEMPERATURE_FILE" "$MX_SUMMARY_FILE" | sort -t',' -k1,1n || true)"
+  GPU_PROCESS_CSV="$(mx-smi --show-process 2>/dev/null | awk -F'|' '
+    /^[[:space:]]*\|[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+/ {
+      row=$2
+      gsub(/^[ \t]+|[ \t]+$/, "", row)
+      count=split(row, parts, /[[:space:]]+/)
+      if (count >= 4) {
+        print parts[1] "," parts[2] "," parts[count]
+      }
+    }
+  ' || true)"
+  GPU_COUNT="$(printf '%s\n' "$GPU_UUID_INDEX_CSV" | awk 'NF {count++} END {print count+0}')"
+  rm -f "$MX_LIST_FILE" "$MX_MEMORY_FILE" "$MX_USAGE_FILE" "$MX_TEMPERATURE_FILE" "$MX_SUMMARY_FILE"
+fi
 OS_NAME="$( ( . /etc/os-release 2>/dev/null && printf '%s' "${PRETTY_NAME:-${NAME:-linux}}" ) || printf 'linux')"
 OS_VERSION="$( ( . /etc/os-release 2>/dev/null && printf '%s' "${VERSION_ID:-}" ) || true)"
 CPU_MODEL="$(awk -F: '/model name/ {sub(/^[ \t]+/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
 CPU_CORES="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || printf '0')"
+CPU_USED_CORES="$(ps -eo pcpu= 2>/dev/null | awk '{sum += $1} END {if (sum > 0) printf "%.2f", sum / 100; else printf "0"}')"
 MEMORY_TOTAL="$(awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo 2>/dev/null || printf '0')"
+MEMORY_USED="$(awk '/MemTotal/ {total=$2} /MemAvailable/ {avail=$2} END {if (total > 0) print (total - avail) * 1024; else print 0}' /proc/meminfo 2>/dev/null || printf '0')"
 ROOT_TOTAL="$(df -B1 / 2>/dev/null | awk 'NR==2 {print $2}' || printf '0')"
 DISK_TOTAL="$(lsblk -b -dn -o SIZE 2>/dev/null | awk '{sum += $1} END {if (sum > 0) print sum; else print 0}')"
 if [ "$DISK_TOTAL" = "0" ] || [ -z "$DISK_TOTAL" ]; then
   DISK_TOTAL="$ROOT_TOTAL"
 fi
-GPU_COUNT="$(if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi -L 2>/dev/null | wc -l | tr -d ' '; else printf '0'; fi)"
 printf '%s\n' 'EASYDO_BASE_INFO_BEGIN'
 printf 'EASYDO_HOSTNAME=%s\n' "$(hostname 2>/dev/null || true)"
 printf 'EASYDO_PRIMARY_IPV4=%s\n' "$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
@@ -3820,7 +3982,9 @@ printf 'EASYDO_KERNEL_VERSION=%s\n' "$(uname -r 2>/dev/null || true)"
 printf 'EASYDO_ARCH=%s\n' "$(uname -m 2>/dev/null || true)"
 printf 'EASYDO_CPU_MODEL=%s\n' "$CPU_MODEL"
 printf 'EASYDO_CPU_LOGICAL_CORES=%s\n' "$CPU_CORES"
+printf 'EASYDO_CPU_USED_CORES=%s\n' "$CPU_USED_CORES"
 printf 'EASYDO_MEMORY_TOTAL_BYTES=%s\n' "$MEMORY_TOTAL"
+printf 'EASYDO_MEMORY_USED_BYTES=%s\n' "$MEMORY_USED"
 printf 'EASYDO_ROOT_TOTAL_BYTES=%s\n' "$ROOT_TOTAL"
 printf 'EASYDO_TOTAL_DISK_BYTES=%s\n' "$DISK_TOTAL"
 printf 'EASYDO_GPU_COUNT=%s\n' "$GPU_COUNT"
@@ -3829,10 +3993,63 @@ printf '%s\n' 'EASYDO_DISK_ROWS_BEGIN'
 lsblk -b -P -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null || true
 printf '%s\n' 'EASYDO_DISK_ROWS_END'
 printf '%s\n' 'EASYDO_GPU_CSV_BEGIN'
-if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=index,name,memory.total,uuid,pci.bus_id --format=csv,noheader,nounits 2>/dev/null || true
+if [ -n "$GPU_DEVICE_CSV" ]; then
+  printf '%s\n' "$GPU_DEVICE_CSV" | awk -F',' '{
+    for (i = 1; i <= NF; i++) {
+      gsub(/^[ \t]+|[ \t]+$/, "", $i)
+    }
+    if ($1 != "") print $0
+  }' || true
 fi
 printf '%s\n' 'EASYDO_GPU_CSV_END'
+printf '%s\n' 'EASYDO_RUNTIME_WORKLOADS_BEGIN'
+if [ -n "$GPU_PROCESS_CSV" ]; then
+  printf '%s\n' "$GPU_PROCESS_CSV" | awk -F',' '{gsub(/^[ \t]+|[ \t]+$/, "", $2); if ($2 != "" && !seen[$2]++) print $0}' | while IFS=',' read -r gpu_ref pid used_memory; do
+    pid="$(trim "$pid")"
+    [ -n "$pid" ] || continue
+    name="$(ps -p "$pid" -o comm= 2>/dev/null | head -n 1)"
+    [ -n "$name" ] || name="pid-$pid"
+    printf '{"name":"%s","pid":%s,"runtime":"process"}\n' "$(escape_json "$name")" "$pid"
+  done || true
+fi
+if command -v docker >/dev/null 2>&1; then
+  docker ps -q --no-trunc 2>/dev/null | while read -r cid; do
+    [ -n "$cid" ] || continue
+    meta="$(docker inspect --format '{{.State.Pid}}|{{.Name}}|{{.Config.Image}}' "$cid" 2>/dev/null || true)"
+    pid="$(printf '%s' "$meta" | cut -d'|' -f1)"
+    container_name="$(printf '%s' "$meta" | cut -d'|' -f2 | sed 's#^/##')"
+    image="$(printf '%s' "$meta" | cut -d'|' -f3)"
+    pid="$(trim "$pid")"
+    [ -n "$pid" ] || continue
+    [ "$pid" != "0" ] || continue
+    printf '{"name":"%s","pid":%s,"runtime":"docker","containerId":"%s","containerName":"%s"}\n' "$(escape_json "$image")" "$pid" "$(escape_json "$cid")" "$(escape_json "$container_name")"
+  done || true
+fi
+printf '%s\n' 'EASYDO_RUNTIME_WORKLOADS_END'
+printf '%s\n' 'EASYDO_PROCESS_TREE_BEGIN'
+ps -eo pid=,ppid= 2>/dev/null | awk '{gsub(/^[ \t]+|[ \t]+$/, "", $1); gsub(/^[ \t]+|[ \t]+$/, "", $2); if ($1 != "" && $2 != "") printf "%s,%s\n", $1, $2}' || true
+printf '%s\n' 'EASYDO_PROCESS_TREE_END'
+printf '%s\n' 'EASYDO_GPU_PROCESS_CSV_BEGIN'
+if [ -n "$GPU_PROCESS_CSV" ]; then
+  printf '%s\n' "$GPU_PROCESS_CSV" | while IFS=',' read -r gpu_ref pid used_memory; do
+    gpu_ref="$(trim "$gpu_ref")"
+    pid="$(trim "$pid")"
+    used_memory="$(trim "$used_memory")"
+    [ -n "$gpu_ref" ] || continue
+    [ -n "$pid" ] || continue
+    gpu_index=""
+    if [ "$GPU_VENDOR" = "NVIDIA" ]; then
+      gpu_index="$(printf '%s\n' "$GPU_UUID_INDEX_CSV" | awk -F',' -v uuid="$gpu_ref" '{gsub(/^[ \t]+|[ \t]+$/, "", $1); gsub(/^[ \t]+|[ \t]+$/, "", $2); if ($2 == uuid) { print $1; exit }}')"
+    else
+      gpu_index="$gpu_ref"
+    fi
+    [ -n "$gpu_index" ] || continue
+    used_memory_int="$(printf '%s' "$used_memory" | awk '{printf "%d", $1}')"
+    case "$used_memory_int" in ''|*[!0-9]*) used_memory_int=0 ;; esac
+    printf '{"gpuIndex":%s,"pid":%s,"memoryUsedBytes":%s}\n' "$gpu_index" "$pid" "$((used_memory_int * 1024 * 1024))"
+  done || true
+fi
+printf '%s\n' 'EASYDO_GPU_PROCESS_CSV_END'
 printf '%s\n' 'EASYDO_BASE_INFO_END'`
 }
 
@@ -4127,19 +4344,35 @@ func buildCanonicalVMBaseInfo(resourceID uint64, stdout, source string) (Resourc
 		if utilization, ok := optionalFloat64MapValue(device, "utilizationGpuPercent"); ok {
 			instance.Metrics = append(instance.Metrics, newResourceBaseInfoMeasureValue("utilizationGpuPercent", utilization))
 		}
+		if temperature, ok := optionalFloat64MapValue(device, "temperatureGpuCelsius"); ok {
+			instance.Metrics = append(instance.Metrics, newResourceBaseInfoMeasureValue("temperatureGpuCelsius", temperature))
+		}
 		baseInfo.ResourceInstances = append(baseInfo.ResourceInstances, instance)
 		gpuInstanceIDs[gpuIndex] = instance.ID
 	}
 
 	workloads := parseVMRuntimeWorkloads(sections.runtimeWorkloadRows)
+	pidParentByPID := parseVMProcessTreeRows(sections.processTreeRows)
 	serviceByPID := map[int]ResourceBaseInfoService{}
 	serviceKeyByPID := map[int]string{}
+	servicePriorityByPID := map[int]int{}
 	serviceOrder := make([]int, 0, len(workloads))
 	for _, workload := range workloads {
 		pid := parseIntValue(fmt.Sprint(workload["pid"]))
+		if pid <= 0 {
+			continue
+		}
+		priority := canonicalVMWorkloadPriority(workload)
+		if existingPriority, exists := servicePriorityByPID[pid]; exists {
+			if existingPriority >= priority {
+				continue
+			}
+		} else {
+			serviceOrder = append(serviceOrder, pid)
+		}
 		serviceKey := buildCanonicalVMServiceKey(workload)
 		serviceKeyByPID[pid] = serviceKey
-		serviceOrder = append(serviceOrder, pid)
+		servicePriorityByPID[pid] = priority
 		serviceByPID[pid] = ResourceBaseInfoService{
 			ID:       buildResourceBaseInfoServiceID(resourceID, serviceKey),
 			Name:     defaultIfEmpty(stringValue(workload["name"]), defaultIfEmpty(stringValue(workload["containerName"]), serviceKey)),
@@ -4153,9 +4386,26 @@ func buildCanonicalVMBaseInfo(resourceID uint64, stdout, source string) (Resourc
 		}
 	}
 
+	filteredServiceOrder := make([]int, 0, len(serviceOrder))
+	filteredServiceByPID := map[int]ResourceBaseInfoService{}
+	filteredServiceKeyByPID := map[int]string{}
+	for _, pid := range serviceOrder {
+		if reconcileVMGPUProcessPID(pid, servicePriorityByPID, pidParentByPID) != pid {
+			continue
+		}
+		filteredServiceOrder = append(filteredServiceOrder, pid)
+		filteredServiceByPID[pid] = serviceByPID[pid]
+		filteredServiceKeyByPID[pid] = serviceKeyByPID[pid]
+	}
+	serviceOrder = filteredServiceOrder
+	serviceByPID = filteredServiceByPID
+	serviceKeyByPID = filteredServiceKeyByPID
+
 	allocationByID := map[string]*ResourceBaseInfoAllocation{}
+	seenClaimByAllocationID := map[string]map[string]struct{}{}
 	for _, proc := range parseVMGPUProcessRows(sections.gpuProcessRows) {
-		pid := parseIntValue(fmt.Sprint(proc["pid"]))
+		rawPID := parseIntValue(fmt.Sprint(proc["pid"]))
+		pid := reconcileVMGPUProcessPID(rawPID, servicePriorityByPID, pidParentByPID)
 		service, ok := serviceByPID[pid]
 		if !ok {
 			continue
@@ -4174,9 +4424,29 @@ func buildCanonicalVMBaseInfo(resourceID uint64, stdout, source string) (Resourc
 			allocationByID[allocationID] = allocation
 		}
 		dimensions := []ResourceBaseInfoField{newResourceBaseInfoField("pid", pid)}
+		if rawPID > 0 && rawPID != pid {
+			dimensions = append(dimensions, newResourceBaseInfoField("observedPid", rawPID))
+		}
 		if used, ok := proc["memoryUsedBytes"]; ok {
 			dimensions = append(dimensions, newResourceBaseInfoField("memoryUsedBytes", used))
 		}
+		claimKeyParts := []string{service.ID, gpuInstanceID, fmt.Sprintf("pid-%d", pid)}
+		if rawPID > 0 {
+			claimKeyParts = append(claimKeyParts, fmt.Sprintf("observedPid-%d", rawPID))
+		}
+		if used, ok := proc["memoryUsedBytes"]; ok {
+			claimKeyParts = append(claimKeyParts, fmt.Sprintf("memoryUsedBytes-%s", fmt.Sprint(used)))
+		}
+		claimKey := strings.Join(claimKeyParts, "|")
+		seenClaims := seenClaimByAllocationID[allocationID]
+		if seenClaims == nil {
+			seenClaims = map[string]struct{}{}
+			seenClaimByAllocationID[allocationID] = seenClaims
+		}
+		if _, exists := seenClaims[claimKey]; exists {
+			continue
+		}
+		seenClaims[claimKey] = struct{}{}
 		allocation.Claims = append(allocation.Claims, ResourceBaseInfoAllocationClaim{
 			ServiceID:          service.ID,
 			ResourceInstanceID: gpuInstanceID,
@@ -4344,6 +4614,21 @@ func buildCanonicalK8sBaseInfo(resourceID uint64, stdout, source string) (Resour
 			continue
 		}
 		nodeName := stringValue(spec["nodeName"])
+		ownerKind := ""
+		ownerName := ""
+		if ownerRefs, ok := metadata["ownerReferences"].([]interface{}); ok {
+			for _, rawOwner := range ownerRefs {
+				ownerRef, _ := rawOwner.(map[string]interface{})
+				if ownerRef == nil {
+					continue
+				}
+				ownerKind = stringValue(ownerRef["kind"])
+				ownerName = stringValue(ownerRef["name"])
+				if ownerKind != "" || ownerName != "" {
+					break
+				}
+			}
+		}
 		service := ResourceBaseInfoService{
 			ID:       buildResourceBaseInfoServiceID(resourceID, uid),
 			Name:     defaultIfEmpty(stringValue(metadata["name"]), uid),
@@ -4353,6 +4638,8 @@ func buildCanonicalK8sBaseInfo(resourceID uint64, stdout, source string) (Resour
 				newResourceBaseInfoField("namespace", stringValue(metadata["namespace"])),
 				newResourceBaseInfoField("nodeName", nodeName),
 				newResourceBaseInfoField("phase", stringValue(nestedMapValue(pod, "status", "phase"))),
+				newResourceBaseInfoField("ownerKind", ownerKind),
+				newResourceBaseInfoField("ownerName", ownerName),
 			},
 		}
 		for _, cardID := range parseK8sPodGPUCardBindings(metadata) {
@@ -4387,15 +4674,15 @@ type k8sPodObservableUsage struct {
 }
 
 type k8sGPUCardIdentity struct {
-	NodeName       string `json:"nodeName,omitempty"`
-	Name           string `json:"name,omitempty"`
-	UUID           string `json:"uuid,omitempty"`
-	BusID          string `json:"busId,omitempty"`
-	Index          string `json:"index,omitempty"`
-	Vendor         string `json:"vendor,omitempty"`
-	Model          string `json:"model,omitempty"`
-	MemoryBytes    int64  `json:"memoryBytes,omitempty"`
-	UsedMemoryBytes int64 `json:"memoryUsedBytes,omitempty"`
+	NodeName        string `json:"nodeName,omitempty"`
+	Name            string `json:"name,omitempty"`
+	UUID            string `json:"uuid,omitempty"`
+	BusID           string `json:"busId,omitempty"`
+	Index           string `json:"index,omitempty"`
+	Vendor          string `json:"vendor,omitempty"`
+	Model           string `json:"model,omitempty"`
+	MemoryBytes     int64  `json:"memoryBytes,omitempty"`
+	UsedMemoryBytes int64  `json:"memoryUsedBytes,omitempty"`
 }
 
 func buildK8sPodUsageByNode(podsDoc map[string]interface{}) map[string]k8sPodObservableUsage {
@@ -4586,13 +4873,14 @@ func parseK8sPodGPUCardBindings(metadata map[string]interface{}) []string {
 }
 
 type collectorOutputSections struct {
-	hasMainBlock       bool
-	scalars            map[string]string
-	diskRows           []string
-	gpuRows            []string
-	gpuProcessRows     []string
+	hasMainBlock        bool
+	scalars             map[string]string
+	diskRows            []string
+	gpuRows             []string
+	gpuProcessRows      []string
+	processTreeRows     []string
 	runtimeWorkloadRows []string
-	labelRows          []string
+	labelRows           []string
 }
 
 func parseMarkedCollectorOutput(stdout string) collectorOutputSections {
@@ -4631,6 +4919,12 @@ func parseMarkedCollectorOutput(stdout string) collectorOutputSections {
 		case "EASYDO_GPU_PROCESS_CSV_END":
 			mode = ""
 			continue
+		case "EASYDO_PROCESS_TREE_BEGIN":
+			mode = "process-tree"
+			continue
+		case "EASYDO_PROCESS_TREE_END":
+			mode = ""
+			continue
 		case "EASYDO_RUNTIME_WORKLOADS_BEGIN":
 			mode = "runtime-workload"
 			continue
@@ -4654,6 +4948,8 @@ func parseMarkedCollectorOutput(stdout string) collectorOutputSections {
 			sections.gpuRows = append(sections.gpuRows, line)
 		case "gpu-process":
 			sections.gpuProcessRows = append(sections.gpuProcessRows, line)
+		case "process-tree":
+			sections.processTreeRows = append(sections.processTreeRows, line)
 		case "runtime-workload":
 			sections.runtimeWorkloadRows = append(sections.runtimeWorkloadRows, line)
 		case "labels":
@@ -4724,7 +5020,22 @@ func parseVMBaseInfoGPUDevices(rows []string) []map[string]interface{} {
 	for _, row := range rows {
 		parts := strings.Split(row, ",")
 		if len(parts) < 3 {
-			continue
+			fields := strings.Fields(row)
+			if len(fields) < 9 {
+				continue
+			}
+			parts = []string{
+				fields[0],
+				strings.Join(fields[1:len(fields)-7], " "),
+				fields[len(fields)-7],
+				fields[len(fields)-6],
+				fields[len(fields)-5],
+				"NVIDIA",
+				fields[len(fields)-4],
+				fields[len(fields)-3],
+				fields[len(fields)-2],
+				fields[len(fields)-1],
+			}
 		}
 		device := map[string]interface{}{
 			"index":       parseIntValue(strings.TrimSpace(parts[0])),
@@ -4761,14 +5072,28 @@ func parseVMBaseInfoGPUDevices(rows []string) []map[string]interface{} {
 				device["utilizationGpuPercent"] = parseFloat64Value(utilization)
 			}
 		}
+		if len(parts) > 9 {
+			if temperature, ok := parseOptionalFloat64Value(parts[9]); ok {
+				device["temperatureGpuCelsius"] = temperature
+			}
+		}
 		devices = append(devices, device)
 	}
 	return devices
 }
 
 func parseIntValue(raw string) int {
-	value, _ := strconv.Atoi(strings.TrimSpace(raw))
-	return value
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0
+	}
+	if value, err := strconv.Atoi(trimmed); err == nil {
+		return value
+	}
+	if value, err := strconv.ParseFloat(trimmed, 64); err == nil {
+		return int(value)
+	}
+	return 0
 }
 
 func parseInt64Value(raw string) int64 {
@@ -4786,15 +5111,20 @@ func parseInt64Value(raw string) int64 {
 }
 
 func parseFloat64Value(raw string) float64 {
+	value, _ := parseOptionalFloat64Value(raw)
+	return value
+}
+
+func parseOptionalFloat64Value(raw string) (float64, bool) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return 0
+		return 0, false
 	}
 	value, err := strconv.ParseFloat(trimmed, 64)
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	return value
+	return value, true
 }
 
 func parseVMRuntimeWorkloads(rows []string) []map[string]interface{} {
@@ -4819,6 +5149,66 @@ func parseVMGPUProcessRows(rows []string) []map[string]interface{} {
 		processes = append(processes, item)
 	}
 	return processes
+}
+
+func parseVMProcessTreeRows(rows []string) map[int]int {
+	parentByPID := map[int]int{}
+	for _, row := range rows {
+		parts := strings.Split(row, ",")
+		if len(parts) < 2 {
+			continue
+		}
+		pid := parseIntValue(parts[0])
+		ppid := parseIntValue(parts[1])
+		if pid <= 0 || ppid < 0 {
+			continue
+		}
+		parentByPID[pid] = ppid
+	}
+	return parentByPID
+}
+
+func reconcileVMGPUProcessPID(pid int, servicePriorityByPID map[int]int, parentByPID map[int]int) int {
+	if pid <= 0 {
+		return pid
+	}
+	bestPID := 0
+	bestPriority := -1
+	visited := map[int]struct{}{}
+	current := pid
+	for current > 0 {
+		if priority, ok := servicePriorityByPID[current]; ok && priority > bestPriority {
+			bestPID = current
+			bestPriority = priority
+		}
+		if _, seen := visited[current]; seen {
+			break
+		}
+		visited[current] = struct{}{}
+		parent, ok := parentByPID[current]
+		if !ok || parent <= 0 || parent == current {
+			break
+		}
+		current = parent
+	}
+	if bestPID > 0 {
+		return bestPID
+	}
+	return pid
+}
+
+func canonicalVMWorkloadPriority(workload map[string]interface{}) int {
+	runtime := strings.TrimSpace(stringValue(workload["runtime"]))
+	switch runtime {
+	case "docker":
+		return 3
+	case "pod", "container":
+		return 2
+	case "process":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func buildCanonicalVMServiceKey(workload map[string]interface{}) string {

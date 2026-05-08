@@ -1,5 +1,5 @@
 <template>
-  <el-popover placement="top" :width="360" trigger="hover" popper-class="gpu-hover-popper">
+  <el-popover placement="top" :width="420" trigger="hover" popper-class="gpu-hover-popper">
     <template #reference>
       <slot />
     </template>
@@ -7,36 +7,83 @@
     <div class="hover-card">
       <div class="hover-title">{{ title || '-' }}</div>
 
-      <div v-if="resourceInstance" class="hover-block">
+      <div v-if="entity" class="hover-block">
+        <div class="hover-label">节点</div>
+        <div class="kv-list">
+          <div class="kv-item"><span>名称</span><strong>{{ entity.name || '-' }}</strong></div>
+          <div v-if="entity.fieldsMap?.hostname" class="kv-item"><span>主机名</span><strong>{{ formatValue(entity.fieldsMap.hostname) }}</strong></div>
+          <div v-if="entity.fieldsMap?.primaryIpv4" class="kv-item"><span>IP</span><strong>{{ formatValue(entity.fieldsMap.primaryIpv4) }}</strong></div>
+        </div>
+      </div>
+
+      <div v-if="gpuInfo" class="hover-block">
         <div class="hover-label">GPU</div>
         <div class="kv-list">
-          <div class="kv-item"><span>名称</span><strong>{{ resourceInstance.displayName }}</strong></div>
-          <div class="kv-item"><span>节点</span><strong>{{ resourceInstance.entity?.name || '-' }}</strong></div>
-          <div class="kv-item"><span>型号</span><strong>{{ resourceInstance.specMap?.model || '-' }}</strong></div>
-          <div class="kv-item"><span>厂商</span><strong>{{ resourceInstance.specMap?.vendor || '-' }}</strong></div>
-          <div class="kv-item"><span>索引</span><strong>{{ formatValue(resourceInstance.identityMap?.index) }}</strong></div>
-          <div class="kv-item"><span>UUID</span><strong>{{ formatValue(resourceInstance.identityMap?.uuid) }}</strong></div>
-          <div class="kv-item"><span>显存</span><strong>{{ formatBytes(getMeasureValue(resourceInstance.capacityMap?.memoryBytes, ['capacity', 'allocatable', 'total', 'value'])) }}</strong></div>
-          <div class="kv-item"><span>已用显存</span><strong>{{ formatBytes(getMeasureValue(resourceInstance.metricsMap?.memoryBytesUsed, ['value', 'used'])) }}</strong></div>
-          <div class="kv-item"><span>利用率</span><strong>{{ formatPercent(getMeasureValue(resourceInstance.metricsMap?.utilizationGpuPercent, ['value'])) }}</strong></div>
+          <div class="kv-item"><span>名称</span><strong>{{ gpuInfo.displayName || '-' }}</strong></div>
+          <div class="kv-item"><span>型号</span><strong>{{ gpuInfo.model || '-' }}</strong></div>
+          <div class="kv-item"><span>厂商</span><strong>{{ gpuInfo.vendor || '-' }}</strong></div>
+          <div class="kv-item"><span>索引</span><strong>{{ formatValue(gpuInfo.index) }}</strong></div>
+          <div class="kv-item"><span>UUID</span><strong>{{ formatValue(gpuInfo.uuid) }}</strong></div>
+          <div class="kv-item"><span>Bus ID</span><strong>{{ formatValue(gpuInfo.busId) }}</strong></div>
+          <div class="kv-item"><span>显存</span><strong>{{ formatBytes(gpuInfo.memoryBytes) }}</strong></div>
+          <div class="kv-item"><span>已用显存</span><strong>{{ formatBytes(gpuInfo.memoryUsedBytes) }}</strong></div>
+          <div class="kv-item"><span>温度</span><strong>{{ formatTemperature(gpuInfo.temperatureGpuCelsius) }}</strong></div>
+          <div class="kv-item"><span>利用率</span><strong>{{ formatPercent(gpuInfo.utilizationGpuPercent) }}</strong></div>
         </div>
       </div>
 
-      <div v-if="service" class="hover-block">
+      <div v-if="serviceHover" class="hover-block">
         <div class="hover-label">服务</div>
         <div class="kv-list">
-          <div class="kv-item"><span>名称</span><strong>{{ service.displayName }}</strong></div>
-          <div class="kv-item"><span>实体</span><strong>{{ service.entity?.name || '-' }}</strong></div>
-          <div class="kv-item" v-for="field in service.fields || []" :key="`service-${field.name}`"><span>{{ field.name }}</span><strong>{{ formatValue(field.value) }}</strong></div>
+          <div class="kv-item"><span>服务名</span><strong>{{ serviceHover.displayName || '-' }}</strong></div>
+          <div class="kv-item"><span>ID</span><strong>{{ serviceHover.id || '-' }}</strong></div>
+          <div class="kv-item"><span>name</span><strong>{{ serviceHover.name || '-' }}</strong></div>
+          <div class="kv-item"><span>部署方式</span><strong>{{ serviceHover.runtimeType || '-' }}</strong></div>
+          <div class="kv-item"><span>PID</span><strong>{{ formatPidList(serviceHover.pids) }}</strong></div>
+          <div class="kv-item"><span>观测 PID</span><strong>{{ formatPidList(serviceHover.observedPids) }}</strong></div>
+          <div class="kv-item"><span>显存占用</span><strong>{{ formatBytes(serviceHover.memoryUsedBytes) }}</strong></div>
+          <div v-if="serviceHover.containerName" class="kv-item"><span>容器名</span><strong>{{ serviceHover.containerName }}</strong></div>
+          <div v-if="serviceHover.containerId" class="kv-item"><span>容器 ID</span><strong>{{ serviceHover.containerId }}</strong></div>
+          <div v-if="serviceHover.uid" class="kv-item"><span>UID</span><strong>{{ serviceHover.uid }}</strong></div>
+          <div v-if="serviceHover.namespace" class="kv-item"><span>命名空间</span><strong>{{ serviceHover.namespace }}</strong></div>
+          <div v-if="serviceHover.nodeName" class="kv-item"><span>节点</span><strong>{{ serviceHover.nodeName }}</strong></div>
+          <div v-if="serviceHover.phase" class="kv-item"><span>状态</span><strong>{{ serviceHover.phase }}</strong></div>
+          <div v-if="serviceHover.ownerDisplayName" class="kv-item"><span>归属</span><strong>{{ serviceHover.ownerDisplayName }}</strong></div>
         </div>
       </div>
 
-      <div v-if="claims?.length" class="hover-block">
-        <div class="hover-label">Claims</div>
-        <div class="claim-list">
-          <div v-for="claim in claims" :key="claim.id" class="claim-item">
-            <span class="claim-id">{{ claim.allocationId }}</span>
-            <span class="claim-meta">{{ formatClaim(claim) }}</span>
+      <div v-if="segment && !serviceHover" class="hover-block">
+        <div class="hover-label">载体</div>
+        <div class="kv-list">
+          <div class="kv-item"><span>名称</span><strong>{{ segment.label || '-' }}</strong></div>
+          <div class="kv-item"><span>部署方式</span><strong>{{ segment.caption || '-' }}</strong></div>
+          <div class="kv-item"><span>显存占用</span><strong>{{ formatBytes(segment.summary?.memoryUsedBytes) }}</strong></div>
+        </div>
+      </div>
+
+      <div v-if="occupancy && !serviceHover" class="hover-block">
+        <div class="hover-label">占用概览</div>
+        <div class="kv-list">
+          <div class="kv-item"><span>载体数</span><strong>{{ occupancy.serviceCount || 0 }}</strong></div>
+          <div class="kv-item"><span>显存占用</span><strong>{{ formatBytes(occupancy.memoryUsedBytes) }}</strong></div>
+        </div>
+        <div v-if="occupancy.serviceSummaries?.length" class="summary-list">
+          <div v-for="item in occupancy.serviceSummaries" :key="item.id" class="summary-item">
+            <strong>{{ item.displayName || item.name || item.id }}</strong>
+            <span>{{ item.runtimeType || '-' }}</span>
+            <span>PID {{ formatPidList(item.pids) }}</span>
+            <span>{{ formatBytes(item.memoryUsedBytes) }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="serviceHover?.descendantProcesses?.length" class="hover-block">
+        <div class="hover-label">子孙进程显存</div>
+        <div class="summary-list">
+          <div v-for="process in serviceHover.descendantProcesses" :key="process.id" class="summary-item">
+            <strong>PID {{ formatValue(process.observedPid) }}</strong>
+            <span>归属 PID {{ formatValue(process.pid) }}</span>
+            <span>{{ formatBytes(process.memoryUsedBytes) }}</span>
           </div>
         </div>
       </div>
@@ -45,10 +92,16 @@
 </template>
 
 <script setup>
-defineProps({
+import { computed } from 'vue'
+
+const props = defineProps({
   title: {
     type: String,
     default: ''
+  },
+  entity: {
+    type: Object,
+    default: null
   },
   resourceInstance: {
     type: Object,
@@ -58,24 +111,27 @@ defineProps({
     type: Object,
     default: null
   },
-  claims: {
-    type: Array,
-    default: () => []
+  segment: {
+    type: Object,
+    default: null
+  },
+  occupancy: {
+    type: Object,
+    default: null
   }
 })
 
-const getMeasureValue = (measure, keys) => {
-  if (!measure) return null
-  for (const key of keys) {
-    const value = Number(measure[key])
-    if (Number.isFinite(value)) return value
-  }
-  return null
-}
+const gpuInfo = computed(() => props.segment?.gpuHover || props.resourceInstance)
+const serviceHover = computed(() => props.segment?.serviceHover || props.service)
 
 const formatValue = (value) => {
   if (Array.isArray(value)) return value.join(', ') || '-'
   return value == null || value === '' ? '-' : String(value)
+}
+
+const formatPidList = (values) => {
+  if (!Array.isArray(values) || !values.length) return '-'
+  return values.map(item => formatValue(item)).join(', ')
 }
 
 const formatPercent = (value) => {
@@ -84,10 +140,17 @@ const formatPercent = (value) => {
   return Number.isFinite(number) ? `${number}%` : '-'
 }
 
+const formatTemperature = (value) => {
+  if (value == null || value === '') return '-'
+  const number = Number(value)
+  return Number.isFinite(number) ? `${number}°C` : '-'
+}
+
 const formatBytes = (value) => {
   if (value == null || value === '') return '-'
   const size = Number(value)
-  if (!Number.isFinite(size)) return '-'
+  if (!Number.isFinite(size) || size < 0) return '-'
+  if (size === 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
   let current = size
   let unitIndex = 0
@@ -96,11 +159,6 @@ const formatBytes = (value) => {
     unitIndex += 1
   }
   return `${current >= 10 || unitIndex === 0 ? current.toFixed(0) : current.toFixed(1)} ${units[unitIndex]}`
-}
-
-const formatClaim = (claim) => {
-  const parts = (claim?.dimensions || []).map(item => `${item.name}=${formatValue(item.value)}`)
-  return parts.join(' · ') || '-'
 }
 </script>
 
@@ -154,32 +212,35 @@ const formatClaim = (claim) => {
   }
 }
 
-.claim-list {
+.summary-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.claim-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.summary-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) repeat(3, auto);
+  gap: 8px;
   padding-top: 6px;
   border-top: 1px solid var(--border-color-lighter);
+  align-items: center;
 
   &:first-child {
     padding-top: 0;
     border-top: 0;
   }
-}
 
-.claim-id {
-  font-weight: 600;
-  color: var(--text-primary);
-}
+  strong {
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
-.claim-meta {
-  color: var(--text-secondary);
-  word-break: break-word;
+  span {
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
 }
 </style>

@@ -81,7 +81,8 @@ const canonicalVmPayload = {
       ],
       metrics: [
         { name: 'memoryBytesUsed', value: 21474836480 },
-        { name: 'utilizationGpuPercent', value: 55 }
+        { name: 'utilizationGpuPercent', value: 55 },
+        { name: 'temperatureGpuCelsius', value: 67 }
       ]
     },
     {
@@ -98,7 +99,7 @@ const canonicalVmPayload = {
         { name: 'model', value: 'A100' }
       ],
       capacity: [{ name: 'memoryBytes', capacity: 85899345920 }],
-      metrics: [{ name: 'utilizationGpuPercent', value: 10 }]
+      metrics: [{ name: 'utilizationGpuPercent', value: 10 }, { name: 'temperatureGpuCelsius', value: 49 }]
     }
   ],
   services: [
@@ -156,6 +157,7 @@ const canonicalVmPayload = {
           resourceInstanceId: 'gpu-0',
           dimensions: [
             { name: 'pid', value: 1301 },
+            { name: 'observedPid', value: 2301 },
             { name: 'memoryUsedBytes', value: 10737418240 }
           ]
         },
@@ -189,7 +191,11 @@ assert.equal(normalizedVm.summary.hostCount, 1)
 assert.equal(normalizedVm.summary.nodeCount, 0)
 assert.equal(normalizedVm.resourceInstancesById['gpu-0'].entityId, 'resource:1:entity:host')
 assert.equal(normalizedVm.resourceInstancesById['gpu-0'].specMap.model, 'A100')
+assert.equal(normalizedVm.resourceInstancesById['gpu-0'].metricsMap.temperatureGpuCelsius.value, 67)
 assert.equal(normalizedVm.servicesById['service-a'].fieldsMap.runtime, 'docker')
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].segments[0].caption, 'docker')
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].segments[0].label, 'trainer-a')
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].segments[1].caption, 'docker')
 assert.equal(normalizedVm.allocationsById['alloc-a'].claims.length, 1)
 assert.equal(normalizedVm.detail.hostSummary.hostname, 'vm-host-1')
 assert.equal(normalizedVm.detail.hostSummary.primaryIpv4, '10.0.0.8')
@@ -207,6 +213,29 @@ assert.equal(normalizedVm.matrix.cells['service-b::gpu-0'].claimCount, 1)
 assert.equal(normalizedVm.matrix.cells['service-b::gpu-1'].claimCount, 1)
 assert.equal(normalizedVm.matrix.cells['service-a::gpu-1'].claimCount, 0)
 assert.equal(normalizedVm.matrix.hasData, true)
+assert.equal(normalizedVm.gpuView.rowCount, 1)
+assert.equal(normalizedVm.gpuView.gpuCount, 2)
+assert.equal(normalizedVm.gpuView.activeServiceCount, 2)
+assert.equal(normalizedVm.gpuView.hasData, true)
+assert.deepEqual(normalizedVm.gpuView.rows.map(row => row.id), ['resource:1:entity:host'])
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells.length, 2)
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].resourceInstance.id, 'gpu-0')
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].segments.length, 2)
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].segments[0].label, 'trainer-a')
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].segments[0].summary.memoryUsedBytes, 21474836480)
+assert.deepEqual(normalizedVm.gpuView.rows[0].gpuCells[0].segments[1].serviceHover.pids, [1301])
+assert.deepEqual(normalizedVm.gpuView.rows[0].gpuCells[0].segments[1].serviceHover.observedPids, [2301])
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].segments[1].serviceHover.descendantProcessCount, 1)
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].segments[1].serviceHover.descendantProcesses[0].memoryUsedBytes, 10737418240)
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].segments[1].serviceHover.runtimeType, 'docker')
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].segments[1].serviceHover.containerName, 'trainer-b')
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].segments[1].gpuHover.temperatureGpuCelsius, 67)
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].occupancy.serviceSummaries[0].runtimeType, 'docker')
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].occupancy.serviceSummaries[1].memoryUsedBytes, 10737418240)
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].resourceInstance.metricsMap.temperatureGpuCelsius.value, 67)
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[0].resourceInstance.metricsMap.memoryBytesUsed.value, 21474836480)
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[1].segments.length, 1)
+assert.equal(normalizedVm.gpuView.rows[0].gpuCells[1].segments[0].label, 'trainer-b')
 assert.equal('vm' in normalizedVm, false)
 assert.equal('k8s' in normalizedVm, false)
 assert.equal('machine' in normalizedVm, false)
@@ -336,7 +365,11 @@ const canonicalK8sPayload = {
         { name: 'uid', value: 'pod-a' },
         { name: 'namespace', value: 'default' },
         { name: 'nodeName', value: 'node-a' },
-        { name: 'phase', value: 'Running' }
+        { name: 'phase', value: 'Running' },
+        { name: 'ownerKind', value: 'StatefulSet' },
+        { name: 'ownerName', value: 'infer-b' },
+        { name: 'ownerKind', value: 'Deployment' },
+        { name: 'ownerName', value: 'infer-a' }
       ]
     },
     {
@@ -348,7 +381,9 @@ const canonicalK8sPayload = {
         { name: 'uid', value: 'pod-b' },
         { name: 'namespace', value: 'default' },
         { name: 'nodeName', value: 'node-b' },
-        { name: 'phase', value: 'Running' }
+        { name: 'phase', value: 'Running' },
+        { name: 'ownerKind', value: 'StatefulSet' },
+        { name: 'ownerName', value: 'infer-b' }
       ]
     }
   ],
@@ -397,6 +432,14 @@ assert.deepEqual(normalizedK8s.matrix.columns.map(column => column.id), ['node-1
 assert.equal(normalizedK8s.matrix.cells['svc-infer-b::node-1-gpu-0'].claimCount, 1)
 assert.equal(normalizedK8s.matrix.cells['svc-infer-b::node-1-gpu-0'].summary.podUid, 'pod-b')
 assert.equal(normalizedK8s.matrix.cells['svc-infer-a::node-2-gpu-0'].claimCount, 0)
+assert.equal(normalizedK8s.gpuView.rowCount, 2)
+assert.deepEqual(normalizedK8s.gpuView.rows.map(row => row.id), ['node-1', 'node-2'])
+assert.equal(normalizedK8s.gpuView.rows[0].gpuCells.length, 1)
+assert.equal(normalizedK8s.gpuView.rows[0].gpuCells[0].segments.length, 2)
+assert.equal(normalizedK8s.gpuView.rows[0].gpuCells[0].segments[0].summary.podUid, 'pod-a')
+assert.equal(normalizedK8s.gpuView.rows[0].gpuCells[0].segments[0].caption, 'pod')
+assert.equal(normalizedK8s.gpuView.rows[1].gpuCells[0].segments[0].caption, 'pod')
+assert.equal(normalizedK8s.gpuView.rows[1].gpuCells[0].segments.length, 1)
 assert.equal('k8s' in normalizedK8s, false)
 assert.equal('gpuColumns' in normalizedK8s, false)
 assert.equal('matrixRows' in normalizedK8s, false)
@@ -424,6 +467,9 @@ assert.deepEqual(malformed.matrix.rows.map(row => row.id), ['svc-bad'])
 assert.deepEqual(malformed.matrix.columns.map(column => column.id), ['node-bad-gpu-0'])
 assert.equal(malformed.matrix.cells['svc-bad::node-bad-gpu-0'].claimCount, 1)
 assert.equal(malformed.matrix.cells['svc-bad::node-bad-gpu-0'].summary.podUid, 'bad-pod')
+assert.equal(malformed.gpuView.rowCount, 1)
+assert.equal(malformed.gpuView.rows[0].gpuCells.length, 1)
+assert.equal(malformed.gpuView.rows[0].gpuCells[0].segments.length, 1)
 assert.equal(Boolean(malformed.matrix.cells['svc-bad::missing-instance']), false)
 assert.equal(Boolean(malformed.matrix.cells['missing-service::node-bad-gpu-0']), false)
 

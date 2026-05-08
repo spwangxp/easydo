@@ -24,13 +24,25 @@ RUN go mod tidy
 ARG GIT_COMMIT=unknown
 ARG GIT_COMMIT_SHORT=unknown
 ARG GIT_DATE=unknown
-ENV GIT_COMMIT=${GIT_COMMIT}
-ENV GIT_COMMIT_SHORT=${GIT_COMMIT_SHORT}
-ENV GIT_DATE=${GIT_DATE}
-
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
-  -ldflags "-X easydo-agent/internal/version.Commit=${GIT_COMMIT} -X easydo-agent/internal/version.CommitShort=${GIT_COMMIT_SHORT} -X easydo-agent/internal/version.Date=${GIT_DATE}" \
-  -o easydo-agent ./cmd/main.go
+RUN set -eu; \
+  resolved_commit="${GIT_COMMIT}"; \
+  if [ -z "${resolved_commit}" ] || [ "${resolved_commit}" = "unknown" ]; then \
+    resolved_commit="$(git rev-parse HEAD 2>/dev/null || true)"; \
+  fi; \
+  if [ -z "${resolved_commit}" ] || [ "${resolved_commit}" = "unknown" ]; then \
+    resolved_commit="$(find . -type f -not -path './.git/*' -print | LC_ALL=C sort | xargs sha256sum | sha256sum | awk '{print $1}')"; \
+  fi; \
+  resolved_short="${GIT_COMMIT_SHORT}"; \
+  if [ -z "${resolved_short}" ] || [ "${resolved_short}" = "unknown" ]; then \
+    resolved_short="$(printf '%.12s' "${resolved_commit}")"; \
+  fi; \
+  resolved_date="${GIT_DATE}"; \
+  if [ -z "${resolved_date}" ] || [ "${resolved_date}" = "unknown" ]; then \
+    resolved_date="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"; \
+  fi; \
+  CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
+    -ldflags "-X easydo-agent/internal/version.Commit=${resolved_commit} -X easydo-agent/internal/version.CommitShort=${resolved_short} -X easydo-agent/internal/version.Date=${resolved_date}" \
+    -o easydo-agent ./cmd/main.go
 
 FROM moby/buildkit:rootless AS buildkit
 FROM alpine/helm:4 AS helm

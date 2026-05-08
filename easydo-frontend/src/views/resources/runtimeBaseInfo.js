@@ -32,11 +32,28 @@ function normalizeNumber(value) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function optionalNumber(value) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+/**
  * @param {Array<string>} values
  * @returns {Array<string>}
  */
 function uniqueStrings(values) {
   return [...new Set(values.map(item => normalizeString(item)).filter(Boolean))]
+}
+
+/**
+ * @param {Array<number | null | undefined>} values
+ * @returns {Array<number>}
+ */
+function uniqueNumbers(values) {
+  return [...new Set(values.filter(item => Number.isFinite(item)).map(item => Number(item)))]
 }
 
 /**
@@ -46,7 +63,7 @@ function uniqueStrings(values) {
 function normalizeFields(fields) {
   return normalizeArray(fields)
     .map(item => ({
-      name: normalizeString(item?.name),
+      name: normalizeString(item?.name || item?.key),
       value: item?.value
     }))
     .filter(item => item.name)
@@ -75,6 +92,7 @@ function normalizeMeasures(measures) {
       allocatable: item?.allocatable,
       capacity: item?.capacity,
       available: item?.available,
+      unit: normalizeString(item?.unit),
       sourceReported: Boolean(item?.sourceReported)
     }))
     .filter(item => item.name)
@@ -96,8 +114,12 @@ function buildMeasureMap(measures) {
 function pickMeasureNumber(measure, keys) {
   if (!measure) return 0
   for (const key of keys) {
-    const value = normalizeNumber(measure[key])
-    if (value) return value
+    const value = optionalNumber(measure[key])
+    if (value != null && value !== 0) return value
+  }
+  for (const key of keys) {
+    const value = optionalNumber(measure[key])
+    if (value != null) return value
   }
   return 0
 }
@@ -123,7 +145,7 @@ function isGpuResourceType(resourceType = {}) {
  * @returns {boolean}
  */
 function isNodeEntity(entity = {}) {
-  return normalizeString(entity?.kind) === 'node'
+  return normalizeString(entity?.kind || entity?.type) === 'node'
 }
 
 /**
@@ -131,7 +153,7 @@ function isNodeEntity(entity = {}) {
  * @returns {boolean}
  */
 function isHostEntity(entity = {}) {
-  return normalizeString(entity?.kind) === 'host'
+  return normalizeString(entity?.kind || entity?.type) === 'host'
 }
 
 /**
@@ -175,7 +197,48 @@ function getResourceInstanceDisplayName(resourceInstance = {}) {
  * @returns {string}
  */
 function getServiceDisplayName(service = {}) {
-  return normalizeString(service?.name) || normalizeString(service?.fieldsMap?.uid) || normalizeString(service?.id)
+  return normalizeString(service?.fieldsMap?.containerName)
+    || normalizeString(service?.name)
+    || normalizeString(service?.fieldsMap?.uid)
+    || normalizeString(service?.id)
+}
+
+/**
+ * @param {Record<string, any>} service
+ * @returns {string}
+ */
+function getServiceRuntimeType(service = {}) {
+  const runtime = normalizeString(service?.fieldsMap?.runtime).toLowerCase()
+  if (runtime === 'docker') return 'docker'
+  if (runtime === 'pod' || service?.fieldsMap?.uid || service?.fieldsMap?.ownerKind) return 'pod'
+  return 'host-cli'
+}
+
+/**
+ * @param {Record<string, any>} service
+ * @returns {string}
+ */
+function getServiceOwnerDisplayName(service = {}) {
+  const ownerKind = normalizeString(service?.fieldsMap?.ownerKind)
+  const ownerName = normalizeString(service?.fieldsMap?.ownerName)
+  return ownerKind && ownerName ? `${ownerKind}/${ownerName}` : ownerName || ownerKind
+}
+
+/**
+ * @param {Record<string, any>} claim
+ * @returns {Record<string, any>}
+ */
+function buildClaimProcessEntry(claim = {}) {
+  const pid = optionalNumber(claim?.dimensionsMap?.pid)
+  const observedPid = optionalNumber(claim?.dimensionsMap?.observedPid)
+  const memoryUsedBytes = normalizeNumber(claim?.dimensionsMap?.memoryUsedBytes)
+  return {
+    id: `${claim.id || 'claim'}::${observedPid ?? pid ?? 'process'}`,
+    pid,
+    observedPid,
+    memoryUsedBytes,
+    isDescendant: observedPid != null && pid != null && observedPid !== pid
+  }
 }
 
 /**
@@ -185,10 +248,22 @@ function getServiceDisplayName(service = {}) {
 function summarizeClaimDimensions(claims) {
   const dimensions = claims.flatMap(item => item.dimensions || [])
   const dimensionMap = buildFieldMap(dimensions)
+  const processes = claims.map(buildClaimProcessEntry)
+  const memoryUsedBytes = processes.reduce((total, item) => total + item.memoryUsedBytes, 0)
+  const pids = uniqueNumbers(processes.map(item => item.pid))
+  const observedPids = uniqueNumbers(processes.map(item => item.observedPid))
+  const descendants = processes.filter(item => item.isDescendant)
   return {
     pid: dimensionMap.pid,
+    observedPid: dimensionMap.observedPid,
     podUid: dimensionMap.podUid,
-    memoryUsedBytes: normalizeNumber(dimensionMap.memoryUsedBytes)
+    memoryUsedBytes,
+    pids,
+    observedPids,
+    processCount: processes.length,
+    descendantProcessCount: descendants.length,
+    processes,
+    descendantProcesses: descendants
   }
 }
 
@@ -264,6 +339,100 @@ function buildNodeSummaries(nodeEntities, resourceInstancesByEntityId) {
 }
 
 /**
+ * @param {Record<string, any>} resourceInstance
+ * @returns {number}
+ */
+function getGpuSortIndex(resourceInstance = {}) {
+  const index = optionalNumber(resourceInstance?.identityMap?.index)
+  return index == null ? Number.MAX_SAFE_INTEGER : index
+}
+
+/**
+ * @param {Record<string, any>} left
+ * @param {Record<string, any>} right
+ * @returns {number}
+ */
+function compareGpuResourceInstances(left, right) {
+  const indexDiff = getGpuSortIndex(left) - getGpuSortIndex(right)
+  if (indexDiff !== 0) return indexDiff
+  const busDiff = normalizeString(left?.identityMap?.busId).localeCompare(normalizeString(right?.identityMap?.busId), 'en')
+  if (busDiff !== 0) return busDiff
+  const uuidDiff = normalizeString(left?.identityMap?.uuid).localeCompare(normalizeString(right?.identityMap?.uuid), 'en')
+  if (uuidDiff !== 0) return uuidDiff
+  return normalizeString(left?.displayName).localeCompare(normalizeString(right?.displayName), 'en')
+}
+
+/**
+ * @param {Record<string, any>} service
+ * @returns {string}
+ */
+function getSegmentDisplayLabel(service = {}) {
+  return normalizeString(service?.fieldsMap?.containerName)
+    || normalizeString(service?.name)
+    || normalizeString(service?.fieldsMap?.uid)
+    || normalizeString(service?.id)
+}
+
+/**
+ * @param {Record<string, any>} service
+ * @returns {string}
+ */
+function getSegmentCaption(service = {}) {
+  return getServiceRuntimeType(service)
+}
+
+/**
+ * @param {Record<string, any>} resourceInstance
+ * @returns {Record<string, any>}
+ */
+function buildGpuHoverSummary(resourceInstance = {}) {
+  return {
+    id: normalizeString(resourceInstance?.id),
+    displayName: normalizeString(resourceInstance?.displayName),
+    index: optionalNumber(resourceInstance?.identityMap?.index),
+    uuid: normalizeString(resourceInstance?.identityMap?.uuid),
+    busId: normalizeString(resourceInstance?.identityMap?.busId),
+    model: normalizeString(resourceInstance?.specMap?.model),
+    vendor: normalizeString(resourceInstance?.specMap?.vendor),
+    memoryBytes: pickMeasureNumber(resourceInstance?.capacityMap?.memoryBytes, ['capacity', 'allocatable', 'total', 'value']),
+    memoryUsedBytes: pickMeasureNumber(resourceInstance?.metricsMap?.memoryBytesUsed, ['value', 'used']),
+    temperatureGpuCelsius: optionalNumber(resourceInstance?.metricsMap?.temperatureGpuCelsius?.value),
+    utilizationGpuPercent: optionalNumber(resourceInstance?.metricsMap?.utilizationGpuPercent?.value)
+  }
+}
+
+/**
+ * @param {Record<string, any>} service
+ * @param {Record<string, any>} summary
+ * @returns {Record<string, any>}
+ */
+function buildServiceHoverSummary(service = {}, summary = {}) {
+  return {
+    id: normalizeString(service?.id),
+    displayName: normalizeString(service?.displayName),
+    name: normalizeString(service?.name),
+    runtimeType: normalizeString(service?.runtimeType),
+    pid: optionalNumber(service?.fieldsMap?.pid),
+    pids: summary?.pids || [],
+    observedPids: summary?.observedPids || [],
+    memoryUsedBytes: normalizeNumber(summary?.memoryUsedBytes),
+    processCount: normalizeNumber(summary?.processCount),
+    descendantProcessCount: normalizeNumber(summary?.descendantProcessCount),
+    processes: summary?.processes || [],
+    descendantProcesses: summary?.descendantProcesses || [],
+    containerId: normalizeString(service?.fieldsMap?.containerId),
+    containerName: normalizeString(service?.fieldsMap?.containerName),
+    uid: normalizeString(service?.fieldsMap?.uid),
+    namespace: normalizeString(service?.fieldsMap?.namespace),
+    phase: normalizeString(service?.fieldsMap?.phase),
+    nodeName: normalizeString(service?.fieldsMap?.nodeName),
+    ownerDisplayName: normalizeString(service?.ownerDisplayName),
+    ownerKind: normalizeString(service?.fieldsMap?.ownerKind),
+    ownerName: normalizeString(service?.fieldsMap?.ownerName)
+  }
+}
+
+/**
  * @param {Record<string, any>} payload
  * @returns {Record<string, any>}
  */
@@ -276,8 +445,9 @@ export function normalizeRuntimeBaseInfo(payload = {}) {
       return {
         ...normalizeObject(item),
         id: getItemId(item),
-        kind: normalizeString(item?.kind),
+        kind: normalizeString(item?.kind || item?.type),
         name: normalizeString(item?.name),
+        labels: normalizeObject(item?.labels),
         fields,
         fieldsMap: buildFieldMap(fields)
       }
@@ -289,7 +459,8 @@ export function normalizeRuntimeBaseInfo(payload = {}) {
       ...normalizeObject(item),
       id: getItemId(item),
       name: normalizeString(item?.name),
-      description: normalizeString(item?.description)
+      description: normalizeString(item?.description),
+      fields: normalizeFields(item?.fields)
     }))
     .filter(item => item.id)
 
@@ -301,18 +472,29 @@ export function normalizeRuntimeBaseInfo(payload = {}) {
       const identity = normalizeFields(item?.identity)
       const spec = normalizeFields(item?.spec)
       const capacity = normalizeMeasures(item?.capacity)
+      const allocatable = normalizeMeasures(item?.allocatable)
+      const used = normalizeMeasures(item?.used)
+      const available = normalizeMeasures(item?.available)
       const metrics = normalizeMeasures(item?.metrics)
       return {
         ...normalizeObject(item),
         id: getItemId(item),
-        resourceTypeId: normalizeString(item?.resourceTypeId),
+        resourceTypeId: normalizeString(item?.resourceTypeId || item?.typeId),
         entityId: normalizeString(item?.entityId),
+        name: normalizeString(item?.name),
+        labels: normalizeObject(item?.labels),
         identity,
         identityMap: buildFieldMap(identity),
         spec,
         specMap: buildFieldMap(spec),
         capacity,
         capacityMap: buildMeasureMap(capacity),
+        allocatable,
+        allocatableMap: buildMeasureMap(allocatable),
+        used,
+        usedMap: buildMeasureMap(used),
+        available,
+        availableMap: buildMeasureMap(available),
         metrics,
         metricsMap: buildMeasureMap(metrics)
       }
@@ -339,16 +521,22 @@ export function normalizeRuntimeBaseInfo(payload = {}) {
         id: getItemId(item),
         name: normalizeString(item?.name),
         entityId: normalizeString(item?.entityId),
+        type: normalizeString(item?.type),
+        labels: normalizeObject(item?.labels),
         resourceInstanceIds: uniqueStrings(normalizeArray(item?.resourceInstanceIds)),
         fields,
-        fieldsMap: buildFieldMap(fields)
+        fieldsMap: buildFieldMap(fields),
+        runtimeType: '',
+        ownerDisplayName: ''
       }
     })
     .filter(item => item.id)
     .map(item => ({
       ...item,
       entity: entitiesById[item.entityId] || null,
-      displayName: getServiceDisplayName(item)
+      displayName: getServiceDisplayName(item),
+      runtimeType: getServiceRuntimeType(item),
+      ownerDisplayName: getServiceOwnerDisplayName(item)
     }))
 
   const servicesById = Object.fromEntries(services.map(item => [item.id, item]))
@@ -357,16 +545,23 @@ export function normalizeRuntimeBaseInfo(payload = {}) {
     .map(item => ({
       ...normalizeObject(item),
       id: getItemId(item),
+      status: normalizeString(item?.status),
+      labels: normalizeObject(item?.labels),
+      fields: normalizeFields(item?.fields),
       claims: normalizeArray(item?.claims)
         .map((claim, index) => ({
           id: `${getItemId(item)}::${index}`,
           serviceId: normalizeString(claim?.serviceId),
           resourceInstanceId: normalizeString(claim?.resourceInstanceId),
-          dimensions: normalizeFields(claim?.dimensions)
+          dimensions: normalizeFields(claim?.dimensions || claim?.fields)
         }))
         .filter(claim => claim.serviceId && claim.resourceInstanceId)
     }))
     .filter(item => item.id)
+    .map(item => ({
+      ...item,
+      fieldsMap: buildFieldMap(item.fields)
+    }))
 
   const allocationsById = Object.fromEntries(allocations.map(item => [item.id, item]))
   const resourceInstancesByEntityId = {}
@@ -389,6 +584,7 @@ export function normalizeRuntimeBaseInfo(payload = {}) {
       const claimView = {
         ...claim,
         allocationId: allocation.id,
+        allocation,
         service,
         resourceInstance,
         dimensionsMap: buildFieldMap(claim.dimensions)
@@ -406,7 +602,7 @@ export function normalizeRuntimeBaseInfo(payload = {}) {
 
   const gpuResourceInstances = resourceInstances
     .filter(item => isGpuResourceType(item.resourceType || { id: item.resourceTypeId }))
-    .sort((left, right) => left.displayName.localeCompare(right.displayName, 'en'))
+    .sort(compareGpuResourceInstances)
 
   const matrixRows = uniqueStrings(activeServiceIds)
     .map(serviceId => servicesById[serviceId])
@@ -446,6 +642,71 @@ export function normalizeRuntimeBaseInfo(payload = {}) {
     })
   })
 
+  const gpuViewEntities = entities
+    .filter(entity => (isHostEntity(entity) || isNodeEntity(entity)) && (resourceInstancesByEntityId[entity.id] || []).some(instance => instance.resourceTypeId === 'gpu'))
+    .sort((left, right) => normalizeString(left.name || left.id).localeCompare(normalizeString(right.name || right.id), 'en'))
+
+  const gpuViewRows = gpuViewEntities.map(entity => {
+    const gpuCells = (resourceInstancesByEntityId[entity.id] || [])
+      .filter(instance => instance.resourceTypeId === 'gpu')
+      .sort(compareGpuResourceInstances)
+      .map(resourceInstance => {
+        const claims = claimsByResourceInstanceId[resourceInstance.id] || []
+        const segmentMap = {}
+        claims.forEach(claim => {
+          if (!segmentMap[claim.serviceId]) segmentMap[claim.serviceId] = []
+          segmentMap[claim.serviceId].push(claim)
+        })
+        const segments = Object.entries(segmentMap)
+          .map(([serviceId, segmentClaims]) => {
+            const service = servicesById[serviceId]
+            if (!service) return null
+            const summary = summarizeClaimDimensions(segmentClaims)
+            return {
+              id: `${resourceInstance.id}::${serviceId}`,
+              colorKey: serviceId,
+              service,
+              resourceInstance,
+              entity,
+              claims: segmentClaims,
+              allocations: segmentClaims.map(item => item.allocation).filter(Boolean),
+              allocationIds: uniqueStrings(segmentClaims.map(item => item.allocationId)),
+              summary,
+              label: getSegmentDisplayLabel(service),
+              caption: getSegmentCaption(service),
+              serviceHover: buildServiceHoverSummary(service, summary),
+              gpuHover: buildGpuHoverSummary(resourceInstance)
+            }
+          })
+          .filter(Boolean)
+          .sort((left, right) => normalizeString(left?.label).localeCompare(normalizeString(right?.label), 'en'))
+        return {
+          id: resourceInstance.id,
+          entity,
+          resourceInstance,
+          claims,
+          claimCount: claims.length,
+          segments,
+          gpuHover: buildGpuHoverSummary(resourceInstance),
+          occupancy: {
+            serviceCount: segments.length,
+            claimCount: claims.length,
+            memoryUsedBytes: segments.reduce((total, segment) => total + normalizeNumber(segment?.summary?.memoryUsedBytes), 0),
+            services: segments.map(segment => segment.service),
+            serviceSummaries: segments.map(segment => segment.serviceHover)
+          }
+        }
+      })
+    return {
+      id: entity.id,
+      entity,
+      displayName: normalizeString(entity.name) || normalizeString(entity.fieldsMap.hostname) || normalizeString(entity.id),
+      gpuCells,
+      gpuCount: gpuCells.length,
+      activeServiceCount: uniqueStrings(gpuCells.flatMap(cell => cell.segments.map(segment => segment.service.id))).length
+    }
+  })
+
   const hostEntity = entities.find(isHostEntity) || null
   const nodeEntities = entities.filter(isNodeEntity)
   const hostSummary = hostEntity ? buildHostSummary(hostEntity, resourceInstancesByEntityId[hostEntity.id] || []) : null
@@ -482,6 +743,14 @@ export function normalizeRuntimeBaseInfo(payload = {}) {
       rowCount: matrixRows.length,
       columnCount: matrixColumns.length,
       hasData: matrixRows.length > 0 && matrixColumns.length > 0
+    },
+    gpuView: {
+      rows: gpuViewRows,
+      rowCount: gpuViewRows.length,
+      gpuCount: gpuResourceInstances.length,
+      activeServiceCount: uniqueStrings(gpuViewRows.flatMap(row => row.gpuCells.flatMap(cell => cell.segments.map(segment => segment.service.id)))).length,
+      allocationCount: allocations.length,
+      hasData: gpuViewRows.some(row => row.gpuCells.length > 0)
     },
     summary: {
       hasCanonicalData: entities.length > 0 || resourceInstances.length > 0 || services.length > 0 || allocations.length > 0,

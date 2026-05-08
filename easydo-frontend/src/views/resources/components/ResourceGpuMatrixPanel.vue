@@ -1,30 +1,36 @@
 <template>
   <div class="matrix-panel">
     <div class="matrix-toolbar">
-      <div class="matrix-title">GPU Matrix</div>
-      <div class="matrix-meta">{{ rows.length }} 服务 / {{ columns.length }} GPU</div>
+      <div class="matrix-title">GPU 视图</div>
+      <div class="matrix-meta">{{ rows.length }} 节点 / {{ gpuCount }} GPU / {{ activeServiceCount }} 运行载体</div>
     </div>
-    <GpuMatrixGrid v-if="rows.length && columns.length" :rows="rows" :columns="columns" :cells="cells" />
-    <el-empty v-else description="暂无 GPU 分配" :image-size="64" />
+    <GpuMatrixGrid v-if="rows.length" :rows="rows" />
+    <el-empty v-else description="暂无 GPU 数据" :image-size="64" />
   </div>
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import GpuMatrixGrid from './GpuMatrixGrid.vue'
 
-defineProps({
+const props = defineProps({
   rows: {
     type: Array,
     default: () => []
-  },
-  columns: {
-    type: Array,
-    default: () => []
-  },
-  cells: {
-    type: Object,
-    default: () => ({})
   }
+})
+
+const gpuCount = computed(() => props.rows.reduce((total, row) => total + (row.gpuCells?.length || 0), 0))
+const activeServiceCount = computed(() => {
+  const ids = new Set()
+  props.rows.forEach(row => {
+    ;(row.gpuCells || []).forEach(cell => {
+      ;(cell.segments || []).forEach(segment => {
+        if (segment?.service?.id) ids.add(segment.service.id)
+      })
+    })
+  })
+  return ids.size
 })
 </script>
 

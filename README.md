@@ -459,6 +459,30 @@ docker-compose -f deploy/docker-compose/docker-compose.yml ps
 docker-compose -f deploy/docker-compose/docker-compose.yml logs -f
 ```
 
+### 🧱 直接使用 Dockerfile 构建（不经过 make）/ Build with Dockerfile directly
+
+三个模块的 Dockerfile 都支持仅使用现有 `GIT_COMMIT`、`GIT_COMMIT_SHORT`、`GIT_DATE`。
+
+- 不传 `GIT_*` 时：Dockerfile 会自动生成构建时间，并优先用 git commit（若不可用则使用源码快照指纹），避免默认 `unknown`
+- 传 `GIT_*` 时：显式传参优先，会覆盖自动生成值
+
+```bash
+# Frontend
+docker build -f easydo-frontend/Dockerfile easydo-frontend -t easydo-frontend:latest
+
+# Server
+docker build -f easydo-server/Dockerfile easydo-server -t easydo-server:latest
+
+# Agent
+docker build -f easydo-agent/Dockerfile easydo-agent -t easydo-agent:latest
+
+# 示例：显式传入 GIT_*（覆盖自动生成）
+docker build -f easydo-server/Dockerfile easydo-server -t easydo-server:latest \
+  --build-arg GIT_COMMIT="$(git rev-parse HEAD)" \
+  --build-arg GIT_COMMIT_SHORT="$(git rev-parse --short HEAD)" \
+  --build-arg GIT_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+```
+
 ### 访问应用 / Access Application
 
 - 前端 / Frontend：`http://localhost:8088`
