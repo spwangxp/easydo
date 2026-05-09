@@ -1,15 +1,7 @@
 <template>
   <div class="agent-container">
-    <PageHeader>
-      <template #title><h1>执行器管理</h1></template>
-      <template #subtitle>
-        {{ workspaceLabel }}
-        <div class="page-guidance">{{ workspaceRegistrationHint }}</div>
-      </template>
-    </PageHeader>
-
-    <div class="agent-filters">
-      <div class="filter-tabs">
+    <div class="content-toolbar agent-filters">
+      <div class="content-toolbar__start filter-tabs">
         <div
           class="tab-item"
           :class="{ active: activeTab === 'all' }"
@@ -45,7 +37,11 @@
         </div>
       </div>
 
-      <div class="filter-search">
+      <div class="content-toolbar__meta agent-context-hint">
+        {{ workspaceRegistrationHint }}
+      </div>
+
+      <div class="content-toolbar__actions filter-search">
         <el-input
           v-model="searchKeyword"
           placeholder="搜索名称"
@@ -698,8 +694,7 @@ import {
 } from '@element-plus/icons-vue'
 import { getAgentList, getAgentDetail, updateAgent, deleteAgent, getAgentHeartbeats, refreshAgentToken, approveAgent, rejectAgent, removeAgent, getPendingAgents } from '@/api/agent'
 import { getTaskDispatchList } from '@/api/task'
-import PageHeader from '../store/components/PageHeader.vue'
-import { normalizeMirrorList, deriveMirrorEditorText, buildMirrorSubmitPayload } from './mirrorSettings'
+import { deriveMirrorEditorText, buildMirrorSubmitPayload } from './mirrorSettings'
 
 const userStore = useUserStore()
 
@@ -800,12 +795,6 @@ const isPlatformAdmin = computed(() => String(userStore.userInfo?.role || '').to
 const isWorkspaceMaintainerLike = computed(() => ['owner', 'maintainer'].includes(String(userStore.currentWorkspace?.role || '').toLowerCase()))
 const canManageAgents = computed(() => userStore.hasAnyPermission(['agent.write', 'agent.approve', 'agent.token.rotate']))
 const canManagePendingTab = computed(() => isPlatformAdmin.value || isWorkspaceMaintainerLike.value || canManageAgents.value)
-const workspaceLabel = computed(() => {
-  if (!userStore.currentWorkspace?.name) {
-    return '当前查看：平台执行器'
-  }
-  return `当前工作空间：${userStore.currentWorkspace.name}（ID: ${userStore.currentWorkspace.id}）`
-})
 const workspaceRegistrationHint = computed(() => {
   if (!userStore.currentWorkspaceId) {
     return '未选择具体工作空间：启动执行器时不填写 workspace_id，将默认注册为平台型执行器。'

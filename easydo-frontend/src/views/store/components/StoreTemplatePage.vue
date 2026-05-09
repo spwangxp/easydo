@@ -1,54 +1,28 @@
 <template>
   <div class="store-page">
-    <div class="store-header-card">
-      <PageHeader>
-        <template #title><h1>商店</h1></template>
-        <template #subtitle>{{ pageSubtitle }}</template>
-        <template #actions>
-          <PageHeaderActions v-if="canManageTemplates">
-            <el-button v-if="isLLMStore" @click="openImportModelDialog">导入模型</el-button>
-            <el-button type="primary" @click="openTemplateDialog">
-              {{ isLLMStore ? '新建工作空间部署工具' : '新建工作空间模板' }}
-            </el-button>
-          </PageHeaderActions>
-        </template>
-      </PageHeader>
-
-      <el-tabs :model-value="storeKind" class="store-kind-tabs" @tab-change="handleStoreTabChange">
-        <el-tab-pane label="应用商店" name="app" />
-        <el-tab-pane label="LLM 商店" name="llm" />
-      </el-tabs>
-
-      <div class="catalog-overview">
-        <template v-if="isLLMStore">
-          <div class="overview-card accent-primary">
-            <span class="overview-label">已导入模型目录</span>
-            <strong class="overview-value">{{ importedModelCount }}</strong>
-            <span class="overview-hint">仅展示管理员从 Hugging Face / ModelScope 导入的本地模型元数据</span>
-          </div>
-          <div class="overview-card">
-            <span class="overview-label">平台部署工具</span>
-            <strong class="overview-value">{{ platformTemplates.length }}</strong>
-            <span class="overview-hint">平台维护的稳定部署方式，可直接选版本发起部署</span>
-          </div>
-          <div class="overview-card accent-success">
-            <span class="overview-label">工作空间部署工具</span>
-            <strong class="overview-value">{{ workspaceTemplates.length }}</strong>
-            <span class="overview-hint">当前团队维护，可继续新增版本和复用发布流水线</span>
-          </div>
-        </template>
-        <template v-else>
-          <div class="overview-card">
-            <span class="overview-label">平台目录</span>
-            <strong class="overview-value">{{ platformTemplates.length }}</strong>
-            <span class="overview-hint">平台预置，适合直接选择发布</span>
-          </div>
-          <div class="overview-card accent-success">
-            <span class="overview-label">工作空间目录</span>
-            <strong class="overview-value">{{ workspaceTemplates.length }}</strong>
-            <span class="overview-hint">当前团队维护，可继续迭代版本</span>
-          </div>
-        </template>
+    <div class="content-toolbar store-page-toolbar card-shell">
+      <div class="content-toolbar__start store-page-filters">
+        <el-input
+          v-model="filters.keyword"
+          :placeholder="isLLMStore ? '搜索本地模型或部署工具' : '搜索模板名称'"
+          clearable
+          style="width: 240px"
+        />
+        <el-select v-model="filters.resourceType" placeholder="目标资源类型" clearable style="width: 180px">
+          <el-option label="VM" value="vm" />
+          <el-option label="K8s 集群" value="k8s" />
+        </el-select>
+        <el-select v-model="filters.sourceType" placeholder="类型" clearable style="width: 180px">
+          <el-option label="平台" value="platform" />
+          <el-option label="工作空间" value="workspace" />
+        </el-select>
+      </div>
+      <div class="content-toolbar__actions store-page-actions">
+        <el-button @click="loadData">刷新</el-button>
+        <el-button v-if="canManageTemplates && isLLMStore" @click="openImportModelDialog">导入模型</el-button>
+        <el-button v-if="canManageTemplates" type="primary" @click="openTemplateDialog">
+          {{ isLLMStore ? '新建工作空间部署工具' : '新建工作空间模板' }}
+        </el-button>
       </div>
     </div>
 
@@ -63,20 +37,6 @@
         </span>
       </div>
       <el-button @click="goBackToScopedK8sBrowser">返回 K8s 浏览器</el-button>
-    </div>
-
-    <div class="page-filters card-shell">
-      <el-input
-        v-model="filters.keyword"
-        :placeholder="isLLMStore ? '搜索本地模型或部署工具' : '搜索模板名称'"
-        clearable
-        style="width: 240px"
-      />
-      <el-select v-model="filters.resourceType" placeholder="目标资源类型" clearable style="width: 180px">
-        <el-option label="VM" value="vm" />
-        <el-option label="K8s 集群" value="k8s" />
-      </el-select>
-      <el-button @click="loadData">刷新</el-button>
     </div>
 
     <section v-if="isLLMStore" class="catalog-section card-shell local-model-section">
@@ -147,16 +107,21 @@
     <section class="catalog-section card-shell">
       <div class="catalog-header">
         <div>
-          <h2 class="catalog-title">{{ isLLMStore ? '平台部署工具' : '平台目录' }}</h2>
+          <h2 class="catalog-title">{{ isLLMStore ? '部署工具列表' : '模板列表' }}</h2>
           <p class="catalog-description">
-            {{ isLLMStore ? '平台统一维护的稳定部署工具，可结合本地模型和版本参数直接发起部署。' : '面向全平台统一维护的稳定模板，适合直接选择版本后发起部署。' }}
+            {{ isLLMStore ? '平台与工作空间部署工具统一在一个列表中管理，按类型筛选后直接发起部署或维护版本。' : '平台与工作空间模板统一在一个列表中浏览，按类型筛选后直接部署或继续维护。' }}
           </p>
         </div>
-        <el-tag type="info" size="large">{{ platformTemplates.length }} {{ isLLMStore ? '个工具' : '个模板' }}</el-tag>
+        <el-tag size="large">{{ filteredTemplates.length }} {{ isLLMStore ? '个工具' : '个模板' }}</el-tag>
       </div>
 
-      <el-table :data="platformTemplates" v-loading="loading" style="width: 100%">
+      <el-table :data="filteredTemplates" v-loading="loading" style="width: 100%">
         <el-table-column prop="name" :label="isLLMStore ? '部署工具' : '模板名称'" min-width="220" />
+        <el-table-column label="类型" width="120">
+          <template #default="{ row }">
+            <el-tag :type="row.source === 'platform' ? 'info' : 'success'">{{ row.source === 'platform' ? '平台' : '工作空间' }}</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="target_resource_type" label="目标资源" width="120">
           <template #default="{ row }">
             <el-tag>{{ row.target_resource_type === 'vm' ? 'VM' : 'K8s' }}</el-tag>
@@ -168,58 +133,22 @@
           </template>
         </el-table-column>
         <el-table-column prop="summary" label="摘要" min-width="260" />
-        <el-table-column label="操作" width="160" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" @click="openDeployDialog(row)">
-              {{ isLLMStore ? '使用此工具' : '一键部署' }}
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-
-      <el-empty v-if="!loading && platformTemplates.length === 0" :description="isLLMStore ? '暂无平台部署工具' : '暂无平台模板'" />
-    </section>
-
-    <section class="catalog-section card-shell">
-      <div class="catalog-header">
-        <div>
-          <h2 class="catalog-title">{{ isLLMStore ? '工作空间部署工具' : '工作空间目录' }}</h2>
-          <p class="catalog-description">
-            {{ isLLMStore ? '团队自定义部署工具和版本维护区，可继续绑定发布流水线并维护工具版本。' : '团队自定义模板和版本维护区，发布入口和版本管理都在这里继续演进。' }}
-          </p>
-        </div>
-        <el-tag type="success" size="large">{{ workspaceTemplates.length }} {{ isLLMStore ? '个工具' : '个模板' }}</el-tag>
-      </div>
-
-      <el-table :data="workspaceTemplates" v-loading="loading" style="width: 100%">
-        <el-table-column prop="name" :label="isLLMStore ? '部署工具' : '模板名称'" min-width="220" />
-        <el-table-column prop="target_resource_type" label="目标资源" width="120">
-          <template #default="{ row }">
-            <el-tag>{{ row.target_resource_type === 'vm' ? 'VM' : 'K8s' }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="status" label="状态" width="120">
-          <template #default="{ row }">
-            <el-tag :type="getTemplateStatusType(row.status)">{{ row.status || '-' }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="summary" label="摘要" min-width="240" />
         <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openDeployDialog(row)">
               {{ isLLMStore ? '使用此工具' : '一键部署' }}
             </el-button>
-            <el-button v-if="canManageTemplates" link type="primary" @click="openVersionDialog(row)">
+            <el-button v-if="canManageTemplates && row.source !== 'platform'" link type="primary" @click="openVersionDialog(row)">
               新增版本
             </el-button>
-            <el-button v-if="canManageTemplates" link type="danger" @click="removeTemplate(row)">
+            <el-button v-if="canManageTemplates && row.source !== 'platform'" link type="danger" @click="removeTemplate(row)">
               删除
             </el-button>
           </template>
         </el-table-column>
       </el-table>
 
-      <el-empty v-if="!loading && workspaceTemplates.length === 0" :description="isLLMStore ? '暂无工作空间部署工具' : '暂无工作空间模板'" />
+      <el-empty v-if="!loading && filteredTemplates.length === 0" :description="isLLMStore ? '暂无部署工具' : '暂无模板'" />
     </section>
 
     <el-dialog v-model="templateDialogVisible" :title="isLLMStore ? '新增工作空间部署工具' : '新增工作空间模板'" width="620px">
@@ -419,8 +348,6 @@ import {
 } from '@/api/store'
 import { getPipelineList } from '@/api/pipeline'
 import { extractCanonicalParameters } from '../appStoreHelpers'
-import PageHeader from './PageHeader.vue'
-import PageHeaderActions from './PageHeaderActions.vue'
 
 const props = defineProps({
   storeKind: { type: String, required: true }
@@ -446,7 +373,7 @@ const localModels = ref([])
 const deployParameterFields = ref([])
 const selectedTemplateIdForVersion = ref(0)
 const selectedGpuDeviceKeys = ref([])
-const filters = reactive({ keyword: '', resourceType: '' })
+const filters = reactive({ keyword: '', resourceType: '', sourceType: '' })
 const templateForm = reactive({ name: '', target_resource_type: 'vm', summary: '', description: '' })
 const versionForm = reactive({ version: '', pipeline_id: null })
 const importForm = reactive({ source: 'huggingface', source_model_id: '' })
@@ -462,22 +389,19 @@ const isLLMStore = computed(() => props.storeKind === 'llm')
 const canManageTemplates = computed(() => userStore.hasPermission('store.template.manage'))
 const canDeployTemplates = computed(() => userStore.hasPermission('store.template.use') && userStore.hasPermission('resource.use'))
 
-const pageSubtitle = computed(() => isLLMStore.value
-  ? '先选择本地导入模型，再选择部署工具、版本和工具参数完成部署。'
-  : '平台目录与工作空间目录统一承载应用模板发布入口。'
-)
-
 const filteredTemplates = computed(() => templates.value.filter(item => {
   if (item.template_type !== props.storeKind) return false
   if (filters.resourceType && item.target_resource_type !== filters.resourceType) return false
+  if (filters.sourceType) {
+    const normalizedSource = item.source === 'platform' ? 'platform' : 'workspace'
+    if (normalizedSource !== filters.sourceType) return false
+  }
   if (!filters.keyword) return true
   const keyword = filters.keyword.toLowerCase()
   return [item.name, item.summary, item.description].some(value => String(value || '').toLowerCase().includes(keyword))
 }))
 
 const deployableTemplates = computed(() => templates.value.filter(item => item.template_type === props.storeKind))
-const platformTemplates = computed(() => filteredTemplates.value.filter(item => item.source === 'platform'))
-const workspaceTemplates = computed(() => filteredTemplates.value.filter(item => item.source !== 'platform'))
 const selectedTemplate = computed(() => templates.value.find(item => String(item.id) === String(deployForm.template_id)) || null)
 const selectedModel = computed(() => localModels.value.find(item => String(item.catalogId) === String(deployForm.model_id)) || null)
 const selectedResource = computed(() => resources.value.find(item => String(item.id) === String(deployForm.target_resource_id)) || null)
@@ -507,7 +431,6 @@ const localModelsFiltered = computed(() => {
   return localModels.value.filter(item => [item.name, item.modelIdentifier, item.path, item.source].some(value => String(value || '').toLowerCase().includes(keyword)))
 })
 
-const importedModelCount = computed(() => localModels.value.filter(item => item.imported).length)
 const basicDeployParameterFields = computed(() => deployParameterFields.value.filter(field => field.advanced !== true))
 const advancedDeployParameterFields = computed(() => deployParameterFields.value.filter(field => field.advanced === true))
 const resourceScopedDeployContext = computed(() => {
@@ -1527,7 +1450,6 @@ onMounted(loadData)
   color: var(--text-secondary);
 }
 
-.store-header-card,
 .card-shell {
   border-radius: $radius-xl;
   border: 1px solid var(--border-color-light);
@@ -1537,63 +1459,13 @@ onMounted(loadData)
   -webkit-backdrop-filter: $blur-md;
 }
 
-.store-header-card {
-  padding: 22px 22px 18px;
-}
-
-.store-kind-tabs {
-  margin-top: 18px;
-}
-
-.catalog-overview {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 14px;
-  margin-top: $space-3;
-}
-
-.overview-card {
-  display: flex;
-  flex-direction: column;
-  gap: $space-2;
-  padding: 18px 20px;
-  border-radius: $radius-lg;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-color-light);
-  box-shadow: var(--shadow-sm);
-
-  &.accent-success {
-    background: linear-gradient(140deg, rgba($success-color, 0.12), rgba($success-color, 0.04));
-  }
-
-  &.accent-primary {
-    background: linear-gradient(140deg, rgba($primary-color, 0.14), rgba($primary-color, 0.05));
-  }
-}
-
-.overview-label {
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.overview-value {
-  font-family: $font-family-display;
-  font-size: 32px;
-  line-height: 1;
-  color: var(--text-primary);
-}
-
-.overview-hint {
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.page-filters {
-  display: flex;
-  gap: $space-3;
-  flex-wrap: wrap;
+.store-page-toolbar {
   padding: 16px 18px;
+}
+
+.store-page-filters,
+.store-page-actions {
+  flex-wrap: wrap;
 }
 
 .catalog-section {

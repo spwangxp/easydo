@@ -1,22 +1,19 @@
 <template>
   <div class="statistics-container">
-    <PageHeader>
-      <template #title><h1>统计</h1></template>
-      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</template>
-      <template #actions>
-        <PageHeaderActions>
-          <el-date-picker
-            v-model="dateRange"
-            type="daterange"
-            range-separator="-"
-            start-placeholder="开始日期"
-            end-placeholder="结束日期"
-            size="default"
-          />
-        </PageHeaderActions>
-      </template>
-    </PageHeader>
-    
+    <div class="content-toolbar">
+      <div class="content-toolbar__spacer"></div>
+      <div class="content-toolbar__actions">
+        <el-date-picker
+          v-model="dateRange"
+          type="daterange"
+          range-separator="-"
+          start-placeholder="开始日期"
+          end-placeholder="结束日期"
+          size="default"
+        />
+      </div>
+    </div>
+
     <div class="stats-overview" v-loading="loading">
       <div class="stat-card">
         <div class="stat-icon blue">
@@ -188,16 +185,10 @@ import {
   WarningFilled 
 } from '@element-plus/icons-vue'
 import { getStatsOverview, getStatsTrend, getTopPipelines } from '@/api/statistics'
-import { ElMessage } from 'element-plus'
-import { useUserStore } from '@/stores/user'
-import PageHeader from '../store/components/PageHeader.vue'
-import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 import {
   buildStatisticsDateParams,
   getDefaultStatisticsDateRange
 } from './dateRange'
-
-const userStore = useUserStore()
 
 const dateRange = ref(getDefaultStatisticsDateRange())
 

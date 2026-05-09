@@ -1,24 +1,24 @@
 <template>
   <div class="ai-store-page">
-    <PageHeader>
-      <template #title>
+    <div class="content-toolbar store-page-toolbar">
+      <div class="content-toolbar__start">
         <StoreKindSwitch :model-value="storeKind" @update:model-value="handleStoreTabChange" />
-      </template>
-      <template #subtitle>模型、Provider、Deployment、Runtime 一体查看。</template>
-      <template #actions>
-        <PageHeaderActions>
+      </div>
+      <div class="content-toolbar__meta store-page-hint">模型、Provider、Deployment、Runtime 一体查看。</div>
+      <div class="content-toolbar__actions">
+        <StoreHeaderActions>
           <el-input
             v-model="filters.keyword"
             clearable
             placeholder="搜索模型 / Provider / Runtime"
             style="width: 280px"
           />
-          <el-button @click="openImportModelDialog">导入模型</el-button>
+          <el-button type="primary" @click="openImportModelDialog">导入模型</el-button>
           <el-button type="primary" @click="openDeployDialog">部署模型</el-button>
-          <el-button type="primary" plain @click="openProviderDialog">接入外部 Provider</el-button>
-        </PageHeaderActions>
-      </template>
-    </PageHeader>
+          <el-button type="primary" @click="openProviderDialog">接入外部 Provider</el-button>
+        </StoreHeaderActions>
+      </div>
+    </div>
 
     <section class="card-shell section-shell">
       <div class="section-header">
@@ -330,9 +330,8 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import CredentialSelector from '@/views/pipeline/components/CredentialSelector.vue'
-import PageHeaderActions from './components/PageHeaderActions.vue'
+import StoreHeaderActions from './components/StoreHeaderActions.vue'
 import StoreKindSwitch from './components/StoreKindSwitch.vue'
-import PageHeader from './components/PageHeader.vue'
 import StoreParameterFields from './components/StoreParameterFields.vue'
 import { createDeploymentRequest } from '@/api/deployment'
 import { getResourceDetail, getResourceList, refreshResourceBaseInfo } from '@/api/resource'
@@ -1048,6 +1047,14 @@ function createProviderForm() {
   border: 1px solid var(--border-color-light);
   background: var(--bg-card);
   box-shadow: var(--shadow-md);
+}
+
+.store-page-toolbar {
+  margin-bottom: 16px;
+}
+
+.store-page-hint {
+  max-width: 420px;
 }
 
 .section-shell {

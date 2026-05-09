@@ -1,20 +1,7 @@
 <template>
   <div class="pipeline-container">
-    <PageHeader>
-      <template #title><h1>流水线</h1></template>
-      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</template>
-      <template #actions>
-        <PageHeaderActions>
-          <el-button type="primary" @click="handleCreate">
-            <el-icon><Plus /></el-icon>
-            新建流水线
-          </el-button>
-        </PageHeaderActions>
-      </template>
-    </PageHeader>
-    
-    <div class="pipeline-filters">
-      <div class="filter-tabs">
+    <div class="content-toolbar pipeline-filters">
+      <div class="content-toolbar__start filter-tabs">
         <div class="tab-item active">
           <span>常用</span>
         </div>
@@ -45,33 +32,40 @@
         </div>
       </div>
       
-      <div class="filter-search">
-        <el-input
-          v-model="searchKeyword"
-          placeholder="搜索名称"
-          prefix-icon="Search"
-          clearable
-          style="width: 240px"
-        />
-      </div>
-      
-      <div class="filter-selects">
-        <el-select v-model="filterProject" placeholder="项目" clearable style="width: 160px">
-          <el-option
-            v-for="project in projectList"
-            :key="project.id"
-            :label="project.name"
-            :value="project.id"
+      <div class="content-toolbar__actions filter-controls">
+        <div class="filter-search">
+          <el-input
+            v-model="searchKeyword"
+            placeholder="搜索名称"
+            prefix-icon="Search"
+            clearable
+            style="width: 240px"
           />
-        </el-select>
-        
-        <el-select v-model="filterEnvironment" placeholder="环境" clearable style="width: 160px">
-          <el-option label="开发环境" value="development" />
-          <el-option label="测试环境" value="testing" />
-          <el-option label="生产环境" value="production" />
-        </el-select>
-        
-        <el-button :icon="Refresh" circle @click="fetchPipelines" />
+        </div>
+
+        <div class="filter-selects">
+          <el-select v-model="filterProject" placeholder="项目" clearable style="width: 160px">
+            <el-option
+              v-for="project in projectList"
+              :key="project.id"
+              :label="project.name"
+              :value="project.id"
+            />
+          </el-select>
+
+          <el-select v-model="filterEnvironment" placeholder="环境" clearable style="width: 160px">
+            <el-option label="开发环境" value="development" />
+            <el-option label="测试环境" value="testing" />
+            <el-option label="生产环境" value="production" />
+          </el-select>
+
+          <el-button :icon="Refresh" circle @click="fetchPipelines" />
+        </div>
+
+        <el-button type="primary" @click="handleCreate">
+          <el-icon><Plus /></el-icon>
+          新建流水线
+        </el-button>
       </div>
     </div>
     
@@ -328,12 +322,7 @@ import {
 } from '@element-plus/icons-vue'
 import { getPipelineList, getPipelineDetail, createPipeline, runPipeline, toggleFavorite as apiToggleFavorite, deletePipeline } from '@/api/pipeline'
 import { getProjectList } from '@/api/project'
-import { useUserStore } from '@/stores/user'
-import PageHeader from '../store/components/PageHeader.vue'
-import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 import { buildRunInputsPayload, createRunInputs, getManualRunNodes } from './runtimeConfig'
-
-const userStore = useUserStore()
 const activeTab = ref('all')
 const searchKeyword = ref('')
 const filterProject = ref('')
@@ -638,10 +627,6 @@ const handleDeleteConfirm = async () => {
   animation: float-up 0.45s ease both;
 
   .pipeline-filters {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    margin-bottom: 18px;
     padding: 14px 16px;
     border-radius: $radius-xl;
     border: 1px solid var(--border-color-light);
@@ -701,7 +686,6 @@ const handleDeleteConfirm = async () => {
     }
 
     .filter-search {
-      flex: 1;
       min-width: 180px;
     }
 

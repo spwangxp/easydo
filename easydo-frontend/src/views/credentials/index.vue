@@ -1,60 +1,32 @@
 <template>
   <div class="credentials-page">
-    <PageHeader>
-      <template #title>
-        <h1>
-          <el-icon><Key /></el-icon>
-          凭据管理
-        </h1>
-      </template>
-      <template #subtitle>统一管理工作空间内可供流水线和服务任务使用的认证凭据。</template>
-      <template #actions>
-        <PageHeaderActions>
-          <el-button v-if="canWriteCredentials" type="primary" @click="showCreateDialog">
-            <el-icon><Plus /></el-icon>
-            新建凭据
-          </el-button>
-        </PageHeaderActions>
-      </template>
-    </PageHeader>
-
-    <div class="stats-grid">
-      <el-card>
-        <div class="stat-value">{{ stats.total }}</div>
-        <div class="stat-label">凭据总数</div>
-      </el-card>
-      <el-card>
-        <div class="stat-value">{{ stats.active }}</div>
-        <div class="stat-label">可用</div>
-      </el-card>
-      <el-card>
-        <div class="stat-value">{{ stats.disabled }}</div>
-        <div class="stat-label">禁用 / 撤销</div>
-      </el-card>
-      <el-card>
-        <div class="stat-value">{{ stats.expired }}</div>
-        <div class="stat-label">已过期</div>
-      </el-card>
-    </div>
-
-    <div class="filter-bar">
-      <el-input v-model="filters.keyword" placeholder="搜索名称或描述" clearable class="search-input" @keyup.enter="reloadList" @clear="reloadList">
-        <template #prefix>
-          <el-icon><Search /></el-icon>
-        </template>
-      </el-input>
-      <el-select v-model="filters.type" clearable placeholder="类型" class="filter-select">
-        <el-option v-for="type in credentialTypes" :key="type.value" :label="type.label" :value="type.value" />
-      </el-select>
-      <el-select v-model="filters.category" clearable placeholder="分类" class="filter-select">
-        <el-option v-for="category in credentialCategories" :key="category.value" :label="category.label" :value="category.value" />
-      </el-select>
-      <el-select v-model="filters.status" clearable placeholder="状态" class="filter-select">
-        <el-option label="可用" value="active" />
-        <el-option label="已禁用" value="inactive" />
-        <el-option label="已撤销" value="revoked" />
-        <el-option label="已过期" value="expired" />
-      </el-select>
+    <div class="content-toolbar filter-bar">
+      <div class="content-toolbar__start">
+        <el-input v-model="filters.keyword" placeholder="搜索名称或描述" clearable class="search-input" @keyup.enter="reloadList" @clear="reloadList">
+          <template #prefix>
+            <el-icon><Search /></el-icon>
+          </template>
+        </el-input>
+        <el-select v-model="filters.type" clearable placeholder="类型" class="filter-select">
+          <el-option v-for="type in credentialTypes" :key="type.value" :label="type.label" :value="type.value" />
+        </el-select>
+        <el-select v-model="filters.category" clearable placeholder="分类" class="filter-select">
+          <el-option v-for="category in credentialCategories" :key="category.value" :label="category.label" :value="category.value" />
+        </el-select>
+        <el-select v-model="filters.status" clearable placeholder="状态" class="filter-select">
+          <el-option label="可用" value="active" />
+          <el-option label="已禁用" value="inactive" />
+          <el-option label="已撤销" value="revoked" />
+          <el-option label="已过期" value="expired" />
+        </el-select>
+      </div>
+      <div class="content-toolbar__actions">
+        <el-button @click="reloadList">刷新</el-button>
+        <el-button v-if="canWriteCredentials" type="primary" @click="showCreateDialog">
+          <el-icon><Plus /></el-icon>
+          新建凭据
+        </el-button>
+      </div>
     </div>
 
     <div v-if="selectedIds.length > 0" class="batch-bar">
@@ -185,7 +157,7 @@
 import { computed, h, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Key, MoreFilled, Plus, Search } from '@element-plus/icons-vue'
+import { MoreFilled, Plus, Search } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import {
   batchDeleteCredentials,
@@ -202,8 +174,6 @@ import {
   verifyCredential
 } from '@/api/credential'
 import CredentialForm from './components/CredentialForm.vue'
-import PageHeader from '../store/components/PageHeader.vue'
-import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 
 const userStore = useUserStore()
 const route = useRoute()
@@ -230,13 +200,6 @@ const hasDeletableCredentials = computed(() => credentials.value.some(item => it
 const pagination = reactive({ page: 1, size: 10, total: 0 })
 const filters = reactive({ keyword: '', type: '', category: '', status: '' })
 const impactSummaryUnavailable = '-- / --'
-
-const stats = computed(() => ({
-  total: pagination.total,
-  active: credentials.value.filter(item => item.status === 'active').length,
-  disabled: credentials.value.filter(item => item.status === 'inactive' || item.status === 'revoked').length,
-  expired: credentials.value.filter(item => item.status === 'expired').length
-}))
 
 async function loadCredentialImpacts(list) {
   const ids = Array.isArray(list) ? list.map(item => item.id).filter(Boolean) : []
@@ -611,26 +574,7 @@ onMounted(async () => {
   color: var(--text-muted);
 }
 
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.stat-value {
-  font-size: 28px;
-  font-weight: 700;
-}
-
-.stat-label {
-  margin-top: 8px;
-  color: var(--text-muted);
-}
-
 .filter-bar {
-  display: flex;
-  gap: 12px;
   margin-bottom: 16px;
 }
 

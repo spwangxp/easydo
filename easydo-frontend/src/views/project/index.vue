@@ -1,20 +1,7 @@
 <template>
   <div class="project-container">
-    <PageHeader>
-      <template #title><h1>项目</h1></template>
-      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</template>
-      <template #actions>
-        <PageHeaderActions>
-          <el-button type="primary" @click="handleCreate">
-            <el-icon><Plus /></el-icon>
-            添加项目
-          </el-button>
-        </PageHeaderActions>
-      </template>
-    </PageHeader>
-
-    <div class="project-filters">
-      <div class="filter-tabs">
+    <div class="content-toolbar project-filters">
+      <div class="content-toolbar__start filter-tabs">
         <div class="tab-item active">
           <span>常用</span>
         </div>
@@ -45,7 +32,7 @@
         </div>
       </div>
 
-      <div class="filter-search">
+      <div class="content-toolbar__actions filter-search">
         <el-input
           v-model="searchKeyword"
           placeholder="搜索名称"
@@ -54,6 +41,10 @@
           style="width: 240px"
           @input="handleSearch"
         />
+        <el-button type="primary" @click="handleCreate">
+          <el-icon><Plus /></el-icon>
+          添加项目
+        </el-button>
       </div>
     </div>
 
@@ -219,11 +210,6 @@ import {
   Warning
 } from '@element-plus/icons-vue'
 import { getProjectList, createProject, updateProject, deleteProject, toggleFavorite } from '@/api/project'
-import { useUserStore } from '@/stores/user'
-import PageHeader from '../store/components/PageHeader.vue'
-import PageHeaderActions from '../store/components/PageHeaderActions.vue'
-
-const userStore = useUserStore()
 
 const activeTab = ref('all')
 const searchKeyword = ref('')
@@ -504,9 +490,6 @@ onMounted(() => {
   animation: float-up 0.45s ease both;
 
   .project-filters {
-    display: flex;
-    align-items: center;
-    gap: 16px;
     padding: 14px 16px;
     margin-bottom: 18px;
     border-radius: $radius-xl;
@@ -567,7 +550,6 @@ onMounted(() => {
     }
 
     .filter-search {
-      flex: 1;
       min-width: 180px;
     }
   }

@@ -8,10 +8,11 @@
 
     <aside class="sidebar" :class="{ collapsed: isCollapsed }">
       <div class="sidebar-header">
-        <img src="@/assets/images/logo.svg" alt="Logo" class="logo" />
-        <div v-show="!isCollapsed" class="brand-text">
-          <span class="title">EasyDo</span>
-          <span class="subtitle">Delivery Control</span>
+        <div class="sidebar-brand">
+          <img src="@/assets/images/logo.svg" alt="Logo" class="logo" />
+          <div v-show="!isCollapsed" class="brand-text">
+            <span class="title">EasyDo</span>
+          </div>
         </div>
       </div>
 
@@ -30,29 +31,34 @@
             <span v-show="!isCollapsed" class="nav-text">{{ item.name }}</span>
           </router-link>
         </div>
-
-        <div class="nav-section bottom">
-          <router-link
-            v-for="item in filteredBottomMenuItems"
-            :key="item.path"
-            :to="item.path"
-            class="nav-item"
-            :class="{ active: isActive(item.path) }"
-          >
-            <el-icon class="nav-icon">
-              <component :is="item.icon" />
-            </el-icon>
-            <span v-show="!isCollapsed" class="nav-text">{{ item.name }}</span>
-          </router-link>
-        </div>
       </nav>
 
       <div class="sidebar-footer">
-        <div class="user-info" @click="showUserMenu = !showUserMenu">
+        <div class="sidebar-footer-icons">
+          <el-badge :value="notificationStore.unreadCount" :max="99" :hidden="notificationStore.unreadCount < 1" class="sidebar-badge">
+            <button class="icon-btn sidebar-icon-btn" type="button" @click="router.push('/messages')">
+              <el-icon :size="18"><Bell /></el-icon>
+            </button>
+          </el-badge>
+
+          <el-tooltip :content="themeStore.isDark ? '切换到浅色' : '切换到深色'" placement="right">
+            <button class="icon-btn sidebar-icon-btn" type="button" @click="toggleTheme">
+              <el-icon :size="18">
+                <Sunny v-if="themeStore.isDark" />
+                <Moon v-else />
+              </el-icon>
+            </button>
+          </el-tooltip>
+        </div>
+
+        <div class="user-info" @click="handleUserInfoClick">
           <el-avatar :size="34" :src="userStore.userInfo?.avatar">
             {{ userStore.userInfo?.username?.charAt(0)?.toUpperCase() }}
           </el-avatar>
-          <span v-show="!isCollapsed" class="username">{{ userStore.userInfo?.username }}</span>
+          <div v-show="!isCollapsed" class="user-copy">
+            <span class="username">{{ userStore.userInfo?.username }}</span>
+            <span class="user-link">个人中心</span>
+          </div>
           <el-icon v-show="!isCollapsed" class="dropdown-icon">
             <ArrowDown />
           </el-icon>
@@ -85,10 +91,6 @@
 
           <div class="title-block">
             <h1>{{ currentPageTitle }}</h1>
-            <el-breadcrumb separator="/">
-              <el-breadcrumb-item :to="{ path: '/' }">首页</el-breadcrumb-item>
-              <el-breadcrumb-item>{{ currentPageTitle }}</el-breadcrumb-item>
-            </el-breadcrumb>
           </div>
         </div>
 
@@ -107,58 +109,6 @@
               :value="workspace.id"
             />
           </el-select>
-
-          <div class="time-chip">
-            <el-icon :size="15"><Calendar /></el-icon>
-            <span>{{ currentDateLabel }}</span>
-          </div>
-
-          <el-tooltip :content="themeStore.isDark ? '切换到浅色' : '切换到深色'" placement="bottom">
-            <button class="icon-btn" type="button" @click="toggleTheme">
-              <el-icon :size="18">
-                <Sunny v-if="themeStore.isDark" />
-                <Moon v-else />
-              </el-icon>
-            </button>
-          </el-tooltip>
-
-          <el-badge :value="notificationStore.unreadCount" :max="99" :hidden="notificationStore.unreadCount < 1" class="header-badge">
-            <button class="icon-btn" type="button" @click="router.push('/messages')">
-              <el-icon :size="18"><Bell /></el-icon>
-            </button>
-          </el-badge>
-
-          <el-tooltip content="帮助与支持" placement="bottom">
-            <button class="icon-btn" type="button">
-              <el-icon :size="18"><QuestionFilled /></el-icon>
-            </button>
-          </el-tooltip>
-
-          <el-dropdown trigger="click" @command="handleCommand">
-            <button class="user-chip" type="button">
-              <el-avatar :size="30" :src="userStore.userInfo?.avatar">
-                {{ userStore.userInfo?.username?.charAt(0)?.toUpperCase() }}
-              </el-avatar>
-              <span class="user-name">{{ userStore.userInfo?.username }}</span>
-              <el-icon :size="12"><ArrowDown /></el-icon>
-            </button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="profile">
-                  <el-icon><User /></el-icon>
-                  个人中心
-                </el-dropdown-item>
-                <el-dropdown-item command="settings">
-                  <el-icon><Setting /></el-icon>
-                  系统设置
-                </el-dropdown-item>
-                <el-dropdown-item divided command="logout">
-                  <el-icon><SwitchButton /></el-icon>
-                  退出登录
-                </el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
         </div>
       </header>
 
@@ -170,7 +120,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { useUserStore } from '@/stores/user'
@@ -184,7 +134,6 @@ import {
   DataAnalysis,
   Setting,
   Bell,
-  QuestionFilled,
   User,
   SwitchButton,
   ArrowDown,
@@ -195,8 +144,7 @@ import {
   Collection,
   Shop,
   Sunny,
-  Moon,
-  Calendar
+  Moon
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -207,30 +155,14 @@ const themeStore = useThemeStore()
 
 const isCollapsed = ref(false)
 const showUserMenu = ref(false)
-const currentDate = ref(new Date())
-let dateTimer = null
 
 onMounted(() => {
   themeStore.init()
   notificationStore.startPolling()
-  dateTimer = setInterval(() => {
-    currentDate.value = new Date()
-  }, 60000)
 })
 
 onUnmounted(() => {
   notificationStore.stopPolling()
-  if (dateTimer) {
-    clearInterval(dateTimer)
-  }
-})
-
-const currentDateLabel = computed(() => {
-  return currentDate.value.toLocaleDateString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    weekday: 'short'
-  })
 })
 
 const toggleTheme = () => {
@@ -250,26 +182,41 @@ const menuItems = [
   { name: '设置', path: '/settings', icon: Setting, permission: 'workspace.read' }
 ]
 
-const bottomMenuItems = [
-  { name: '消息', path: '/messages', icon: Bell }
+const pageTitleMatchers = [
+  { name: '工作台', match: (path) => path === '/' },
+  { name: '流水线', match: (path) => path === '/pipeline' || path.startsWith('/pipeline/') },
+  { name: '项目', match: (path) => path === '/project' || path.startsWith('/project/') },
+  { name: '商店', match: (path) => path === '/store' || path.startsWith('/store/') },
+  { name: '执行器', match: (path) => path === '/agent' || path.startsWith('/agent/') },
+  { name: '资源管理', match: (path) => path === '/resources' || path.startsWith('/resources/') || path === '/terminal' },
+  { name: '发布', match: (path) => path === '/deploy' || path.startsWith('/deploy/') },
+  { name: '凭据管理', match: (path) => path === '/credentials' || path.startsWith('/credentials/') },
+  { name: '统计', match: (path) => path === '/statistics' || path.startsWith('/statistics/') },
+  { name: '设置', match: (path) => path === '/settings' || path.startsWith('/settings/') },
+  { name: '消息', match: (path) => path === '/messages' || path.startsWith('/messages/') },
+  { name: '个人中心', match: (path) => path === '/profile' || path.startsWith('/profile/') }
 ]
 
-const filteredMenuItems = computed(() => menuItems.filter(item => !item.permission || userStore.hasPermission(item.permission)))
-const filteredBottomMenuItems = computed(() => bottomMenuItems.filter(item => !item.permission || userStore.hasPermission(item.permission)))
+const filteredMenuItems = computed(() => menuItems.filter((item) => !item.permission || userStore.hasPermission(item.permission)))
 
 const currentPageTitle = computed(() => {
-  const currentRoute = [...filteredMenuItems.value, ...filteredBottomMenuItems.value].find(item => {
-    if (item.path === '/') {
-      return route.path === '/'
-    }
-    return route.path === item.path || route.path.startsWith(item.path + '/')
-  })
-  return currentRoute?.name || '工作台'
+  const matchedItem = pageTitleMatchers.find((item) => item.match(route.path))
+  return matchedItem?.name || '工作台'
 })
 
 watch(() => userStore.currentWorkspaceId, async () => {
   await notificationStore.refreshUnreadCount()
 }, { immediate: true })
+
+watch(isCollapsed, (collapsed) => {
+  if (collapsed) {
+    showUserMenu.value = false
+  }
+})
+
+watch(() => route.fullPath, () => {
+  showUserMenu.value = false
+})
 
 const isActive = (path) => {
   if (path === '/') {
@@ -278,18 +225,12 @@ const isActive = (path) => {
   return route.path === path || route.path.startsWith(path + '/')
 }
 
-const handleCommand = (command) => {
-  switch (command) {
-    case 'profile':
-      router.push('/profile')
-      break
-    case 'settings':
-      router.push('/settings')
-      break
-    case 'logout':
-      handleLogout()
-      break
+const handleUserInfoClick = () => {
+  if (isCollapsed.value) {
+    router.push('/profile')
+    return
   }
+  showUserMenu.value = !showUserMenu.value
 }
 
 const handleWorkspaceChange = async (workspaceId) => {
@@ -399,13 +340,29 @@ const handleLogout = async () => {
     width: $sidebar-collapsed-width;
 
     .sidebar-header {
+      padding: 0 6px;
+    }
+
+    .sidebar-brand {
       justify-content: center;
-      padding: 0;
     }
 
     .nav-item {
       justify-content: center;
       padding: 14px 0;
+    }
+
+    .sidebar-footer {
+      align-items: center;
+    }
+
+    .sidebar-footer-icons {
+      justify-content: center;
+    }
+
+    .user-info {
+      justify-content: center;
+      padding: 10px;
     }
   }
 }
@@ -414,9 +371,15 @@ const handleLogout = async () => {
   height: $header-height;
   display: flex;
   align-items: center;
-  gap: 12px;
   padding: 0 14px;
   margin-bottom: 4px;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
 
   .logo {
     width: 38px;
@@ -427,7 +390,7 @@ const handleLogout = async () => {
 
   .brand-text {
     display: flex;
-    flex-direction: column;
+    min-width: 0;
     overflow: hidden;
 
     .title {
@@ -436,13 +399,9 @@ const handleLogout = async () => {
       font-weight: 750;
       letter-spacing: -0.03em;
       color: var(--text-primary);
-    }
-
-    .subtitle {
-      font-size: 11px;
-      color: var(--text-tertiary);
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
   }
 }
@@ -459,12 +418,6 @@ const handleLogout = async () => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-
-  &.bottom {
-    margin-top: auto;
-    padding-top: 12px;
-    border-top: 1px solid var(--border-color-light);
-  }
 }
 
 .nav-item {
@@ -521,14 +474,40 @@ const handleLogout = async () => {
 }
 
 .sidebar-footer {
-  padding: 8px 6px 4px;
+  padding: 12px 6px 4px;
   position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid var(--border-color-light);
+}
+
+.sidebar-footer-icons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+}
+
+.sidebar-icon-btn {
+  width: 38px;
+  height: 38px;
+}
+
+.sidebar-badge {
+  :deep(.el-badge__content) {
+    border: none;
+    box-shadow: 0 0 0 2px var(--bg-elevated);
+    background: $danger-color;
+  }
 }
 
 .user-info {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
+  min-width: 0;
   border-radius: $radius-lg;
   background: var(--bg-elevated);
   border: 1px solid var(--border-color-light);
@@ -543,12 +522,20 @@ const handleLogout = async () => {
   }
 
   :deep(.el-avatar) {
+    flex-shrink: 0;
     background: linear-gradient(135deg, $primary-color 0%, $primary-hover 100%);
     font-weight: 650;
   }
 
-  .username {
+  .user-copy {
     flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .username {
     min-width: 0;
     font-size: 13px;
     font-weight: 600;
@@ -558,9 +545,16 @@ const handleLogout = async () => {
     white-space: nowrap;
   }
 
+  .user-link {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+
   .dropdown-icon {
     color: var(--text-muted);
     font-size: 12px;
+    flex-shrink: 0;
   }
 }
 
@@ -639,6 +633,7 @@ const handleLogout = async () => {
   align-items: center;
   gap: 14px;
   min-width: 0;
+  flex: 1;
 }
 
 .collapse-btn {
@@ -664,19 +659,18 @@ const handleLogout = async () => {
 
 .title-block {
   min-width: 0;
+  flex: 1;
 
   h1 {
+    margin: 0;
     font-family: $font-family-display;
     font-size: 22px;
     line-height: 1.12;
     font-weight: 720;
-    letter-spacing: -0.02em;
-    margin-bottom: 6px;
     color: var(--text-primary);
-  }
-
-  :deep(.el-breadcrumb__item .el-breadcrumb__inner) {
-    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 }
 
@@ -684,26 +678,26 @@ const handleLogout = async () => {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 .workspace-select {
-  width: 220px;
-}
+  width: min(280px, 32vw);
+  min-width: 140px;
+  max-width: 100%;
+  flex-shrink: 1;
 
-.time-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 34px;
-  padding: 0 12px;
-  border-radius: $radius-full;
-  border: 1px solid var(--border-color-light);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  box-shadow: var(--shadow-sm);
+  :deep(.el-input__wrapper) {
+    min-width: 0;
+  }
+
+  :deep(.el-select__selected-item),
+  :deep(.el-input__inner) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 .icon-btn {
@@ -727,67 +721,6 @@ const handleLogout = async () => {
   }
 }
 
-.header-badge {
-  :deep(.el-badge__content) {
-    border: none;
-    box-shadow: 0 0 0 2px var(--bg-elevated);
-    background: $danger-color;
-  }
-}
-
-.quick-app-btn {
-  height: 34px;
-  border: 1px solid var(--border-color-light);
-  border-radius: $radius-md;
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 12px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  box-shadow: var(--shadow-sm);
-  transition: all $transition-fast;
-
-  &:hover {
-    color: var(--primary-color);
-    transform: translateY(-1px);
-  }
-}
-
-.user-chip {
-  height: 36px;
-  border: 1px solid var(--border-color-light);
-  border-radius: $radius-full;
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 8px 0 4px;
-  cursor: pointer;
-  box-shadow: var(--shadow-sm);
-  transition: all $transition-fast;
-
-  &:hover {
-    transform: translateY(-1px);
-    border-color: var(--border-color-hover);
-    box-shadow: var(--shadow-md);
-  }
-
-  .user-name {
-    max-width: 110px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-}
-
 .content-wrapper {
   flex: 1;
   margin-top: 12px;
@@ -801,15 +734,8 @@ const handleLogout = async () => {
 }
 
 @media (max-width: 1200px) {
-  .time-chip,
-  .quick-app-btn span,
-  .user-chip .user-name {
-    display: none;
-  }
-
-  .quick-app-btn,
-  .user-chip {
-    padding: 0 8px;
+  .workspace-select {
+    width: min(220px, 28vw);
   }
 }
 
@@ -825,7 +751,6 @@ const handleLogout = async () => {
 
   .title-block h1 {
     font-size: 18px;
-    margin-bottom: 3px;
   }
 
   .topbar {
@@ -833,8 +758,30 @@ const handleLogout = async () => {
     padding: 0 14px;
   }
 
+  .workspace-select {
+    width: min(180px, 24vw);
+    min-width: 120px;
+  }
+
   .content-wrapper {
     padding: 14px;
+  }
+}
+
+@media (max-width: 720px) {
+  .topbar {
+    gap: 10px;
+  }
+
+  .workspace-select {
+    width: min(148px, 22vw);
+    min-width: 104px;
+  }
+}
+
+@media (max-width: 560px) {
+  .sidebar-footer-icons {
+    gap: 6px;
   }
 }
 </style>

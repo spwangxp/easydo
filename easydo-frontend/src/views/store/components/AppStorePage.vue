@@ -1,14 +1,14 @@
 <template>
   <div class="app-store-page">
-    <PageHeader>
-      <template #title>
+    <div class="content-toolbar store-page-toolbar">
+      <div class="content-toolbar__start">
         <StoreKindSwitch :model-value="storeKind" @update:model-value="handleStoreTabChange" />
-      </template>
-      <template #subtitle>
+      </div>
+      <div class="content-toolbar__meta store-page-hint">
         {{ selectedApp ? '当前正在查看应用详情，可直接管理版本、参数和部署入口。' : '按功能分类浏览应用，外层只保留关键信息，进入详情后再管理版本与部署。' }}
-      </template>
-      <template #actions>
-        <PageHeaderActions>
+      </div>
+      <div class="content-toolbar__actions">
+        <StoreHeaderActions>
           <template v-if="selectedApp">
             <el-button @click="resetSelection">返回目录</el-button>
             <el-button @click="loadVariants(selectedApp.id)">刷新版本</el-button>
@@ -17,9 +17,9 @@
             <el-button @click="loadInitialData">刷新</el-button>
             <el-button type="primary" @click="openAppDialog()">新增应用</el-button>
           </template>
-        </PageHeaderActions>
-      </template>
-    </PageHeader>
+        </StoreHeaderActions>
+      </div>
+    </div>
 
     <template v-if="!selectedApp">
       <section class="catalog-shell">
@@ -477,9 +477,8 @@ import {
   updateTemplate,
   updateTemplateVersion
 } from '@/api/store'
-import PageHeaderActions from './PageHeaderActions.vue'
+import StoreHeaderActions from './StoreHeaderActions.vue'
 import StoreKindSwitch from './StoreKindSwitch.vue'
-import PageHeader from './PageHeader.vue'
 import {
   createParameterRow,
   normalizeChartSourcePayload,
@@ -1157,6 +1156,14 @@ function formatDiffText(line) {
   box-shadow: var(--shadow-md);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
+}
+
+.store-page-toolbar {
+  margin-bottom: 16px;
+}
+
+.store-page-hint {
+  max-width: 480px;
 }
 
 .detail-header h2 {

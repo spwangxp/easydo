@@ -1,30 +1,22 @@
 <template>
   <div class="resource-page">
-    <PageHeader>
-      <template #title><h1>资源管理</h1></template>
-      <template #subtitle>
-        统一管理工作空间内的 VM 与 K8s 集群资源，发布流程会直接复用这里绑定好的接入凭据。
-        当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}
-      </template>
-      <template #actions>
-        <PageHeaderActions>
-          <el-button v-if="canManage" type="primary" @click="openCreateDialog">新建资源</el-button>
-        </PageHeaderActions>
-      </template>
-    </PageHeader>
-
-    <div class="filter-bar">
-      <el-input v-model="filters.keyword" placeholder="搜索资源名称" clearable class="search-input" />
-      <el-select v-model="filters.type" clearable placeholder="资源类型" class="filter-select">
-        <el-option label="VM" value="vm" />
-        <el-option label="K8s 集群" value="k8s" />
-      </el-select>
-      <el-select v-model="filters.environment" clearable placeholder="环境" class="filter-select">
-        <el-option label="开发环境" value="development" />
-        <el-option label="测试环境" value="testing" />
-        <el-option label="生产环境" value="production" />
-      </el-select>
-      <el-button @click="fetchResources">刷新</el-button>
+    <div class="content-toolbar filter-bar">
+      <div class="content-toolbar__start">
+        <el-input v-model="filters.keyword" placeholder="搜索资源名称" clearable class="search-input" />
+        <el-select v-model="filters.type" clearable placeholder="资源类型" class="filter-select">
+          <el-option label="VM" value="vm" />
+          <el-option label="K8s 集群" value="k8s" />
+        </el-select>
+        <el-select v-model="filters.environment" clearable placeholder="环境" class="filter-select">
+          <el-option label="开发环境" value="development" />
+          <el-option label="测试环境" value="testing" />
+          <el-option label="生产环境" value="production" />
+        </el-select>
+      </div>
+      <div class="content-toolbar__actions">
+        <el-button @click="fetchResources">刷新</el-button>
+        <el-button v-if="canManage" type="primary" @click="openCreateDialog">新建资源</el-button>
+      </div>
     </div>
 
     <el-table
@@ -154,8 +146,6 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useUserStore } from '@/stores/user'
-import PageHeader from '../store/components/PageHeader.vue'
-import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 import {
   bindResourceCredential,
   createResource,

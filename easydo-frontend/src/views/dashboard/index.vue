@@ -1,18 +1,5 @@
 <template>
   <div class="dashboard-container">
-    <PageHeader>
-      <template #title><h1>工作台</h1></template>
-      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</template>
-      <template #actions>
-        <PageHeaderActions>
-          <el-button type="primary" @click="handleCreatePipeline">
-            <el-icon><Plus /></el-icon>
-            新建流水线
-          </el-button>
-        </PageHeaderActions>
-      </template>
-    </PageHeader>
-    
     <div class="stats-overview" v-loading="loading">
       <div class="stat-card">
         <div class="stat-icon blue">
@@ -240,12 +227,8 @@ import {
 import { getPipelineList, getPipelineHistory } from '@/api/pipeline'
 import { getProjectList } from '@/api/project'
 import { getTaskDispatchList } from '@/api/task'
-import { useUserStore } from '@/stores/user'
-import PageHeader from '../store/components/PageHeader.vue'
-import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 
 const router = useRouter()
-const userStore = useUserStore()
 const loading = ref(false)
 const dispatchLoading = ref(false)
 

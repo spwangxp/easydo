@@ -1,19 +1,5 @@
 <template>
   <div class="deploy-container">
-    <PageHeader>
-      <template #title><h1>发布</h1></template>
-      <template #subtitle>当前工作空间：{{ userStore.currentWorkspace?.name || '-' }}</template>
-      <template #actions>
-        <PageHeaderActions>
-          <el-button v-if="deployScopeContext?.backLink" @click="goBackToScopedK8sBrowser">返回 K8s 浏览器</el-button>
-          <el-button type="primary" @click="handleCreate">
-            <el-icon><Plus /></el-icon>
-            新建发布
-          </el-button>
-        </PageHeaderActions>
-      </template>
-    </PageHeader>
-
     <div v-if="deployScopeContext" class="deploy-scope-card">
       <div>
         <span class="deploy-scope-label">当前按 K8s 资源上下文查看发布记录</span>
@@ -26,27 +12,8 @@
       <el-button @click="clearDeployScope">查看全部发布</el-button>
     </div>
 
-    <div class="deploy-overview">
-      <div class="overview-card">
-        <span class="overview-label">发布总数</span>
-        <strong class="overview-value">{{ total }}</strong>
-      </div>
-      <div class="overview-card running">
-        <span class="overview-label">进行中</span>
-        <strong class="overview-value">{{ statusCounts.running }}</strong>
-      </div>
-      <div class="overview-card success">
-        <span class="overview-label">成功</span>
-        <strong class="overview-value">{{ statusCounts.success }}</strong>
-      </div>
-      <div class="overview-card danger">
-        <span class="overview-label">失败 / 已取消</span>
-        <strong class="overview-value">{{ statusCounts.failed }}</strong>
-      </div>
-    </div>
-
-    <div class="deploy-filters card-shell">
-      <div class="filter-tabs">
+    <div class="content-toolbar deploy-filters card-shell">
+      <div class="content-toolbar__start filter-tabs">
         <div class="tab-item" :class="{ active: statusTab === 'all' }" @click="statusTab = 'all'">
           <span>全部</span>
           <span class="tab-count">{{ total }}</span>
@@ -65,7 +32,7 @@
         </div>
       </div>
 
-      <div class="filter-controls">
+      <div class="content-toolbar__actions filter-controls">
         <el-input v-model="searchKeyword" placeholder="搜索发布名称" clearable style="width: 240px" />
 
         <el-select v-model="filterProject" placeholder="项目" clearable style="width: 160px">
@@ -79,6 +46,10 @@
         </el-select>
 
         <el-button @click="fetchDeploys">刷新</el-button>
+        <el-button type="primary" @click="handleCreate">
+          <el-icon><Plus /></el-icon>
+          新建发布
+        </el-button>
       </div>
     </div>
 
@@ -277,15 +248,12 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useUserStore } from '@/stores/user'
 import { getDeploymentRequestDetail, getDeploymentRequestList } from '@/api/deployment'
 import { getTemplateList } from '@/api/store'
 import { getResourceList } from '@/api/resource'
 import { getProjectList } from '@/api/project'
 import { getPipelineRunDetail } from '@/api/pipeline'
 import LogViewer from '@/views/pipeline/components/LogViewer.vue'
-import PageHeader from '../store/components/PageHeader.vue'
-import PageHeaderActions from '../store/components/PageHeaderActions.vue'
 import { buildResourceK8sRouteLocation, resolveNamespaceFromParameterSnapshot } from '@/views/resources/k8s/utils'
 import {
   Plus,
@@ -296,7 +264,6 @@ import {
 
 const route = useRoute()
 const router = useRouter()
-const userStore = useUserStore()
 const statusTab = ref('all')
 const searchKeyword = ref('')
 const filterProject = ref('')
@@ -754,14 +721,6 @@ onUnmounted(() => {
   color: var(--text-secondary);
 }
 
-.deploy-overview {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 16px;
-  margin-bottom: 18px;
-}
-
-.overview-card,
 .detail-summary-card {
   display: flex;
   flex-direction: column;
@@ -785,7 +744,6 @@ onUnmounted(() => {
   }
 }
 
-.overview-label,
 .summary-label,
 .meta-label,
 .section-description,
@@ -794,7 +752,6 @@ onUnmounted(() => {
   color: var(--text-secondary);
 }
 
-.overview-value,
 .summary-value,
 .meta-value,
 .task-name,
@@ -804,7 +761,6 @@ onUnmounted(() => {
   color: var(--text-primary);
 }
 
-.overview-value,
 .summary-value {
   font-family: $font-family-display;
   font-size: 30px;
@@ -1074,7 +1030,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 1200px) {
-  .deploy-overview,
   .detail-summary-grid,
   .detail-meta-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1091,7 +1046,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) {
-  .deploy-overview,
   .detail-summary-grid,
   .detail-meta-grid {
     grid-template-columns: 1fr;

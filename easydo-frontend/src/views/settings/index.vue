@@ -1,9 +1,5 @@
 <template>
   <div class="settings-container">
-    <PageHeader>
-      <template #title><h1>设置</h1></template>
-    </PageHeader>
-    
     <div class="settings-layout">
       <aside class="settings-sidebar">
         <div 
@@ -503,7 +499,6 @@ import {
   getAIModelCatalog
 } from '@/api/store'
 import { createWorkspace, createWorkspaceInvitation, getWorkspaceInvitations, getWorkspaceList, getWorkspaceMembers, removeWorkspaceMember, revokeWorkspaceInvitation, updateWorkspaceMember } from '@/api/workspace'
-import PageHeader from '../store/components/PageHeader.vue'
 import { createUser } from '@/api/user'
 import { 
   Setting, 
