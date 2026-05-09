@@ -249,30 +249,40 @@
                   <el-icon v-else-if="task.display_status === 'blocked'" :color="'var(--warning-color)'"><Warning /></el-icon>
                   <el-icon v-else-if="['execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(task.status)" :color="'var(--danger-color)'"><CircleCloseFilled /></el-icon>
                 </div>
-                <div class="task-info">
-                  <div class="task-name">
-                    <span>{{ task.name || `任务 #${task.id}` }}</span>
+                <div class="task-body">
+                  <div class="task-main-line">
+                    <span class="task-title-text">{{ task.name || `任务 #${task.id}` }}</span>
                     <span v-if="isIgnoredFailureTask(task)" class="task-ignored-hint">已忽略执行失败</span>
-                  </div>
-                  <div class="task-meta">
-                    <el-tag v-if="task.display_status === 'not_executed'" type="info" size="small">暂未执行</el-tag>
-                    <el-tag v-else-if="task.display_status === 'blocked'" type="warning" size="small">已阻塞</el-tag>
-                    <span class="task-agent" v-if="task.Agent">{{ task.Agent.name }}</span>
-                    <span class="task-start-time">开始: {{ formatDateTime(task.start_time) }}</span>
-                    <span class="task-duration" v-if="task.duration > 0">耗时: {{ formatDuration(task.duration) }}</span>
-                    <span class="task-exit-code" v-if="shouldShowTaskExitCode(task)">退出码: {{ getTaskExitCode(task) }}</span>
+                    <div class="task-inline-meta">
+                      <el-tag v-if="task.display_status === 'not_executed'" type="info" size="small">暂未执行</el-tag>
+                      <el-tag v-else-if="task.display_status === 'blocked'" type="warning" size="small">已阻塞</el-tag>
+                      <span class="task-agent" v-if="task.Agent">{{ task.Agent.name }}</span>
+                      <span class="task-start-time">开始: {{ formatDateTime(task.start_time) }}</span>
+                      <span class="task-duration" v-if="task.duration > 0">耗时: {{ formatDuration(task.duration) }}</span>
+                      <span class="task-exit-code" v-if="shouldShowTaskExitCode(task)">退出码: {{ getTaskExitCode(task) }}</span>
+                    </div>
+                    <div v-if="hasTaskOutputs(task)" class="task-inline-outputs">
+                      <div
+                        v-for="(output, idx) in formatTaskOutputs(getTaskOutputs(task), getTaskOutputDisplayKind(task)).slice(0, 3)"
+                        :key="idx"
+                        class="task-output-chip"
+                      >
+                        <span class="output-label">{{ output.label }}:</span>
+                        <span class="output-value" :class="`output-${output.type}`">{{ output.value }}</span>
+                      </div>
+                    </div>
                   </div>
                   <div class="task-error" v-if="task.error_msg">
                     <el-icon><Warning /></el-icon>
                     {{ task.error_msg }}
                   </div>
-                  <div class="task-outputs" v-if="hasTaskOutputs(task)">
-                    <div class="task-outputs-header">
-                      <span>任务输出</span>
-                    </div>
+                  <div
+                    v-if="hasTaskOutputs(task) && formatTaskOutputs(getTaskOutputs(task), getTaskOutputDisplayKind(task)).length > 3"
+                    class="task-outputs task-outputs--expanded"
+                  >
                     <div class="task-outputs-grid">
                       <div
-                        v-for="(output, idx) in formatTaskOutputs(getTaskOutputs(task), getTaskOutputDisplayKind(task))"
+                        v-for="(output, idx) in formatTaskOutputs(getTaskOutputs(task), getTaskOutputDisplayKind(task)).slice(3)"
                         :key="idx"
                         class="task-output-item"
                       >
@@ -2755,22 +2765,23 @@ onUnmounted(() => {
             .task-item {
               display: flex;
               align-items: flex-start;
-              padding: 16px;
+              gap: 12px;
+              padding: 14px 16px;
               border-bottom: 1px solid #ebeef5;
               transition: background 0.3s;
-              
+
               &:last-child {
                 border-bottom: none;
               }
-              
+
               &:hover {
                 background: var(--bg-secondary);
               }
-              
+
               &.task-running {
                 background: var(--warning-light);
               }
-              
+
               &.task-failed {
                 background: var(--danger-light);
               }
@@ -2778,117 +2789,168 @@ onUnmounted(() => {
               &.task-blocked {
                 background: var(--warning-light);
               }
-              
+
               &.task-not-executed {
                 background: var(--bg-secondary);
                 opacity: 0.7;
               }
-              
+
               .task-status-icon {
-                margin-right: 16px;
-                font-size: 24px;
-                
+                font-size: 22px;
+                flex-shrink: 0;
+
                 .running-icon {
                   animation: spin 1s linear infinite;
                 }
               }
-              
-              .task-info {
+
+              .task-body {
                 flex: 1;
-                
-                .task-name {
-                  font-size: 14px;
-                  font-weight: 500;
-                  color: var(--text-primary);
-                  margin-bottom: 4px;
-                  display: flex;
-                  align-items: center;
-                  gap: 8px;
-                  flex-wrap: wrap;
+                min-width: 0;
+              }
 
-                  .task-ignored-hint {
-                    font-size: 12px;
-                    font-weight: 400;
-                    color: var(--warning-color);
-                  }
+              .task-main-line {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                min-width: 0;
+                white-space: nowrap;
+                overflow: hidden;
+              }
+
+              .task-title-text {
+                font-size: 14px;
+                font-weight: 500;
+                color: var(--text-primary);
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                flex-shrink: 1;
+              }
+
+              .task-ignored-hint {
+                font-size: 12px;
+                font-weight: 400;
+                color: var(--warning-color);
+                flex-shrink: 0;
+              }
+
+              .task-inline-meta,
+              .task-inline-outputs {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                min-width: 0;
+                overflow: hidden;
+              }
+
+              .task-inline-meta {
+                font-size: 12px;
+                color: var(--text-muted);
+                flex-shrink: 1;
+
+                .task-agent {
+                  margin-right: 2px;
+                  flex-shrink: 0;
                 }
 
-                .task-meta {
-                  font-size: 12px;
-                  color: var(--text-muted);
-                  display: flex;
-                  align-items: center;
-                  gap: 12px;
-                  flex-wrap: wrap;
-
-                  .task-agent {
-                    margin-right: 4px;
-                  }
-
-                  .task-start-time,
-                  .task-duration,
-                  .task-exit-code {
-                    color: var(--text-secondary);
-                  }
+                .task-start-time,
+                .task-duration,
+                .task-exit-code {
+                  color: var(--text-secondary);
+                  flex-shrink: 0;
                 }
-                
-                .task-error {
-                  margin-top: 8px;
-                  padding: 8px 12px;
-                  background: var(--danger-light);
-                  border-radius: 4px;
-                  font-size: 12px;
-                  color: #F56C6C;
+              }
+
+              .task-inline-outputs {
+                flex-shrink: 1;
+
+                .task-output-chip,
+                .task-output-item {
                   display: flex;
                   align-items: center;
                   gap: 4px;
+                  min-width: 0;
+                  overflow: hidden;
                 }
 
-                .task-outputs {
-                  margin-top: 8px;
-                  padding: 8px 12px;
-                  background: var(--bg-secondary);
-                  border-radius: 4px;
-                  font-size: 12px;
+                .output-label {
+                  color: var(--text-muted);
+                  flex-shrink: 0;
+                }
 
-                  .task-outputs-header {
-                    color: var(--text-secondary);
-                    margin-bottom: 6px;
-                    font-weight: 500;
+                .output-value {
+                  min-width: 0;
+                  overflow: hidden;
+                  text-overflow: ellipsis;
+                  font-weight: 500;
+                  font-family: 'Consolas', 'Monaco', monospace;
+
+                  &.output-primary { color: var(--primary-color); }
+                  &.output-success { color: #67C23A; }
+                  &.output-danger { color: #F56C6C; }
+                  &.output-warning { color: #E6A23C; }
+                  &.output-info { color: var(--text-secondary); }
+                  &.output-default { color: var(--text-primary); }
+                }
+              }
+
+              .task-error {
+                margin-top: 8px;
+                padding: 8px 12px;
+                background: var(--danger-light);
+                border-radius: 4px;
+                font-size: 12px;
+                color: #F56C6C;
+                display: flex;
+                align-items: center;
+                gap: 4px;
+              }
+
+              .task-outputs.task-outputs--expanded {
+                margin-top: 8px;
+                padding: 8px 12px;
+                background: var(--bg-secondary);
+                border-radius: 4px;
+                font-size: 12px;
+
+                .task-outputs-grid {
+                  display: flex;
+                  flex-wrap: wrap;
+                  gap: 8px 16px;
+
+                  .task-output-item {
+                    display: flex;
+                    align-items: center;
+                    gap: 4px;
+                    min-width: 0;
                   }
 
-                  .task-outputs-grid {
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 8px 16px;
+                  .output-label {
+                    color: var(--text-muted);
+                    flex-shrink: 0;
+                  }
 
-                    .task-output-item {
-                      display: flex;
-                      align-items: center;
-                      gap: 4px;
+                  .output-value {
+                    min-width: 0;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    font-weight: 500;
+                    font-family: 'Consolas', 'Monaco', monospace;
 
-                      .output-label {
-                        color: var(--text-muted);
-                      }
-
-                      .output-value {
-                        font-weight: 500;
-                        font-family: 'Consolas', 'Monaco', monospace;
-
-                        &.output-primary { color: var(--primary-color); }
-                        &.output-success { color: #67C23A; }
-                        &.output-danger { color: #F56C6C; }
-                        &.output-warning { color: #E6A23C; }
-                        &.output-info { color: var(--text-secondary); }
-                        &.output-default { color: var(--text-primary); }
-                      }
-                    }
+                    &.output-primary { color: var(--primary-color); }
+                    &.output-success { color: #67C23A; }
+                    &.output-danger { color: #F56C6C; }
+                    &.output-warning { color: #E6A23C; }
+                    &.output-info { color: var(--text-secondary); }
+                    &.output-default { color: var(--text-primary); }
                   }
                 }
               }
 
               .task-actions {
-                margin-left: 16px;
+                flex-shrink: 0;
+                margin-left: 12px;
               }
             }
           }

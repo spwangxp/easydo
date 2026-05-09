@@ -81,94 +81,64 @@
         style="width: 100%"
         :default-sort="{ prop: 'updated_at', order: 'descending' }"
       >
-        <el-table-column prop="name" label="流水线名称" min-width="200">
+        <el-table-column prop="name" label="流水线" min-width="320">
           <template #default="{ row }">
-            <div class="pipeline-name">
+            <div class="pipeline-primary-line">
               <span class="name-icon">{{ row.name.charAt(0).toUpperCase() }}</span>
               <router-link :to="`/pipeline/${row.id}`" class="name-link">
                 {{ row.name }}
               </router-link>
+              <span class="primary-separator">/</span>
+              <span class="project-inline">{{ row.project_name || '-' }}</span>
+              <el-tag :type="getEnvironmentTagType(row.environment)" size="small">
+                {{ row.environment_text || row.environment }}
+              </el-tag>
             </div>
           </template>
         </el-table-column>
-        
-        <el-table-column prop="project_name" label="所属项目" width="120" align="center">
+
+        <el-table-column prop="last_build" label="最近构建" min-width="220">
           <template #default="{ row }">
-            <span>{{ row.project_name || '-' }}</span>
-          </template>
-        </el-table-column>
-        
-        <el-table-column prop="environment_text" label="环境" width="100" align="center">
-          <template #default="{ row }">
-            <el-tag :type="getEnvironmentTagType(row.environment)" size="small">
-              {{ row.environment_text || row.environment }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        
-        <el-table-column prop="last_editor" label="编辑人员" width="120" align="center">
-          <template #default="{ row }">
-            <div class="user-info">
-              <span class="user-avatar">{{ row.last_editor?.charAt(0) || row.owner?.username?.charAt(0) || '?' }}</span>
-              <span>{{ row.last_editor || row.owner?.username || '-' }}</span>
-            </div>
-          </template>
-        </el-table-column>
-        
-        <el-table-column prop="updated_at" label="编辑时间" width="160" sortable>
-          <template #default="{ row }">
-            {{ formatDateTime(row.updated_at) }}
-          </template>
-        </el-table-column>
-        
-        <el-table-column prop="last_build" label="最近构建" width="200">
-          <template #default="{ row }">
-            <div v-if="row.last_build" class="last-build">
-              <span class="build-time">{{ formatRelativeTime(row.last_build.created_at) }}</span>
-              <span class="build-number">#{{ row.last_build.build_number }}</span>
+            <div v-if="row.last_build" class="pipeline-build-line">
               <el-icon v-if="['success', 'execute_success'].includes(row.last_build.status)" class="status-icon success"><CircleCheck /></el-icon>
               <el-icon v-else-if="row.last_build.status === 'running'" class="status-icon running"><Loading /></el-icon>
               <el-icon v-else-if="['failed', 'execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired'].includes(row.last_build.status)" class="status-icon failed"><CircleClose /></el-icon>
               <el-icon v-else-if="['queued', 'assigned', 'dispatching', 'pulling', 'acked', 'cancelled'].includes(row.last_build.status)" class="status-icon pending"><Clock /></el-icon>
               <el-icon v-else class="status-icon warning"><Warning /></el-icon>
+              <span class="build-status-text">{{ getBuildStatusText(row.last_build.status) }}</span>
+              <span class="build-number">#{{ row.last_build.build_number }}</span>
+              <span class="build-time">{{ formatRelativeTime(row.last_build.created_at) }}</span>
             </div>
             <span v-else class="no-build">无构建</span>
           </template>
         </el-table-column>
-        
-        <el-table-column prop="latest_runner" label="构建人员" width="120" align="center">
+
+        <el-table-column prop="last_editor" label="编辑人员" min-width="120">
+          <template #default="{ row }">
+            <div class="user-info">
+              <span class="user-avatar">{{ row.last_editor?.charAt(0) || row.owner?.username?.charAt(0) || '?' }}</span>
+              <span class="user-name-text">{{ row.last_editor || row.owner?.username || '-' }}</span>
+            </div>
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="latest_runner" label="构建人员" min-width="120">
           <template #default="{ row }">
             <div v-if="row.last_build" class="user-info">
               <span class="user-avatar">{{ row.latest_runner?.charAt(0) || row.last_build?.trigger_user?.charAt(0) || '?' }}</span>
-              <span>{{ row.latest_runner || row.last_build?.trigger_user || '-' }}</span>
+              <span class="user-name-text">{{ row.latest_runner || row.last_build?.trigger_user || '-' }}</span>
             </div>
             <span v-else class="no-build">-</span>
           </template>
         </el-table-column>
-        
-        <el-table-column prop="owner" label="创建人" width="120" align="center">
+
+        <el-table-column prop="updated_at" label="更新时间" min-width="160" sortable>
           <template #default="{ row }">
-            <div class="owner-info">
-              <span class="owner-avatar">{{ row.owner?.username?.charAt(0) || '?' }}</span>
-              <span>{{ row.owner?.username || '-' }}</span>
-            </div>
+            <span class="update-time-text">{{ formatDateTime(row.updated_at) }}</span>
           </template>
         </el-table-column>
-        
-        <el-table-column prop="created_at" label="创建时间" width="160" sortable>
-          <template #default="{ row }">
-            {{ formatDateTime(row.created_at) }}
-          </template>
-        </el-table-column>
-        
-        <el-table-column label="最新构建时间" width="160" align="center">
-          <template #default="{ row }">
-            <span v-if="row.last_build">{{ formatDateTime(row.last_build.created_at) }}</span>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-        
-        <el-table-column label="操作" width="180" fixed="right">
+
+        <el-table-column label="操作" width="132" fixed="right">
           <template #default="{ row }">
             <div class="table-actions">
               <el-tooltip content="运行流水线" placement="top">
@@ -514,6 +484,32 @@ const getEnvironmentTagType = (env) => {
   }
 }
 
+const getBuildStatusText = (status) => {
+  switch (status) {
+    case 'success':
+    case 'execute_success':
+      return '执行成功'
+    case 'running':
+      return '运行中'
+    case 'failed':
+    case 'execute_failed':
+    case 'schedule_failed':
+    case 'dispatch_timeout':
+    case 'lease_expired':
+      return '执行失败'
+    case 'queued':
+    case 'assigned':
+    case 'dispatching':
+    case 'pulling':
+    case 'acked':
+      return '排队中'
+    case 'cancelled':
+      return '已取消'
+    default:
+      return '状态未知'
+  }
+}
+
 // 新建流水线
 const handleCreate = () => {
   pipelineForm.name = ''
@@ -739,27 +735,47 @@ const handleDeleteConfirm = async () => {
       }
 
       td.el-table__cell {
-        height: 56px;
+        height: 48px;
       }
     }
 
-    .pipeline-name {
+    .pipeline-primary-line,
+    .pipeline-build-line,
+    .user-info,
+    .table-actions {
       display: flex;
       align-items: center;
-      gap: 10px;
+      min-width: 0;
+    }
 
+    .pipeline-primary-line,
+    .pipeline-build-line {
+      gap: 8px;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    .pipeline-primary-line {
       .name-icon {
-        width: 34px;
-        height: 34px;
-        border-radius: 12px;
+        width: 28px;
+        height: 28px;
+        border-radius: 10px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
         color: #fff;
-        font-size: 13px;
+        font-size: 12px;
         font-weight: 700;
+        flex-shrink: 0;
         background: linear-gradient(140deg, $primary-color 0%, $primary-hover 100%);
-        box-shadow: 0 10px 22px rgba($primary-color, 0.28);
+        box-shadow: 0 8px 18px rgba($primary-color, 0.24);
+      }
+
+      .name-link,
+      .project-inline {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       .name-link {
@@ -771,26 +787,50 @@ const handleDeleteConfirm = async () => {
           color: var(--primary-color);
         }
       }
+
+      .primary-separator {
+        color: var(--text-muted);
+        flex-shrink: 0;
+      }
+
+      .project-inline {
+        color: var(--text-secondary);
+      }
+
+      :deep(.el-tag) {
+        flex-shrink: 0;
+      }
     }
 
-    .last-build {
-      display: flex;
-      align-items: center;
-      gap: 6px;
+    .pipeline-build-line {
+      .build-status-text,
+      .build-number,
+      .build-time {
+        min-width: 0;
+      }
+
+      .build-status-text {
+        color: var(--text-primary);
+        font-weight: 600;
+        flex-shrink: 0;
+      }
 
       .build-time {
         color: var(--text-secondary);
         font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       .build-number {
         color: var(--text-primary);
         font-family: $font-family-mono;
         font-weight: 650;
+        flex-shrink: 0;
       }
 
       .status-icon {
-        margin-left: 2px;
+        flex-shrink: 0;
 
         &.success { color: $success-color; }
         &.running { color: $warning-color; }
@@ -799,49 +839,60 @@ const handleDeleteConfirm = async () => {
       }
     }
 
-    .no-build {
-      color: var(--text-muted);
+    .no-build,
+    .update-time-text {
+      color: var(--text-secondary);
       font-size: 12px;
     }
 
-    .user-info,
-    .owner-info {
-      display: flex;
-      align-items: center;
-      gap: 8px;
+    .update-time-text {
+      display: inline-block;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
 
-      .user-avatar,
-      .owner-avatar {
-        width: 28px;
-        height: 28px;
+    .no-build {
+      color: var(--text-muted);
+    }
+
+    .user-info {
+      gap: 8px;
+      white-space: nowrap;
+      overflow: hidden;
+
+      .user-avatar {
+        width: 24px;
+        height: 24px;
         border-radius: 50%;
         display: inline-flex;
         align-items: center;
         justify-content: center;
         color: #fff;
-        font-size: 11px;
+        font-size: 10px;
         font-weight: 700;
-        box-shadow: 0 8px 18px rgba(10, 32, 66, 0.2);
-      }
-
-      .user-avatar {
+        flex-shrink: 0;
+        box-shadow: 0 6px 14px rgba(10, 32, 66, 0.18);
         background: linear-gradient(140deg, $primary-color, $primary-hover);
       }
 
-      .owner-avatar {
-        background: linear-gradient(140deg, #6d85a8, #8da5c5);
+      .user-name-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
     }
 
     .table-actions {
-      display: flex;
-      align-items: center;
-      gap: 8px;
+      justify-content: flex-end;
+      gap: 6px;
+      flex-shrink: 0;
 
       .action-icon {
-        width: 32px;
-        height: 32px;
-        border-radius: 10px;
+        width: 28px;
+        height: 28px;
+        border-radius: 9px;
         border: 1px solid transparent;
         color: var(--text-secondary);
         display: inline-flex;

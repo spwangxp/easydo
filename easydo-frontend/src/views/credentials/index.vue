@@ -60,48 +60,55 @@
     <div v-if="selectedIds.length > 0" class="batch-bar">
       <span>已选择 {{ selectedIds.length }} 项</span>
       <el-button type="danger" link @click="batchDelete">批量删除</el-button>
-      <el-button link @click="selectedIds = []">取消</el-button>
+      <el-button link @click="clearBatchSelection">取消</el-button>
     </div>
 
-    <el-table v-loading="loading" :data="credentials" @selection-change="handleSelectionChange">
+    <el-table ref="credentialsTableRef" v-loading="loading" :data="credentials" :fit="true" class="credentials-table" @selection-change="handleSelectionChange">
       <el-table-column v-if="hasDeletableCredentials" type="selection" width="48" :selectable="isRowDeletable" />
-      <el-table-column prop="name" label="名称" min-width="180" />
-      <el-table-column prop="type" label="类型" width="130">
-        <template #default="{ row }">
-          <el-tag size="small">{{ getTypeLabel(row.type) }}</el-tag>
-        </template>
+      <el-table-column prop="name" label="名称" min-width="220" show-overflow-tooltip />
+      <el-table-column prop="type" label="类型" min-width="120" show-overflow-tooltip>
+        <template #default="{ row }">{{ getTypeLabel(row.type) }}</template>
       </el-table-column>
-      <el-table-column prop="category" label="分类" width="130">
+      <el-table-column prop="category" label="分类" min-width="120" show-overflow-tooltip>
         <template #default="{ row }">{{ getCategoryLabel(row.category) }}</template>
       </el-table-column>
-      <el-table-column prop="scope" label="范围" width="120">
-        <template #default="{ row }">{{ getScopeLabel(row.scope) }}</template>
-      </el-table-column>
-      <el-table-column prop="status" label="状态" width="120">
+      <el-table-column prop="status" label="状态" min-width="100">
         <template #default="{ row }">
           <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusLabel(row.status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="lock_state" label="锁定状态" width="120">
+      <el-table-column prop="lock_state" label="锁定状态" min-width="100">
         <template #default="{ row }">
           <el-tag :type="getLockStateType(row.lock_state)" size="small">{{ getLockStateLabel(row.lock_state) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="used_count" label="使用次数" width="100" align="center" />
-      <el-table-column prop="last_used_at" label="最后使用" width="180">
-        <template #default="{ row }">{{ formatDateTime(row.last_used_at ? row.last_used_at * 1000 : null) }}</template>
-      </el-table-column>
-      <el-table-column prop="updated_at" label="更新时间" width="180">
-        <template #default="{ row }">{{ formatDateTime(row.updated_at) }}</template>
-      </el-table-column>
-      <el-table-column label="操作" min-width="360" fixed="right">
+      <el-table-column label="影响" min-width="120">
         <template #default="{ row }">
-          <el-button v-if="row.can_view_secret" type="primary" link @click="handleViewPayload(row)">查看敏感载荷</el-button>
-          <el-button v-if="row.can_verify" type="success" link @click="handleVerify(row)">验证</el-button>
-          <el-button type="info" link @click="showUsage(row)">使用统计</el-button>
-          <el-button type="warning" link @click="showImpact(row)">影响分析</el-button>
-          <el-button v-if="row.can_edit" type="primary" link @click="handleEdit(row)">编辑</el-button>
-          <el-button v-if="row.can_delete" type="danger" link @click="handleDelete(row)">删除</el-button>
+          <el-button type="primary" link class="impact-link" :title="getImpactTooltip(row.id)" @click="showImpact(row)">{{ getImpactSummary(row.id) }}</el-button>
+        </template>
+      </el-table-column>
+      <el-table-column prop="updated_at" label="更新时间" min-width="160">
+        <template #default="{ row }">{{ formatUpdatedAt(row.updated_at) }}</template>
+      </el-table-column>
+      <el-table-column label="操作" min-width="160" align="right">
+        <template #default="{ row }">
+          <div class="table-actions">
+            <el-button v-if="row.can_edit" type="primary" link @click="handleEdit(row)">编辑</el-button>
+            <el-button v-if="row.can_verify" type="success" link @click="handleVerify(row)">验证</el-button>
+            <el-dropdown trigger="click" @command="command => handleRowCommand(command, row)">
+              <el-button link class="more-action-button">
+                更多
+                <el-icon><MoreFilled /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item v-if="row.can_view_secret" command="payload">查看敏感载荷</el-dropdown-item>
+                  <el-dropdown-item command="usage">使用统计</el-dropdown-item>
+                  <el-dropdown-item v-if="row.can_delete" command="delete" divided>删除</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -151,7 +158,7 @@
       </div>
       <div v-if="usageData" class="usage-footer">
         <div>成功率：{{ Math.round(Number(usageData.success_rate || 0)) }}%</div>
-        <div>最后使用：{{ formatDateTime(usageData.last_used_at ? usageData.last_used_at * 1000 : null) }}</div>
+        <div>最后使用：{{ formatLastUsedAt(usageData.last_used_at ? usageData.last_used_at * 1000 : null) }}</div>
       </div>
     </el-dialog>
 
@@ -178,7 +185,7 @@
 import { computed, h, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Key, Plus, Search } from '@element-plus/icons-vue'
+import { Key, MoreFilled, Plus, Search } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import {
   batchDeleteCredentials,
@@ -202,6 +209,7 @@ const userStore = useUserStore()
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
+const credentialsTableRef = ref(null)
 const credentials = ref([])
 const credentialTypes = ref([])
 const credentialCategories = ref([])
@@ -215,11 +223,13 @@ const usageDialogVisible = ref(false)
 const usageData = ref(null)
 const impactDialogVisible = ref(false)
 const impactData = ref(null)
+const credentialImpactMap = ref({})
 const canWriteCredentials = computed(() => userStore.hasPermission('credential.write'))
 const hasDeletableCredentials = computed(() => credentials.value.some(item => item.can_delete))
 
 const pagination = reactive({ page: 1, size: 10, total: 0 })
 const filters = reactive({ keyword: '', type: '', category: '', status: '' })
+const impactSummaryUnavailable = '-- / --'
 
 const stats = computed(() => ({
   total: pagination.total,
@@ -227,6 +237,25 @@ const stats = computed(() => ({
   disabled: credentials.value.filter(item => item.status === 'inactive' || item.status === 'revoked').length,
   expired: credentials.value.filter(item => item.status === 'expired').length
 }))
+
+async function loadCredentialImpacts(list) {
+  const ids = Array.isArray(list) ? list.map(item => item.id).filter(Boolean) : []
+  if (ids.length === 0) {
+    credentialImpactMap.value = {}
+    return
+  }
+
+  try {
+    const res = await batchCredentialImpact(ids)
+    const items = Array.isArray(res?.data?.items) ? res.data.items : []
+    credentialImpactMap.value = items.reduce((acc, item) => {
+      acc[item.credential_id] = item
+      return acc
+    }, {})
+  } catch (error) {
+    credentialImpactMap.value = {}
+  }
+}
 
 async function loadCredentials() {
   loading.value = true
@@ -242,6 +271,7 @@ async function loadCredentials() {
     if (res.code === 200) {
       credentials.value = res.data.list
       pagination.total = res.data.total
+      await loadCredentialImpacts(credentials.value)
     }
   } catch (error) {
     ElMessage.error('加载凭据列表失败')
@@ -271,6 +301,11 @@ async function loadTypesAndCategories() {
 
 function handleSelectionChange(rows) {
   selectedIds.value = rows.map(row => row.id)
+}
+
+function clearBatchSelection() {
+  selectedIds.value = []
+  credentialsTableRef.value?.clearSelection?.()
 }
 
 function isRowDeletable(row) {
@@ -477,11 +512,34 @@ function getCategoryLabel(category) {
   return credentialCategories.value.find(item => item.value === category)?.label || category || '-'
 }
 
-function getScopeLabel(scope) {
-  if (scope === 'personal') return '个人'
-  if (scope === 'project') return '项目'
-  if (scope === 'workspace') return '工作空间'
-  return scope || '-'
+function getImpactSummary(credentialId) {
+  const impact = credentialImpactMap.value[credentialId]
+  if (!impact) return impactSummaryUnavailable
+  const pipelineCount = Number(impact.pipeline_count || 0)
+  const referenceCount = Number(impact.reference_count || 0)
+  return `${pipelineCount} / ${referenceCount}`
+}
+
+function getImpactTooltip(credentialId) {
+  const impact = credentialImpactMap.value[credentialId]
+  if (!impact) return '影响数据暂不可用'
+  const pipelineCount = Number(impact.pipeline_count || 0)
+  const referenceCount = Number(impact.reference_count || 0)
+  return `${pipelineCount} 条流水线 / ${referenceCount} 个节点`
+}
+
+function handleRowCommand(command, credential) {
+  if (command === 'payload') {
+    handleViewPayload(credential)
+    return
+  }
+  if (command === 'usage') {
+    showUsage(credential)
+    return
+  }
+  if (command === 'delete') {
+    handleDelete(credential)
+  }
 }
 
 function getStatusType(status) {
@@ -510,9 +568,18 @@ function getLockStateLabel(lockState) {
   return '已锁定'
 }
 
-function formatDateTime(value) {
+function formatUpdatedAt(value) {
+  if (!value) return '-'
+  return new Date(value).toLocaleString()
+}
+
+function formatLastUsedAt(value) {
   if (!value) return '从未使用'
   return new Date(value).toLocaleString()
+}
+
+function formatDateTime(value) {
+  return formatUpdatedAt(value)
 }
 
 watch(() => ({ ...filters }), reloadList, { deep: true })
@@ -580,6 +647,35 @@ onMounted(async () => {
   align-items: center;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.credentials-table :deep(.el-table__cell) {
+  padding: 8px 0;
+}
+
+.credentials-table :deep(.cell) {
+  line-height: 1.2;
+}
+
+.impact-link {
+  padding: 0;
+  font-weight: 600;
+}
+
+.table-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+.more-action-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
 }
 
 .pagination-wrapper {
