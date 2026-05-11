@@ -775,6 +775,7 @@
       v-model="runDialogVisible"
       title="运行流水线"
       :width="runDialogWidth"
+      @close="closeRunDialog"
     >
       <div v-if="manualRunNodes.length === 0" class="manual-run-empty">
         当前流水线未配置可手动覆盖参数，将按定义直接运行。
@@ -801,6 +802,31 @@
                 v-model="runForm.inputs[node.node_id][param.key]"
                 style="width: 100%"
               />
+              <el-checkbox-group
+                v-else-if="param.input_type === 'checkbox_group'"
+                v-model="runForm.inputs[node.node_id][param.key]"
+              >
+                <el-checkbox
+                  v-for="option in param.options || []"
+                  :key="`${node.node_id}-${param.key}-${option.value}`"
+                  :label="option.value"
+                >
+                  {{ option.label }}
+                </el-checkbox>
+              </el-checkbox-group>
+              <el-select
+                v-else-if="param.input_type === 'select'"
+                v-model="runForm.inputs[node.node_id][param.key]"
+                :placeholder="param.placeholder || '请选择运行时覆盖值'"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="option in param.options || []"
+                  :key="`${node.node_id}-${param.key}-${option.value}`"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </el-select>
               <el-input
                 v-else
                 v-model="runForm.inputs[node.node_id][param.key]"
@@ -811,7 +837,7 @@
         </div>
       </div>
       <template #footer>
-        <el-button @click="runDialogVisible = false">取消</el-button>
+        <el-button @click="closeRunDialog">取消</el-button>
         <el-button type="primary" :loading="runLoading" @click="confirmRun">运行</el-button>
       </template>
     </el-dialog>
@@ -847,7 +873,7 @@ import {
   Warning,
   Close
 } from '@element-plus/icons-vue'
-import { getPipelineDetail, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineRunDetail, getRunTasks, getPipelineStatistics, getPipelineTestReports, cancelPipelineRun } from '@/api/pipeline'
+import { getPipelineDetail, getPipelineTaskTypes, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineRunDetail, getRunTasks, getPipelineStatistics, getPipelineTestReports, cancelPipelineRun } from '@/api/pipeline'
 import { getTaskLogs as fetchTaskLogsFromApi } from '@/api/task'
 import { getProjectList } from '@/api/project'
 import DesignTab from './designTab.vue'
@@ -878,6 +904,7 @@ const totalRuns = ref(0)
 const projectList = ref([])
 const testReports = ref([])
 const recentFailures = ref([])
+const pipelineTaskDefinitions = ref([])
 
 // 运行表单（node-scoped runtime inputs）
 const runForm = reactive({
@@ -929,13 +956,37 @@ const getRunBranch = (run) => {
   return run?.branch || '-'
 }
 
-const manualRunNodes = computed(() => getManualRunNodes(pipeline.value))
+const manualRunNodes = computed(() => getManualRunNodes({
+  ...pipeline.value,
+  task_definitions: pipelineTaskDefinitions.value
+}))
 
 const initializeRunInputs = () => {
   runForm.inputs = createRunInputs(manualRunNodes.value)
 }
 
 const buildRunInputsPayload = () => buildManualRunPayload(manualRunNodes.value, runForm.inputs)
+
+const closeRunDialog = () => {
+  runDialogVisible.value = false
+  runLoading.value = false
+  runForm.inputs = {}
+}
+
+const fetchPipelineTaskDefinitions = async () => {
+  try {
+    const response = await getPipelineTaskTypes()
+    if (response.code === 200) {
+      pipelineTaskDefinitions.value = Array.isArray(response.data) ? response.data : (response.data?.list || [])
+      return pipelineTaskDefinitions.value
+    }
+  } catch (error) {
+    console.error('获取任务定义失败:', error)
+  }
+
+  pipelineTaskDefinitions.value = []
+  return pipelineTaskDefinitions.value
+}
 
 // 设置表单
 const settingsForm = reactive({
@@ -1568,8 +1619,15 @@ const openRunExecutionView = async (run) => {
 
 // 运行流水线
 const handleRun = async () => {
-  const latestPipeline = await fetchPipelineDetail()
+  runDialogVisible.value = false
+  runForm.inputs = {}
+
+  const [latestPipeline] = await Promise.all([
+    fetchPipelineDetail(),
+    fetchPipelineTaskDefinitions()
+  ])
   if (!latestPipeline) return
+
   initializeRunInputs()
   runDialogVisible.value = true
 }

@@ -224,6 +224,7 @@
       width="720px"
       :close-on-click-modal="false"
       :append-to-body="true"
+      @close="closeRunDialog"
     >
       <div v-if="manualRunNodes.length === 0" class="manual-run-empty">
         当前流水线未配置可手动覆盖参数，将按定义直接运行。
@@ -250,6 +251,31 @@
                 v-model="runForm.inputs[node.node_id][param.key]"
                 style="width: 100%"
               />
+              <el-checkbox-group
+                v-else-if="param.input_type === 'checkbox_group'"
+                v-model="runForm.inputs[node.node_id][param.key]"
+              >
+                <el-checkbox
+                  v-for="option in param.options || []"
+                  :key="`${node.node_id}-${param.key}-${option.value}`"
+                  :label="option.value"
+                >
+                  {{ option.label }}
+                </el-checkbox>
+              </el-checkbox-group>
+              <el-select
+                v-else-if="param.input_type === 'select'"
+                v-model="runForm.inputs[node.node_id][param.key]"
+                :placeholder="param.placeholder || '请选择运行时覆盖值'"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="option in param.options || []"
+                  :key="`${node.node_id}-${param.key}-${option.value}`"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </el-select>
               <el-input
                 v-else
                 v-model="runForm.inputs[node.node_id][param.key]"
@@ -320,7 +346,7 @@ import {
   Warning,
   Clock
 } from '@element-plus/icons-vue'
-import { getPipelineList, getPipelineDetail, createPipeline, runPipeline, toggleFavorite as apiToggleFavorite, deletePipeline } from '@/api/pipeline'
+import { getPipelineList, getPipelineDetail, getPipelineTaskTypes, createPipeline, runPipeline, toggleFavorite as apiToggleFavorite, deletePipeline } from '@/api/pipeline'
 import { getProjectList } from '@/api/project'
 import { buildRunInputsPayload, createRunInputs, getManualRunNodes } from './runtimeConfig'
 const activeTab = ref('all')
@@ -372,10 +398,15 @@ const projectList = ref([])
 const runDialogVisible = ref(false)
 const runLoading = ref(false)
 const runningPipeline = ref(null)
+const pipelineTaskDefinitions = ref([])
+const runDialogRequestSeq = ref(0)
 const runForm = reactive({
   inputs: {}
 })
-const manualRunNodes = computed(() => getManualRunNodes(runningPipeline.value))
+const manualRunNodes = computed(() => getManualRunNodes({
+  ...runningPipeline.value,
+  task_definitions: pipelineTaskDefinitions.value
+}))
 
 // 加载项目列表
 const fetchProjects = async () => {
@@ -400,7 +431,7 @@ const fetchPipelines = async () => {
       project_id: filterProject.value || undefined,
       environment: filterEnvironment.value || undefined
     }
-    
+
     const response = await getPipelineList(params)
     pipelineList.value = response.data.list || []
     total.value = response.data.total || 0
@@ -414,6 +445,21 @@ const fetchPipelines = async () => {
     pipelineList.value = []
     total.value = 0
   }
+}
+
+const fetchPipelineTaskDefinitions = async () => {
+  try {
+    const response = await getPipelineTaskTypes()
+    if (response.code === 200) {
+      pipelineTaskDefinitions.value = Array.isArray(response.data) ? response.data : (response.data?.list || [])
+      return pipelineTaskDefinitions.value
+    }
+  } catch (error) {
+    console.error('获取任务定义失败:', error)
+  }
+
+  pipelineTaskDefinitions.value = []
+  return pipelineTaskDefinitions.value
 }
 
 onMounted(() => {
@@ -530,6 +576,7 @@ const handleSubmit = async () => {
 }
 
 const closeRunDialog = () => {
+  runDialogRequestSeq.value += 1
   runDialogVisible.value = false
   runLoading.value = false
   runningPipeline.value = null
@@ -538,8 +585,19 @@ const closeRunDialog = () => {
 
 // 运行流水线
 const handleRun = async (row) => {
+  const requestSeq = runDialogRequestSeq.value + 1
+  runDialogRequestSeq.value = requestSeq
+  runDialogVisible.value = false
+  runningPipeline.value = null
+  runForm.inputs = {}
+
   try {
-    const response = await getPipelineDetail(row.id)
+    const [response] = await Promise.all([
+      getPipelineDetail(row.id),
+      fetchPipelineTaskDefinitions()
+    ])
+    if (requestSeq !== runDialogRequestSeq.value) return
+
     if (response.code !== 200 || !response.data) {
       ElMessage.error(response.message || '获取流水线详情失败')
       return
@@ -549,6 +607,7 @@ const handleRun = async (row) => {
     runForm.inputs = createRunInputs(manualRunNodes.value)
     runDialogVisible.value = true
   } catch (error) {
+    if (requestSeq !== runDialogRequestSeq.value) return
     console.error('获取流水线详情失败:', error)
     ElMessage.error('获取流水线详情失败')
   }
