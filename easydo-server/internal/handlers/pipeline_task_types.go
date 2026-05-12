@@ -13,6 +13,8 @@ import (
 const (
 	taskExecModeAgent  = "agent"
 	taskExecModeServer = "server"
+	taskShellSH        = "sh"
+	taskShellBash      = "bash"
 )
 
 type pipelineTaskDefinition struct {
@@ -178,6 +180,7 @@ fi`,
 		ExecMode:      taskExecModeAgent,
 		FieldsSchema: []models.TaskDefinitionField{
 			{Key: "working_dir", Label: "工作目录", Type: "string", UIComponent: "input", Default: "."},
+			{Key: "shell", Label: "执行 Shell", Type: "select", UIComponent: "select", Default: taskShellSH, Options: []models.FieldOption{{Label: "sh", Value: taskShellSH}, {Label: "bash", Value: taskShellBash}}},
 			{Key: "script", Label: "脚本内容", Type: "text", Required: true, UIComponent: "textarea"},
 		},
 		ShellTemplate: `set -e
@@ -1111,6 +1114,7 @@ func defaultTaskEnvMapping(taskKey string) map[string]string {
 	case "shell":
 		return map[string]string{
 			"working_dir": "EASYDO_INPUT_WORKING_DIR",
+			"shell":       "EASYDO_INPUT_SHELL",
 			"script":      "EASYDO_INPUT_SCRIPT",
 		}
 	case "webhook":
@@ -1144,6 +1148,9 @@ func normalizePipelineNodeConfig(rawType, canonical string, nodeConfig map[strin
 			cfg["env"] = envMap
 		}
 	}
+	if canonical == "shell" {
+		cfg["shell"] = normalizeTaskShellValue(cfg["shell"])
+	}
 	if canonical == "git_clone" {
 		if repository, ok := cfg["repository"].(map[string]interface{}); ok {
 			if cfg["git_repo_url"] == nil && strings.TrimSpace(toString(repository["url"])) != "" {
@@ -1158,6 +1165,17 @@ func normalizePipelineNodeConfig(rawType, canonical string, nodeConfig map[strin
 		}
 	}
 	return cfg
+}
+
+func normalizeTaskShellValue(value interface{}) string {
+	switch strings.ToLower(strings.TrimSpace(toString(value))) {
+	case "", taskShellSH:
+		return taskShellSH
+	case taskShellBash:
+		return taskShellBash
+	default:
+		return taskShellSH
+	}
 }
 
 func renderPipelineAgentScript(taskType string, nodeConfig map[string]interface{}) (string, string, error) {

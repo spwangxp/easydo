@@ -29,11 +29,17 @@ var taskStatusTransitions = map[string]map[string]bool{
 		TaskStatusCancelled:       true,
 	},
 	TaskStatusAcked: {
-		TaskStatusRunning:      true,
-		TaskStatusCancelled:    true,
-		TaskStatusLeaseExpired: true,
+		TaskStatusRunning:         true,
+		TaskStatusCancelRequested: true,
+		TaskStatusLeaseExpired:    true,
 	},
 	TaskStatusRunning: {
+		TaskStatusExecuteSuccess:  true,
+		TaskStatusExecuteFailed:   true,
+		TaskStatusCancelRequested: true,
+		TaskStatusLeaseExpired:    true,
+	},
+	TaskStatusCancelRequested: {
 		TaskStatusExecuteSuccess: true,
 		TaskStatusExecuteFailed:  true,
 		TaskStatusCancelled:      true,
@@ -77,7 +83,7 @@ func IsDispatchStageTaskStatus(status string) bool {
 
 func IsExecutionStageTaskStatus(status string) bool {
 	switch status {
-	case TaskStatusAcked, TaskStatusRunning, TaskStatusExecuteSuccess, TaskStatusExecuteFailed, TaskStatusLeaseExpired, TaskStatusCancelled:
+	case TaskStatusAcked, TaskStatusRunning, TaskStatusCancelRequested, TaskStatusExecuteSuccess, TaskStatusExecuteFailed, TaskStatusLeaseExpired, TaskStatusCancelled:
 		return true
 	default:
 		return false

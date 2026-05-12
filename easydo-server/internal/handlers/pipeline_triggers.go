@@ -313,7 +313,7 @@ func (h *PipelineHandler) evaluateOneScheduledPipelineTrigger(triggerID uint64, 
 		}
 		var activeCount int64
 		if err := tx.Model(&models.PipelineRun{}).
-			Where("pipeline_id = ? AND trigger_type = ? AND status IN ?", pipeline.ID, pipelineRunTriggerTypeSchedule, []string{models.PipelineRunStatusQueued, models.PipelineRunStatusPending, models.PipelineRunStatusRunning}).
+			Where("pipeline_id = ? AND trigger_type = ? AND status IN ?", pipeline.ID, pipelineRunTriggerTypeSchedule, []string{models.PipelineRunStatusQueued, models.PipelineRunStatusPending, models.PipelineRunStatusRunning, models.PipelineRunStatusCancelRequested}).
 			Count(&activeCount).Error; err != nil {
 			return err
 		}

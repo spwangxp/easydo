@@ -90,7 +90,7 @@ func (h *WebSocketHandler) handleTerminalRelayEnvelope(envelope terminalRelayEnv
 		if envelope.AgentID == 0 {
 			return
 		}
-		_ = h.sendMessageToAgent(envelope.AgentID, envelope.MessageType, envelope.Payload)
+		_ = h.sendMessageToLocalAgent(envelope.AgentID, envelope.MessageType, envelope.Payload)
 	case "frontend_message":
 		sessionID, _ := envelope.Payload["session_id"].(string)
 		if sessionID == "" {
@@ -273,7 +273,7 @@ func (h *WebSocketHandler) routeTerminalMessageToAgent(session *models.ResourceT
 			Payload:     payload,
 		})
 	}
-	return h.sendMessageToAgent(session.AgentID, msgType, payload)
+	return h.sendMessageToLocalAgent(session.AgentID, msgType, payload)
 }
 
 func (h *WebSocketHandler) handleTerminalAgentMessage(client *wsClient, msgType string, payload map[string]interface{}) {

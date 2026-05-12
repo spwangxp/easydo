@@ -13,7 +13,7 @@ func deploymentRequestStatusFromRunStatus(status string) (models.DeploymentReque
 	switch status {
 	case models.PipelineRunStatusQueued:
 		return models.DeploymentRequestStatusQueued, true
-	case models.PipelineRunStatusRunning:
+	case models.PipelineRunStatusRunning, models.PipelineRunStatusCancelRequested:
 		return models.DeploymentRequestStatusRunning, true
 	case models.PipelineRunStatusSuccess:
 		return models.DeploymentRequestStatusSuccess, true

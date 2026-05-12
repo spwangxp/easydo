@@ -27,26 +27,26 @@ import (
 // server relies on to converge run/task state. Terminal status/log messages may
 // need to survive temporary WS outages and be replayed after reconnect.
 type TaskHandler struct {
-	httpClient            *client.HTTPClient
-	wsClient              *client.WebSocketClient
-	cfg                   *config.Config
-	tokenMgr              *TokenManager
-	agentID               uint64
-	token                 string
-	log                   *logrus.Logger
-	executor              *task.Executor
-	embeddedBuildkit      *task.EmbeddedBuildkitManager
-	mu                    sync.RWMutex
-	running               bool
-	stopChan              chan struct{}
-	runCtx                context.Context
-	inFlight              sync.Map
-	runningTasks          sync.Map
-	cancelledTasks        sync.Map
-	pendingMu             sync.Mutex
-	pendingWS             []pendingWebSocketMessage
-	taskSlots             chan struct{}
-	runtimeAgentCfg       client.AgentConfig
+	httpClient       *client.HTTPClient
+	wsClient         *client.WebSocketClient
+	cfg              *config.Config
+	tokenMgr         *TokenManager
+	agentID          uint64
+	token            string
+	log              *logrus.Logger
+	executor         *task.Executor
+	embeddedBuildkit *task.EmbeddedBuildkitManager
+	mu               sync.RWMutex
+	running          bool
+	stopChan         chan struct{}
+	runCtx           context.Context
+	inFlight         sync.Map
+	runningTasks     sync.Map
+	cancelledTasks   sync.Map
+	pendingMu        sync.Mutex
+	pendingWS        []pendingWebSocketMessage
+	taskSlots        chan struct{}
+	runtimeAgentCfg  client.AgentConfig
 }
 
 // pendingWebSocketMessage stores one outbound WS message that could not be sent
@@ -834,7 +834,20 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 
 	if _, cancelled := th.cancelledTasks.Load(task.ID); cancelled {
 		th.log.Infof("Task %d was cancelled before execution started", task.ID)
+		th.reportCancelledTaskUpdate(task, attempt, 0)
 		return
+	}
+	if err := ctx.Err(); err != nil {
+		th.log.Infof("Task %d was cancelled before running update: %v", task.ID, err)
+		th.reportCancelledTaskUpdate(task, attempt, 0)
+		return
+	}
+	if value, ok := th.runningTasks.Load(task.ID); ok {
+		if execution, ok := value.(*runningTaskExecution); ok && execution != nil && execution.cancelled.Load() {
+			th.log.Infof("Task %d was cancelled before running update", task.ID)
+			th.reportCancelledTaskUpdate(task, attempt, 0)
+			return
+		}
 	}
 
 	// Report task as running first. If this fails, keep task pending server-side and wait for redispatch.
@@ -861,6 +874,7 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 
 	if value, ok := th.runningTasks.Load(task.ID); ok {
 		if execution, ok := value.(*runningTaskExecution); ok && execution != nil && execution.cancelled.Load() {
+			th.reportCancelledTaskUpdate(task, attempt, result.Duration.Milliseconds())
 			if err := th.reportTaskLogEndV2(task, attempt, atomic.LoadInt64(&logSeq)); err != nil {
 				th.log.Debugf("Failed to report v2 log end: %v", err)
 			}
@@ -879,6 +893,12 @@ func (th *TaskHandler) executeTask(ctx context.Context, task *Task) {
 
 	th.log.Infof("Task %d completed: status=%s, exit_code=%d, duration=%v",
 		task.ID, status, result.ExitCode, result.Duration)
+}
+
+func (th *TaskHandler) reportCancelledTaskUpdate(task *Task, attempt int, durationMs int64) {
+	if err := th.reportTaskUpdateV2(task, attempt, "cancelled", 0, "task cancelled", durationMs, nil); err != nil {
+		th.log.Warnf("Failed to report v2 task cancellation: %v", err)
+	}
 }
 
 // ParseParams converts Task to TaskParams
@@ -900,6 +920,9 @@ func (t *Task) ParseParamsWithRuntimeConfig(agentCfg client.AgentConfig) (*task.
 	}
 	if params.Params == nil {
 		params.Params = map[string]any{}
+	}
+	if shell, ok := params.Params["shell"].(string); ok {
+		params.Shell = shell
 	}
 	if t.TaskType == "docker" && len(agentCfg.DockerHubMirrors) > 0 {
 		mirrors := make([]any, 0, len(agentCfg.DockerHubMirrors))
@@ -1415,7 +1438,7 @@ func (th *TaskHandler) reportTaskUpdateV2(t *Task, attempt int, status string, e
 	th.mu.RLock()
 	wsClient := th.wsClient
 	th.mu.RUnlock()
-	queueOnFailure := status == "execute_success" || status == "execute_failed"
+	queueOnFailure := status == "execute_success" || status == "execute_failed" || status == "cancelled"
 
 	payload := map[string]interface{}{
 		"task_id":         t.ID,

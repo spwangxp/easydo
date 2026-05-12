@@ -145,6 +145,7 @@ const (
 	TaskStatusScheduleFailed  = "schedule_failed"
 	TaskStatusDispatchTimeout = "dispatch_timeout"
 	TaskStatusLeaseExpired    = "lease_expired"
+	TaskStatusCancelRequested = "cancel_requested"
 	TaskStatusCancelled       = "cancelled"
 )
 

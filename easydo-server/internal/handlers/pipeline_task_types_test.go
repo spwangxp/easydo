@@ -158,7 +158,7 @@ func TestGetPipelineTaskTypesResponseIncludesTypedDefinitionFields(t *testing.T)
 }
 
 func TestBuildAndDeployTaskDefinitionsExposeFieldSchemas(t *testing.T) {
-	for _, taskKey := range []string{"npm", "maven", "gradle", "docker", "artifact_publish", "ssh", "kubernetes", "docker-run", "email", "in_app"} {
+	for _, taskKey := range []string{"shell", "npm", "maven", "gradle", "docker", "artifact_publish", "ssh", "kubernetes", "docker-run", "email", "in_app"} {
 		def, ok := getTaskDefinition(taskKey)
 		if !ok {
 			t.Fatalf("expected task definition for %s", taskKey)
@@ -237,6 +237,35 @@ func TestRenderPipelineAgentScript_DockerIncludesPreBuildScript(t *testing.T) {
 	}
 	if !strings.Contains(script, `cd ${outputs.clone.git_checkout_path}`) {
 		t.Fatalf("expected docker script to preserve output variable reference for runtime substitution, got: %s", script)
+	}
+}
+
+func TestShellTaskDefinitionIncludesShellSelector(t *testing.T) {
+	def, ok := getTaskDefinition("shell")
+	if !ok {
+		t.Fatalf("expected shell definition")
+	}
+	shellFound := false
+	for _, field := range def.FieldsSchema {
+		if field.Key != "shell" {
+			continue
+		}
+		shellFound = true
+		if field.Type != "select" {
+			t.Fatalf("expected shell field to be select, got %s", field.Type)
+		}
+		if field.UIComponent != "select" {
+			t.Fatalf("expected shell field to render as select, got %s", field.UIComponent)
+		}
+		if field.Default != taskShellSH {
+			t.Fatalf("expected shell default to be %s, got %#v", taskShellSH, field.Default)
+		}
+		if len(field.Options) != 2 {
+			t.Fatalf("expected shell options, got %#v", field.Options)
+		}
+	}
+	if !shellFound {
+		t.Fatalf("expected shell fields schema to include shell selector")
 	}
 }
 

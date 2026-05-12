@@ -54,7 +54,7 @@ FROM alpine:3.19
 RUN addgroup -g 1000 appgroup && \
     adduser -u 1000 -G appgroup -s /bin/sh -D appuser
 
-RUN apk add --no-cache git docker-cli openssh-client-default sshpass kubectl runc python3 shadow-subids util-linux && \
+RUN apk add --no-cache bash git docker-cli openssh-client-default sshpass kubectl runc python3 shadow-subids util-linux && \
     echo 'appuser:100000:65536' > /etc/subuid && \
     echo 'appuser:100000:65536' > /etc/subgid
 

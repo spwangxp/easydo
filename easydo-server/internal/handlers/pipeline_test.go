@@ -90,6 +90,27 @@ func TestPipelineConfig_GetEdges(t *testing.T) {
 	}
 }
 
+func TestDefaultResolvedNodeStatus(t *testing.T) {
+	tests := []struct {
+		name      string
+		runStatus string
+		want      string
+	}{
+		{name: "queued run stays queued", runStatus: models.PipelineRunStatusQueued, want: models.PipelineRunStatusQueued},
+		{name: "running run defaults pending", runStatus: models.PipelineRunStatusRunning, want: models.PipelineRunStatusPending},
+		{name: "cancel requested run defaults pending", runStatus: models.PipelineRunStatusCancelRequested, want: models.PipelineRunStatusPending},
+		{name: "unknown run defaults pending", runStatus: "unknown", want: models.PipelineRunStatusPending},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := defaultResolvedNodeStatus(tt.runStatus); got != tt.want {
+				t.Fatalf("defaultResolvedNodeStatus(%q)=%q, want %q", tt.runStatus, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPipelineNode_GetNodeConfig(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -2229,8 +2250,11 @@ func TestCancelPipelineRun_CancelsRunningTasks(t *testing.T) {
 	if err := db.First(&updatedRun, run.ID).Error; err != nil {
 		t.Fatalf("load run failed: %v", err)
 	}
-	if updatedRun.Status != models.PipelineRunStatusCancelled {
-		t.Fatalf("expected run status cancelled, got %s", updatedRun.Status)
+	if updatedRun.Status != models.PipelineRunStatusCancelRequested {
+		t.Fatalf("expected run status cancel_requested, got %s", updatedRun.Status)
+	}
+	if updatedRun.EndTime != 0 {
+		t.Fatalf("expected run end_time to stay 0 before terminal cancel, got %d", updatedRun.EndTime)
 	}
 
 	var updatedTasks []models.AgentTask
@@ -2244,8 +2268,84 @@ func TestCancelPipelineRun_CancelsRunningTasks(t *testing.T) {
 	if updatedTasks[0].Status != models.TaskStatusExecuteSuccess {
 		t.Fatalf("expected task 1 to remain success, got %s", updatedTasks[0].Status)
 	}
-	if updatedTasks[1].Status != models.TaskStatusCancelled {
-		t.Fatalf("expected task 2 to be cancelled, got %s", updatedTasks[1].Status)
+	if updatedTasks[1].Status != models.TaskStatusCancelRequested {
+		t.Fatalf("expected task 2 to be cancel_requested, got %s", updatedTasks[1].Status)
+	}
+	if updatedTasks[1].EndTime != 0 {
+		t.Fatalf("expected task 2 end_time to stay 0 before terminal cancel, got %d", updatedTasks[1].EndTime)
+	}
+}
+
+func TestCancelPipelineRun_CancelsQueuedTasksForQueuedRun(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "cancel-queued-run-user", models.WorkspaceRoleDeveloper)
+
+	pipeline := models.Pipeline{
+		Name:        "cancel-queued-run-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Config:      `{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo build"}}],"edges":[]}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID: workspace.ID,
+		PipelineID:  pipeline.ID,
+		BuildNumber: 1,
+		Status:      models.PipelineRunStatusQueued,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	task := models.AgentTask{
+		WorkspaceID:   workspace.ID,
+		PipelineRunID: run.ID,
+		NodeID:        "1",
+		TaskType:      "shell",
+		Name:          "Build",
+		Status:        models.TaskStatusQueued,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/runs/%d/cancel", pipeline.ID, run.ID), nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}, {Key: "run_id", Value: strconv.FormatUint(run.ID, 10)}}
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+	c.Set("workspace_id", workspace.ID)
+
+	h.CancelPipelineRun(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var updatedRun models.PipelineRun
+	if err := db.First(&updatedRun, run.ID).Error; err != nil {
+		t.Fatalf("load run failed: %v", err)
+	}
+	if updatedRun.Status != models.PipelineRunStatusCancelled {
+		t.Fatalf("expected queued run to become cancelled, got %s", updatedRun.Status)
+	}
+
+	var updatedTask models.AgentTask
+	if err := db.First(&updatedTask, task.ID).Error; err != nil {
+		t.Fatalf("load task failed: %v", err)
+	}
+	if updatedTask.Status != models.TaskStatusCancelled {
+		t.Fatalf("expected queued task to become cancelled, got %s", updatedTask.Status)
+	}
+
+	if updatedTask.EndTime == 0 {
+		t.Fatal("expected cancelled queued task end_time to be set")
 	}
 }
 

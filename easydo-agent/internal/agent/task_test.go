@@ -14,6 +14,7 @@ import (
 	"easydo-agent/internal/client"
 	agenttask "easydo-agent/internal/task"
 	"github.com/gorilla/websocket"
+	"github.com/sirupsen/logrus"
 )
 
 func TestReportTaskUpdateV2_QueuesTerminalUpdateWhenWebsocketUnavailable(t *testing.T) {
@@ -193,6 +194,29 @@ func TestFlushPendingWebSocketMessagesWithSender_FlushesInOrderAndStopsOnFailure
 	}
 	if len(h.pendingWS) != 2 {
 		t.Fatalf("pending queue len after failure=%d, want=2", len(h.pendingWS))
+	}
+}
+
+func TestExecuteTask_ReportsCancelledAfterPreStartCancellation(t *testing.T) {
+	h := &TaskHandler{log: logrus.New()}
+	task := &Task{ID: 14, TaskType: "shell", Name: "cancel-before-running", Params: `{}`}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	execution := &runningTaskExecution{cancel: func() {}}
+	execution.cancelled.Store(true)
+	h.runningTasks.Store(task.ID, execution)
+	defer h.runningTasks.Delete(task.ID)
+
+	h.executeTask(ctx, task)
+
+	if len(h.pendingWS) != 1 {
+		t.Fatalf("pending queue len=%d, want=1", len(h.pendingWS))
+	}
+	if h.pendingWS[0].messageType != "task_update_v2" {
+		t.Fatalf("queued message type=%s, want task_update_v2", h.pendingWS[0].messageType)
+	}
+	if status := h.pendingWS[0].payload["status"]; status != "cancelled" {
+		t.Fatalf("queued status=%v, want cancelled", status)
 	}
 }
 

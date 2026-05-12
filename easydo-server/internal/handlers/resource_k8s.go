@@ -509,7 +509,7 @@ func mapResourceOperationStatus(taskStatus string) models.ResourceOperationStatu
 		return models.ResourceOperationStatusFailed
 	case models.TaskStatusCancelled:
 		return models.ResourceOperationStatusCancelled
-	case models.TaskStatusRunning, models.TaskStatusAcked, models.TaskStatusDispatching, models.TaskStatusAssigned, models.TaskStatusPulling:
+	case models.TaskStatusRunning, models.TaskStatusAcked, models.TaskStatusCancelRequested, models.TaskStatusDispatching, models.TaskStatusAssigned, models.TaskStatusPulling:
 		return models.ResourceOperationStatusRunning
 	default:
 		return models.ResourceOperationStatusQueued

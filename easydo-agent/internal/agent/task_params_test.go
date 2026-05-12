@@ -27,3 +27,19 @@ func TestTaskParseParams_DecodesStructuredParamsJSON(t *testing.T) {
 		t.Fatalf("CI env=%v, want true", params.EnvVars["CI"])
 	}
 }
+
+func TestTaskParseParams_ExtractsShellFromStructuredParams(t *testing.T) {
+	task := &Task{
+		ID:       22,
+		TaskType: "shell",
+		Params:   `{"shell":"bash","script":"for i in {1..3}; do echo $i; done"}`,
+	}
+
+	params, err := task.ParseParams()
+	if err != nil {
+		t.Fatalf("parse params failed: %v", err)
+	}
+	if params.Shell != "bash" {
+		t.Fatalf("shell=%q, want bash", params.Shell)
+	}
+}

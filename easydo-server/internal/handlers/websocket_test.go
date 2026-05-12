@@ -1,13 +1,18 @@
 package handlers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"runtime"
 	"strconv"
 	"strings"
@@ -393,6 +398,461 @@ func TestSendTaskAssign_PublishesAgentStreamEvent(t *testing.T) {
 	assert.Equal(t, reloaded.DispatchToken, entries[0].Values["dispatch_token"])
 	assert.Equal(t, "1", entries[0].Values["dispatch_attempt"])
 	assert.Equal(t, fmt.Sprintf("%d", reloaded.ID), fmt.Sprintf("%v", entries[0].Values["task_id"]))
+}
+
+func TestHandleAgentPullTaskRejectsStaleStateTransition(t *testing.T) {
+	setupAgentWSTestRuntime(t)
+
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = previousDB
+	})
+
+	agent := models.Agent{
+		Name:               "pull-stale-agent",
+		Host:               "host-stale",
+		Port:               1,
+		Status:             models.AgentStatusOnline,
+		RegistrationStatus: models.AgentRegistrationStatusApproved,
+		Token:              "tok-pull-stale",
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	server := newAgentWSTestServer(t, handler)
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(server.URL, fmt.Sprintf("?agent_id=%d&token=%s", agent.ID, agent.Token)), nil)
+	if err != nil {
+		t.Fatalf("dial agent websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	heartbeat := WebSocketMessage{
+		Type: "heartbeat",
+		Payload: map[string]interface{}{
+			"agent_id":  agent.ID,
+			"timestamp": time.Now().Unix(),
+		},
+	}
+	heartbeatData, err := json.Marshal(heartbeat)
+	if err != nil {
+		t.Fatalf("marshal heartbeat failed: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, heartbeatData); err != nil {
+		t.Fatalf("write heartbeat failed: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set heartbeat read deadline failed: %v", err)
+	}
+	_, raw, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read heartbeat ack failed: %v", err)
+	}
+	conn.SetReadDeadline(time.Time{})
+	var heartbeatAck WebSocketMessage
+	if err := json.Unmarshal(raw, &heartbeatAck); err != nil {
+		t.Fatalf("unmarshal heartbeat ack failed: %v", err)
+	}
+	if heartbeatAck.Type != "heartbeat_ack" {
+		t.Fatalf("expected heartbeat_ack, got %s", heartbeatAck.Type)
+	}
+
+	task := models.AgentTask{
+		WorkspaceID:     1,
+		AgentID:         agent.ID,
+		PipelineRunID:   1,
+		NodeID:          "node-stale",
+		TaskType:        "shell",
+		Name:            "Stale Pull",
+		Status:          models.TaskStatusDispatching,
+		DispatchToken:   "dispatch-token-stale",
+		DispatchAttempt: 1,
+		Timeout:         60,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	staleOverwriteInjected := false
+	callbackName := "test:pull-task-stale-state-transition"
+	if err := db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if staleOverwriteInjected || tx.Statement == nil || tx.Statement.Schema == nil || tx.Statement.Schema.Table != "agent_tasks" {
+			return
+		}
+		updates, ok := tx.Statement.Dest.(map[string]interface{})
+		if !ok {
+			return
+		}
+		status, _ := updates["status"].(string)
+		if status != models.TaskStatusAcked {
+			return
+		}
+		staleOverwriteInjected = true
+		if err := db.Model(&models.AgentTask{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+			"status":           models.TaskStatusRunning,
+			"agent_session_id": "newer-session",
+			"owner_server_id":  "other-server",
+		}).Error; err != nil {
+			t.Fatalf("inject newer task state failed: %v", err)
+		}
+	}); err != nil {
+		t.Fatalf("register update callback failed: %v", err)
+	}
+	defer db.Callback().Update().Remove(callbackName)
+
+	pullTask := WebSocketMessage{
+		Type: "pull_task",
+		Payload: map[string]interface{}{
+			"task_id":        task.ID,
+			"dispatch_token": task.DispatchToken,
+			"timestamp":      time.Now().Unix(),
+		},
+	}
+	pullTaskData, err := json.Marshal(pullTask)
+	if err != nil {
+		t.Fatalf("marshal pull_task failed: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, pullTaskData); err != nil {
+		t.Fatalf("write pull_task failed: %v", err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set pull_task read deadline failed: %v", err)
+	}
+	defer conn.SetReadDeadline(time.Time{})
+
+	sawTaskPayload := false
+	var ack WebSocketMessage
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read pull_task response failed: %v", err)
+		}
+		if err := json.Unmarshal(raw, &ack); err != nil {
+			t.Fatalf("unmarshal pull_task response failed: %v", err)
+		}
+		if ack.Type == "task_payload" {
+			sawTaskPayload = true
+			continue
+		}
+		if ack.Type == "ack_v2" && ack.Payload["event"] == "pull_task" {
+			break
+		}
+	}
+
+	if !staleOverwriteInjected {
+		t.Fatal("expected stale state injection to run")
+	}
+	if sawTaskPayload {
+		t.Fatal("expected stale pull to be rejected before task_payload delivery")
+	}
+	if ok, _ := ack.Payload["ok"].(bool); ok {
+		t.Fatalf("expected pull_task ack failure for stale state transition, got %#v", ack.Payload)
+	}
+	if getString(ack.Payload, "error_msg") == "" {
+		t.Fatalf("expected stale pull rejection to include error message, got %#v", ack.Payload)
+	}
+
+	var reloaded models.AgentTask
+	if err := db.First(&reloaded, task.ID).Error; err != nil {
+		t.Fatalf("reload task failed: %v", err)
+	}
+	if reloaded.Status != models.TaskStatusRunning {
+		t.Fatalf("task status=%s, want %s", reloaded.Status, models.TaskStatusRunning)
+	}
+	if reloaded.AgentSessionID != "newer-session" {
+		t.Fatalf("task agent_session_id=%q, want newer-session", reloaded.AgentSessionID)
+	}
+	if reloaded.OwnerServerID != "other-server" {
+		t.Fatalf("task owner_server_id=%q, want other-server", reloaded.OwnerServerID)
+	}
+}
+
+func TestHandleAgentPullTaskAcksAndBindsOwnership(t *testing.T) {
+	setupAgentWSTestRuntime(t)
+
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = previousDB
+	})
+
+	agent := models.Agent{
+		Name:               "pull-success-agent",
+		Host:               "host-success",
+		Port:               1,
+		Status:             models.AgentStatusOnline,
+		RegistrationStatus: models.AgentRegistrationStatusApproved,
+		Token:              "tok-pull-success",
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	server := newAgentWSTestServer(t, handler)
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(server.URL, fmt.Sprintf("?agent_id=%d&token=%s", agent.ID, agent.Token)), nil)
+	if err != nil {
+		t.Fatalf("dial agent websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	heartbeat := WebSocketMessage{
+		Type: "heartbeat",
+		Payload: map[string]interface{}{
+			"agent_id":  agent.ID,
+			"timestamp": time.Now().Unix(),
+		},
+	}
+	heartbeatData, err := json.Marshal(heartbeat)
+	if err != nil {
+		t.Fatalf("marshal heartbeat failed: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, heartbeatData); err != nil {
+		t.Fatalf("write heartbeat failed: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set heartbeat read deadline failed: %v", err)
+	}
+	_, raw, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read heartbeat ack failed: %v", err)
+	}
+	conn.SetReadDeadline(time.Time{})
+	var heartbeatAck WebSocketMessage
+	if err := json.Unmarshal(raw, &heartbeatAck); err != nil {
+		t.Fatalf("unmarshal heartbeat ack failed: %v", err)
+	}
+	if heartbeatAck.Type != "heartbeat_ack" {
+		t.Fatalf("expected heartbeat_ack, got %s", heartbeatAck.Type)
+	}
+	sessionID := getString(heartbeatAck.Payload, "agent_session_id")
+	if sessionID == "" {
+		t.Fatal("expected heartbeat ack to carry agent_session_id")
+	}
+
+	task := models.AgentTask{
+		WorkspaceID:     1,
+		AgentID:         agent.ID,
+		PipelineRunID:   1,
+		NodeID:          "node-success",
+		TaskType:        "shell",
+		Name:            "Successful Pull",
+		Status:          models.TaskStatusDispatching,
+		DispatchToken:   "dispatch-token-success",
+		DispatchAttempt: 1,
+		Timeout:         60,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	pullTask := WebSocketMessage{
+		Type: "pull_task",
+		Payload: map[string]interface{}{
+			"task_id":          task.ID,
+			"dispatch_token":   task.DispatchToken,
+			"agent_session_id": sessionID,
+			"timestamp":        time.Now().Unix(),
+		},
+	}
+	pullTaskData, err := json.Marshal(pullTask)
+	if err != nil {
+		t.Fatalf("marshal pull_task failed: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, pullTaskData); err != nil {
+		t.Fatalf("write pull_task failed: %v", err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set pull_task read deadline failed: %v", err)
+	}
+	defer conn.SetReadDeadline(time.Time{})
+
+	sawTaskPayload := false
+	sawAck := false
+	for !(sawTaskPayload && sawAck) {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read pull_task response failed: %v", err)
+		}
+		var msg WebSocketMessage
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			t.Fatalf("unmarshal pull_task response failed: %v", err)
+		}
+		switch msg.Type {
+		case "task_payload":
+			taskPayload, ok := msg.Payload["task"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("expected task payload map, got %#v", msg.Payload["task"])
+			}
+			if uint64(getFloat64(taskPayload, "id")) != task.ID {
+				t.Fatalf("task payload id=%d, want %d", uint64(getFloat64(taskPayload, "id")), task.ID)
+			}
+			if getString(taskPayload, "dispatch_token") != task.DispatchToken {
+				t.Fatalf("task payload dispatch_token=%q, want %q", getString(taskPayload, "dispatch_token"), task.DispatchToken)
+			}
+			if getString(taskPayload, "status") != models.TaskStatusAcked {
+				t.Fatalf("task payload status=%q, want %q", getString(taskPayload, "status"), models.TaskStatusAcked)
+			}
+			sawTaskPayload = true
+		case "ack_v2":
+			if msg.Payload["event"] != "pull_task" {
+				continue
+			}
+			if ok, _ := msg.Payload["ok"].(bool); !ok {
+				t.Fatalf("expected successful pull_task ack, got %#v", msg.Payload)
+			}
+			sawAck = true
+		}
+	}
+
+	var reloaded models.AgentTask
+	if err := db.First(&reloaded, task.ID).Error; err != nil {
+		t.Fatalf("reload task failed: %v", err)
+	}
+	if reloaded.Status != models.TaskStatusAcked {
+		t.Fatalf("task status=%s, want %s", reloaded.Status, models.TaskStatusAcked)
+	}
+	if reloaded.AgentSessionID != sessionID {
+		t.Fatalf("task agent_session_id=%q, want %q", reloaded.AgentSessionID, sessionID)
+	}
+	if reloaded.OwnerServerID != handler.serverID {
+		t.Fatalf("task owner_server_id=%q, want %q", reloaded.OwnerServerID, handler.serverID)
+	}
+}
+
+func TestRetryTaskRejectsOldDispatchIdentity(t *testing.T) {
+	setupAgentWSTestRuntime(t)
+	gin.SetMode(gin.TestMode)
+
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = previousDB
+	})
+
+	workspace := models.Workspace{Name: "retry-dispatch-workspace", Slug: "retry-dispatch-workspace", Status: "active"}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	agent := models.Agent{
+		Name:               "retry-dispatch-agent",
+		Host:               "host-retry",
+		Port:               1,
+		Status:             models.AgentStatusOnline,
+		RegistrationStatus: models.AgentRegistrationStatusApproved,
+		Token:              "tok-retry-dispatch",
+		WorkspaceID:        workspace.ID,
+		ScopeType:          models.AgentScopeWorkspace,
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+	oldDispatchToken := "dispatch-token-old"
+	task := models.AgentTask{
+		WorkspaceID:     workspace.ID,
+		AgentID:         agent.ID,
+		PipelineRunID:   1,
+		NodeID:          "node-retry",
+		TaskType:        "shell",
+		Name:            "Retry Task",
+		Status:          models.TaskStatusExecuteFailed,
+		RetryCount:      0,
+		MaxRetries:      2,
+		DispatchToken:   oldDispatchToken,
+		DispatchAttempt: 3,
+		LeaseExpireAt:   time.Now().Add(-time.Minute).Unix(),
+		AgentSessionID:  "old-session",
+		OwnerServerID:   "old-server",
+		ErrorMsg:        "previous dispatch failed",
+		Timeout:         60,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	taskHandler := &TaskHandler{DB: db}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/tasks/"+strconv.FormatUint(task.ID, 10)+"/retry", nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(task.ID, 10)}}
+	c.Set("workspace_id", workspace.ID)
+
+	taskHandler.RetryTask(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("retry status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var retried models.AgentTask
+	if err := db.First(&retried, task.ID).Error; err != nil {
+		t.Fatalf("reload retried task failed: %v", err)
+	}
+	if retried.Status != models.TaskStatusDispatching {
+		t.Fatalf("retried task status=%s, want %s", retried.Status, models.TaskStatusDispatching)
+	}
+	if retried.DispatchToken == "" {
+		t.Fatal("expected retry to issue a new dispatch token")
+	}
+	if retried.DispatchToken == oldDispatchToken {
+		t.Fatalf("retry kept old dispatch token=%q", retried.DispatchToken)
+	}
+	if retried.DispatchAttempt != 1 {
+		t.Fatalf("retried dispatch_attempt=%d, want 1", retried.DispatchAttempt)
+	}
+	if retried.AgentSessionID != "" {
+		t.Fatalf("retried agent_session_id=%q, want empty", retried.AgentSessionID)
+	}
+	if retried.OwnerServerID != "" {
+		t.Fatalf("retried owner_server_id=%q, want empty", retried.OwnerServerID)
+	}
+
+	oldEvent := utils.AgentStreamEvent{
+		TaskID:          retried.ID,
+		DispatchToken:   oldDispatchToken,
+		DispatchAttempt: task.DispatchAttempt,
+		CreatedAt:       time.Now().Unix(),
+	}
+	if shouldDispatchAgentStreamEvent(&retried, oldEvent) {
+		t.Fatal("expected old dispatch stream event to be rejected after retry")
+	}
+
+	handler := NewWebSocketHandler()
+	client := &wsClient{agentID: agent.ID, sessionID: "session-retry-new", serverID: "server-retry-new"}
+	handler.handleAgentPullTask(client, &agent, map[string]interface{}{
+		"task_id":        float64(retried.ID),
+		"dispatch_token": oldDispatchToken,
+		"timestamp":      float64(time.Now().Unix()),
+	})
+
+	var afterStalePull models.AgentTask
+	if err := db.First(&afterStalePull, task.ID).Error; err != nil {
+		t.Fatalf("reload task after stale pull failed: %v", err)
+	}
+	if afterStalePull.Status != models.TaskStatusDispatching {
+		t.Fatalf("task status after stale pull=%s, want %s", afterStalePull.Status, models.TaskStatusDispatching)
+	}
+	if afterStalePull.DispatchToken != retried.DispatchToken {
+		t.Fatalf("task dispatch_token after stale pull=%q, want %q", afterStalePull.DispatchToken, retried.DispatchToken)
+	}
+	if afterStalePull.DispatchAttempt != retried.DispatchAttempt {
+		t.Fatalf("task dispatch_attempt after stale pull=%d, want %d", afterStalePull.DispatchAttempt, retried.DispatchAttempt)
+	}
+	if afterStalePull.AgentSessionID != "" {
+		t.Fatalf("task agent_session_id after stale pull=%q, want empty", afterStalePull.AgentSessionID)
+	}
+	if afterStalePull.OwnerServerID != "" {
+		t.Fatalf("task owner_server_id after stale pull=%q, want empty", afterStalePull.OwnerServerID)
+	}
 }
 
 func TestTriggerDownstreamTasks_InjectsCredentialEnvForGitClone(t *testing.T) {
@@ -994,6 +1454,8 @@ func TestStatusConstants(t *testing.T) {
 	assert.Equal(t, "schedule_failed", models.TaskStatusScheduleFailed)
 	assert.Equal(t, "dispatch_timeout", models.TaskStatusDispatchTimeout)
 	assert.Equal(t, "lease_expired", models.TaskStatusLeaseExpired)
+	assert.Equal(t, "cancel_requested", models.TaskStatusCancelRequested)
+	assert.Equal(t, "cancel_requested", models.PipelineRunStatusCancelRequested)
 	assert.Equal(t, "cancelled", models.TaskStatusCancelled)
 
 	assert.Equal(t, "pending", models.AgentRegistrationStatusPending)
@@ -1675,6 +2137,266 @@ func TestHandleTaskUpdateV2_PersistsRunRecordOutputsForCompletedTask(t *testing.
 	}
 	if !strings.Contains(updatedRun.Outputs, `"node_1"`) || !strings.Contains(updatedRun.Outputs, `"git_commit":"abc123def"`) {
 		t.Fatalf("expected run outputs_json updated from task result, got=%s", updatedRun.Outputs)
+	}
+}
+
+func TestTaskUpdateV2_CancelRequestedConvergesToCancelled(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	run := models.PipelineRun{
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusCancelRequested,
+		Config:           `{"version":"2.0","nodes":[{"id":"node_cancel","type":"shell","name":"Cancelable","config":{"script":"sleep 30"}}],"edges":[]}`,
+		PipelineSnapshot: `{"version":"2.0","nodes":[{"id":"node_cancel","type":"shell","name":"Cancelable","config":{"script":"sleep 30"}}],"edges":[]}`,
+		ResolvedNodes:    `[]`,
+		Outputs:          `{}`,
+		AgentID:          9,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	startTime := time.Now().Add(-5 * time.Second).Unix()
+	task := models.AgentTask{
+		WorkspaceID:    1,
+		AgentID:        9,
+		PipelineRunID:  run.ID,
+		NodeID:         "node_cancel",
+		TaskType:       "shell",
+		Name:           "Cancelable",
+		Params:         `{"script":"sleep 30"}`,
+		Status:         models.TaskStatusCancelRequested,
+		AgentSessionID: "session-1",
+		StartTime:      startTime,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	client := &wsClient{agentID: 9, sessionID: "session-1"}
+	handler.handleTaskUpdateV2(client, &models.Agent{BaseModel: models.BaseModel{ID: 9}, Name: "worker-1"}, map[string]interface{}{
+		"task_id":         float64(task.ID),
+		"attempt":         float64(1),
+		"status":          models.TaskStatusCancelled,
+		"exit_code":       float64(130),
+		"error_msg":       "task cancelled",
+		"duration_ms":     float64(4200),
+		"idempotency_key": "task-cancelled-terminal",
+		"result": map[string]interface{}{
+			"stdout": "partial output",
+		},
+	})
+
+	var reloaded models.AgentTask
+	if err := db.First(&reloaded, task.ID).Error; err != nil {
+		t.Fatalf("reload task failed: %v", err)
+	}
+	if reloaded.Status != models.TaskStatusCancelled {
+		t.Fatalf("task status=%s, want %s", reloaded.Status, models.TaskStatusCancelled)
+	}
+	if reloaded.EndTime == 0 {
+		t.Fatal("expected cancelled task end_time to be set")
+	}
+	if reloaded.Duration != 4 {
+		t.Fatalf("duration=%d, want 4", reloaded.Duration)
+	}
+	if reloaded.ExitCode != 130 {
+		t.Fatalf("exit_code=%d, want 130", reloaded.ExitCode)
+	}
+	if reloaded.ErrorMsg != "task cancelled" {
+		t.Fatalf("error_msg=%q, want task cancelled", reloaded.ErrorMsg)
+	}
+	if reloaded.EndTime < reloaded.StartTime {
+		t.Fatalf("end_time=%d before start_time=%d", reloaded.EndTime, reloaded.StartTime)
+	}
+
+	var execution models.TaskExecution
+	if err := db.Where("task_id = ? AND attempt = ?", task.ID, 1).First(&execution).Error; err != nil {
+		t.Fatalf("load task execution failed: %v", err)
+	}
+	if execution.Status != models.TaskStatusCancelled {
+		t.Fatalf("execution status=%s, want %s", execution.Status, models.TaskStatusCancelled)
+	}
+	if execution.Duration != 4 {
+		t.Fatalf("execution duration=%d, want 4", execution.Duration)
+	}
+	if execution.ExitCode != 130 {
+		t.Fatalf("execution exit_code=%d, want 130", execution.ExitCode)
+	}
+
+	var event models.AgentTaskEvent
+	if err := db.Where("task_id = ? AND attempt = ? AND idempotency_key = ?", task.ID, 1, "task-cancelled-terminal").First(&event).Error; err != nil {
+		t.Fatalf("load task event failed: %v", err)
+	}
+	if event.Status != models.TaskStatusCancelled {
+		t.Fatalf("event status=%s, want %s", event.Status, models.TaskStatusCancelled)
+	}
+	if event.ExitCode != 130 {
+		t.Fatalf("event exit_code=%d, want 130", event.ExitCode)
+	}
+
+	var updatedRun models.PipelineRun
+	if err := db.First(&updatedRun, run.ID).Error; err != nil {
+		t.Fatalf("reload run failed: %v", err)
+	}
+	if updatedRun.Status != models.PipelineRunStatusCancelled {
+		t.Fatalf("run status=%s, want %s", updatedRun.Status, models.PipelineRunStatusCancelled)
+	}
+	if updatedRun.EndTime == 0 {
+		t.Fatal("expected cancelled run end_time to be set")
+	}
+
+	type runEventRecord struct {
+		EventType string                 `json:"event_type"`
+		Payload   map[string]interface{} `json:"payload"`
+	}
+	var events []runEventRecord
+	if err := json.Unmarshal([]byte(updatedRun.Events), &events); err != nil {
+		t.Fatalf("unmarshal run events failed: %v raw=%s", err, updatedRun.Events)
+	}
+	foundCancelledEvent := false
+	for _, event := range events {
+		if event.EventType != "node_cancelled" {
+			continue
+		}
+		if got := uint64(event.Payload["task_id"].(float64)); got != task.ID {
+			t.Fatalf("node_cancelled task_id=%d, want %d", got, task.ID)
+		}
+		foundCancelledEvent = true
+	}
+	if !foundCancelledEvent {
+		t.Fatalf("expected node_cancelled event in run events, got=%s", updatedRun.Events)
+	}
+}
+
+func TestTaskUpdateV2_BlockingFailureWaitsForCancelRequestedSibling(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	run := models.PipelineRun{
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		Config:           `{"version":"2.0","nodes":[{"id":"node_fail","type":"shell","name":"Failing","config":{"script":"exit 1"}},{"id":"node_cancel","type":"shell","name":"Cancelable","config":{"script":"sleep 30"}}],"edges":[]}`,
+		PipelineSnapshot: `{"version":"2.0","nodes":[{"id":"node_fail","type":"shell","name":"Failing","config":{"script":"exit 1"}},{"id":"node_cancel","type":"shell","name":"Cancelable","config":{"script":"sleep 30"}}],"edges":[]}`,
+		ResolvedNodes:    `[]`,
+		Outputs:          `{}`,
+		AgentID:          9,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	failedTask := models.AgentTask{
+		WorkspaceID:   1,
+		AgentID:       9,
+		PipelineRunID: run.ID,
+		NodeID:        "node_fail",
+		TaskType:      "shell",
+		Name:          "Failing",
+		Status:        models.TaskStatusRunning,
+		RetryCount:    3,
+		MaxRetries:    3,
+		StartTime:     time.Now().Add(-5 * time.Second).Unix(),
+	}
+	cancelledSibling := models.AgentTask{
+		WorkspaceID:   1,
+		AgentID:       9,
+		PipelineRunID: run.ID,
+		NodeID:        "node_cancel",
+		TaskType:      "shell",
+		Name:          "Cancelable",
+		Status:        models.TaskStatusRunning,
+		RetryCount:    3,
+		MaxRetries:    3,
+		StartTime:     time.Now().Add(-5 * time.Second).Unix(),
+	}
+	if err := db.Create(&failedTask).Error; err != nil {
+		t.Fatalf("create failed task failed: %v", err)
+	}
+	if err := db.Create(&cancelledSibling).Error; err != nil {
+		t.Fatalf("create sibling task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	client := &wsClient{agentID: 9, sessionID: "session-1"}
+	handler.handleTaskUpdateV2(client, &models.Agent{BaseModel: models.BaseModel{ID: 9}, Name: "worker-1"}, map[string]interface{}{
+		"task_id":         float64(failedTask.ID),
+		"attempt":         float64(1),
+		"status":          models.TaskStatusExecuteFailed,
+		"exit_code":       float64(1),
+		"error_msg":       "boom",
+		"duration_ms":     float64(1200),
+		"idempotency_key": "task-failed-terminal",
+	})
+
+	var updatedRun models.PipelineRun
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := db.First(&updatedRun, run.ID).Error; err != nil {
+			t.Fatalf("reload run failed: %v", err)
+		}
+		if updatedRun.Status == models.PipelineRunStatusCancelRequested {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run status=%s, want %s", updatedRun.Status, models.PipelineRunStatusCancelRequested)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var siblingReloaded models.AgentTask
+	if err := db.First(&siblingReloaded, cancelledSibling.ID).Error; err != nil {
+		t.Fatalf("reload sibling task failed: %v", err)
+	}
+	if siblingReloaded.Status != models.TaskStatusCancelRequested {
+		t.Fatalf("sibling status=%s, want %s", siblingReloaded.Status, models.TaskStatusCancelRequested)
+	}
+
+	handler.handleTaskUpdateV2(client, &models.Agent{BaseModel: models.BaseModel{ID: 9}, Name: "worker-1"}, map[string]interface{}{
+		"task_id":         float64(cancelledSibling.ID),
+		"attempt":         float64(1),
+		"status":          models.TaskStatusCancelled,
+		"exit_code":       float64(130),
+		"error_msg":       "task cancelled",
+		"duration_ms":     float64(3200),
+		"idempotency_key": "task-cancelled-after-failure",
+	})
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		if err := db.First(&updatedRun, run.ID).Error; err != nil {
+			t.Fatalf("reload final run failed: %v", err)
+		}
+		if updatedRun.Status == models.PipelineRunStatusFailed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("final run status=%s, want %s", updatedRun.Status, models.PipelineRunStatusFailed)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if updatedRun.EndTime == 0 {
+		t.Fatal("expected failed run end_time to be set")
 	}
 }
 
@@ -2562,5 +3284,655 @@ func TestFrontendWebSocket_InitialTaskSnapshotIncludesOutputs(t *testing.T) {
 			t.Fatalf("expected commit_sha output in task_status payload, got %#v", outputs)
 		}
 		break
+	}
+}
+
+func TestSendControlMessageToAgent_FallsBackToCrossReplicaRelay(t *testing.T) {
+	mini, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis failed: %v", err)
+	}
+	defer mini.Close()
+
+	previousRedis := utils.RedisClient
+	utils.RedisClient = redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() {
+		if utils.RedisClient != nil {
+			_ = utils.RedisClient.Close()
+		}
+		utils.RedisClient = previousRedis
+	})
+
+	handler := NewWebSocketHandler()
+	agentID := uint64(901)
+	targetServerID := handler.serverID + "-remote"
+	if err := utils.PutAgentPresence(context.Background(), utils.AgentPresence{
+		AgentID:           agentID,
+		AgentSessionID:    "session-cross-replica",
+		ServerID:          targetServerID,
+		ServerURL:         "http://remote-server:8080",
+		HeartbeatInterval: 10,
+	}); err != nil {
+		t.Fatalf("put agent presence failed: %v", err)
+	}
+
+	pubsub := utils.RedisClient.Subscribe(context.Background(), utils.ControlRelayTopic(targetServerID))
+	defer func() { _ = pubsub.Close() }()
+	_, err = pubsub.Receive(context.Background())
+	if err != nil {
+		t.Fatalf("subscribe relay topic failed: %v", err)
+	}
+
+	payload := map[string]interface{}{
+		"task_id": float64(88),
+		"run_id":  float64(19),
+	}
+	if ok := handler.sendControlMessageToAgent(agentID, "task_cancel", payload); !ok {
+		t.Fatalf("expected cross-replica relay delivery to succeed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	relayMsg, err := pubsub.ReceiveMessage(ctx)
+	if err != nil {
+		t.Fatalf("receive relay message failed: %v", err)
+	}
+
+	envelope := controlRelayEnvelope{}
+	if err := json.Unmarshal([]byte(relayMsg.Payload), &envelope); err != nil {
+		t.Fatalf("unmarshal relay envelope failed: %v", err)
+	}
+	if envelope.AgentID != agentID {
+		t.Fatalf("relay agent_id=%d, want %d", envelope.AgentID, agentID)
+	}
+	if envelope.CommandType != "task_cancel" {
+		t.Fatalf("relay command_type=%s, want task_cancel", envelope.CommandType)
+	}
+	if got := uint64(getFloat64(envelope.Payload, "task_id")); got != 88 {
+		t.Fatalf("relay payload task_id=%d, want 88", got)
+	}
+	if envelope.CommandID != "" {
+		t.Fatalf("expected empty command_id in generic relay test, got %q", envelope.CommandID)
+	}
+}
+
+func TestHandleControlRelayEnvelope_TaskCancelRejectsStaleSession(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	defer func() { models.DB = previousDB }()
+
+	handler := NewWebSocketHandler()
+	handler.serverID = "server-owner"
+	agentID := uint64(77)
+	task := models.AgentTask{
+		BaseModel:      models.BaseModel{ID: 88},
+		AgentID:        agentID,
+		Status:         models.TaskStatusCancelRequested,
+		AgentSessionID: "session-live",
+		OwnerServerID:  "server-owner",
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	captured := 0
+	previousWrite := writeAgentTextMessage
+	writeAgentTextMessage = func(conn *websocket.Conn, data []byte, timeout time.Duration) error {
+		captured++
+		return nil
+	}
+	defer func() { writeAgentTextMessage = previousWrite }()
+
+	handler.agentsMu.Lock()
+	handler.agents[agentID] = &wsClient{agentID: agentID, sessionID: "session-live", serverID: "server-owner", conn: &websocket.Conn{}}
+	handler.agentsMu.Unlock()
+
+	handler.handleControlRelayEnvelope(controlRelayEnvelope{
+		CommandType:    "task_cancel",
+		CommandID:      "cmd-1",
+		TaskID:         task.ID,
+		AgentID:        agentID,
+		TargetServerID: "server-owner",
+		AgentSessionID: "session-stale",
+		Payload: map[string]interface{}{
+			"task_id":    float64(task.ID),
+			"command_id": "cmd-1",
+		},
+	})
+
+	if captured != 0 {
+		t.Fatalf("expected stale session relay to be rejected")
+	}
+}
+
+func TestHandleControlRelayEnvelope_TaskCancelRejectsNonCancelableState(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	defer func() { models.DB = previousDB }()
+
+	handler := NewWebSocketHandler()
+	handler.serverID = "server-owner"
+	agentID := uint64(78)
+	task := models.AgentTask{
+		BaseModel:      models.BaseModel{ID: 89},
+		AgentID:        agentID,
+		Status:         models.TaskStatusCancelled,
+		AgentSessionID: "session-live",
+		OwnerServerID:  "server-owner",
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	captured := 0
+	previousWrite := writeAgentTextMessage
+	writeAgentTextMessage = func(conn *websocket.Conn, data []byte, timeout time.Duration) error {
+		captured++
+		return nil
+	}
+	defer func() { writeAgentTextMessage = previousWrite }()
+
+	handler.agentsMu.Lock()
+	handler.agents[agentID] = &wsClient{agentID: agentID, sessionID: "session-live", serverID: "server-owner", conn: &websocket.Conn{}}
+	handler.agentsMu.Unlock()
+
+	handler.handleControlRelayEnvelope(controlRelayEnvelope{
+		CommandType:    "task_cancel",
+		CommandID:      "cmd-2",
+		TaskID:         task.ID,
+		AgentID:        agentID,
+		TargetServerID: "server-owner",
+		AgentSessionID: "session-live",
+		Payload: map[string]interface{}{
+			"task_id":    float64(task.ID),
+			"command_id": "cmd-2",
+		},
+	})
+
+	if captured != 0 {
+		t.Fatalf("expected non-cancelable relay to be rejected")
+	}
+}
+
+func TestConsumeControlRelay_DeliversTaskCancelToLocalAgent(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	defer func() { models.DB = previousDB }()
+
+	mini, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis failed: %v", err)
+	}
+	defer mini.Close()
+
+	previousRedis := utils.RedisClient
+	utils.RedisClient = redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	defer func() {
+		if utils.RedisClient != nil {
+			_ = utils.RedisClient.Close()
+		}
+		utils.RedisClient = previousRedis
+	}()
+
+	handler := NewWebSocketHandler()
+	handler.serverID = "server-owner"
+	agentID := uint64(1201)
+	task := models.AgentTask{
+		AgentID:        agentID,
+		Status:         models.TaskStatusCancelRequested,
+		AgentSessionID: "session-live",
+		OwnerServerID:  "server-owner",
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	captured := make(chan WebSocketMessage, 1)
+	previousWrite := writeAgentTextMessage
+	writeAgentTextMessage = func(conn *websocket.Conn, data []byte, timeout time.Duration) error {
+		var msg WebSocketMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return err
+		}
+		captured <- msg
+		return nil
+	}
+	defer func() { writeAgentTextMessage = previousWrite }()
+
+	handler.agentsMu.Lock()
+	handler.agents[agentID] = &wsClient{agentID: agentID, sessionID: "session-live", serverID: "server-owner", conn: &websocket.Conn{}}
+	handler.agentsMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go handler.consumeControlRelay(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	payload := map[string]interface{}{
+		"task_id":    float64(task.ID),
+		"command_id": "cmd-consumer-ok",
+	}
+	envelope := controlRelayEnvelope{
+		CommandType:    "task_cancel",
+		CommandID:      "cmd-consumer-ok",
+		TaskID:         task.ID,
+		AgentID:        agentID,
+		TargetServerID: "server-owner",
+		AgentSessionID: "session-live",
+		Payload:        payload,
+	}
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal relay envelope failed: %v", err)
+	}
+	if err := utils.RedisClient.Publish(context.Background(), utils.ControlRelayTopic("server-owner"), raw).Err(); err != nil {
+		t.Fatalf("publish relay message failed: %v", err)
+	}
+
+	select {
+	case msg := <-captured:
+		if msg.Type != "task_cancel" {
+			t.Fatalf("message type=%s, want task_cancel", msg.Type)
+		}
+		if got := uint64(getFloat64(msg.Payload, "task_id")); got != task.ID {
+			t.Fatalf("payload task_id=%d, want %d", got, task.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for relayed task_cancel delivery")
+	}
+}
+
+func TestConsumeControlRelay_RejectsStaleSession(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	defer func() { models.DB = previousDB }()
+
+	mini, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis failed: %v", err)
+	}
+	defer mini.Close()
+
+	previousRedis := utils.RedisClient
+	utils.RedisClient = redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	defer func() {
+		if utils.RedisClient != nil {
+			_ = utils.RedisClient.Close()
+		}
+		utils.RedisClient = previousRedis
+	}()
+
+	handler := NewWebSocketHandler()
+	handler.serverID = "server-owner"
+	agentID := uint64(1202)
+	task := models.AgentTask{
+		AgentID:        agentID,
+		Status:         models.TaskStatusCancelRequested,
+		AgentSessionID: "session-live",
+		OwnerServerID:  "server-owner",
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	captured := make(chan WebSocketMessage, 1)
+	previousWrite := writeAgentTextMessage
+	writeAgentTextMessage = func(conn *websocket.Conn, data []byte, timeout time.Duration) error {
+		var msg WebSocketMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return err
+		}
+		captured <- msg
+		return nil
+	}
+	defer func() { writeAgentTextMessage = previousWrite }()
+
+	handler.agentsMu.Lock()
+	handler.agents[agentID] = &wsClient{agentID: agentID, sessionID: "session-live", serverID: "server-owner", conn: &websocket.Conn{}}
+	handler.agentsMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go handler.consumeControlRelay(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	envelope := controlRelayEnvelope{
+		CommandType:    "task_cancel",
+		CommandID:      "cmd-consumer-stale",
+		TaskID:         task.ID,
+		AgentID:        agentID,
+		TargetServerID: "server-owner",
+		AgentSessionID: "session-stale",
+		Payload: map[string]interface{}{
+			"task_id":    float64(task.ID),
+			"command_id": "cmd-consumer-stale",
+		},
+	}
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal relay envelope failed: %v", err)
+	}
+	if err := utils.RedisClient.Publish(context.Background(), utils.ControlRelayTopic("server-owner"), raw).Err(); err != nil {
+		t.Fatalf("publish relay message failed: %v", err)
+	}
+
+	select {
+	case msg := <-captured:
+		t.Fatalf("unexpected relayed message type=%s for stale session", msg.Type)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestAgentControlWriteTimesOut(t *testing.T) {
+	handler := NewWebSocketHandler()
+	conn, cleanup := newBlockingAgentTestWebSocketConn(t)
+	defer cleanup()
+	client := &wsClient{conn: conn}
+
+	previousTimeout := agentControlWriteTimeout
+	agentControlWriteTimeout = 50 * time.Millisecond
+	defer func() {
+		agentControlWriteTimeout = previousTimeout
+	}()
+
+	largePayload := strings.Repeat("x", 1<<20)
+	start := time.Now()
+	err := handler.writeAgentWebSocketMessage(client, WebSocketMessage{Type: "task_cancel", Payload: map[string]interface{}{"task_id": float64(1), "blob": largePayload}})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected control write to fail on timeout")
+	}
+	if !isTimeoutError(err) {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+	if elapsed < 40*time.Millisecond || elapsed > 250*time.Millisecond {
+		t.Fatalf("expected bounded control write near timeout, elapsed=%s", elapsed)
+	}
+}
+
+func TestAgentControlWriteSucceeds(t *testing.T) {
+	handler := NewWebSocketHandler()
+	client := &wsClient{conn: &websocket.Conn{}}
+
+	previousWrite := writeAgentTextMessage
+	captured := WebSocketMessage{}
+	writeAgentTextMessage = func(conn *websocket.Conn, data []byte, timeout time.Duration) error {
+		if timeout != agentControlWriteTimeout {
+			t.Fatalf("write timeout=%s, want %s", timeout, agentControlWriteTimeout)
+		}
+		if err := json.Unmarshal(data, &captured); err != nil {
+			t.Fatalf("unmarshal outbound control message failed: %v", err)
+		}
+		return nil
+	}
+	defer func() {
+		writeAgentTextMessage = previousWrite
+	}()
+
+	ok := handler.sendMessageToLocalAgent(99, "task_cancel", map[string]interface{}{"task_id": float64(7)})
+	if ok {
+		t.Fatalf("expected local delivery to fail without registered agent")
+	}
+
+	handler.agentsMu.Lock()
+	handler.agents[99] = client
+	handler.agentsMu.Unlock()
+
+	if ok := handler.sendMessageToLocalAgent(99, "task_cancel", map[string]interface{}{"task_id": float64(7)}); !ok {
+		t.Fatalf("expected bounded control write to succeed")
+	}
+	if captured.Type != "task_cancel" {
+		t.Fatalf("message type=%s, want task_cancel", captured.Type)
+	}
+	if got := uint64(getFloat64(captured.Payload, "task_id")); got != 7 {
+		t.Fatalf("payload task_id=%d, want 7", got)
+	}
+}
+
+func newBlockingAgentTestWebSocketConn(t *testing.T) (*websocket.Conn, func()) {
+	t.Helper()
+	clientConn, serverConn := net.Pipe()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		reader := bufio.NewReader(serverConn)
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		accept := computeTestWebSocketAccept(req.Header.Get("Sec-WebSocket-Key"))
+		_, _ = io.WriteString(serverConn, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "+accept+"\r\n\r\n")
+		<-stop
+	}()
+	wsConn, _, err := websocket.NewClient(clientConn, &url.URL{Scheme: "ws", Host: "example.test", Path: "/ws"}, nil, 1024, 1024)
+	if err != nil {
+		close(stop)
+		_ = serverConn.Close()
+		t.Fatalf("create websocket client failed: %v", err)
+	}
+	cleanup := func() {
+		close(stop)
+		_ = wsConn.Close()
+		_ = serverConn.Close()
+		<-done
+	}
+	return wsConn, cleanup
+}
+
+func computeTestWebSocketAccept(key string) string {
+	h := sha1.New()
+	_, _ = io.WriteString(h, key+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
+func isTimeoutError(err error) bool {
+	timeoutErr, ok := err.(interface{ Timeout() bool })
+	return ok && timeoutErr.Timeout()
+}
+
+func TestHandleTaskCancelAck_CompletesTracker(t *testing.T) {
+	handler := NewWebSocketHandler()
+	commandID := "cancel-command-1"
+	tracker := handler.registerTaskCancelTracker(commandID, models.AgentTask{BaseModel: models.BaseModel{ID: 88}})
+	if tracker == nil {
+		t.Fatalf("expected tracker to be created")
+	}
+
+	client := &wsClient{agentID: 1, sessionID: "session-a"}
+	handler.handleTaskCancelAck(client, map[string]interface{}{
+		"task_id":          float64(88),
+		"command_id":       commandID,
+		"ok":               true,
+		"agent_session_id": "session-a",
+	})
+
+	select {
+	case ok := <-tracker.done:
+		if !ok {
+			t.Fatalf("expected ack result to be true")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for tracker completion")
+	}
+
+	if stillTracked := handler.getTaskCancelTracker(commandID); stillTracked != nil {
+		t.Fatalf("expected tracker to be removed after ack")
+	}
+}
+
+func TestHandleTaskCancelAck_IgnoresMismatchedTaskID(t *testing.T) {
+	handler := NewWebSocketHandler()
+	commandID := "cancel-command-2"
+	tracker := handler.registerTaskCancelTracker(commandID, models.AgentTask{BaseModel: models.BaseModel{ID: 88}})
+	if tracker == nil {
+		t.Fatalf("expected tracker to be created")
+	}
+
+	client := &wsClient{agentID: 1, sessionID: "session-b"}
+	handler.handleTaskCancelAck(client, map[string]interface{}{
+		"task_id":          float64(99),
+		"command_id":       commandID,
+		"ok":               true,
+		"agent_session_id": "session-b",
+	})
+
+	select {
+	case <-tracker.done:
+		t.Fatalf("unexpected tracker completion for mismatched task id")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if stillTracked := handler.getTaskCancelTracker(commandID); stillTracked == nil {
+		t.Fatalf("expected tracker to remain registered")
+	}
+}
+
+func TestRedrivePendingTasksForConnectedAgent_ResendsCancelRequestedTask(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = previousDB
+	})
+
+	agent := models.Agent{Name: "cancel-redrive-agent", Host: "host", Port: 1, Token: "tok", Status: models.AgentStatusOnline, RegistrationStatus: models.AgentRegistrationStatusApproved}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+	run := models.PipelineRun{WorkspaceID: 1, PipelineID: 1, BuildNumber: 1, Status: models.PipelineRunStatusCancelRequested, AgentID: agent.ID}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	task := models.AgentTask{WorkspaceID: 1, AgentID: agent.ID, PipelineRunID: run.ID, NodeID: "node-cancel-redrive", TaskType: "shell", Name: "cancel-redrive", Status: models.TaskStatusCancelRequested, AgentSessionID: "session-1", OwnerServerID: "server-1", StartTime: time.Now().Add(-3 * time.Second).Unix()}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	handler.serverID = "server-1"
+	client := &wsClient{agentID: agent.ID, sessionID: "session-1", serverID: "server-1"}
+
+	previousWrite := writeAgentTextMessage
+	writes := 0
+	writeAgentTextMessage = func(conn *websocket.Conn, data []byte, timeout time.Duration) error {
+		writes++
+		return nil
+	}
+	defer func() {
+		writeAgentTextMessage = previousWrite
+	}()
+
+	handler.agentsMu.Lock()
+	handler.agents[agent.ID] = &wsClient{agentID: agent.ID, sessionID: "session-1", serverID: "server-1", conn: &websocket.Conn{}}
+	handler.agentsMu.Unlock()
+
+	handler.redrivePendingTasksForConnectedAgent(client)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if writes > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expected cancel_requested task to be re-sent")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestMarkTaskCancelDeliveryTimeout_PersistsObservableMessage(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	models.DB = db
+	defer func() { models.DB = previousDB }()
+
+	run := models.PipelineRun{WorkspaceID: 1, PipelineID: 1, BuildNumber: 1, Status: models.PipelineRunStatusCancelRequested}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	task := models.AgentTask{WorkspaceID: 1, AgentID: 1, PipelineRunID: run.ID, NodeID: "node-timeout", TaskType: "shell", Name: "timeout-task", Status: models.TaskStatusCancelRequested}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	handler.markTaskCancelDeliveryTimeout(task, 2*time.Second, 3)
+
+	var reloadedTask models.AgentTask
+	if err := db.First(&reloadedTask, task.ID).Error; err != nil {
+		t.Fatalf("reload task failed: %v", err)
+	}
+	if !strings.Contains(reloadedTask.ErrorMsg, "等待 agent 确认") {
+		t.Fatalf("task error_msg=%q, want waiting-for-agent hint", reloadedTask.ErrorMsg)
+	}
+	if reloadedTask.Status != models.TaskStatusCancelRequested {
+		t.Fatalf("task status=%s, want %s", reloadedTask.Status, models.TaskStatusCancelRequested)
+	}
+
+	var reloadedRun models.PipelineRun
+	if err := db.First(&reloadedRun, run.ID).Error; err != nil {
+		t.Fatalf("reload run failed: %v", err)
+	}
+	if reloadedRun.Status != models.PipelineRunStatusCancelRequested {
+		t.Fatalf("run status=%s, want %s", reloadedRun.Status, models.PipelineRunStatusCancelRequested)
+	}
+}
+
+func TestReconcileCancelRequestedTasks_FinalizesOfflineTaskAndRun(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	agent := models.Agent{Name: "offline-cancel-agent", Host: "host", Port: 1, Token: "tok", Status: models.AgentStatusOffline, RegistrationStatus: models.AgentRegistrationStatusApproved, HeartbeatInterval: 10, LastHeartAt: time.Now().Add(-time.Minute).Unix()}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+	run := models.PipelineRun{WorkspaceID: 1, PipelineID: 1, BuildNumber: 1, Status: models.PipelineRunStatusCancelRequested, AgentID: agent.ID, StartTime: time.Now().Add(-10 * time.Second).Unix()}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	task := models.AgentTask{WorkspaceID: 1, AgentID: agent.ID, PipelineRunID: run.ID, NodeID: "node-offline-cancel", TaskType: "shell", Name: "offline-cancel", Status: models.TaskStatusCancelRequested, AgentSessionID: "gone-session", OwnerServerID: "gone-server", StartTime: time.Now().Add(-5 * time.Second).Unix()}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create task failed: %v", err)
+	}
+
+	updated, err := reconcileCancelRequestedTasks(db, time.Now().Unix())
+	if err != nil {
+		t.Fatalf("reconcileCancelRequestedTasks returned error: %v", err)
+	}
+	if updated != 1 {
+		t.Fatalf("updated=%d, want 1", updated)
+	}
+
+	var reloadedTask models.AgentTask
+	if err := db.First(&reloadedTask, task.ID).Error; err != nil {
+		t.Fatalf("reload task failed: %v", err)
+	}
+	if reloadedTask.Status != models.TaskStatusCancelled {
+		t.Fatalf("task status=%s, want %s", reloadedTask.Status, models.TaskStatusCancelled)
+	}
+	if reloadedTask.EndTime == 0 {
+		t.Fatal("expected cancelled task end_time to be set")
+	}
+
+	var reloadedRun models.PipelineRun
+	if err := db.First(&reloadedRun, run.ID).Error; err != nil {
+		t.Fatalf("reload run failed: %v", err)
+	}
+	if reloadedRun.Status != models.PipelineRunStatusCancelled {
+		t.Fatalf("run status=%s, want %s", reloadedRun.Status, models.PipelineRunStatusCancelled)
+	}
+	if reloadedRun.EndTime == 0 {
+		t.Fatal("expected cancelled run end_time to be set")
 	}
 }

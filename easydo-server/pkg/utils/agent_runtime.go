@@ -27,6 +27,7 @@ const (
 	agentStreamKeyPrefix   = "easydo:agent:stream:"
 	frontendRealtimeTopic  = "easydo:frontend:realtime"
 	terminalRelayTopicBase = "easydo:terminal:relay:"
+	controlRelayTopicBase  = "easydo:control:relay:"
 	InternalTokenHeader    = "X-EasyDo-Internal-Token"
 )
 
@@ -156,6 +157,10 @@ func FrontendRealtimeTopic() string {
 
 func TerminalRelayTopic(serverID string) string {
 	return terminalRelayTopicBase + strings.TrimSpace(serverID)
+}
+
+func ControlRelayTopic(serverID string) string {
+	return controlRelayTopicBase + strings.TrimSpace(serverID)
 }
 
 func PutAgentPresence(ctx context.Context, presence AgentPresence) error {

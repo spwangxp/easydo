@@ -255,12 +255,23 @@ func TestParseParams_PreservesEnvVarsWhenJSONContainsNonStringValues(t *testing.
 
 func TestRunScript_PreservesSystemPathWhenCustomEnvProvided(t *testing.T) {
 	executor := &Executor{}
-	stdout, stderr, err := executor.runScript(context.Background(), 1, `command -v sh >/dev/null && printf '%s' "$PATH"`, "/tmp", map[string]string{"EASYDO_FLAG": "1"}, nil)
+	stdout, stderr, err := executor.runScript(context.Background(), 1, `command -v sh >/dev/null && printf '%s' "$PATH"`, "sh", "/tmp", map[string]string{"EASYDO_FLAG": "1"}, nil)
 	if err != nil {
 		t.Fatalf("expected runScript to preserve PATH, got err=%v stderr=%s", err, stderr)
 	}
 	if stdout == "" {
 		t.Fatalf("expected PATH to remain available when custom env is provided")
+	}
+}
+
+func TestRunScript_UsesExplicitBashWhenRequested(t *testing.T) {
+	executor := &Executor{}
+	stdout, stderr, err := executor.runScript(context.Background(), 1, `for i in {1..3}; do printf '%s' "$i"; done`, "bash", "/tmp", nil, nil)
+	if err != nil {
+		t.Fatalf("expected bash script to succeed, got err=%v stderr=%s", err, stderr)
+	}
+	if stdout != "123" {
+		t.Fatalf("stdout=%q, want 123", stdout)
 	}
 }
 
@@ -270,6 +281,7 @@ func TestRunScript_PreservesLongSingleLineStdout(t *testing.T) {
 		context.Background(),
 		1,
 		`dd if=/dev/zero bs=70000 count=1 2>/dev/null | tr '\000' 'a'; printf '\n'`,
+		"sh",
 		"/tmp",
 		nil,
 		nil,
@@ -369,7 +381,7 @@ func TestRunScript_KillsBackgroundProcessGroupOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	_, _, err := executor.runScript(ctx, 1, `sh -c 'trap "" HUP TERM INT; while true; do sleep 1; done' >/dev/null 2>&1 & child=$!; echo $child > "`+pidFile+`"; wait`, tmpDir, nil, nil)
+	_, _, err := executor.runScript(ctx, 1, `sh -c 'trap "" HUP TERM INT; while true; do sleep 1; done' >/dev/null 2>&1 & child=$!; echo $child > "`+pidFile+`"; wait`, "sh", tmpDir, nil, nil)
 	if err == nil {
 		t.Fatal("expected context cancellation error")
 	}

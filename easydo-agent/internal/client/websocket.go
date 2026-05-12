@@ -153,7 +153,7 @@ type WebSocketClient struct {
 	ackWaiters      map[string]chan ackResult
 }
 
- type ackResult struct {
+type ackResult struct {
 	ok       bool
 	errorMsg string
 }
@@ -565,9 +565,26 @@ func (c *WebSocketClient) handleTaskCancel(payload map[string]interface{}) {
 	}
 
 	klog.Infof("Received task cancellation: task_id=%d", taskID)
+	commandID := getStringValue(payload, "command_id")
 
 	go func() {
-		if err := handler.HandleTaskCancel(taskID); err != nil {
+		err := handler.HandleTaskCancel(taskID)
+		ackPayload := map[string]interface{}{
+			"task_id":    taskID,
+			"command_id": commandID,
+			"ok":         err == nil,
+			"timestamp":  time.Now().Unix(),
+		}
+		if err != nil {
+			ackPayload["error_msg"] = err.Error()
+		}
+		if sessionID := c.GetSessionID(); sessionID != "" {
+			ackPayload["agent_session_id"] = sessionID
+		}
+		if sendErr := c.SendMessage("task_cancel_ack", ackPayload); sendErr != nil {
+			klog.Warningf("Failed to send task_cancel_ack for task %d: %v", taskID, sendErr)
+		}
+		if err != nil {
 			klog.Warningf("Failed to handle task cancel: %v", err)
 		}
 	}()

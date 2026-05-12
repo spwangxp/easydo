@@ -938,6 +938,17 @@ const getRunStartTime = (run) => {
   return run.start_time || run.created_at || null
 }
 
+const updateRunHistoryEntry = (runID, patch) => {
+  const targetRunID = Number(runID || 0)
+  if (!targetRunID) return
+  const index = runHistory.value.findIndex(run => Number(run?.id || 0) === targetRunID)
+  if (index === -1) return
+  runHistory.value.splice(index, 1, {
+    ...runHistory.value[index],
+    ...patch
+  })
+}
+
 const getRunBranch = (run) => {
   const runInputs = getRunConfig(run)?.inputs || {}
   for (const params of Object.values(runInputs)) {
@@ -1796,7 +1807,9 @@ const stopExecution = () => {
       const res = await cancelPipelineRun(pipelineId.value, currentRun.value.id)
       if (res.code === 200) {
         ElMessage.success('流水线已停止')
-        stopAllUpdates()
+        currentRun.value.status = 'cancel_requested'
+        updateRunHistoryEntry(currentRun.value.id, { status: 'cancel_requested' })
+        await fetchRunHistory()
       } else {
         ElMessage.error(res.message || '停止失败')
       }
@@ -2185,15 +2198,29 @@ const setupRealtimeUpdates = () => {
   realtimeHandlers.runStatus = (payload) => {
     if (!currentRun.value || Number(payload.run_id) !== Number(currentRun.value.id)) return
 
-    // 更新流水线状态
     currentRun.value.status = payload.status
-    if (payload.error_msg) {
-      currentRun.value.stage = payload.error_msg
+    if (payload.error_msg !== undefined) {
+      currentRun.value.error_msg = payload.error_msg
+      if (payload.error_msg) {
+        currentRun.value.stage = payload.error_msg
+      }
     }
-
-    // 更新耗时（如果提供了）
     if (payload.duration !== undefined && payload.duration !== null) {
       currentRun.value.duration = payload.duration
+    }
+    if (payload.end_time !== undefined && payload.end_time !== null) {
+      currentRun.value.end_time = payload.end_time
+    }
+
+    updateRunHistoryEntry(payload.run_id, {
+      status: payload.status,
+      error_msg: payload.error_msg,
+      duration: payload.duration,
+      end_time: payload.end_time
+    })
+
+    if (isRunTerminal(payload.status)) {
+      fetchRunHistory()
     }
 
     console.log(`Pipeline run ${payload.run_id} status updated to: ${payload.status}`)

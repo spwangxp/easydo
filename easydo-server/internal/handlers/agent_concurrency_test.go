@@ -200,6 +200,17 @@ func TestUpdateAgentStatusByPipelineConcurrency_Transitions(t *testing.T) {
 		t.Fatalf("status=%s, want=%s", current.Status, models.AgentStatusBusy)
 	}
 
+	if err := db.Model(&runningRun).Update("status", models.PipelineRunStatusCancelRequested).Error; err != nil {
+		t.Fatalf("update run status failed: %v", err)
+	}
+	updateAgentStatusByPipelineConcurrency(db, agent.ID)
+	if err := db.First(&current, agent.ID).Error; err != nil {
+		t.Fatalf("get agent failed: %v", err)
+	}
+	if current.Status != models.AgentStatusBusy {
+		t.Fatalf("status=%s, want=%s", current.Status, models.AgentStatusBusy)
+	}
+
 	if err := db.Model(&runningRun).Update("status", models.PipelineRunStatusSuccess).Error; err != nil {
 		t.Fatalf("update run status failed: %v", err)
 	}

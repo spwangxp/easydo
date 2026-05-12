@@ -466,7 +466,7 @@ func (h *TaskHandler) CancelTask(c *gin.Context) {
 		return
 	}
 
-	if task.Status != models.TaskStatusAssigned && task.Status != models.TaskStatusDispatching && task.Status != models.TaskStatusPulling && task.Status != models.TaskStatusAcked && task.Status != models.TaskStatusRunning {
+	if !isTaskCancelable(task.Status) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":    400,
 			"message": "任务已结束，无法取消",
@@ -474,11 +474,23 @@ func (h *TaskHandler) CancelTask(c *gin.Context) {
 		return
 	}
 
-	shouldNotifyAgent := task.Status == models.TaskStatusAcked || task.Status == models.TaskStatusRunning
-	h.DB.Model(&task).Updates(map[string]interface{}{
-		"status":   models.TaskStatusCancelled,
-		"end_time": time.Now().Unix(),
-	})
+	now := time.Now().Unix()
+	shouldNotifyAgent := isExecutionOwnedTaskStatus(task.Status)
+	updates := buildTaskCancelUpdates(&task, now)
+	if err := h.DB.Model(&task).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "取消任务失败"})
+		return
+	}
+	if status, ok := updates["status"].(string); ok {
+		task.Status = status
+	}
+	if endTime, ok := updates["end_time"].(int64); ok {
+		task.EndTime = endTime
+	}
+	if duration, ok := updates["duration"].(int); ok {
+		task.Duration = duration
+	}
+	syncLiveTaskStateFromTask(&task, "")
 
 	if shouldNotifyAgent {
 		_ = SharedWebSocketHandler().sendTaskCancel(task)

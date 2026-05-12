@@ -17,7 +17,7 @@ func normalizeAgentMaxConcurrentPipelines(max int) int {
 func countAgentRunningPipelines(db *gorm.DB, agentID uint64) int64 {
 	var running int64
 	db.Model(&models.PipelineRun{}).
-		Where("agent_id = ? AND status = ?", agentID, models.PipelineRunStatusRunning).
+		Where("agent_id = ? AND status IN ?", agentID, []string{models.PipelineRunStatusRunning, models.PipelineRunStatusCancelRequested}).
 		Count(&running)
 	return running
 }
@@ -30,7 +30,7 @@ func selectAgentWithPipelineCapacity(db *gorm.DB, workspaceID uint64) uint64 {
 
 	query := db.Model(&models.Agent{}).
 		Select(`agents.id, COALESCE(COUNT(pipeline_runs.id), 0) AS running_count`).
-		Joins(`LEFT JOIN pipeline_runs ON pipeline_runs.agent_id = agents.id AND pipeline_runs.status = ?`, models.PipelineRunStatusRunning).
+		Joins(`LEFT JOIN pipeline_runs ON pipeline_runs.agent_id = agents.id AND pipeline_runs.status IN ?`, []string{models.PipelineRunStatusRunning, models.PipelineRunStatusCancelRequested}).
 		Where("agents.registration_status = ? AND agents.status IN ?",
 			models.AgentRegistrationStatusApproved,
 			[]string{models.AgentStatusOnline, models.AgentStatusBusy},
@@ -54,7 +54,7 @@ func selectAgentWithPipelineCapacity(db *gorm.DB, workspaceID uint64) uint64 {
 }
 
 func updateAgentStatusByPipelineConcurrency(db *gorm.DB, agentID uint64) {
-	if agentID == 0 {
+	if db == nil || agentID == 0 {
 		return
 	}
 

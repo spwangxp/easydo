@@ -76,6 +76,7 @@ func runQueuedPipelineSchedulerTick(db *gorm.DB) int {
 	if db == nil {
 		db = models.DB
 	}
+	_, _ = reconcileCancelRequestedTasks(db, time.Now().Unix())
 	return NewPipelineHandler().scheduleQueuedPipelineRuns(db)
 }
 

@@ -26,6 +26,7 @@ type TaskParams struct {
 	Name          string
 	Params        map[string]interface{}
 	Script        string
+	Shell         string
 	WorkDir       string
 	EnvVars       map[string]string
 	Timeout       int
@@ -267,7 +268,7 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams, callback LogC
 	e.log.Infof("Task %d executing in workspace: %s", params.TaskID, workDir)
 
 	// Execute the script in the workspace directory
-	stdout, stderr, err := e.runScript(execCtx, params.TaskID, params.Script, workDir, params.EnvVars, callback)
+	stdout, stderr, err := e.runScript(execCtx, params.TaskID, params.Script, params.Shell, workDir, params.EnvVars, callback)
 
 	duration := time.Since(startTime)
 
@@ -290,7 +291,7 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams, callback LogC
 }
 
 // runScript executes a shell script and captures output
-func (e *Executor) runScript(ctx context.Context, taskID uint64, script, workDir string, envVars map[string]string, callback LogCallback) (string, string, error) {
+func (e *Executor) runScript(ctx context.Context, taskID uint64, script, shell, workDir string, envVars map[string]string, callback LogCallback) (string, string, error) {
 	env := append([]string{}, os.Environ()...)
 	seen := make(map[string]int, len(env))
 	for i, item := range env {
@@ -311,14 +312,17 @@ func (e *Executor) runScript(ctx context.Context, taskID uint64, script, workDir
 		env = append(env, entry)
 	}
 
-	// Determine shell command
-	shell := "/bin/sh"
-	if _, err := exec.LookPath("bash"); err == nil {
-		shell = "/bin/bash"
+	resolvedShell := "/bin/sh"
+	switch strings.ToLower(strings.TrimSpace(shell)) {
+	case "", "sh":
+		resolvedShell = "/bin/sh"
+	case "bash":
+		resolvedShell = "/bin/bash"
+	default:
+		resolvedShell = "/bin/sh"
 	}
 
-	// Create command
-	cmd := exec.CommandContext(ctx, shell, "-c", script)
+	cmd := exec.CommandContext(ctx, resolvedShell, "-c", script)
 	cmd.Env = env
 	cmd.Dir = workDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -378,6 +382,9 @@ func ParseParams(task interface{}) (*TaskParams, error) {
 	}
 	if script, ok := taskMap["script"].(string); ok {
 		params.Script = script
+	}
+	if shell, ok := taskMap["shell"].(string); ok {
+		params.Shell = shell
 	}
 	if workDir, ok := taskMap["work_dir"].(string); ok {
 		params.WorkDir = workDir

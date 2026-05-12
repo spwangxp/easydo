@@ -5,7 +5,7 @@ type PipelineRun struct {
 	WorkspaceID     uint64  `gorm:"not null;index" json:"workspace_id"`
 	PipelineID      uint64  `gorm:"index;not null;uniqueIndex:idx_pipeline_build_number" json:"pipeline_id"`
 	BuildNumber     int     `gorm:"not null;uniqueIndex:idx_pipeline_build_number" json:"build_number"`
-	Status          string  `gorm:"size:32;not null" json:"status"` // queued/pending/running/success/failed/cancelled
+	Status          string  `gorm:"size:32;not null" json:"status"` // queued/pending/running/cancel_requested/success/failed/cancelled
 	TriggerType     string  `gorm:"size:32" json:"trigger_type"`    // manual/webhook/schedule
 	TriggerUser     string  `gorm:"size:64" json:"trigger_user"`
 	TriggerUserID   uint64  `gorm:"index;default:0" json:"trigger_user_id"`
@@ -38,10 +38,11 @@ type PipelineRun struct {
 }
 
 const (
-	PipelineRunStatusQueued    = "queued"
-	PipelineRunStatusPending   = "pending"
-	PipelineRunStatusRunning   = "running"
-	PipelineRunStatusSuccess   = "success"
-	PipelineRunStatusFailed    = "failed"
-	PipelineRunStatusCancelled = "cancelled"
+	PipelineRunStatusQueued          = "queued"
+	PipelineRunStatusPending         = "pending"
+	PipelineRunStatusRunning         = "running"
+	PipelineRunStatusCancelRequested = "cancel_requested"
+	PipelineRunStatusSuccess         = "success"
+	PipelineRunStatusFailed          = "failed"
+	PipelineRunStatusCancelled       = "cancelled"
 )
