@@ -531,6 +531,25 @@
 
         <!-- 失败忽略配置 -->
         <div class="config-section">
+          <div class="section-title">执行控制</div>
+          <el-form label-position="top" size="small">
+            <el-form-item label="任务超时（秒）">
+              <el-input-number
+                v-model="selectedNode.timeout"
+                :min="1"
+                :step="30"
+                controls-position="right"
+                style="width: 100%"
+                @change="updateNode(selectedNode)"
+              />
+              <div class="config-tip config-tip-inline">
+                每个任务必须显式配置超时时间，避免统一默认值导致任务行为不可控。
+              </div>
+            </el-form-item>
+          </el-form>
+        </div>
+
+        <div class="config-section">
           <div class="section-title">失败处理</div>
           <el-form label-position="top" size="small">
             <el-form-item>
@@ -592,6 +611,7 @@ const loadedDefinition = ref({
   }
 })
 const availableResources = ref([])
+const DEFAULT_TASK_TIMEOUT_SECONDS = 3600
 
 // 画布状态
 const canvasArea = ref(null)
@@ -780,6 +800,15 @@ const getFieldDefaultValue = (field = {}) => {
   if (fieldType === 'number') return 0
   if (fieldType === 'multiselect') return []
   return ''
+}
+
+const normalizeNodeTimeout = (value, fallback = DEFAULT_TASK_TIMEOUT_SECONDS) => {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) {
+    return fallback
+  }
+  const timeout = Math.floor(numericValue)
+  return timeout > 0 ? timeout : fallback
 }
 
 const normalizeFieldOptions = (options) => {
@@ -1075,6 +1104,7 @@ const handleDrop = (event) => {
       inputs: (component.inputs || []).map(i => ({ ...i, connected: false })),
       outputs: (component.outputs || []).map(o => ({ ...o, connected: false })),
       params: buildDefaultNodeParams(component.type),
+      timeout: DEFAULT_TASK_TIMEOUT_SECONDS,
       conditions: [],
       predecessors: [],
       status: 'pending'
@@ -1103,7 +1133,8 @@ const addNodeFromLibrary = (component) => {
     width: 200,
     inputs: component.inputs.map(i => ({ ...i, connected: false })),
     outputs: component.outputs.map(o => ({ ...o, connected: false })),
-      params: buildDefaultNodeParams(component.type),
+    params: buildDefaultNodeParams(component.type),
+    timeout: DEFAULT_TASK_TIMEOUT_SECONDS,
     conditions: [],
     predecessors: [],
     status: 'pending'
@@ -2014,6 +2045,7 @@ const buildDefinitionNodes = () => nodes.value.map((node) => {
     node_name: node.name || node.id,
     task_key: normalizeTaskType(node.type),
     task_version: 1,
+    timeout: normalizeNodeTimeout(node.timeout),
     ignore_failure: Boolean(node.ignore_failure),
     params: normalizedParams,
     credential_bindings: bindings.credential_bindings,
@@ -2038,6 +2070,18 @@ const savePipeline = async () => {
   const validationErrors = validateDAG()
   if (validationErrors.length > 0) {
     ElMessage.error(`保存失败：\n${validationErrors.join('\n')}`)
+    return
+  }
+
+  const timeoutErrors = nodes.value
+    .map((node) => {
+      const timeout = Number(node?.timeout)
+      if (Number.isFinite(timeout) && Math.floor(timeout) > 0) return ''
+      return `节点 ${node?.name || node?.id || '-'} 未设置有效的任务超时（秒）`
+    })
+    .filter(Boolean)
+  if (timeoutErrors.length > 0) {
+    ElMessage.error(`保存失败：\n${timeoutErrors.join('\n')}`)
     return
   }
   
@@ -2208,6 +2252,7 @@ const loadPipeline = async () => {
               inputs: getNodePorts(taskType, 'input').map(i => ({ ...i, connected: false })),
               outputs: getNodePorts(taskType, 'output').map(o => ({ ...o, connected: false })),
               params: paramsWithCredentialBindings,
+              timeout: normalizeNodeTimeout(node.timeout),
               conditions: [],
               predecessors: [],
               status: 'pending',
@@ -2260,6 +2305,7 @@ const loadPipeline = async () => {
                 inputs: getNodePorts(taskType, 'input').map(i => ({ ...i, connected: false })),
                 outputs: getNodePorts(taskType, 'output').map(o => ({ ...o, connected: false })),
                 params: paramsWithCredentialBindings,
+                timeout: normalizeNodeTimeout(node.timeout),
                 conditions: Array.isArray(node.conditions) ? node.conditions : [],
                 predecessors: Array.isArray(node.predecessors) ? node.predecessors : [],
                 status: node.status || 'pending'
@@ -3005,6 +3051,13 @@ onUnmounted(() => {
     background: var(--bg-secondary);
     border-radius: $radius-md;
     border-left: 3px solid var(--info-color);
+  }
+
+  .config-tip-inline {
+    margin-top: 8px;
+    margin-bottom: 0;
+    border-left-width: 2px;
+    padding: 8px 10px;
   }
 
   .outputs-header {

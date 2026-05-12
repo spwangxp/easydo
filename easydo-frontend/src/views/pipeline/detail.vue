@@ -261,32 +261,22 @@
                       <span class="task-duration" v-if="task.duration > 0">耗时: {{ formatDuration(task.duration) }}</span>
                       <span class="task-exit-code" v-if="shouldShowTaskExitCode(task)">退出码: {{ getTaskExitCode(task) }}</span>
                     </div>
-                    <div v-if="hasTaskOutputs(task)" class="task-inline-outputs">
-                      <div
-                        v-for="(output, idx) in formatTaskOutputs(getTaskOutputs(task), getTaskOutputDisplayKind(task)).slice(0, 3)"
-                        :key="idx"
-                        class="task-output-chip"
-                      >
-                        <span class="output-label">{{ output.label }}:</span>
-                        <span class="output-value" :class="`output-${output.type}`">{{ output.value }}</span>
-                      </div>
-                    </div>
                   </div>
                   <div class="task-error" v-if="task.error_msg">
                     <el-icon><Warning /></el-icon>
                     {{ task.error_msg }}
                   </div>
                   <div
-                    v-if="hasTaskOutputs(task) && formatTaskOutputs(getTaskOutputs(task), getTaskOutputDisplayKind(task)).length > 3"
+                    v-if="getFormattedTaskOutputs(task).length > 0"
                     class="task-outputs task-outputs--expanded"
                   >
                     <div class="task-outputs-grid">
                       <div
-                        v-for="(output, idx) in formatTaskOutputs(getTaskOutputs(task), getTaskOutputDisplayKind(task)).slice(3)"
+                        v-for="(output, idx) in getFormattedTaskOutputs(task)"
                         :key="idx"
                         class="task-output-item"
                       >
-                        <span class="output-label">{{ output.label }}:</span>
+                        <span class="output-label">{{ output.label }}</span>
                         <span class="output-value" :class="`output-${output.type}`">{{ output.value }}</span>
                       </div>
                     </div>
@@ -1855,6 +1845,14 @@ const getTaskOutputs = (task) => {
   return task.outputs || null
 }
 
+const formatTaskOutputValue = (value) => {
+  if (value === undefined || value === null || value === '') return ''
+  if (Array.isArray(value) || (typeof value === 'object' && value !== null)) {
+    return JSON.stringify(value, null, 2)
+  }
+  return String(value)
+}
+
 // 格式化任务输出显示
 const formatTaskOutputs = (outputs, taskType) => {
   if (!outputs) return []
@@ -1919,7 +1917,7 @@ const formatTaskOutputs = (outputs, taskType) => {
     if (outputs.quality_score !== undefined) lines.push({ label: 'Quality Score', value: outputs.quality_score, type: Number(outputs.quality_score) >= 80 ? 'success' : 'warning' })
     if (outputs.issues_count !== undefined) lines.push({ label: 'Issues Count', value: outputs.issues_count, type: outputs.issues_count > 0 ? 'warning' : 'success' })
     if (Array.isArray(outputs.issues) && outputs.issues.length > 0) {
-      lines.push({ label: 'Issues', value: JSON.stringify(outputs.issues), type: 'default' })
+      lines.push({ label: 'Issues', value: formatTaskOutputValue(outputs.issues), type: 'default' })
     }
   }
 
@@ -1927,10 +1925,10 @@ const formatTaskOutputs = (outputs, taskType) => {
     if (outputs.summary) lines.push({ label: 'Summary', value: outputs.summary, type: 'info' })
     if (outputs.defect_count !== undefined) lines.push({ label: 'Defect Count', value: outputs.defect_count, type: outputs.defect_count > 0 ? 'warning' : 'success' })
     if (Array.isArray(outputs.defects) && outputs.defects.length > 0) {
-      lines.push({ label: 'Defects', value: JSON.stringify(outputs.defects), type: 'default' })
+      lines.push({ label: 'Defects', value: formatTaskOutputValue(outputs.defects), type: 'default' })
     }
     if (Array.isArray(outputs.suggestions) && outputs.suggestions.length > 0) {
-      lines.push({ label: 'Suggestions', value: outputs.suggestions.join('；'), type: 'info' })
+      lines.push({ label: 'Suggestions', value: formatTaskOutputValue(outputs.suggestions), type: 'info' })
     }
   }
 
@@ -1942,19 +1940,21 @@ const formatTaskOutputs = (outputs, taskType) => {
     'summary', 'quality_score', 'issues', 'issues_count', 'defects', 'defect_count', 'suggestions']
   for (const [key, value] of Object.entries(outputs)) {
     if (!knownKeys.includes(key) && value !== undefined && value !== null && value !== '') {
-      lines.push({ label: key, value: String(value), type: 'default' })
+      lines.push({ label: key, value: formatTaskOutputValue(value), type: 'default' })
     }
   }
 
   return lines
 }
 
+const getFormattedTaskOutputs = (task) => {
+  if (!task) return []
+  return formatTaskOutputs(getTaskOutputs(task), getTaskOutputDisplayKind(task))
+}
+
 // 判断任务是否有输出可显示
 const hasTaskOutputs = (task) => {
-  if (!task) return false
-  const outputs = getTaskOutputs(task)
-  if (!outputs) return false
-  return Object.keys(outputs).length > 0
+  return getFormattedTaskOutputs(task).length > 0
 }
 
 const isIgnoredFailureTask = (task) => {
@@ -2899,8 +2899,7 @@ onUnmounted(() => {
                 align-items: center;
                 gap: 10px;
                 min-width: 0;
-                white-space: nowrap;
-                overflow: hidden;
+                flex-wrap: wrap;
               }
 
               .task-title-text {
@@ -2926,7 +2925,7 @@ onUnmounted(() => {
                 align-items: center;
                 gap: 10px;
                 min-width: 0;
-                overflow: hidden;
+                flex-wrap: wrap;
               }
 
               .task-inline-meta {
@@ -2988,48 +2987,53 @@ onUnmounted(() => {
                 font-size: 12px;
                 color: #F56C6C;
                 display: flex;
-                align-items: center;
+                align-items: flex-start;
                 gap: 4px;
+                white-space: pre-wrap;
+                word-break: break-word;
               }
 
               .task-outputs.task-outputs--expanded {
-                margin-top: 8px;
-                padding: 8px 12px;
+                margin-top: 10px;
+                padding: 12px;
                 background: var(--bg-secondary);
-                border-radius: 4px;
+                border-radius: 8px;
                 font-size: 12px;
 
                 .task-outputs-grid {
-                  display: flex;
-                  flex-wrap: wrap;
-                  gap: 8px 16px;
+                  display: grid;
+                  gap: 10px;
+                }
 
-                  .task-output-item {
-                    display: flex;
-                    align-items: center;
-                    gap: 4px;
-                    min-width: 0;
-                  }
+                .task-output-item {
+                  display: grid;
+                  grid-template-columns: 132px minmax(0, 1fr);
+                  align-items: start;
+                  gap: 8px;
+                  min-width: 0;
+                }
 
-                  .output-label {
-                    color: var(--text-muted);
-                    flex-shrink: 0;
-                  }
+                .output-label {
+                  color: var(--text-muted);
+                  font-weight: 600;
+                  line-height: 1.6;
+                }
 
-                  .output-value {
-                    min-width: 0;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    font-weight: 500;
-                    font-family: 'Consolas', 'Monaco', monospace;
+                .output-value {
+                  min-width: 0;
+                  white-space: pre-wrap;
+                  word-break: break-all;
+                  overflow-wrap: anywhere;
+                  line-height: 1.7;
+                  font-weight: 500;
+                  font-family: 'Consolas', 'Monaco', monospace;
 
-                    &.output-primary { color: var(--primary-color); }
-                    &.output-success { color: #67C23A; }
-                    &.output-danger { color: #F56C6C; }
-                    &.output-warning { color: #E6A23C; }
-                    &.output-info { color: var(--text-secondary); }
-                    &.output-default { color: var(--text-primary); }
-                  }
+                  &.output-primary { color: var(--primary-color); }
+                  &.output-success { color: #67C23A; }
+                  &.output-danger { color: #F56C6C; }
+                  &.output-warning { color: #E6A23C; }
+                  &.output-info { color: var(--text-secondary); }
+                  &.output-default { color: var(--text-primary); }
                 }
               }
 

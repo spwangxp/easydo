@@ -399,6 +399,9 @@ func (h *PipelineHandler) parseAndValidatePipelineConfig(rawConfig string, userI
 	if valid, errMsg := config.ValidateNodeParams(); !valid {
 		return PipelineConfig{}, nil, errMsg, errors.New(errMsg)
 	}
+	if valid, errMsg := config.ValidateNodeTimeouts(); !valid {
+		return PipelineConfig{}, nil, errMsg, errors.New(errMsg)
+	}
 
 	refs, err := h.validatePipelineCredentialBindings(&config, userID, role, pipelineID, workspaceID)
 	if err != nil {

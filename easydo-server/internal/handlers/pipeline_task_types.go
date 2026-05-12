@@ -1041,6 +1041,19 @@ func (c *PipelineConfig) ValidateNodeParams() (bool, string) {
 	return true, ""
 }
 
+func (c *PipelineConfig) ValidateNodeTimeouts() (bool, string) {
+	for _, node := range c.Nodes {
+		if node.Timeout <= 0 {
+			nodeLabel := strings.TrimSpace(firstNonEmptyTaskValue(node.Name, node.NodeName, node.ID, node.NodeID))
+			if nodeLabel == "" {
+				nodeLabel = "unknown"
+			}
+			return false, fmt.Sprintf("流水线配置无效：节点 '%s' 必须显式设置 timeout（秒）且大于 0", nodeLabel)
+		}
+	}
+	return true, ""
+}
+
 func getPipelineTaskDefinition(taskType string) (string, pipelineTaskDefinition, bool) {
 	normalized := strings.TrimSpace(strings.ToLower(taskType))
 	if canonical, ok := pipelineTaskTypeAliases[normalized]; ok {

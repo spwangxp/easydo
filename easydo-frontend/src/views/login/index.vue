@@ -8,29 +8,32 @@
     <!-- Left side - decorative -->
     <div class="login-left">
       <div class="brand-section">
-        <img src="@/assets/images/logo.svg" alt="Logo" class="brand-logo" />
-        <h1 class="brand-name">EasyDo</h1>
-        <p class="brand-tagline">智能化 DevOps 工作平台</p>
+        <div class="brand-identity">
+          <img src="@/assets/images/logo.svg" alt="Logo" class="brand-logo" />
+          <h1 class="brand-name">EasyDo</h1>
+        </div>
+        <p class="brand-tagline">统一管理研发交付、资源编排与执行自动化</p>
+        <p class="brand-description">覆盖流水线、项目、资源、执行器、发布、凭据与 AI / 模板能力，让团队在同一平台完成从编排到执行的协作闭环。</p>
       </div>
-      
+
       <div class="features">
         <div class="feature-item">
           <div class="feature-icon">
             <el-icon :size="24"><Connection /></el-icon>
           </div>
-          <span class="feature-text">流水线</span>
+          <span class="feature-text">流水线与项目协作</span>
         </div>
         <div class="feature-item">
           <div class="feature-icon">
             <el-icon :size="24"><Box /></el-icon>
           </div>
-          <span class="feature-text">项目管理</span>
+          <span class="feature-text">资源、凭据与发布管理</span>
         </div>
         <div class="feature-item">
           <div class="feature-icon">
             <el-icon :size="24"><Monitor /></el-icon>
           </div>
-          <span class="feature-text">执行器</span>
+          <span class="feature-text">执行器与自动化任务</span>
         </div>
       </div>
     </div>
@@ -259,11 +262,21 @@ const handleLogin = async () => {
   .brand-section {
     max-width: 560px;
 
+    .brand-identity {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
     .brand-logo {
+      display: block;
       width: 82px;
       height: 82px;
-      margin-bottom: 18px;
+      margin: 0;
+      object-fit: contain;
       filter: drop-shadow(0 10px 24px rgba($primary-color, 0.26));
+      flex-shrink: 0;
     }
 
     .brand-name {
@@ -273,14 +286,22 @@ const handleLogin = async () => {
       letter-spacing: -0.04em;
       color: var(--text-primary);
       font-weight: 800;
-      margin-bottom: 14px;
+      margin: 0;
     }
 
     .brand-tagline {
       font-size: 19px;
       color: var(--text-secondary);
-      font-weight: 500;
+      font-weight: 600;
       letter-spacing: 0.01em;
+      margin-bottom: 14px;
+    }
+
+    .brand-description {
+      max-width: 540px;
+      font-size: 15px;
+      line-height: 1.75;
+      color: var(--text-muted);
     }
   }
 
@@ -354,14 +375,20 @@ const handleLogin = async () => {
 }
 
 .login-header {
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
   margin-bottom: 26px;
 
   .logo {
+    display: block;
     width: 58px;
     height: 58px;
-    margin-bottom: 12px;
+    margin: 0;
+    object-fit: contain;
     filter: drop-shadow(0 6px 16px rgba($primary-color, 0.24));
+    flex-shrink: 0;
   }
 
   .title {
@@ -370,6 +397,7 @@ const handleLogin = async () => {
     letter-spacing: -0.03em;
     font-weight: 760;
     color: var(--text-primary);
+    line-height: 1;
   }
 }
 
@@ -517,6 +545,15 @@ const handleLogin = async () => {
     padding: 44px;
 
     .brand-section {
+      .brand-identity {
+        gap: 16px;
+      }
+
+      .brand-logo {
+        width: 72px;
+        height: 72px;
+      }
+
       .brand-name {
         font-size: 46px;
       }
