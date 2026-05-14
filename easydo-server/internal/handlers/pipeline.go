@@ -4214,7 +4214,33 @@ func loadPipelineRunForRead(db *gorm.DB, workspaceID uint64, pipelineIDParam, ru
 	return run, true, nil
 }
 
-func parseHistoricalResolvedInputs(raw string) ([]rerunPreviewHistoricalParam, error) {
+func appendHistoricalPreviewParam(params []rerunPreviewHistoricalParam, seen map[string]struct{}, nodeID, paramKey string, value interface{}) ([]rerunPreviewHistoricalParam, error) {
+	nodeID = strings.TrimSpace(nodeID)
+	paramKey = strings.TrimSpace(paramKey)
+	if nodeID == "" || paramKey == "" {
+		return params, nil
+	}
+	matchKey := nodeID + "+" + paramKey
+	if _, exists := seen[matchKey]; exists {
+		return nil, fmt.Errorf("duplicate resolved input %s", matchKey)
+	}
+	seen[matchKey] = struct{}{}
+	return append(params, rerunPreviewHistoricalParam{
+		NodeID:   nodeID,
+		ParamKey: paramKey,
+		Value:    value,
+	}), nil
+}
+
+func sortHistoricalPreviewParams(params []rerunPreviewHistoricalParam) {
+	sort.Slice(params, func(i, j int) bool {
+		left := params[i].NodeID + "+" + params[i].ParamKey
+		right := params[j].NodeID + "+" + params[j].ParamKey
+		return left < right
+	})
+}
+
+func parseHistoricalResolvedInputs(raw string, allowedKeys map[string]models.PipelineDefinitionParam) ([]rerunPreviewHistoricalParam, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return nil, fmt.Errorf("resolved_nodes_json missing")
@@ -4239,23 +4265,47 @@ func parseHistoricalResolvedInputs(raw string) ([]rerunPreviewHistoricalParam, e
 			if paramKey == "" {
 				continue
 			}
-			matchKey := nodeID + "+" + paramKey
-			if _, exists := seen[matchKey]; exists {
-				return nil, fmt.Errorf("duplicate resolved input %s", matchKey)
+			if len(allowedKeys) > 0 {
+				if _, exists := allowedKeys[nodeID+"+"+paramKey]; !exists {
+					continue
+				}
 			}
-			seen[matchKey] = struct{}{}
-			params = append(params, rerunPreviewHistoricalParam{
-				NodeID:   nodeID,
-				ParamKey: paramKey,
-				Value:    value,
-			})
+			var err error
+			params, err = appendHistoricalPreviewParam(params, seen, nodeID, paramKey, value)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
-	sort.Slice(params, func(i, j int) bool {
-		left := params[i].NodeID + "+" + params[i].ParamKey
-		right := params[j].NodeID + "+" + params[j].ParamKey
-		return left < right
-	})
+	sortHistoricalPreviewParams(params)
+	return params, nil
+}
+
+func parseHistoricalRunConfigInputs(raw string) ([]rerunPreviewHistoricalParam, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var snapshot models.PipelineRunConfigSnapshot
+	if err := json.Unmarshal([]byte(trimmed), &snapshot); err != nil {
+		return nil, err
+	}
+	params := make([]rerunPreviewHistoricalParam, 0)
+	seen := make(map[string]struct{})
+	for nodeID, inputs := range snapshot.Inputs {
+		trimmedNodeID := strings.TrimSpace(nodeID)
+		if trimmedNodeID == "" {
+			continue
+		}
+		for key, value := range inputs {
+			var err error
+			params, err = appendHistoricalPreviewParam(params, seen, trimmedNodeID, key, value)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	sortHistoricalPreviewParams(params)
 	return params, nil
 }
 
@@ -4268,13 +4318,6 @@ func buildCurrentPipelineManualRunParamLookup(config PipelineConfig) map[string]
 }
 
 func buildRunRerunPreview(run models.PipelineRun, currentConfig PipelineConfig) rerunPreviewResponse {
-	historicalParams, err := parseHistoricalResolvedInputs(run.ResolvedNodes)
-	if err != nil {
-		return buildRerunPreviewFailure("historical_resolved_inputs_unavailable", "历史运行缺少有效的 resolved_nodes_json，无法生成 rerun preview")
-	}
-	if len(historicalParams) == 0 {
-		return buildRerunPreviewFailure("historical_resolved_inputs_empty", "历史运行未形成可复用的最终参数，无法生成 rerun preview")
-	}
 	if len(currentConfig.Nodes) == 0 {
 		return buildRerunPreviewFailure("current_pipeline_definition_unavailable", "当前流水线定义缺失，无法生成 rerun preview")
 	}
@@ -4291,6 +4334,20 @@ func buildRunRerunPreview(run models.PipelineRun, currentConfig PipelineConfig) 
 	}
 	if len(currentManualRunKeys) == 0 {
 		return buildRerunPreviewFailure("current_manual_run_definition_unavailable", "当前流水线缺少可手动运行参数定义，无法进入运行对话框")
+	}
+
+	historicalParams, err := parseHistoricalRunConfigInputs(run.RunConfig)
+	if err != nil {
+		return buildRerunPreviewFailure("historical_resolved_inputs_unavailable", "历史运行缺少有效的 resolved_nodes_json，无法生成 rerun preview")
+	}
+	if len(historicalParams) == 0 {
+		historicalParams, err = parseHistoricalResolvedInputs(run.ResolvedNodes, currentManualRunKeys)
+		if err != nil {
+			return buildRerunPreviewFailure("historical_resolved_inputs_unavailable", "历史运行缺少有效的 resolved_nodes_json，无法生成 rerun preview")
+		}
+	}
+	if len(historicalParams) == 0 {
+		return buildRerunPreviewFailure("historical_resolved_inputs_empty", "历史运行未形成可复用的最终参数，无法生成 rerun preview")
 	}
 
 	response := rerunPreviewResponse{

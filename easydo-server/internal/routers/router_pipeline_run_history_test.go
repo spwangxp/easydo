@@ -151,7 +151,7 @@ func TestPipelineRunHistoryRoutes_ParameterViewAndRerunPreview(t *testing.T) {
 		if len(resp.Data.Matched) != 1 || len(resp.Data.Mismatched) != 0 {
 			t.Fatalf("unexpected match payload: %#v", resp.Data)
 		}
-		if got := resp.Data.PrefillInputs["node_1"]["script"]; got != "echo historical" {
+		if got := resp.Data.PrefillInputs["node_1"]["script"]; got != "echo override" {
 			t.Fatalf("unexpected prefill payload: %#v", resp.Data.PrefillInputs)
 		}
 	})

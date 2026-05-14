@@ -1772,7 +1772,7 @@ func TestGetRunRerunPreview(t *testing.T) {
 		if err := db.Create(&pipeline).Error; err != nil {
 			t.Fatalf("create pipeline failed: %v", err)
 		}
-		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, ResolvedNodes: `[{"node_id":"missing_node","resolved_inputs":{"script":"echo historical"}}]`}
+		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, RunConfig: `{"inputs":{"missing_node":{"script":"echo historical"}}}`, ResolvedNodes: `[{"node_id":"missing_node","resolved_inputs":{"script":"echo historical"}}]`}
 		if err := db.Create(&run).Error; err != nil {
 			t.Fatalf("create run failed: %v", err)
 		}
@@ -1793,7 +1793,7 @@ func TestGetRunRerunPreview(t *testing.T) {
 		if err := db.Create(&pipeline).Error; err != nil {
 			t.Fatalf("create pipeline failed: %v", err)
 		}
-		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, ResolvedNodes: `[{"node_id":"node_1","resolved_inputs":{"git_ref":"release/2026.05"}}]`}
+		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, RunConfig: `{"inputs":{"node_1":{"git_ref":"release/2026.05"}}}`, ResolvedNodes: `[{"node_id":"node_1","resolved_inputs":{"git_ref":"release/2026.05"}}]`}
 		if err := db.Create(&run).Error; err != nil {
 			t.Fatalf("create run failed: %v", err)
 		}
@@ -1811,7 +1811,7 @@ func TestGetRunRerunPreview(t *testing.T) {
 		if err := db.Create(&pipeline).Error; err != nil {
 			t.Fatalf("create pipeline failed: %v", err)
 		}
-		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, ResolvedNodes: `[{"node_id":"node_1","resolved_inputs":{"script":"echo historical"}}]`}
+		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, RunConfig: `{"inputs":{"node_1":{"script":"echo historical"}}}`, ResolvedNodes: `[{"node_id":"node_1","resolved_inputs":{"script":"echo historical"}}]`}
 		if err := db.Create(&run).Error; err != nil {
 			t.Fatalf("create run failed: %v", err)
 		}
@@ -1821,7 +1821,59 @@ func TestGetRunRerunPreview(t *testing.T) {
 		}
 	})
 
-	t.Run("malformed or missing resolved nodes returns explicit preview failure and no runnable prefill payload", func(t *testing.T) {
+	t.Run("run_config manual inputs take precedence and resolved non flexible defaults do not block rerun", func(t *testing.T) {
+			db := openHandlerTestDB(t)
+			h := &PipelineHandler{DB: db}
+			user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-run-config-priority", models.WorkspaceRoleDeveloper)
+			pipeline := models.Pipeline{
+				Name:        "rerun-preview-run-config-priority",
+				WorkspaceID: workspace.ID,
+				OwnerID:     user.ID,
+				Definition:  `{"version":"2.0","nodes":[{"node_id":"node_1","node_name":"Build","type":"shell","task_key":"shell","params":[{"key":"script","label":"脚本","value":"echo current","is_flexible":false},{"key":"image_tag","label":"镜像标签","value":"latest","is_flexible":true},{"key":"architectures","label":"目标架构","value":["linux/amd64","linux/arm64"],"is_flexible":true}]},{"node_id":"node_2","node_name":"Deploy","type":"shell","task_key":"shell","params":[{"key":"script","label":"部署脚本","value":"echo deploy","is_flexible":false}]}],"edges":[{"from":"node_1","to":"node_2"}]}`,
+			}
+			if err := db.Create(&pipeline).Error; err != nil {
+				t.Fatalf("create pipeline failed: %v", err)
+			}
+			run := models.PipelineRun{
+				WorkspaceID: workspace.ID,
+				PipelineID:  pipeline.ID,
+				BuildNumber: 1,
+				RunConfig:   `{"inputs":{"node_1":{"image_tag":"release-2026.05","architectures":["linux/amd64"]}}}`,
+				ResolvedNodes: `[
+					{"node_id":"node_1","resolved_inputs":{"script":"echo historical default","image_tag":"release-2026.05","architectures":["linux/amd64"],"context":"./app","push":true}},
+					{"node_id":"node_2","resolved_inputs":{"script":"echo deploy","region":"cn"}}
+				]`,
+			}
+			if err := db.Create(&run).Error; err != nil {
+				t.Fatalf("create run failed: %v", err)
+			}
+
+			resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
+			if !resp.Data.CanEnterRunDialog {
+				t.Fatalf("expected rerun dialog available, got %#v", resp.Data)
+			}
+			if resp.Data.Failure != nil {
+				t.Fatalf("unexpected failure: %#v", resp.Data.Failure)
+			}
+			if len(resp.Data.Mismatched) != 0 {
+				t.Fatalf("expected no mismatches, got %#v", resp.Data.Mismatched)
+			}
+			if got := resp.Data.PrefillInputs["node_1"]["image_tag"]; got != "release-2026.05" {
+				t.Fatalf("prefill node_1.image_tag=%#v", got)
+			}
+			architectures, ok := resp.Data.PrefillInputs["node_1"]["architectures"].([]interface{})
+			if !ok || len(architectures) != 1 || architectures[0] != "linux/amd64" {
+				t.Fatalf("prefill node_1.architectures=%#v", resp.Data.PrefillInputs["node_1"]["architectures"])
+			}
+			if _, exists := resp.Data.PrefillInputs["node_1"]["script"]; exists {
+				t.Fatalf("unexpected non-flexible script prefill: %#v", resp.Data.PrefillInputs["node_1"])
+			}
+			if _, exists := resp.Data.PrefillInputs["node_2"]; exists {
+				t.Fatalf("unexpected node_2 prefill: %#v", resp.Data.PrefillInputs["node_2"])
+			}
+		})
+
+		t.Run("malformed or missing resolved nodes returns explicit preview failure and no runnable prefill payload", func(t *testing.T) {
 		for _, raw := range []string{"", `{"bad":true}`, `[{"node_id":"node_1"}]`, `[{"node_id":"node_1","resolved_inputs":{"script":"echo one"}},{"node_id":"node_1","resolved_inputs":{"script":"echo two"}}]`} {
 			db := openHandlerTestDB(t)
 			h := &PipelineHandler{DB: db}
