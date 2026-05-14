@@ -595,7 +595,8 @@ func TestTaskHandlerUpdateTaskConcurrencyRefreshesRuntimeMirrors(t *testing.T) {
 }
 
 func TestTaskHandlerWithTaskSlotRunsTasksSequentiallyWhenLimitIsOne(t *testing.T) {
-	h := &TaskHandler{taskSlots: make(chan struct{}, 1)}
+	h := &TaskHandler{taskLimit: 1}
+h.taskConcurrencyCV = sync.NewCond(&h.taskConcurrencyMu)
 	var mu sync.Mutex
 	current := 0
 	maxConcurrent := 0
@@ -634,6 +635,141 @@ func TestTaskHandlerWithTaskSlotRunsTasksSequentiallyWhenLimitIsOne(t *testing.T
 
 	if maxConcurrent != 1 {
 		t.Fatalf("max concurrent=%d, want 1", maxConcurrent)
+	}
+}
+
+func TestTaskHandlerWithTaskSlotHotExpandWakesWaiters(t *testing.T) {
+	h := &TaskHandler{taskLimit: 1}
+h.taskConcurrencyCV = sync.NewCond(&h.taskConcurrencyMu)
+	started := make(chan string, 3)
+	allowFinish := make(chan struct{})
+
+	run := func(name string) {
+		h.withTaskSlot(func() {
+			started <- name
+			<-allowFinish
+		})
+	}
+
+	go run("first")
+	if got := <-started; got != "first" {
+		t.Fatalf("first started task=%s, want first", got)
+	}
+
+	go run("second")
+	go run("third")
+
+	select {
+	case got := <-started:
+		t.Fatalf("task %s started before hot expansion", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	h.updateTaskConcurrency(client.AgentConfig{TaskConcurrency: 3})
+
+	startedAfterExpand := map[string]bool{}
+	deadline := time.After(300 * time.Millisecond)
+	for len(startedAfterExpand) < 2 {
+		select {
+		case got := <-started:
+			startedAfterExpand[got] = true
+		case <-deadline:
+			t.Fatalf("expected waiting tasks to start after hot expansion, got %#v", startedAfterExpand)
+		}
+	}
+	if !startedAfterExpand["second"] || !startedAfterExpand["third"] {
+		t.Fatalf("started after expand=%#v, want second and third", startedAfterExpand)
+	}
+
+	allowFinish <- struct{}{}
+	allowFinish <- struct{}{}
+	allowFinish <- struct{}{}
+}
+
+func TestTaskHandlerWithTaskSlotHotShrinkKeepsRunningTasksAndBlocksLaterStarts(t *testing.T) {
+	h := &TaskHandler{taskLimit: 3}
+h.taskConcurrencyCV = sync.NewCond(&h.taskConcurrencyMu)
+	started := make(chan string, 4)
+	releaseFirstWave := make(chan struct{})
+	releaseSecondWave := make(chan struct{})
+	firstWaveDone := make(chan string, 3)
+	done := make(chan string, 4)
+
+	run := func(name string, release <-chan struct{}) {
+		h.withTaskSlot(func() {
+			started <- name
+			<-release
+			if name != "fourth" {
+				firstWaveDone <- name
+			}
+			done <- name
+		})
+	}
+
+	go run("first", releaseFirstWave)
+	go run("second", releaseFirstWave)
+	go run("third", releaseFirstWave)
+
+	startedFirstWave := map[string]bool{}
+	deadline := time.After(300 * time.Millisecond)
+	for len(startedFirstWave) < 3 {
+		select {
+		case got := <-started:
+			startedFirstWave[got] = true
+		case <-deadline:
+			t.Fatalf("expected first wave to start before shrink, got %#v", startedFirstWave)
+		}
+	}
+
+	h.updateTaskConcurrency(client.AgentConfig{TaskConcurrency: 1})
+
+	go run("fourth", releaseSecondWave)
+
+	select {
+	case got := <-started:
+		t.Fatalf("task %s started despite hot shrink while three tasks still running", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseFirstWave <- struct{}{}
+	if got := <-firstWaveDone; got == "" {
+		t.Fatal("expected one first-wave task to finish")
+	}
+
+	select {
+	case got := <-started:
+		t.Fatalf("task %s started before running count dropped to shrink limit", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseFirstWave <- struct{}{}
+	if got := <-firstWaveDone; got == "" {
+		t.Fatal("expected second first-wave task to finish")
+	}
+
+	select {
+	case got := <-started:
+		t.Fatalf("task %s started before only one task remained running", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseFirstWave <- struct{}{}
+	if got := <-firstWaveDone; got == "" {
+		t.Fatal("expected third first-wave task to finish")
+	}
+
+	select {
+	case got := <-started:
+		if got != "fourth" {
+			t.Fatalf("started task=%s, want fourth", got)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("expected fourth task to start after running count dropped below shrink limit")
+	}
+
+	releaseSecondWave <- struct{}{}
+	for i := 0; i < 4; i++ {
+		<-done
 	}
 }
 

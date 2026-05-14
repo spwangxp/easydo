@@ -43,10 +43,13 @@ type TaskHandler struct {
 	inFlight         sync.Map
 	runningTasks     sync.Map
 	cancelledTasks   sync.Map
-	pendingMu        sync.Mutex
-	pendingWS        []pendingWebSocketMessage
-	taskSlots        chan struct{}
-	runtimeAgentCfg  client.AgentConfig
+	pendingMu         sync.Mutex
+	pendingWS         []pendingWebSocketMessage
+	taskConcurrencyMu sync.Mutex
+	taskConcurrencyCV *sync.Cond
+	taskLimit         int
+	runningTaskCount  int
+	runtimeAgentCfg   client.AgentConfig
 }
 
 // pendingWebSocketMessage stores one outbound WS message that could not be sent
@@ -64,7 +67,7 @@ type runningTaskExecution struct {
 // NewTaskHandler creates a new task handler
 func NewTaskHandler(httpClient *client.HTTPClient, wsClient *client.WebSocketClient, cfg *config.Config, tokenMgr *TokenManager, runtimeCaps system.RuntimeCapabilities, log *logrus.Logger) *TaskHandler {
 	executor := task.NewExecutor(log, cfg.GetWorkspacePath(), runtimeCaps)
-	return &TaskHandler{
+	handler := &TaskHandler{
 		httpClient:       httpClient,
 		wsClient:         wsClient,
 		cfg:              cfg,
@@ -73,8 +76,10 @@ func NewTaskHandler(httpClient *client.HTTPClient, wsClient *client.WebSocketCli
 		executor:         executor,
 		embeddedBuildkit: task.NewEmbeddedBuildkitManager(log, cfg.GetWorkspacePath(), runtimeCaps),
 		stopChan:         make(chan struct{}),
-		taskSlots:        make(chan struct{}, defaultTaskConcurrencyLimit()),
+		taskLimit:        defaultTaskConcurrencyLimit(),
 	}
+	handler.taskConcurrencyCV = sync.NewCond(&handler.taskConcurrencyMu)
+	return handler
 }
 
 func (th *TaskHandler) WorkspaceManager() *task.WorkspaceManager {
@@ -160,12 +165,17 @@ func (th *TaskHandler) updateTaskConcurrency(agentCfg client.AgentConfig) {
 		limit = defaultTaskConcurrencyLimit()
 	}
 	th.mu.Lock()
-	defer th.mu.Unlock()
 	th.runtimeAgentCfg = agentCfg
-	if th.taskSlots != nil && cap(th.taskSlots) == limit {
-		return
+	th.mu.Unlock()
+
+	th.ensureTaskConcurrencyController()
+	th.taskConcurrencyMu.Lock()
+	changed := th.taskLimit != limit
+	th.taskLimit = limit
+	th.taskConcurrencyMu.Unlock()
+	if changed {
+		th.taskConcurrencyCV.Broadcast()
 	}
-	th.taskSlots = make(chan struct{}, limit)
 }
 
 func (th *TaskHandler) updateRuntimeAgentConfig(agentCfg client.AgentConfig) {
@@ -180,16 +190,34 @@ func (th *TaskHandler) runtimeAgentConfig() client.AgentConfig {
 	return th.runtimeAgentCfg
 }
 
-func (th *TaskHandler) withTaskSlot(run func()) {
-	th.mu.RLock()
-	taskSlots := th.taskSlots
-	th.mu.RUnlock()
-	if taskSlots == nil {
-		run()
-		return
+func (th *TaskHandler) ensureTaskConcurrencyController() {
+	th.taskConcurrencyMu.Lock()
+	defer th.taskConcurrencyMu.Unlock()
+	if th.taskConcurrencyCV == nil {
+		th.taskConcurrencyCV = sync.NewCond(&th.taskConcurrencyMu)
 	}
-	taskSlots <- struct{}{}
-	defer func() { <-taskSlots }()
+	if th.taskLimit <= 0 {
+		th.taskLimit = defaultTaskConcurrencyLimit()
+	}
+}
+
+func (th *TaskHandler) withTaskSlot(run func()) {
+	th.ensureTaskConcurrencyController()
+
+	th.taskConcurrencyMu.Lock()
+	for th.runningTaskCount >= th.taskLimit {
+		th.taskConcurrencyCV.Wait()
+	}
+	th.runningTaskCount++
+	th.taskConcurrencyMu.Unlock()
+
+	defer func() {
+		th.taskConcurrencyMu.Lock()
+		th.runningTaskCount--
+		th.taskConcurrencyMu.Unlock()
+		th.taskConcurrencyCV.Broadcast()
+	}()
+
 	run()
 }
 

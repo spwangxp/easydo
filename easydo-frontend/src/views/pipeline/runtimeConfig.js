@@ -193,17 +193,8 @@ export const createRunInputs = (manualRunNodes = []) => {
   return inputs
 }
 
-const normalizeParamViewSection = (value) => {
-  if (Array.isArray(value)) {
-    return value
-      .filter(item => item && typeof item === 'object' && !Array.isArray(item) && String(item.key || '').trim())
-      .reduce((result, item) => {
-        result[item.key] = item.value
-        return result
-      }, {})
-  }
-
-  if (!value || typeof value !== 'object') return {}
+const normalizeParamRecord = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
   return value
 }
 
@@ -219,8 +210,8 @@ export const normalizeRunParameterViewPayload = (payload) => {
         return {
           node_id: nodeID,
           node_name: String(node?.node_name || node?.name || nodeID || `节点 ${index + 1}`),
-          runtime_params: normalizeParamViewSection(node?.runtime_params),
-          default_params: normalizeParamViewSection(node?.default_params)
+          runtime_params: normalizeParamRecord(node?.runtime_params),
+          default_params: normalizeParamRecord(node?.default_params)
         }
       })
       .filter(Boolean)

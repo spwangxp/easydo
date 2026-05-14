@@ -314,14 +314,14 @@ test('normalizeRunParameterViewPayload keeps runtime and default params as separ
       {
         node_id: 'node_1',
         node_name: 'Build',
-        runtime_params: [
-          { key: 'script', label: '脚本', value: 'echo historical' },
-          { key: 'args', label: '参数', value: ['--prod'] }
-        ],
-        default_params: [
-          { key: 'script', label: '脚本', value: 'echo default' },
-          { key: 'image', label: '镜像', value: 'node:20' }
-        ]
+        runtime_params: {
+          script: 'echo historical',
+          args: ['--prod']
+        },
+        default_params: {
+          script: 'echo default',
+          image: 'node:20'
+        }
       },
       {
         node_id: 'node_2',

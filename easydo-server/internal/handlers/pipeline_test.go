@@ -1753,11 +1753,6 @@ func TestGetRunRerunPreview(t *testing.T) {
 		if len(resp.Data.Matched) != 3 || len(resp.Data.Mismatched) != 0 {
 			t.Fatalf("unexpected matches/mismatches: %#v", resp.Data)
 		}
-		for _, item := range resp.Data.Matched {
-			if item.ParamKey == "shell" {
-				t.Fatalf("expected internal executor field to be excluded, got %#v", resp.Data.Matched)
-			}
-		}
 		if got := resp.Data.PrefillInputs["node_1"]["script"]; got != "echo historical" {
 			t.Fatalf("prefill node_1.script=%#v", got)
 		}
@@ -1849,30 +1844,6 @@ func TestGetRunRerunPreview(t *testing.T) {
 			if len(resp.Data.PrefillInputs) != 0 || len(resp.Data.Matched) != 0 {
 				t.Fatalf("expected no runnable payload for raw=%q, got %#v", raw, resp.Data)
 			}
-		}
-	})
-
-	t.Run("executor-only resolved fields are ignored during rerun preview matching", func(t *testing.T) {
-		db := openHandlerTestDB(t)
-		h := &PipelineHandler{DB: db}
-		user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-ignore-executor-fields", models.WorkspaceRoleDeveloper)
-		pipeline := models.Pipeline{Name: "rerun-preview-ignore-executor-fields", WorkspaceID: workspace.ID, OwnerID: user.ID, Definition: makeDefinition(`[{"key":"script","label":"脚本","value":"echo current","is_flexible":true}]`)}
-		if err := db.Create(&pipeline).Error; err != nil {
-			t.Fatalf("create pipeline failed: %v", err)
-		}
-		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, RunConfig: `{"inputs":{"node_1":{"script":"echo historical"}}}`, PipelineSnapshot: `{"version":"2.0","nodes":[{"node_id":"node_1","node_name":"Build","type":"shell","task_key":"shell","params":[{"key":"script","label":"脚本","value":"${inputs.script}","is_flexible":true}]}],"edges":[]}`, ResolvedNodes: `[{"node_id":"node_1","resolved_inputs":{"script":"echo historical","shell":"sh"}}]`}
-		if err := db.Create(&run).Error; err != nil {
-			t.Fatalf("create run failed: %v", err)
-		}
-		resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
-		if !resp.Data.CanEnterRunDialog {
-			t.Fatalf("expected runnable dialog, got %#v", resp.Data)
-		}
-		if len(resp.Data.Mismatched) != 0 {
-			t.Fatalf("expected executor-only fields to be ignored, got %#v", resp.Data.Mismatched)
-		}
-		if got := resp.Data.PrefillInputs["node_1"]["script"]; got != "echo historical" {
-			t.Fatalf("prefill node_1.script=%#v", got)
 		}
 	})
 

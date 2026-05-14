@@ -280,16 +280,18 @@
                   </div>
                   <div
                     v-if="getFormattedTaskOutputs(task).length > 0"
-                    class="task-outputs task-outputs--expanded"
+                    class="task-inline-outputs"
                   >
-                    <div class="task-outputs-grid">
-                      <div
-                        v-for="(output, idx) in getFormattedTaskOutputs(task)"
-                        :key="idx"
-                        class="task-output-item"
-                      >
-                        <span class="output-label">{{ output.label }}</span>
-                        <span class="output-value" :class="`output-${output.type}`">{{ output.value }}</span>
+                    <div class="task-outputs task-outputs--expanded">
+                      <div class="task-outputs-grid">
+                        <div
+                          v-for="(output, idx) in getFormattedTaskOutputs(task)"
+                          :key="idx"
+                          class="task-output-item"
+                        >
+                          <span class="output-label">{{ output.label }}</span>
+                          <span class="output-value" :class="`output-${output.type}`">{{ output.value }}</span>
+                        </div>
                       </div>
                     </div>
                   </div>

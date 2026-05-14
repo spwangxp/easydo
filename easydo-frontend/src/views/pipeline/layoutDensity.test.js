@@ -19,6 +19,27 @@ test('pipeline list keeps approved single-line columns and excludes creator colu
   assert.match(source, /class="pipeline-primary-line"/)
   assert.match(source, /class="pipeline-build-line"/)
   assert.match(source, /class="table-actions"/)
+  assert.match(source, /content="复制"/)
+  assert.match(source, /@click="handleCopy\(row\)"/)
+})
+
+test('pipeline copy reuses create dialog with copy-mode payload preparation', async () => {
+  const source = await readView('index.vue')
+
+  assert.match(source, /const dialogMode = ref\('create'\)/)
+  assert.match(source, /const copiedDefinitionJson = ref\(''\)/)
+  assert.match(source, /const dialogTitle = computed\(\(\) => \(dialogMode\.value === 'copy' \? '复制流水线' : '新建流水线'\)\)/)
+  assert.match(source, /const submitButtonText = computed\(\(\) => \(dialogMode\.value === 'copy' \? '复制' : '创建'\)\)/)
+  assert.match(source, /:title="dialogTitle"/)
+  assert.match(source, /@closed="resetPipelineDialogState"/)
+  assert.match(source, /<el-option label="无项目" :value="0"\s*\/?>/)
+  assert.match(source, /const payload = buildPipelineCopyPayload\(response\.data\)/)
+  assert.match(source, /copiedDefinitionJson\.value = payload\.definition_json/)
+  assert.match(source, /pipelineForm\.name = payload\.name \?\? ''/)
+  assert.match(source, /pipelineForm\.project_id = payload\.project_id \?\? ''/)
+  assert.match(source, /dialogVisible\.value = true/)
+  assert.match(source, /dialogMode\.value === 'copy' && copiedDefinitionJson\.value\s*\? \{ definition_json: copiedDefinitionJson\.value \}/)
+  assert.doesNotMatch(source, /const payload = buildPipelineCopyPayload\(response\.data\)\s*await createPipeline\(payload\)/)
 })
 
 test('pipeline detail execution tasks use single-line meta and isolated auxiliary blocks', async () => {

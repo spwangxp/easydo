@@ -4185,52 +4185,6 @@ type rerunPreviewHistoricalParam struct {
 	Value    interface{}
 }
 
-func buildHistoricalParamKeyLookup(run models.PipelineRun) map[string]struct{} {
-	lookup := make(map[string]struct{})
-
-	if trimmed := strings.TrimSpace(run.PipelineSnapshot); trimmed != "" {
-		var snapshot PipelineConfig
-		if err := json.Unmarshal([]byte(trimmed), &snapshot); err == nil {
-			for _, node := range snapshot.Nodes {
-				nodeID := strings.TrimSpace(node.ID)
-				if nodeID == "" {
-					continue
-				}
-				for _, param := range node.DefinitionParams {
-					paramKey := strings.TrimSpace(param.Key)
-					if !param.IsFlexible || paramKey == "" {
-						continue
-					}
-					lookup[nodeID+"+"+paramKey] = struct{}{}
-				}
-			}
-		}
-	}
-
-	var runSnapshot struct {
-		Inputs map[string]map[string]interface{} `json:"inputs"`
-	}
-	if trimmed := strings.TrimSpace(run.RunConfig); trimmed != "" {
-		if err := json.Unmarshal([]byte(trimmed), &runSnapshot); err == nil {
-			for nodeID, params := range runSnapshot.Inputs {
-				trimmedNodeID := strings.TrimSpace(nodeID)
-				if trimmedNodeID == "" {
-					continue
-				}
-				for paramKey := range params {
-					trimmedParamKey := strings.TrimSpace(paramKey)
-					if trimmedParamKey == "" {
-						continue
-					}
-					lookup[trimmedNodeID+"+"+trimmedParamKey] = struct{}{}
-				}
-			}
-		}
-	}
-
-	return lookup
-}
-
 func buildRerunPreviewFailure(code, message string) rerunPreviewResponse {
 	return rerunPreviewResponse{
 		CanEnterRunDialog: false,
@@ -4318,19 +4272,7 @@ func buildRunRerunPreview(run models.PipelineRun, currentConfig PipelineConfig) 
 	if err != nil {
 		return buildRerunPreviewFailure("historical_resolved_inputs_unavailable", "历史运行缺少有效的 resolved_nodes_json，无法生成 rerun preview")
 	}
-	historicalParamKeyLookup := buildHistoricalParamKeyLookup(run)
-	filteredHistoricalParams := make([]rerunPreviewHistoricalParam, 0, len(historicalParams))
-	if len(historicalParamKeyLookup) == 0 {
-		filteredHistoricalParams = append(filteredHistoricalParams, historicalParams...)
-	} else {
-		for _, historical := range historicalParams {
-			if _, exists := historicalParamKeyLookup[historical.NodeID+"+"+historical.ParamKey]; !exists {
-				continue
-			}
-			filteredHistoricalParams = append(filteredHistoricalParams, historical)
-		}
-	}
-	if len(filteredHistoricalParams) == 0 {
+	if len(historicalParams) == 0 {
 		return buildRerunPreviewFailure("historical_resolved_inputs_empty", "历史运行未形成可复用的最终参数，无法生成 rerun preview")
 	}
 	if len(currentConfig.Nodes) == 0 {
@@ -4359,7 +4301,7 @@ func buildRunRerunPreview(run models.PipelineRun, currentConfig PipelineConfig) 
 		PrefillInputs:     map[string]map[string]interface{}{},
 	}
 
-	for _, historical := range filteredHistoricalParams {
+	for _, historical := range historicalParams {
 		matchKey := historical.NodeID + "+" + historical.ParamKey
 		node, nodeExists := nodeLookup[historical.NodeID]
 		if !nodeExists {

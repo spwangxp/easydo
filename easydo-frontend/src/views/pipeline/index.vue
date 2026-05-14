@@ -132,12 +132,22 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="132" fixed="right">
+        <el-table-column label="操作" width="168" fixed="right">
           <template #default="{ row }">
             <div class="table-actions">
               <el-tooltip content="运行流水线" placement="top">
                 <el-icon class="action-icon" @click="handleRun(row)">
                   <VideoPlay />
+                </el-icon>
+              </el-tooltip>
+              <el-tooltip content="复制" placement="top">
+                <el-icon
+                  class="action-icon"
+                  :class="{ 'is-loading': copyingPipelineId === row.id }"
+                  @click="handleCopy(row)"
+                >
+                  <Loading v-if="copyingPipelineId === row.id" />
+                  <DocumentCopy v-else />
                 </el-icon>
               </el-tooltip>
               <el-tooltip :content="row.is_favorited ? '取消收藏' : '收藏'" placement="top">
@@ -164,11 +174,12 @@
     <!-- 新建流水线对话框 -->
     <el-dialog
       v-model="dialogVisible"
-      title="新建流水线"
+      :title="dialogTitle"
       width="640px"
       :close-on-click-modal="false"
       :append-to-body="true"
       top="100px"
+      @closed="resetPipelineDialogState"
     >
 
       <el-form
@@ -183,6 +194,7 @@
         
         <el-form-item label="所属项目" prop="project_id">
           <el-select v-model="pipelineForm.project_id" placeholder="请选择项目" style="width: 100%">
+            <el-option label="无项目" :value="0" />
             <el-option
               v-for="project in projectList"
               :key="project.id"
@@ -213,7 +225,7 @@
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="submitLoading" @click="handleSubmit">
-          创建
+          {{ submitButtonText }}
         </el-button>
       </template>
     </el-dialog>
@@ -344,10 +356,12 @@ import {
   VideoPlay,
   Delete,
   Warning,
-  Clock
+  Clock,
+  DocumentCopy
 } from '@element-plus/icons-vue'
 import { getPipelineList, getPipelineDetail, getPipelineTaskTypes, createPipeline, runPipeline, toggleFavorite as apiToggleFavorite, deletePipeline } from '@/api/pipeline'
 import { getProjectList } from '@/api/project'
+import { buildPipelineCopyPayload } from './copyPayload'
 import { buildRunInputsPayload, createRunInputs, getManualRunNodes } from './runtimeConfig'
 const activeTab = ref('all')
 const searchKeyword = ref('')
@@ -364,6 +378,8 @@ const tabCounts = ref({
 const dialogVisible = ref(false)
 const submitLoading = ref(false)
 const pipelineFormRef = ref(null)
+const dialogMode = ref('create')
+const copiedDefinitionJson = ref('')
 const pipelineForm = reactive({
   name: '',
   project_id: '',
@@ -395,6 +411,7 @@ const pipelineRules = {
 
 const pipelineList = ref([])
 const projectList = ref([])
+const copyingPipelineId = ref(null)
 const runDialogVisible = ref(false)
 const runLoading = ref(false)
 const runningPipeline = ref(null)
@@ -407,6 +424,8 @@ const manualRunNodes = computed(() => getManualRunNodes({
   ...runningPipeline.value,
   task_definitions: pipelineTaskDefinitions.value
 }))
+const dialogTitle = computed(() => (dialogMode.value === 'copy' ? '复制流水线' : '新建流水线'))
+const submitButtonText = computed(() => (dialogMode.value === 'copy' ? '复制' : '创建'))
 
 // 加载项目列表
 const fetchProjects = async () => {
@@ -545,29 +564,50 @@ const getBuildStatusText = (status) => {
   }
 }
 
-// 新建流水线
-const handleCreate = () => {
+const resetPipelineForm = () => {
   pipelineForm.name = ''
   pipelineForm.project_id = ''
   pipelineForm.environment = 'development'
   pipelineForm.description = ''
+}
+
+const resetPipelineDialogState = () => {
+  dialogMode.value = 'create'
+  copiedDefinitionJson.value = ''
+  resetPipelineForm()
+  pipelineFormRef.value?.clearValidate?.()
+}
+
+// 新建流水线
+const handleCreate = () => {
+  dialogMode.value = 'create'
+  copiedDefinitionJson.value = ''
+  resetPipelineForm()
+  pipelineFormRef.value?.clearValidate?.()
   dialogVisible.value = true
 }
 
 const handleSubmit = async () => {
   if (!pipelineFormRef.value) return
-  
+
   await pipelineFormRef.value.validate(async (valid) => {
     if (valid) {
       submitLoading.value = true
       try {
-        await createPipeline(pipelineForm)
-        ElMessage.success('创建成功')
+        const payload = {
+          ...pipelineForm,
+          ...(dialogMode.value === 'copy' && copiedDefinitionJson.value
+            ? { definition_json: copiedDefinitionJson.value }
+            : {})
+        }
+        await createPipeline(payload)
+        ElMessage.success(dialogMode.value === 'copy' ? '复制成功' : '创建成功')
         dialogVisible.value = false
-        fetchPipelines()
+        await fetchPipelines()
       } catch (error) {
-        console.error('创建流水线失败:', error)
-        ElMessage.error('创建失败')
+        console.error(dialogMode.value === 'copy' ? '复制流水线失败:' : '创建流水线失败:', error)
+        const message = error?.response?.data?.message || error?.response?.data?.error || error?.message || (dialogMode.value === 'copy' ? '复制失败' : '创建失败')
+        ElMessage.error(message)
       } finally {
         submitLoading.value = false
       }
@@ -635,6 +675,35 @@ const confirmRun = async () => {
     ElMessage.error('运行失败')
   } finally {
     runLoading.value = false
+  }
+}
+
+const handleCopy = async (row) => {
+  if (!row?.id || copyingPipelineId.value !== null) return
+
+  copyingPipelineId.value = row.id
+  try {
+    const response = await getPipelineDetail(row.id)
+    if (response.code !== 200 || !response.data) {
+      ElMessage.error(response.message || '获取流水线详情失败')
+      return
+    }
+
+    const payload = buildPipelineCopyPayload(response.data)
+    dialogMode.value = 'copy'
+    copiedDefinitionJson.value = payload.definition_json
+    pipelineForm.name = payload.name ?? ''
+    pipelineForm.project_id = payload.project_id ?? ''
+    pipelineForm.environment = payload.environment ?? 'development'
+    pipelineForm.description = payload.description ?? ''
+    pipelineFormRef.value?.clearValidate?.()
+    dialogVisible.value = true
+  } catch (error) {
+    console.error('复制流水线失败:', error)
+    const message = error?.response?.data?.message || error?.response?.data?.error || error?.message || '复制失败'
+    ElMessage.error(message)
+  } finally {
+    copyingPipelineId.value = null
   }
 }
 
@@ -955,6 +1024,14 @@ const handleDeleteConfirm = async () => {
           color: $warning-color;
           border-color: rgba($warning-color, 0.34);
           background: $warning-light;
+        }
+
+        &.is-loading {
+          cursor: default;
+          color: var(--primary-color);
+          background: var(--primary-lighter);
+          border-color: rgba($primary-color, 0.26);
+          transform: none;
         }
 
         &.danger:hover {
