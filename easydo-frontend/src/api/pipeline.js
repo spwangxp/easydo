@@ -83,6 +83,20 @@ export function getPipelineRunDetail(id, runId) {
   })
 }
 
+export function getPipelineRunParameterView(id, runId) {
+  return request({
+    url: `/pipelines/${id}/runs/${runId}/parameter-view`,
+    method: 'get'
+  })
+}
+
+export function previewPipelineRunRerun(id, runId) {
+  return request({
+    url: `/pipelines/${id}/runs/${runId}/rerun-preview`,
+    method: 'post'
+  })
+}
+
 export function getPipelineStatistics(id, params) {
   return request({
     url: `/pipelines/${id}/statistics`,

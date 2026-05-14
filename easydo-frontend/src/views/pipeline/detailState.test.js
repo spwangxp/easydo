@@ -1,6 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseJSONField } from './runtimeConfig.js'
+import {
+  createRunInputs,
+  createRunInputsFromRerunPreview,
+  extractManualRunNodes,
+  buildRunInputsPayload,
+  normalizeRunParameterViewPayload,
+  normalizeRerunPreviewPayload,
+  parseJSONField
+} from './runtimeConfig.js'
 
 const buildRunTasksFromRunRecord = (run) => {
   const resolvedNodes = parseJSONField(run?.resolved_nodes_json, []) || []
@@ -166,4 +174,316 @@ test('normalizeRunTaskFromApi preserves ignore_failure exit code and duration fr
   assert.equal(normalized.ignore_failure, true)
   assert.equal(normalized.exit_code, 9)
   assert.equal(normalized.duration, 21)
+})
+
+test('createRunInputsFromRerunPreview builds run-form inputs from prefill_inputs', () => {
+  const manualRunNodes = [
+    {
+      node_id: 'node_1',
+      node_name: 'Build',
+      params: [
+        { key: 'script', value: 'echo current' },
+        { key: 'git_ref', value: 'main' }
+      ]
+    },
+    {
+      node_id: 'node_2',
+      node_name: 'Deploy',
+      params: [
+        { key: 'image', value: 'nginx:latest' }
+      ]
+    }
+  ]
+
+  const rerunPreview = normalizeRerunPreviewPayload({
+    prefill_inputs: {
+      node_1: {
+        script: 'echo historical',
+        git_ref: 'release/2026.05'
+      },
+      node_2: {
+        image: 'nginx:1.27'
+      }
+    }
+  })
+
+  assert.deepEqual(createRunInputsFromRerunPreview(manualRunNodes, rerunPreview), {
+    node_1: {
+      script: 'echo historical',
+      git_ref: 'release/2026.05'
+    },
+    node_2: {
+      image: 'nginx:1.27'
+    }
+  })
+})
+
+test('createRunInputsFromRerunPreview preserves current manual-run node structure and ignores unknown keys', () => {
+  const manualRunNodes = [
+    {
+      node_id: 'node_1',
+      node_name: 'Build',
+      params: [
+        { key: 'script', value: 'echo current' },
+        { key: 'args', value: ['--prod'] }
+      ]
+    }
+  ]
+
+  const rerunPreview = normalizeRerunPreviewPayload({
+    prefill_inputs: {
+      node_1: {
+        script: 'echo historical',
+        extra: 'ignored'
+      },
+      node_9: {
+        script: 'missing node ignored'
+      }
+    }
+  })
+
+  const inputs = createRunInputsFromRerunPreview(manualRunNodes, rerunPreview)
+
+  assert.deepEqual(inputs, {
+    node_1: {
+      script: 'echo historical',
+      args: ['--prod']
+    }
+  })
+  assert.equal(Object.prototype.hasOwnProperty.call(inputs.node_1, 'extra'), false)
+})
+
+test('createRunInputsFromRerunPreview preserves existing run dialog data shape when no rerun preview is involved', () => {
+  const manualRunNodes = [
+    {
+      node_id: 'node_1',
+      node_name: 'Build',
+      params: [
+        { key: 'script', value: 'echo current' },
+        { key: 'enabled', value: true }
+      ]
+    }
+  ]
+
+  assert.deepEqual(createRunInputsFromRerunPreview(manualRunNodes, null), createRunInputs(manualRunNodes))
+  assert.deepEqual(createRunInputs(manualRunNodes), {
+    node_1: {
+      script: 'echo current',
+      enabled: true
+    }
+  })
+})
+
+test('createRunInputsFromRerunPreview ignores malformed prefill payloads and clones array values', () => {
+  const manualRunNodes = [
+    {
+      node_id: 'node_1',
+      node_name: 'Build',
+      params: [
+        { key: 'script', value: 'echo current' },
+        { key: 'args', value: ['--prod'] }
+      ]
+    }
+  ]
+
+  const previewArgs = ['--debug']
+  const inputs = createRunInputsFromRerunPreview(manualRunNodes, {
+    prefill_inputs: {
+      node_1: {
+        script: null,
+        args: previewArgs,
+        unset: undefined
+      },
+      node_2: ['ignored-array-node-payload']
+    },
+    failure: []
+  })
+
+  assert.deepEqual(inputs, {
+    node_1: {
+      script: 'echo current',
+      args: ['--debug']
+    }
+  })
+  assert.notStrictEqual(inputs.node_1.args, previewArgs)
+})
+
+test('normalizeRunParameterViewPayload keeps runtime and default params as separate node sections', () => {
+  const normalized = normalizeRunParameterViewPayload({
+    nodes: [
+      {
+        node_id: 'node_1',
+        node_name: 'Build',
+        runtime_params: [
+          { key: 'script', label: '脚本', value: 'echo historical' },
+          { key: 'args', label: '参数', value: ['--prod'] }
+        ],
+        default_params: [
+          { key: 'script', label: '脚本', value: 'echo default' },
+          { key: 'image', label: '镜像', value: 'node:20' }
+        ]
+      },
+      {
+        node_id: 'node_2',
+        runtime_params: null,
+        default_params: ['ignored']
+      }
+    ]
+  })
+
+  assert.deepEqual(normalized, {
+    nodes: [
+      {
+        node_id: 'node_1',
+        node_name: 'Build',
+        runtime_params: {
+          script: 'echo historical',
+          args: ['--prod']
+        },
+        default_params: {
+          script: 'echo default',
+          image: 'node:20'
+        }
+      },
+      {
+        node_id: 'node_2',
+        node_name: 'node_2',
+        runtime_params: {},
+        default_params: {}
+      }
+    ]
+  })
+})
+
+test('extractManualRunNodes uses task version specific field schema and preserves richer input types', () => {
+  const manualRunNodes = extractManualRunNodes({
+    nodes: [
+      {
+        node_id: 'node_1',
+        node_name: 'Build',
+        task_key: 'shell',
+        task_version: 2,
+        params: [
+          { key: 'script', value: 'echo current', is_flexible: true },
+          { key: 'advanced', value: { retries: 2 }, is_flexible: true },
+          { key: 'dry_run', value: true, is_flexible: true },
+          { key: 'targets', value: ['prod'], is_flexible: true }
+        ]
+      }
+    ]
+  }, [
+    {
+      task_key: 'shell',
+      task_version: 1,
+      fields_schema: [
+        { key: 'script', label: '脚本 V1', type: 'text' }
+      ]
+    },
+    {
+      task_key: 'shell',
+      task_version: 2,
+      fields_schema: [
+        { key: 'script', label: '脚本', type: 'text', ui_component: 'textarea' },
+        { key: 'advanced', label: '高级配置', type: 'json' },
+        { key: 'dry_run', label: '试运行', type: 'boolean' },
+        { key: 'targets', label: '目标环境', type: 'multiselect', options: ['prod', 'staging'] }
+      ]
+    }
+  ])
+
+  assert.deepEqual(manualRunNodes, [
+    {
+      node_id: 'node_1',
+      node_name: 'Build',
+      params: [
+        {
+          key: 'script',
+          label: '脚本',
+          value: 'echo current',
+          input_type: 'textarea',
+          placeholder: '',
+          options: []
+        },
+        {
+          key: 'advanced',
+          label: '高级配置',
+          value: { retries: 2 },
+          input_type: 'textarea',
+          placeholder: '',
+          options: []
+        },
+        {
+          key: 'dry_run',
+          label: '试运行',
+          value: true,
+          input_type: 'boolean',
+          placeholder: '',
+          options: []
+        },
+        {
+          key: 'targets',
+          label: '目标环境',
+          value: ['prod'],
+          input_type: 'checkbox_group',
+          placeholder: '',
+          options: [
+            { label: 'prod', value: 'prod' },
+            { label: 'staging', value: 'staging' }
+          ]
+        }
+      ]
+    }
+  ])
+})
+
+test('createRunInputs clones arrays and keeps object values for rerun capable params', () => {
+  const sourceObject = { retries: 2 }
+  const sourceArray = ['prod']
+  const inputs = createRunInputs([
+    {
+      node_id: 'node_1',
+      params: [
+        { key: 'advanced', value: sourceObject },
+        { key: 'targets', value: sourceArray }
+      ]
+    }
+  ])
+
+  assert.deepEqual(inputs, {
+    node_1: {
+      advanced: sourceObject,
+      targets: ['prod']
+    }
+  })
+  assert.notStrictEqual(inputs.node_1.targets, sourceArray)
+})
+
+test('buildRunInputsPayload omits empty values and preserves filled structured values', () => {
+  const payload = buildRunInputsPayload([
+    {
+      node_id: 'node_1',
+      params: [
+        { key: 'script' },
+        { key: 'advanced' },
+        { key: 'targets' },
+        { key: 'skip' }
+      ]
+    }
+  ], {
+    node_1: {
+      script: '',
+      advanced: { retries: 3 },
+      targets: ['prod'],
+      skip: null
+    }
+  })
+
+  assert.deepEqual(payload, {
+    inputs: {
+      node_1: {
+        advanced: { retries: 3 },
+        targets: ['prod']
+      }
+    }
+  })
 })

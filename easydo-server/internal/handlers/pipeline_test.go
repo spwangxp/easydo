@@ -1268,6 +1268,300 @@ func TestCreatePipelineRunRecordWithSnapshot_PopulatesBindingsResolvedNodesAndLi
 	}
 }
 
+func TestBuildHistoricalRunParameterView_SeparatesRuntimeAndDefaultsAndMarksOverrides(t *testing.T) {
+	run := models.PipelineRun{
+		BaseModel:     models.BaseModel{ID: 42},
+		PipelineID:    7,
+		BuildNumber:   3,
+		TriggerType:   "manual",
+		TriggerUser:   "alice",
+		TriggerSource: "pipeline_detail",
+		RunConfig: `{
+			"trigger": {"type": "manual", "source": "pipeline_detail", "operator": "alice"},
+			"inputs": {
+				"node_1": {
+					"script": "echo override",
+					"git_ref": "release/2026.05"
+				},
+				"node_2": {
+					"image": "nginx:1.27"
+				}
+			}
+		}`,
+		PipelineSnapshot: `{
+			"nodes": [
+				{
+					"node_id": "node_1",
+					"node_name": "Build",
+					"params": [
+						{"key": "script", "label": "脚本", "value": "echo default", "is_flexible": true},
+						{"key": "git_ref", "label": "分支", "value": "main", "is_flexible": true},
+						{"key": "git_repo_url", "label": "仓库", "value": "https://example.com/repo.git", "is_flexible": false}
+					]
+				},
+				{
+					"node_id": "node_2",
+					"node_name": "Deploy",
+					"params": [
+						{"key": "image", "label": "镜像", "value": "nginx:latest", "is_flexible": true}
+					]
+				}
+			]
+		}`,
+	}
+
+	view := buildHistoricalRunParameterView(run)
+
+	if view.RunID != run.ID {
+		t.Fatalf("run_id=%d, want %d", view.RunID, run.ID)
+	}
+	if view.PipelineID != run.PipelineID {
+		t.Fatalf("pipeline_id=%d, want %d", view.PipelineID, run.PipelineID)
+	}
+	if view.BuildNumber != run.BuildNumber {
+		t.Fatalf("build_number=%d, want %d", view.BuildNumber, run.BuildNumber)
+	}
+
+	if view.Trigger.Type != "manual" || view.Trigger.Source != "pipeline_detail" || view.Trigger.Operator != "alice" {
+		t.Fatalf("unexpected trigger summary: %#v", view.Trigger)
+	}
+
+	if len(view.Nodes) != 2 {
+		t.Fatalf("nodes len=%d, want 2", len(view.Nodes))
+	}
+
+	if view.Nodes[0].NodeID != "node_1" || view.Nodes[0].NodeName != "Build" {
+		t.Fatalf("unexpected first node summary: %#v", view.Nodes[0])
+	}
+	firstRuntime := view.Nodes[0].RuntimeParams
+	if len(firstRuntime) != 2 {
+		t.Fatalf("runtime_params=%#v, want 2 entries", firstRuntime)
+	}
+	if firstRuntime[0].Key != "git_ref" || firstRuntime[0].Source != "pipeline_detail" {
+		t.Fatalf("unexpected first runtime param: %#v", firstRuntime[0])
+	}
+	if firstRuntime[1].Key != "script" || firstRuntime[1].Source != "pipeline_detail" {
+		t.Fatalf("unexpected second runtime param: %#v", firstRuntime[1])
+	}
+
+	firstDefaults := view.Nodes[0].DefaultParams
+	if len(firstDefaults) != 3 {
+		t.Fatalf("default_params=%#v, want 3 entries", firstDefaults)
+	}
+	if firstDefaults[0].Key != "git_ref" || firstDefaults[0].Overridden != true {
+		t.Fatalf("expected git_ref default overridden, got %#v", firstDefaults[0])
+	}
+	if firstDefaults[1].Key != "git_repo_url" || firstDefaults[1].Overridden != false {
+		t.Fatalf("expected git_repo_url default not overridden, got %#v", firstDefaults[1])
+	}
+	if firstDefaults[2].Key != "script" || firstDefaults[2].Overridden != true {
+		t.Fatalf("expected script default overridden, got %#v", firstDefaults[2])
+	}
+
+	secondRuntime := view.Nodes[1].RuntimeParams
+	if len(secondRuntime) != 1 {
+		t.Fatalf("second runtime_params=%#v, want 1 entry", secondRuntime)
+	}
+	if secondRuntime[0].Key != "image" || secondRuntime[0].Source != "pipeline_detail" {
+		t.Fatalf("unexpected second node runtime param: %#v", secondRuntime[0])
+	}
+	secondDefaults := view.Nodes[1].DefaultParams
+	if len(secondDefaults) != 1 || secondDefaults[0].Overridden != true {
+		t.Fatalf("unexpected second node default params: %#v", secondDefaults)
+	}
+}
+
+func TestBuildHistoricalRunParameterView_FallsBackToTriggerTypeForRuntimeSource(t *testing.T) {
+	run := models.PipelineRun{
+		BaseModel:   models.BaseModel{ID: 9},
+		PipelineID:  3,
+		BuildNumber: 8,
+		TriggerType: "schedule",
+		TriggerUser: "scheduler",
+		RunConfig: `{
+			"trigger": {"type": "schedule", "operator": "scheduler"},
+			"inputs": {"node_1": {"script": "echo scheduled"}}
+		}`,
+		PipelineSnapshot: `{"nodes":[{"node_id":"node_1","node_name":"Build","params":[{"key":"script","label":"脚本","value":"echo default","is_flexible":true}]}]}`,
+	}
+
+	view := buildHistoricalRunParameterView(run)
+	runtimeParams := view.Nodes[0].RuntimeParams
+	if len(runtimeParams) != 1 || runtimeParams[0].Source != "schedule" {
+		t.Fatalf("expected runtime source fallback to trigger type, got %#v", runtimeParams)
+	}
+	if view.Trigger.Source != "" {
+		t.Fatalf("expected empty trigger.source when absent in run data, got %#v", view.Trigger)
+	}
+}
+
+func TestBuildHistoricalRunParameterView_BestEffortOnMalformedSnapshots(t *testing.T) {
+	run := models.PipelineRun{
+		BaseModel:        models.BaseModel{ID: 15},
+		PipelineID:       11,
+		BuildNumber:      5,
+		TriggerType:      "webhook",
+		TriggerUser:      "gitlab-user",
+		TriggerSource:    "gitlab:push",
+		RunConfig:        `{"trigger":{"type":"webhook","source":"gitlab:push","operator":"gitlab-user"},"inputs":`,
+		PipelineSnapshot: `{"nodes":`,
+	}
+
+	view := buildHistoricalRunParameterView(run)
+	if view.RunID != run.ID {
+		t.Fatalf("run_id=%d, want %d", view.RunID, run.ID)
+	}
+	if view.Trigger.Type != "webhook" || view.Trigger.Source != "gitlab:push" || view.Trigger.Operator != "gitlab-user" {
+		t.Fatalf("unexpected trigger summary: %#v", view.Trigger)
+	}
+	if len(view.Nodes) != 0 {
+		t.Fatalf("expected no nodes for malformed snapshots, got %#v", view.Nodes)
+	}
+}
+
+func TestBuildHistoricalRunParameterView_ExtractsDefaultsFromLegacySnapshotNodeConfig(t *testing.T) {
+	run := models.PipelineRun{
+		BaseModel:   models.BaseModel{ID: 19},
+		PipelineID:  12,
+		BuildNumber: 6,
+		TriggerType: "manual",
+		TriggerUser: "legacy-user",
+		RunConfig:   `{"trigger":{"type":"manual","operator":"legacy-user"},"inputs":{"node_1":{"script":"echo override"}}}`,
+		PipelineSnapshot: `{
+			"version":"2.0",
+			"nodes":[
+				{
+					"id":"node_1",
+					"type":"shell",
+					"name":"Legacy Build",
+					"config":{"script":"echo default","workdir":"/workspace/app"}
+				},
+				{
+					"id":"node_2",
+					"type":"shell",
+					"name":"Legacy Test",
+					"params":{"command":"go test ./..."}
+				}
+			]
+		}`,
+	}
+
+	view := buildHistoricalRunParameterView(run)
+	if len(view.Nodes) != 2 {
+		t.Fatalf("nodes len=%d, want 2", len(view.Nodes))
+	}
+
+	firstDefaults := view.Nodes[0].DefaultParams
+	if len(firstDefaults) != 2 {
+		t.Fatalf("expected legacy config defaults, got %#v", firstDefaults)
+	}
+	if firstDefaults[0].Key != "script" || firstDefaults[0].Value != "echo default" || firstDefaults[0].Overridden != true {
+		t.Fatalf("unexpected first legacy default param: %#v", firstDefaults[0])
+	}
+	if firstDefaults[1].Key != "workdir" || firstDefaults[1].Value != "/workspace/app" || firstDefaults[1].Overridden != false {
+		t.Fatalf("unexpected second legacy default param: %#v", firstDefaults[1])
+	}
+
+	secondDefaults := view.Nodes[1].DefaultParams
+	if len(secondDefaults) != 1 {
+		t.Fatalf("expected legacy params defaults, got %#v", secondDefaults)
+	}
+	if secondDefaults[0].Key != "command" || secondDefaults[0].Value != "go test ./..." || secondDefaults[0].Overridden != false {
+		t.Fatalf("unexpected legacy params default param: %#v", secondDefaults[0])
+	}
+}
+
+func TestBuildHistoricalRunParameterView_LegacyDefaultsExcludeCredentialAndInternalKeys(t *testing.T) {
+	run := models.PipelineRun{
+		BaseModel:   models.BaseModel{ID: 21},
+		PipelineID:  13,
+		BuildNumber: 7,
+		TriggerType: "manual",
+		TriggerUser: "legacy-user",
+		PipelineSnapshot: `{
+			"version":"2.0",
+			"nodes":[
+				{
+					"id":"node_1",
+					"type":"git_clone",
+					"name":"Legacy Clone",
+					"config":{
+						"git_repo_url":"https://example.com/repo.git",
+						"git_ref":"main",
+						"credentials":{"repo_auth":{"credential_id":12}},
+						"credentials.repo_auth.credential_id":12,
+						"target_resource_id":88,
+						"deploy_resource_id":99
+					}
+				}
+			]
+		}`,
+	}
+
+	view := buildHistoricalRunParameterView(run)
+	nodes := view.Nodes
+	if len(nodes) != 1 {
+		t.Fatalf("nodes len=%d, want 1", len(nodes))
+	}
+	defaults := nodes[0].DefaultParams
+	if len(defaults) != 2 {
+		t.Fatalf("expected only visible legacy defaults, got %#v", defaults)
+	}
+	if defaults[0].Key != "git_ref" || defaults[1].Key != "git_repo_url" {
+		t.Fatalf("unexpected filtered legacy defaults: %#v", defaults)
+	}
+	for _, param := range defaults {
+		if strings.HasPrefix(param.Key, "credentials") || strings.HasSuffix(param.Key, "_resource_id") || param.Key == "target_resource_id" {
+			t.Fatalf("expected internal key filtered out, got %#v", param)
+		}
+	}
+}
+
+func TestBuildHistoricalRunParameterView_AppendsRuntimeOnlyNodesInStableOrder(t *testing.T) {
+	run := models.PipelineRun{
+		BaseModel:   models.BaseModel{ID: 23},
+		PipelineID:  14,
+		BuildNumber: 8,
+		TriggerType: "api",
+		TriggerUser: "api-user",
+		RunConfig: `{
+			"trigger": {"type": "api", "operator": "api-user"},
+			"inputs": {
+				"node_b": {"image": "nginx:1.27"},
+				"node_a": {"script": "echo hi"}
+			}
+		}`,
+		PipelineSnapshot: `{
+			"nodes": [
+				{
+					"node_id": "node_0",
+					"node_name": "Snapshot Node",
+					"params": [
+						{"key": "branch", "label": "分支", "value": "main", "is_flexible": true}
+					]
+				}
+			]
+		}`,
+	}
+
+	view := buildHistoricalRunParameterView(run)
+	if len(view.Nodes) != 3 {
+		t.Fatalf("nodes len=%d, want 3", len(view.Nodes))
+	}
+	if view.Nodes[0].NodeID != "node_0" || view.Nodes[1].NodeID != "node_a" || view.Nodes[2].NodeID != "node_b" {
+		t.Fatalf("unexpected node order: %#v", view.Nodes)
+	}
+	if len(view.Nodes[1].DefaultParams) != 0 || len(view.Nodes[2].DefaultParams) != 0 {
+		t.Fatalf("expected runtime-only nodes to keep empty default params, got %#v %#v", view.Nodes[1].DefaultParams, view.Nodes[2].DefaultParams)
+	}
+	if len(view.Nodes[1].RuntimeParams) != 1 || view.Nodes[1].RuntimeParams[0].Key != "script" {
+		t.Fatalf("unexpected runtime params for node_a: %#v", view.Nodes[1].RuntimeParams)
+	}
+	if len(view.Nodes[2].RuntimeParams) != 1 || view.Nodes[2].RuntimeParams[0].Key != "image" {
+		t.Fatalf("unexpected runtime params for node_b: %#v", view.Nodes[2].RuntimeParams)
+	}
+}
+
 func TestGetRunDetail_PrefersRunRecordResolvedNodesAndOutputs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
@@ -1333,6 +1627,320 @@ func TestGetRunDetail_PrefersRunRecordResolvedNodesAndOutputs(t *testing.T) {
 	if bytes.Contains(w.Body.Bytes(), []byte("task-row-commit")) {
 		t.Fatalf("expected run detail to avoid task result_data as truth, got %s", w.Body.String())
 	}
+}
+
+func TestGetRunParameterView_ReturnsHistoricalSnapshotView(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "parameter-view-user", models.WorkspaceRoleDeveloper)
+
+	pipeline := models.Pipeline{
+		Name:        "parameter-view-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Config:      `{"version":"2.0","nodes":[{"id":"node_1","type":"shell","name":"Build","config":{"script":"echo default"}}],"edges":[]}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID:      workspace.ID,
+		PipelineID:       pipeline.ID,
+		BuildNumber:      9,
+		Status:           models.PipelineRunStatusSuccess,
+		TriggerType:      "manual",
+		TriggerSource:    "pipeline_detail",
+		TriggerUser:      "alice",
+		RunConfig:        `{"trigger":{"type":"manual","source":"pipeline_detail","operator":"alice"},"inputs":{"node_1":{"script":"echo override"}}}`,
+		PipelineSnapshot: `{"nodes":[{"node_id":"node_1","node_name":"Build","params":[{"key":"script","label":"脚本","value":"echo default","is_flexible":true}]}]}`,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/pipelines/%d/runs/%d/parameter-view", pipeline.ID, run.ID), nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}, {Key: "run_id", Value: strconv.FormatUint(run.ID, 10)}}
+	c.Set("workspace_id", workspace.ID)
+
+	h.GetRunParameterView(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Code int                        `json:"code"`
+		Data historicalRunParameterView `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v body=%s", err, w.Body.String())
+	}
+	if resp.Code != 200 {
+		t.Fatalf("code=%d, want 200", resp.Code)
+	}
+	if resp.Data.RunID != run.ID || resp.Data.PipelineID != pipeline.ID {
+		t.Fatalf("unexpected run view ids: %#v", resp.Data)
+	}
+	if len(resp.Data.Nodes) != 1 || len(resp.Data.Nodes[0].RuntimeParams) != 1 {
+		t.Fatalf("unexpected historical parameter view: %#v", resp.Data)
+	}
+	if resp.Data.Nodes[0].RuntimeParams[0].Value != "echo override" {
+		t.Fatalf("runtime param value=%#v, want echo override", resp.Data.Nodes[0].RuntimeParams[0].Value)
+	}
+}
+
+func TestGetRunRerunPreview(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	type previewResponseEnvelope struct {
+		Code int                  `json:"code"`
+		Data rerunPreviewResponse `json:"data"`
+	}
+
+	makeRequest := func(t *testing.T, h *PipelineHandler, workspaceID, pipelineID, runID uint64) previewResponseEnvelope {
+		t.Helper()
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/runs/%d/rerun-preview", pipelineID, runID), nil)
+		c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipelineID, 10)}, {Key: "run_id", Value: strconv.FormatUint(runID, 10)}}
+		c.Set("workspace_id", workspaceID)
+		h.GetRunRerunPreview(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+		}
+		var resp previewResponseEnvelope
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal response failed: %v body=%s", err, w.Body.String())
+		}
+		return resp
+	}
+
+	makeDefinition := func(params string) string {
+		return fmt.Sprintf(`{"version":"2.0","nodes":[{"node_id":"node_1","node_name":"Build","type":"shell","task_key":"shell","params":%s},{"node_id":"node_2","node_name":"Deploy","type":"shell","task_key":"shell","params":[{"key":"image","label":"镜像","value":"nginx:latest","is_flexible":true}]}],"edges":[{"from":"node_1","to":"node_2"}]}`,
+			params,
+		)
+	}
+
+	t.Run("all match response returns can_enter_run_dialog true", func(t *testing.T) {
+		db := openHandlerTestDB(t)
+		h := &PipelineHandler{DB: db}
+		user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-all-match", models.WorkspaceRoleDeveloper)
+		pipeline := models.Pipeline{
+			Name:        "rerun-preview-all-match",
+			WorkspaceID: workspace.ID,
+			OwnerID:     user.ID,
+			Definition:  makeDefinition(`[{"key":"script","label":"脚本","value":"echo current","is_flexible":true},{"key":"git_ref","label":"分支","value":"main","is_flexible":true}]`),
+		}
+		if err := db.Create(&pipeline).Error; err != nil {
+			t.Fatalf("create pipeline failed: %v", err)
+		}
+		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, ResolvedNodes: `[{"node_id":"node_1","resolved_inputs":{"script":"echo historical","git_ref":"release/2026.05"}},{"node_id":"node_2","resolved_inputs":{"image":"nginx:1.27"}}]`}
+		if err := db.Create(&run).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
+
+		resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
+		if resp.Data.CanEnterRunDialog != true {
+			t.Fatalf("can_enter_run_dialog=%v, want true; resp=%#v", resp.Data.CanEnterRunDialog, resp.Data)
+		}
+		if resp.Data.MatchKey != "node_id+param_key" {
+			t.Fatalf("match_key=%q", resp.Data.MatchKey)
+		}
+		if len(resp.Data.Matched) != 3 || len(resp.Data.Mismatched) != 0 {
+			t.Fatalf("unexpected matches/mismatches: %#v", resp.Data)
+		}
+		for _, item := range resp.Data.Matched {
+			if item.ParamKey == "shell" {
+				t.Fatalf("expected internal executor field to be excluded, got %#v", resp.Data.Matched)
+			}
+		}
+		if got := resp.Data.PrefillInputs["node_1"]["script"]; got != "echo historical" {
+			t.Fatalf("prefill node_1.script=%#v", got)
+		}
+		if got := resp.Data.PrefillInputs["node_2"]["image"]; got != "nginx:1.27" {
+			t.Fatalf("prefill node_2.image=%#v", got)
+		}
+		if resp.Data.Failure != nil {
+			t.Fatalf("unexpected failure payload: %#v", resp.Data.Failure)
+		}
+	})
+
+	t.Run("missing node mismatch reason node_not_found", func(t *testing.T) {
+		db := openHandlerTestDB(t)
+		h := &PipelineHandler{DB: db}
+		user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-missing-node", models.WorkspaceRoleDeveloper)
+		pipeline := models.Pipeline{Name: "rerun-preview-missing-node", WorkspaceID: workspace.ID, OwnerID: user.ID, Definition: makeDefinition(`[{"key":"script","label":"脚本","value":"echo current","is_flexible":true}]`)}
+		if err := db.Create(&pipeline).Error; err != nil {
+			t.Fatalf("create pipeline failed: %v", err)
+		}
+		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, ResolvedNodes: `[{"node_id":"missing_node","resolved_inputs":{"script":"echo historical"}}]`}
+		if err := db.Create(&run).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
+		resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
+		if resp.Data.CanEnterRunDialog {
+			t.Fatalf("expected blocked dialog, got %#v", resp.Data)
+		}
+		if len(resp.Data.Mismatched) != 1 || resp.Data.Mismatched[0].Reason != "node_not_found" {
+			t.Fatalf("unexpected mismatches: %#v", resp.Data.Mismatched)
+		}
+	})
+
+	t.Run("missing param mismatch reason param_not_found", func(t *testing.T) {
+		db := openHandlerTestDB(t)
+		h := &PipelineHandler{DB: db}
+		user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-missing-param", models.WorkspaceRoleDeveloper)
+		pipeline := models.Pipeline{Name: "rerun-preview-missing-param", WorkspaceID: workspace.ID, OwnerID: user.ID, Definition: makeDefinition(`[{"key":"script","label":"脚本","value":"echo current","is_flexible":true}]`)}
+		if err := db.Create(&pipeline).Error; err != nil {
+			t.Fatalf("create pipeline failed: %v", err)
+		}
+		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, ResolvedNodes: `[{"node_id":"node_1","resolved_inputs":{"git_ref":"release/2026.05"}}]`}
+		if err := db.Create(&run).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
+		resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
+		if len(resp.Data.Mismatched) != 1 || resp.Data.Mismatched[0].Reason != "param_not_found" {
+			t.Fatalf("unexpected mismatches: %#v", resp.Data.Mismatched)
+		}
+	})
+
+	t.Run("params present historically but not eligible in current manual run set returns not_manual_run_param", func(t *testing.T) {
+		db := openHandlerTestDB(t)
+		h := &PipelineHandler{DB: db}
+		user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-not-manual", models.WorkspaceRoleDeveloper)
+		pipeline := models.Pipeline{Name: "rerun-preview-not-manual", WorkspaceID: workspace.ID, OwnerID: user.ID, Definition: makeDefinition(`[{"key":"script","label":"脚本","value":"echo current","is_flexible":false}]`)}
+		if err := db.Create(&pipeline).Error; err != nil {
+			t.Fatalf("create pipeline failed: %v", err)
+		}
+		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, ResolvedNodes: `[{"node_id":"node_1","resolved_inputs":{"script":"echo historical"}}]`}
+		if err := db.Create(&run).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
+		resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
+		if len(resp.Data.Mismatched) != 1 || resp.Data.Mismatched[0].Reason != "not_manual_run_param" {
+			t.Fatalf("unexpected mismatches: %#v", resp.Data.Mismatched)
+		}
+	})
+
+	t.Run("malformed or missing resolved nodes returns explicit preview failure and no runnable prefill payload", func(t *testing.T) {
+		for _, raw := range []string{"", `{"bad":true}`, `[{"node_id":"node_1"}]`, `[{"node_id":"node_1","resolved_inputs":{"script":"echo one"}},{"node_id":"node_1","resolved_inputs":{"script":"echo two"}}]`} {
+			db := openHandlerTestDB(t)
+			h := &PipelineHandler{DB: db}
+			user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-bad-resolved-"+strconv.Itoa(len(raw)), models.WorkspaceRoleDeveloper)
+			pipeline := models.Pipeline{Name: "rerun-preview-bad-resolved", WorkspaceID: workspace.ID, OwnerID: user.ID, Definition: makeDefinition(`[{"key":"script","label":"脚本","value":"echo current","is_flexible":true}]`)}
+			if err := db.Create(&pipeline).Error; err != nil {
+				t.Fatalf("create pipeline failed: %v", err)
+			}
+			run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, ResolvedNodes: raw}
+			if err := db.Create(&run).Error; err != nil {
+				t.Fatalf("create run failed: %v", err)
+			}
+			resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
+			if resp.Data.CanEnterRunDialog {
+				t.Fatalf("expected blocked dialog for raw=%q, got %#v", raw, resp.Data)
+			}
+			if resp.Data.Failure == nil || resp.Data.Failure.Code != "historical_resolved_inputs_unavailable" {
+				t.Fatalf("unexpected failure for raw=%q: %#v", raw, resp.Data.Failure)
+			}
+			if len(resp.Data.PrefillInputs) != 0 || len(resp.Data.Matched) != 0 {
+				t.Fatalf("expected no runnable payload for raw=%q, got %#v", raw, resp.Data)
+			}
+		}
+	})
+
+	t.Run("executor-only resolved fields are ignored during rerun preview matching", func(t *testing.T) {
+		db := openHandlerTestDB(t)
+		h := &PipelineHandler{DB: db}
+		user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-ignore-executor-fields", models.WorkspaceRoleDeveloper)
+		pipeline := models.Pipeline{Name: "rerun-preview-ignore-executor-fields", WorkspaceID: workspace.ID, OwnerID: user.ID, Definition: makeDefinition(`[{"key":"script","label":"脚本","value":"echo current","is_flexible":true}]`)}
+		if err := db.Create(&pipeline).Error; err != nil {
+			t.Fatalf("create pipeline failed: %v", err)
+		}
+		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, RunConfig: `{"inputs":{"node_1":{"script":"echo historical"}}}`, PipelineSnapshot: `{"version":"2.0","nodes":[{"node_id":"node_1","node_name":"Build","type":"shell","task_key":"shell","params":[{"key":"script","label":"脚本","value":"${inputs.script}","is_flexible":true}]}],"edges":[]}`, ResolvedNodes: `[{"node_id":"node_1","resolved_inputs":{"script":"echo historical","shell":"sh"}}]`}
+		if err := db.Create(&run).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
+		resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
+		if !resp.Data.CanEnterRunDialog {
+			t.Fatalf("expected runnable dialog, got %#v", resp.Data)
+		}
+		if len(resp.Data.Mismatched) != 0 {
+			t.Fatalf("expected executor-only fields to be ignored, got %#v", resp.Data.Mismatched)
+		}
+		if got := resp.Data.PrefillInputs["node_1"]["script"]; got != "echo historical" {
+			t.Fatalf("prefill node_1.script=%#v", got)
+		}
+	})
+
+	t.Run("empty resolved inputs returns explicit preview failure and blocked run dialog", func(t *testing.T) {
+		db := openHandlerTestDB(t)
+		h := &PipelineHandler{DB: db}
+		user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-empty-resolved-inputs", models.WorkspaceRoleDeveloper)
+		pipeline := models.Pipeline{Name: "rerun-preview-empty-resolved-inputs", WorkspaceID: workspace.ID, OwnerID: user.ID, Definition: makeDefinition(`[{"key":"script","label":"脚本","value":"echo current","is_flexible":true}]`)}
+		if err := db.Create(&pipeline).Error; err != nil {
+			t.Fatalf("create pipeline failed: %v", err)
+		}
+		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, ResolvedNodes: `[{"node_id":"node_1","resolved_inputs":{}}]`}
+		if err := db.Create(&run).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
+		resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
+		if resp.Data.CanEnterRunDialog {
+			t.Fatalf("expected blocked dialog, got %#v", resp.Data)
+		}
+		if resp.Data.Failure == nil || resp.Data.Failure.Code != "historical_resolved_inputs_empty" {
+			t.Fatalf("unexpected failure: %#v", resp.Data.Failure)
+		}
+		if len(resp.Data.PrefillInputs) != 0 || len(resp.Data.Matched) != 0 || len(resp.Data.Mismatched) != 0 {
+			t.Fatalf("expected empty preview payload, got %#v", resp.Data)
+		}
+	})
+
+	t.Run("missing current pipeline definition returns explicit preview failure and blocked run dialog", func(t *testing.T) {
+		db := openHandlerTestDB(t)
+		h := &PipelineHandler{DB: db}
+		user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-no-definition", models.WorkspaceRoleDeveloper)
+		pipeline := models.Pipeline{Name: "rerun-preview-no-definition", WorkspaceID: workspace.ID, OwnerID: user.ID}
+		if err := db.Create(&pipeline).Error; err != nil {
+			t.Fatalf("create pipeline failed: %v", err)
+		}
+		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, ResolvedNodes: `[{"node_id":"node_1","resolved_inputs":{"script":"echo historical"}}]`}
+		if err := db.Create(&run).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
+		resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
+		if resp.Data.CanEnterRunDialog {
+			t.Fatalf("expected blocked dialog, got %#v", resp.Data)
+		}
+		if resp.Data.Failure == nil || resp.Data.Failure.Code != "current_pipeline_definition_unavailable" {
+			t.Fatalf("unexpected failure: %#v", resp.Data.Failure)
+		}
+	})
+
+	t.Run("missing current manual run definition returns explicit preview failure and blocked run dialog", func(t *testing.T) {
+		db := openHandlerTestDB(t)
+		h := &PipelineHandler{DB: db}
+		user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-no-manual-definition", models.WorkspaceRoleDeveloper)
+		pipeline := models.Pipeline{Name: "rerun-preview-no-manual-definition", WorkspaceID: workspace.ID, OwnerID: user.ID, Definition: `{"version":"2.0","nodes":[{"node_id":"node_1","node_name":"Build","type":"shell","task_key":"shell","params":[{"key":"script","label":"脚本","value":"echo current","is_flexible":false}]}],"edges":[]}`}
+		if err := db.Create(&pipeline).Error; err != nil {
+			t.Fatalf("create pipeline failed: %v", err)
+		}
+		run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, ResolvedNodes: `[{"node_id":"node_1","resolved_inputs":{"script":"echo historical"}}]`}
+		if err := db.Create(&run).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
+		resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
+		if resp.Data.CanEnterRunDialog {
+			t.Fatalf("expected blocked dialog, got %#v", resp.Data)
+		}
+		if resp.Data.Failure == nil || resp.Data.Failure.Code != "current_manual_run_definition_unavailable" {
+			t.Fatalf("unexpected failure: %#v", resp.Data.Failure)
+		}
+	})
 }
 
 func TestGetRunTasks_UsesUpstreamNodeIgnoreFailureForBlockedStatus(t *testing.T) {
@@ -1563,7 +2171,7 @@ func TestCreatePipeline_PersistsDefinitionJSONAsSourceOfTruth(t *testing.T) {
 		"name":"definition-pipeline",
 		"environment":"development",
 		"config":"{\"version\":\"2.0\",\"nodes\":[{\"id\":\"legacy\",\"type\":\"shell\",\"name\":\"Legacy\",\"config\":{\"script\":\"echo legacy\"}}],\"edges\":[]}",
-		"definition_json":"{\"version\":\"2.0\",\"nodes\":[{\"node_id\":\"node_1\",\"node_name\":\"Build\",\"task_key\":\"shell\",\"task_version\":1,\"params\":[{\"key\":\"script\",\"label\":\"脚本\",\"value\":\"echo definition\",\"is_flexible\":true}],\"credential_bindings\":{},\"resource_bindings\":{},\"metadata\":{\"x\":120,\"y\":220}}],\"edges\":[],\"triggers\":[],\"metadata\":{\"version\":\"2.0\"}}"
+		"definition_json":"{\"version\":\"2.0\",\"nodes\":[{\"node_id\":\"node_1\",\"node_name\":\"Build\",\"type\":\"shell\",\"task_key\":\"shell\",\"task_version\":1,\"timeout\":300,\"params\":[{\"key\":\"script\",\"label\":\"脚本\",\"value\":\"echo definition\",\"is_flexible\":true}],\"credential_bindings\":{},\"resource_bindings\":{},\"metadata\":{\"x\":120,\"y\":220}}],\"edges\":[],\"triggers\":[],\"metadata\":{\"version\":\"2.0\"}}"
 	}`)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

@@ -84,6 +84,8 @@ func InitRouter() *gin.Engine {
 			pipeline.GET("/:id/history", pipelineHandler.GetPipelineRuns)
 			pipeline.GET("/:id/runs", pipelineHandler.GetPipelineRuns)
 			pipeline.GET("/:id/runs/:run_id", pipelineHandler.GetRunDetail)
+			pipeline.GET("/:id/runs/:run_id/parameter-view", pipelineHandler.GetRunParameterView)
+			pipeline.POST("/:id/runs/:run_id/rerun-preview", pipelineHandler.GetRunRerunPreview)
 			pipeline.GET("/:id/runs/:run_id/tasks", pipelineHandler.GetRunTasks)
 			pipeline.GET("/:id/runs/:run_id/logs", middleware.RateLimit(), pipelineHandler.GetRunLogs)
 			pipeline.POST("/:id/runs/:run_id/cancel", pipelineHandler.CancelPipelineRun)

@@ -3256,6 +3256,219 @@ func (h *PipelineHandler) createAISessionForNode(db *gorm.DB, run *models.Pipeli
 	return session, nil
 }
 
+type historicalRunTriggerSummary struct {
+	Type     string `json:"type"`
+	Source   string `json:"source"`
+	Operator string `json:"operator"`
+}
+
+type historicalRuntimeParamView struct {
+	Key    string      `json:"key"`
+	Label  string      `json:"label"`
+	Value  interface{} `json:"value"`
+	Source string      `json:"source"`
+}
+
+type historicalDefaultParamView struct {
+	Key        string      `json:"key"`
+	Label      string      `json:"label"`
+	Value      interface{} `json:"value"`
+	Overridden bool        `json:"overridden"`
+}
+
+type historicalRunNodeParamView struct {
+	NodeID        string                       `json:"node_id"`
+	NodeName      string                       `json:"node_name"`
+	RuntimeParams []historicalRuntimeParamView `json:"runtime_params"`
+	DefaultParams []historicalDefaultParamView `json:"default_params"`
+}
+
+type historicalRunParameterView struct {
+	RunID       uint64                       `json:"run_id"`
+	PipelineID  uint64                       `json:"pipeline_id"`
+	BuildNumber int                          `json:"build_number"`
+	Trigger     historicalRunTriggerSummary  `json:"trigger"`
+	Nodes       []historicalRunNodeParamView `json:"nodes"`
+}
+
+func shouldExposeHistoricalLegacyDefaultKey(key string) bool {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return false
+	}
+	if trimmed == "credentials" || strings.HasPrefix(trimmed, "credentials.") {
+		return false
+	}
+	if trimmed == "target_resource_id" || strings.HasSuffix(trimmed, "_resource_id") {
+		return false
+	}
+	return true
+}
+
+func buildHistoricalRunParameterView(run models.PipelineRun) historicalRunParameterView {
+	view := historicalRunParameterView{
+		RunID:       run.ID,
+		PipelineID:  run.PipelineID,
+		BuildNumber: run.BuildNumber,
+		Trigger: historicalRunTriggerSummary{
+			Type:     strings.TrimSpace(run.TriggerType),
+			Source:   strings.TrimSpace(run.TriggerSource),
+			Operator: strings.TrimSpace(run.TriggerUser),
+		},
+		Nodes: []historicalRunNodeParamView{},
+	}
+
+	type runtimeSnapshot struct {
+		Trigger models.PipelineRunTriggerSnapshot `json:"trigger"`
+		Inputs  map[string]map[string]interface{} `json:"inputs"`
+	}
+	var runSnapshot runtimeSnapshot
+	hasRunSnapshot := false
+	if trimmed := strings.TrimSpace(run.RunConfig); trimmed != "" {
+		if err := json.Unmarshal([]byte(trimmed), &runSnapshot); err == nil {
+			hasRunSnapshot = true
+			if value := strings.TrimSpace(runSnapshot.Trigger.Type); value != "" {
+				view.Trigger.Type = value
+			}
+			if value := strings.TrimSpace(runSnapshot.Trigger.Source); value != "" {
+				view.Trigger.Source = value
+			}
+			if value := strings.TrimSpace(runSnapshot.Trigger.Operator); value != "" {
+				view.Trigger.Operator = value
+			}
+		}
+	}
+
+	runtimeSource := strings.TrimSpace(view.Trigger.Source)
+	if runtimeSource == "" {
+		runtimeSource = strings.TrimSpace(view.Trigger.Type)
+	}
+
+	type historicalNodeParams struct {
+		NodeID        string
+		NodeName      string
+		RuntimeParams []historicalRuntimeParamView
+		DefaultParams []historicalDefaultParamView
+	}
+
+	nodeViews := make(map[string]*historicalNodeParams)
+	nodeOrder := make([]string, 0)
+	ensureNode := func(nodeID, nodeName string) *historicalNodeParams {
+		nodeID = strings.TrimSpace(nodeID)
+		if nodeID == "" {
+			return nil
+		}
+		if existing, ok := nodeViews[nodeID]; ok {
+			if existing.NodeName == "" && strings.TrimSpace(nodeName) != "" {
+				existing.NodeName = strings.TrimSpace(nodeName)
+			}
+			return existing
+		}
+		nodeView := &historicalNodeParams{
+			NodeID:        nodeID,
+			NodeName:      strings.TrimSpace(nodeName),
+			RuntimeParams: []historicalRuntimeParamView{},
+			DefaultParams: []historicalDefaultParamView{},
+		}
+		nodeViews[nodeID] = nodeView
+		nodeOrder = append(nodeOrder, nodeID)
+		return nodeView
+	}
+
+	if trimmed := strings.TrimSpace(run.PipelineSnapshot); trimmed != "" {
+		var snapshot PipelineConfig
+		if err := json.Unmarshal([]byte(trimmed), &snapshot); err == nil {
+			for _, node := range snapshot.Nodes {
+				nodeView := ensureNode(node.ID, node.Name)
+				if nodeView == nil {
+					continue
+				}
+				if len(node.DefinitionParams) > 0 {
+					for _, param := range node.DefinitionParams {
+						nodeView.DefaultParams = append(nodeView.DefaultParams, historicalDefaultParamView{
+							Key:        param.Key,
+							Label:      param.Label,
+							Value:      param.Value,
+							Overridden: false,
+						})
+					}
+				} else {
+					for key, value := range node.getNodeConfig() {
+						if !shouldExposeHistoricalLegacyDefaultKey(key) {
+							continue
+						}
+						nodeView.DefaultParams = append(nodeView.DefaultParams, historicalDefaultParamView{
+							Key:        key,
+							Label:      "",
+							Value:      value,
+							Overridden: false,
+						})
+					}
+				}
+				sort.Slice(nodeView.DefaultParams, func(i, j int) bool {
+					return nodeView.DefaultParams[i].Key < nodeView.DefaultParams[j].Key
+				})
+			}
+		}
+	}
+
+	if hasRunSnapshot {
+		runtimeOnlyNodeIDs := make([]string, 0)
+		for nodeID := range runSnapshot.Inputs {
+			trimmedNodeID := strings.TrimSpace(nodeID)
+			if trimmedNodeID == "" {
+				continue
+			}
+			if _, ok := nodeViews[trimmedNodeID]; !ok {
+				runtimeOnlyNodeIDs = append(runtimeOnlyNodeIDs, trimmedNodeID)
+			}
+		}
+		sort.Strings(runtimeOnlyNodeIDs)
+		for _, nodeID := range runtimeOnlyNodeIDs {
+			ensureNode(nodeID, "")
+		}
+		for _, nodeID := range nodeOrder {
+			inputs, ok := runSnapshot.Inputs[nodeID]
+			if !ok {
+				continue
+			}
+			nodeView := nodeViews[nodeID]
+			for key, value := range inputs {
+				runtimeParam := historicalRuntimeParamView{
+					Key:    key,
+					Label:  "",
+					Value:  value,
+					Source: runtimeSource,
+				}
+				for i := range nodeView.DefaultParams {
+					if nodeView.DefaultParams[i].Key == key {
+						nodeView.DefaultParams[i].Overridden = true
+						if strings.TrimSpace(nodeView.DefaultParams[i].Label) != "" {
+							runtimeParam.Label = nodeView.DefaultParams[i].Label
+						}
+					}
+				}
+				nodeView.RuntimeParams = append(nodeView.RuntimeParams, runtimeParam)
+			}
+			sort.Slice(nodeView.RuntimeParams, func(i, j int) bool {
+				return nodeView.RuntimeParams[i].Key < nodeView.RuntimeParams[j].Key
+			})
+		}
+	}
+
+	for _, nodeID := range nodeOrder {
+		nodeView := nodeViews[nodeID]
+		view.Nodes = append(view.Nodes, historicalRunNodeParamView{
+			NodeID:        nodeView.NodeID,
+			NodeName:      nodeView.NodeName,
+			RuntimeParams: nodeView.RuntimeParams,
+			DefaultParams: nodeView.DefaultParams,
+		})
+	}
+
+	return view
+}
+
 func pipelineRunDetailPayload(run models.PipelineRun) gin.H {
 	return gin.H{
 		"id":                     run.ID,
@@ -3281,6 +3494,7 @@ func pipelineRunDetailPayload(run models.PipelineRun) gin.H {
 		"outputs_json":           parsePipelineRunJSONField(run.Outputs, map[string]interface{}{}),
 		"bindings_snapshot_json": parsePipelineRunJSONField(run.BindingsSnapshot, map[string]interface{}{}),
 		"events_json":            parsePipelineRunJSONField(run.Events, []interface{}{}),
+		"historical_params":      buildHistoricalRunParameterView(run),
 		"agent_id":               run.AgentID,
 		"pipeline":               run.Pipeline,
 		"tasks":                  run.Tasks,
@@ -3928,6 +4142,339 @@ func (h *PipelineHandler) GetRunDetail(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": pipelineRunDetailPayload(run),
+	})
+}
+
+type rerunPreviewMatchItem struct {
+	NodeID          string      `json:"node_id"`
+	ParamKey        string      `json:"param_key"`
+	MatchKey        string      `json:"match_key"`
+	NodeName        string      `json:"node_name,omitempty"`
+	ParamLabel      string      `json:"param_label,omitempty"`
+	HistoricalValue interface{} `json:"historical_value"`
+	CurrentValue    interface{} `json:"current_value,omitempty"`
+}
+
+type rerunPreviewMismatchItem struct {
+	NodeID          string      `json:"node_id"`
+	ParamKey        string      `json:"param_key"`
+	MatchKey        string      `json:"match_key"`
+	Reason          string      `json:"reason"`
+	NodeName        string      `json:"node_name,omitempty"`
+	ParamLabel      string      `json:"param_label,omitempty"`
+	HistoricalValue interface{} `json:"historical_value"`
+}
+
+type rerunPreviewFailure struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type rerunPreviewResponse struct {
+	CanEnterRunDialog bool                              `json:"can_enter_run_dialog"`
+	MatchKey          string                            `json:"match_key"`
+	Matched           []rerunPreviewMatchItem           `json:"matched"`
+	Mismatched        []rerunPreviewMismatchItem        `json:"mismatched"`
+	PrefillInputs     map[string]map[string]interface{} `json:"prefill_inputs"`
+	Failure           *rerunPreviewFailure              `json:"failure,omitempty"`
+}
+
+type rerunPreviewHistoricalParam struct {
+	NodeID   string
+	ParamKey string
+	Value    interface{}
+}
+
+func buildHistoricalParamKeyLookup(run models.PipelineRun) map[string]struct{} {
+	lookup := make(map[string]struct{})
+
+	if trimmed := strings.TrimSpace(run.PipelineSnapshot); trimmed != "" {
+		var snapshot PipelineConfig
+		if err := json.Unmarshal([]byte(trimmed), &snapshot); err == nil {
+			for _, node := range snapshot.Nodes {
+				nodeID := strings.TrimSpace(node.ID)
+				if nodeID == "" {
+					continue
+				}
+				for _, param := range node.DefinitionParams {
+					paramKey := strings.TrimSpace(param.Key)
+					if !param.IsFlexible || paramKey == "" {
+						continue
+					}
+					lookup[nodeID+"+"+paramKey] = struct{}{}
+				}
+			}
+		}
+	}
+
+	var runSnapshot struct {
+		Inputs map[string]map[string]interface{} `json:"inputs"`
+	}
+	if trimmed := strings.TrimSpace(run.RunConfig); trimmed != "" {
+		if err := json.Unmarshal([]byte(trimmed), &runSnapshot); err == nil {
+			for nodeID, params := range runSnapshot.Inputs {
+				trimmedNodeID := strings.TrimSpace(nodeID)
+				if trimmedNodeID == "" {
+					continue
+				}
+				for paramKey := range params {
+					trimmedParamKey := strings.TrimSpace(paramKey)
+					if trimmedParamKey == "" {
+						continue
+					}
+					lookup[trimmedNodeID+"+"+trimmedParamKey] = struct{}{}
+				}
+			}
+		}
+	}
+
+	return lookup
+}
+
+func buildRerunPreviewFailure(code, message string) rerunPreviewResponse {
+	return rerunPreviewResponse{
+		CanEnterRunDialog: false,
+		MatchKey:          "node_id+param_key",
+		Matched:           []rerunPreviewMatchItem{},
+		Mismatched:        []rerunPreviewMismatchItem{},
+		PrefillInputs:     map[string]map[string]interface{}{},
+		Failure: &rerunPreviewFailure{
+			Code:    code,
+			Message: message,
+		},
+	}
+}
+
+func loadPipelineRunForRead(db *gorm.DB, workspaceID uint64, pipelineIDParam, runIDParam string, preloadPipeline bool) (models.PipelineRun, bool, error) {
+	var run models.PipelineRun
+	query := db.Where("workspace_id = ?", workspaceID)
+	if preloadPipeline {
+		query = query.Preload("Pipeline")
+	}
+	if err := query.First(&run, runIDParam).Error; err != nil {
+		return run, false, err
+	}
+	if fmt.Sprintf("%d", run.PipelineID) != pipelineIDParam {
+		return run, false, gorm.ErrRecordNotFound
+	}
+	return run, true, nil
+}
+
+func parseHistoricalResolvedInputs(raw string) ([]rerunPreviewHistoricalParam, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, fmt.Errorf("resolved_nodes_json missing")
+	}
+	var resolvedNodes []map[string]interface{}
+	if err := json.Unmarshal([]byte(trimmed), &resolvedNodes); err != nil {
+		return nil, err
+	}
+	params := make([]rerunPreviewHistoricalParam, 0)
+	seen := make(map[string]struct{})
+	for _, node := range resolvedNodes {
+		nodeID := strings.TrimSpace(toString(node["node_id"]))
+		if nodeID == "" {
+			continue
+		}
+		resolvedInputs, ok := node["resolved_inputs"].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("resolved_inputs missing for node %s", nodeID)
+		}
+		for key, value := range resolvedInputs {
+			paramKey := strings.TrimSpace(key)
+			if paramKey == "" {
+				continue
+			}
+			matchKey := nodeID + "+" + paramKey
+			if _, exists := seen[matchKey]; exists {
+				return nil, fmt.Errorf("duplicate resolved input %s", matchKey)
+			}
+			seen[matchKey] = struct{}{}
+			params = append(params, rerunPreviewHistoricalParam{
+				NodeID:   nodeID,
+				ParamKey: paramKey,
+				Value:    value,
+			})
+		}
+	}
+	sort.Slice(params, func(i, j int) bool {
+		left := params[i].NodeID + "+" + params[i].ParamKey
+		right := params[j].NodeID + "+" + params[j].ParamKey
+		return left < right
+	})
+	return params, nil
+}
+
+func buildCurrentPipelineManualRunParamLookup(config PipelineConfig) map[string]PipelineNode {
+	lookup := make(map[string]PipelineNode, len(config.Nodes))
+	for _, node := range config.Nodes {
+		lookup[node.ID] = node
+	}
+	return lookup
+}
+
+func buildRunRerunPreview(run models.PipelineRun, currentConfig PipelineConfig) rerunPreviewResponse {
+	historicalParams, err := parseHistoricalResolvedInputs(run.ResolvedNodes)
+	if err != nil {
+		return buildRerunPreviewFailure("historical_resolved_inputs_unavailable", "历史运行缺少有效的 resolved_nodes_json，无法生成 rerun preview")
+	}
+	historicalParamKeyLookup := buildHistoricalParamKeyLookup(run)
+	filteredHistoricalParams := make([]rerunPreviewHistoricalParam, 0, len(historicalParams))
+	if len(historicalParamKeyLookup) == 0 {
+		filteredHistoricalParams = append(filteredHistoricalParams, historicalParams...)
+	} else {
+		for _, historical := range historicalParams {
+			if _, exists := historicalParamKeyLookup[historical.NodeID+"+"+historical.ParamKey]; !exists {
+				continue
+			}
+			filteredHistoricalParams = append(filteredHistoricalParams, historical)
+		}
+	}
+	if len(filteredHistoricalParams) == 0 {
+		return buildRerunPreviewFailure("historical_resolved_inputs_empty", "历史运行未形成可复用的最终参数，无法生成 rerun preview")
+	}
+	if len(currentConfig.Nodes) == 0 {
+		return buildRerunPreviewFailure("current_pipeline_definition_unavailable", "当前流水线定义缺失，无法生成 rerun preview")
+	}
+
+	nodeLookup := buildCurrentPipelineManualRunParamLookup(currentConfig)
+	currentManualRunKeys := make(map[string]models.PipelineDefinitionParam)
+	for _, node := range currentConfig.Nodes {
+		for _, param := range node.DefinitionParams {
+			if !param.IsFlexible {
+				continue
+			}
+			currentManualRunKeys[node.ID+"+"+param.Key] = param
+		}
+	}
+	if len(currentManualRunKeys) == 0 {
+		return buildRerunPreviewFailure("current_manual_run_definition_unavailable", "当前流水线缺少可手动运行参数定义，无法进入运行对话框")
+	}
+
+	response := rerunPreviewResponse{
+		CanEnterRunDialog: true,
+		MatchKey:          "node_id+param_key",
+		Matched:           []rerunPreviewMatchItem{},
+		Mismatched:        []rerunPreviewMismatchItem{},
+		PrefillInputs:     map[string]map[string]interface{}{},
+	}
+
+	for _, historical := range filteredHistoricalParams {
+		matchKey := historical.NodeID + "+" + historical.ParamKey
+		node, nodeExists := nodeLookup[historical.NodeID]
+		if !nodeExists {
+			response.Mismatched = append(response.Mismatched, rerunPreviewMismatchItem{
+				NodeID:          historical.NodeID,
+				ParamKey:        historical.ParamKey,
+				MatchKey:        matchKey,
+				Reason:          "node_not_found",
+				HistoricalValue: historical.Value,
+			})
+			continue
+		}
+
+		paramExists := false
+		var matchedParam models.PipelineDefinitionParam
+		for _, param := range node.DefinitionParams {
+			if param.Key != historical.ParamKey {
+				continue
+			}
+			paramExists = true
+			matchedParam = param
+			break
+		}
+		if !paramExists {
+			response.Mismatched = append(response.Mismatched, rerunPreviewMismatchItem{
+				NodeID:          historical.NodeID,
+				NodeName:        node.Name,
+				ParamKey:        historical.ParamKey,
+				MatchKey:        matchKey,
+				Reason:          "param_not_found",
+				HistoricalValue: historical.Value,
+			})
+			continue
+		}
+		if !matchedParam.IsFlexible {
+			response.Mismatched = append(response.Mismatched, rerunPreviewMismatchItem{
+				NodeID:          historical.NodeID,
+				NodeName:        node.Name,
+				ParamKey:        historical.ParamKey,
+				ParamLabel:      matchedParam.Label,
+				MatchKey:        matchKey,
+				Reason:          "not_manual_run_param",
+				HistoricalValue: historical.Value,
+			})
+			continue
+		}
+
+		if response.PrefillInputs[historical.NodeID] == nil {
+			response.PrefillInputs[historical.NodeID] = map[string]interface{}{}
+		}
+		response.PrefillInputs[historical.NodeID][historical.ParamKey] = historical.Value
+		response.Matched = append(response.Matched, rerunPreviewMatchItem{
+			NodeID:          historical.NodeID,
+			NodeName:        node.Name,
+			ParamKey:        historical.ParamKey,
+			ParamLabel:      matchedParam.Label,
+			MatchKey:        matchKey,
+			HistoricalValue: historical.Value,
+			CurrentValue:    matchedParam.Value,
+		})
+	}
+
+	if len(response.Mismatched) > 0 {
+		response.CanEnterRunDialog = false
+	}
+	return response
+}
+
+func (h *PipelineHandler) GetRunParameterView(c *gin.Context) {
+	workspaceID := c.GetUint64("workspace_id")
+	run, ok, err := loadPipelineRunForRead(h.DB, workspaceID, c.Param("id"), c.Param("run_id"), false)
+	if err != nil || !ok {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "运行记录不存在",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": buildHistoricalRunParameterView(run),
+	})
+}
+
+func (h *PipelineHandler) GetRunRerunPreview(c *gin.Context) {
+	workspaceID := c.GetUint64("workspace_id")
+	run, ok, err := loadPipelineRunForRead(h.DB, workspaceID, c.Param("id"), c.Param("run_id"), false)
+	if err != nil || !ok {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code":    404,
+			"message": "运行记录不存在",
+		})
+		return
+	}
+
+	var pipeline models.Pipeline
+	if err := h.DB.Where("workspace_id = ? AND id = ?", workspaceID, run.PipelineID).First(&pipeline).Error; err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"code": 200,
+			"data": buildRerunPreviewFailure("current_pipeline_definition_unavailable", "当前流水线定义缺失，无法生成 rerun preview"),
+		})
+		return
+	}
+	config, err := h.loadPipelineDefinitionConfig(h.DB, pipeline)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"code": 200,
+			"data": buildRerunPreviewFailure("current_pipeline_definition_unavailable", "当前流水线定义缺失，无法生成 rerun preview"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": buildRunRerunPreview(run, config),
 	})
 }
 

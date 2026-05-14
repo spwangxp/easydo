@@ -155,10 +155,16 @@
                 {{ formatDateTime(row.created_at) }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="180" fixed="right">
+            <el-table-column label="操作" width="280" fixed="right">
               <template #default="{ row }">
                 <el-button type="primary" link size="small" @click="viewExecutionDetail(row)">
                   查看执行
+                </el-button>
+                <el-button type="primary" link size="small" @click="viewRunParameters(row)">
+                  查看参数
+                </el-button>
+                <el-button type="primary" link size="small" @click="handleRerun(row)">
+                  重新运行
                 </el-button>
                 <el-button type="primary" link size="small" @click="viewRunLogs(row)">
                   运行日志
@@ -185,6 +191,12 @@
           </div>
           <div class="execution-header-right">
             <el-button :icon="Refresh" circle @click="fetchExecutionDetail" :loading="executionLoading" />
+            <el-button v-if="currentRun?.id" @click="viewRunParameters(currentRun)">
+              查看本次参数
+            </el-button>
+            <el-button v-if="currentRun?.id" @click="handleRerun(currentRun)">
+              按本次参数重新运行
+            </el-button>
             <el-button v-if="currentRun?.id" @click="viewRunLogs(currentRun)">
               运行日志
             </el-button>
@@ -760,6 +772,151 @@
       </div>
     </div>
     
+    <el-drawer
+      v-model="parameterDrawerVisible"
+      title="历史参数"
+      size="720px"
+      @close="closeParameterDrawer"
+    >
+      <div class="parameter-drawer" v-loading="parameterDrawerLoading">
+        <div class="parameter-drawer__meta" v-if="parameterDrawerRun">
+          <span>构建 #{{ parameterDrawerRun.build_number || '-' }}</span>
+          <span>{{ formatDateTime(getRunStartTime(parameterDrawerRun)) }}</span>
+        </div>
+        <div v-if="parameterDrawerNodes.length > 0" class="parameter-node-list">
+          <el-card
+            v-for="node in parameterDrawerNodes"
+            :key="node.node_id"
+            class="parameter-node-card"
+            shadow="never"
+          >
+            <template #header>
+              <div class="parameter-node-card__header">
+                <span class="parameter-node-card__title">{{ node.node_name }}</span>
+                <span class="parameter-node-card__id">{{ node.node_id }}</span>
+              </div>
+            </template>
+            <div class="parameter-sections">
+              <div class="parameter-section">
+                <div class="parameter-section__title">运行时参数</div>
+                <div v-if="Object.keys(node.runtime_params).length > 0" class="parameter-kv-list">
+                  <div v-for="(value, key) in node.runtime_params" :key="`${node.node_id}-runtime-${key}`" class="parameter-kv-item">
+                    <span class="parameter-kv-item__key">{{ key }}</span>
+                    <span class="parameter-kv-item__value">{{ formatTaskOutputValue(value) }}</span>
+                  </div>
+                </div>
+                <el-empty v-else :image-size="56" description="该节点无运行时参数" />
+              </div>
+              <div class="parameter-section">
+                <div class="parameter-section__title">默认参数</div>
+                <div v-if="Object.keys(node.default_params).length > 0" class="parameter-kv-list">
+                  <div v-for="(value, key) in node.default_params" :key="`${node.node_id}-default-${key}`" class="parameter-kv-item">
+                    <span class="parameter-kv-item__key">{{ key }}</span>
+                    <span class="parameter-kv-item__value">{{ formatTaskOutputValue(value) }}</span>
+                  </div>
+                </div>
+                <el-empty v-else :image-size="56" description="该节点无默认参数" />
+              </div>
+            </div>
+          </el-card>
+        </div>
+        <el-empty v-else-if="!parameterDrawerLoading" description="当前执行未返回可展示的历史参数" />
+      </div>
+    </el-drawer>
+
+    <el-dialog
+      v-model="rerunPreviewVisible"
+      title="重新运行预览"
+      width="720px"
+      @close="closeRerunPreviewDialog"
+    >
+      <div class="rerun-preview" v-loading="rerunPreviewLoading">
+        <div class="rerun-preview__meta" v-if="rerunSourceRun">
+          <span>构建 #{{ rerunSourceRun.build_number || '-' }}</span>
+          <span>{{ rerunPreviewSummaryText }}</span>
+        </div>
+        <template v-if="rerunPreviewData.failure">
+          <el-alert
+            type="error"
+            :closable="false"
+            :title="rerunPreviewFailureTitle"
+            show-icon
+          />
+          <div class="rerun-preview__section">
+            <div class="rerun-preview__section-title">失败详情</div>
+            <div class="rerun-preview__detail-list">
+              <div v-if="rerunPreviewData.failure.code" class="rerun-preview__detail-item">
+                <span class="rerun-preview__detail-label">错误码</span>
+                <span class="rerun-preview__detail-value">{{ rerunPreviewData.failure.code }}</span>
+              </div>
+              <div class="rerun-preview__detail-item">
+                <span class="rerun-preview__detail-label">说明</span>
+                <span class="rerun-preview__detail-value">{{ rerunPreviewFailureTitle }}</span>
+              </div>
+            </div>
+          </div>
+        </template>
+        <template v-else>
+          <el-alert
+            :type="rerunPreviewBlocked ? 'warning' : 'success'"
+            :closable="false"
+            :title="rerunPreviewBlocked ? '当前历史参数与最新流水线定义不兼容，无法进入运行对话框。' : '可按历史参数进入运行对话框。'"
+            show-icon
+          />
+          <div v-if="rerunPreviewMatchedItems.length > 0" class="rerun-preview__section">
+            <div class="rerun-preview__section-title">已匹配参数</div>
+            <div class="rerun-preview__detail-list">
+              <div v-for="(item, index) in rerunPreviewMatchedItems" :key="`matched-${index}`" class="rerun-preview__detail-card">
+                <div class="rerun-preview__detail-head">
+                  <span class="rerun-preview__detail-title">{{ item.node_name || item.node_id || '未命名节点' }}</span>
+                  <span class="rerun-preview__detail-subtitle">{{ item.param_label || item.param_key || '-' }}</span>
+                </div>
+                <div class="rerun-preview__detail-item">
+                  <span class="rerun-preview__detail-label">匹配键</span>
+                  <span class="rerun-preview__detail-value">{{ item.match_key || '-' }}</span>
+                </div>
+                <div class="rerun-preview__detail-item">
+                  <span class="rerun-preview__detail-label">历史值</span>
+                  <span class="rerun-preview__detail-value">{{ formatTaskOutputValue(item.historical_value) || '-' }}</span>
+                </div>
+                <div class="rerun-preview__detail-item" v-if="item.current_value !== undefined">
+                  <span class="rerun-preview__detail-label">当前值</span>
+                  <span class="rerun-preview__detail-value">{{ formatTaskOutputValue(item.current_value) || '-' }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-if="rerunPreviewMismatchedItems.length > 0" class="rerun-preview__section">
+            <div class="rerun-preview__section-title">不匹配项</div>
+            <div class="rerun-preview__detail-list">
+              <div v-for="(item, index) in rerunPreviewMismatchedItems" :key="`mismatch-${index}`" class="rerun-preview__detail-card rerun-preview__detail-card--warning">
+                <div class="rerun-preview__detail-head">
+                  <span class="rerun-preview__detail-title">{{ item.node_name || item.node_id || '未命名节点' }}</span>
+                  <span class="rerun-preview__detail-subtitle">{{ item.param_label || item.param_key || '-' }}</span>
+                </div>
+                <div class="rerun-preview__detail-item">
+                  <span class="rerun-preview__detail-label">匹配键</span>
+                  <span class="rerun-preview__detail-value">{{ item.match_key || '-' }}</span>
+                </div>
+                <div class="rerun-preview__detail-item">
+                  <span class="rerun-preview__detail-label">失配原因</span>
+                  <span class="rerun-preview__detail-value">{{ item.reason || '-' }}</span>
+                </div>
+                <div class="rerun-preview__detail-item">
+                  <span class="rerun-preview__detail-label">历史值</span>
+                  <span class="rerun-preview__detail-value">{{ formatTaskOutputValue(item.historical_value) || '-' }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="closeRerunPreviewDialog">关闭</el-button>
+        <el-button v-if="!rerunPreviewBlocked" type="primary" :loading="rerunPreviewLoading" @click="openRunDialogFromRerunPreview">继续</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 运行确认对话框 -->
     <el-dialog
       v-model="runDialogVisible"
@@ -767,6 +924,9 @@
       :width="runDialogWidth"
       @close="closeRunDialog"
     >
+      <div v-if="runDialogPrefillSource" class="manual-run-prefill-hint">
+        已预填构建 #{{ runDialogPrefillSource.build_number || '-' }} 的历史参数，请确认后运行。
+      </div>
       <div v-if="manualRunNodes.length === 0" class="manual-run-empty">
         当前流水线未配置可手动覆盖参数，将按定义直接运行。
       </div>
@@ -863,13 +1023,13 @@ import {
   Warning,
   Close
 } from '@element-plus/icons-vue'
-import { getPipelineDetail, getPipelineTaskTypes, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineRunDetail, getRunTasks, getPipelineStatistics, getPipelineTestReports, cancelPipelineRun } from '@/api/pipeline'
+import { getPipelineDetail, getPipelineTaskTypes, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineRunDetail, getRunTasks, getPipelineStatistics, getPipelineTestReports, cancelPipelineRun, getPipelineRunParameterView, previewPipelineRunRerun } from '@/api/pipeline'
 import { getTaskLogs as fetchTaskLogsFromApi } from '@/api/task'
 import { getProjectList } from '@/api/project'
 import DesignTab from './designTab.vue'
 import LogViewer from './components/LogViewer.vue'
 import realtime from '@/utils/realtime'
-import { buildRunInputsPayload as buildManualRunPayload, createRunInputs, getManualRunNodes, parseJSONField } from './runtimeConfig'
+import { buildRunInputsPayload as buildManualRunPayload, createRunInputs, createRunInputsFromRerunPreview, getManualRunNodes, normalizeRerunPreviewPayload, normalizeRunParameterViewPayload, parseJSONField } from './runtimeConfig'
 import { applyTaskStatusPayload, getTaskOutputDisplayKind, normalizeExecutionTaskOutputs } from './executionRealtimeState'
 
 const route = useRoute()
@@ -883,6 +1043,10 @@ const expanded = ref(true)
 const historyLoading = ref(false)
 const runDialogVisible = ref(false)
 const runLoading = ref(false)
+const parameterDrawerVisible = ref(false)
+const parameterDrawerLoading = ref(false)
+const rerunPreviewVisible = ref(false)
+const rerunPreviewLoading = ref(false)
 const settingsActiveTab = ref('basic')
 const triggerSettingsLoading = ref(false)
 const triggerSettingsSaving = ref(false)
@@ -895,6 +1059,11 @@ const projectList = ref([])
 const testReports = ref([])
 const recentFailures = ref([])
 const pipelineTaskDefinitions = ref([])
+const parameterDrawerRun = ref(null)
+const parameterDrawerNodes = ref([])
+const rerunSourceRun = ref(null)
+const rerunPreviewData = ref(normalizeRerunPreviewPayload(null))
+const runDialogPrefillSource = ref(null)
 
 // 运行表单（node-scoped runtime inputs）
 const runForm = reactive({
@@ -962,8 +1131,10 @@ const manualRunNodes = computed(() => getManualRunNodes({
   task_definitions: pipelineTaskDefinitions.value
 }))
 
-const initializeRunInputs = () => {
-  runForm.inputs = createRunInputs(manualRunNodes.value)
+const initializeRunInputs = (rerunPreview = null) => {
+  runForm.inputs = rerunPreview
+    ? createRunInputsFromRerunPreview(manualRunNodes.value, rerunPreview)
+    : createRunInputs(manualRunNodes.value)
 }
 
 const buildRunInputsPayload = () => buildManualRunPayload(manualRunNodes.value, runForm.inputs)
@@ -972,6 +1143,7 @@ const closeRunDialog = () => {
   runDialogVisible.value = false
   runLoading.value = false
   runForm.inputs = {}
+  runDialogPrefillSource.value = null
 }
 
 const fetchPipelineTaskDefinitions = async () => {
@@ -1263,6 +1435,59 @@ const runDialogWidth = computed(() => {
   const calculated = Math.floor(containerWidth * 0.7)
   const clamped = Math.max(520, Math.min(860, calculated))
   return `${clamped}px`
+})
+
+const rerunPreviewBlocked = computed(() => {
+  const preview = rerunPreviewData.value
+  return Boolean(preview?.failure) || preview?.can_enter_run_dialog !== true
+})
+
+const rerunPreviewSummaryText = computed(() => {
+  const preview = rerunPreviewData.value
+  const matchedCount = Array.isArray(preview?.matched) ? preview.matched.length : 0
+  const mismatchedCount = Array.isArray(preview?.mismatched) ? preview.mismatched.length : 0
+  return `匹配 ${matchedCount} 项，不匹配 ${mismatchedCount} 项`
+})
+
+const rerunPreviewFailureTitle = computed(() => {
+  const failure = rerunPreviewData.value?.failure || null
+  return failure?.message || failure?.error || '重新运行预览失败'
+})
+
+const normalizeRerunPreviewItem = (item) => {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) {
+    return {
+      node_id: '',
+      node_name: '',
+      param_key: '',
+      param_label: '',
+      match_key: '',
+      reason: '',
+      historical_value: undefined,
+      current_value: undefined
+    }
+  }
+
+  return {
+    node_id: item.node_id || '',
+    node_name: item.node_name || '',
+    param_key: item.param_key || '',
+    param_label: item.param_label || '',
+    match_key: item.match_key || '',
+    reason: item.reason || '',
+    historical_value: item.historical_value,
+    current_value: item.current_value
+  }
+}
+
+const rerunPreviewMatchedItems = computed(() => {
+  const matched = Array.isArray(rerunPreviewData.value?.matched) ? rerunPreviewData.value.matched : []
+  return matched.map(normalizeRerunPreviewItem)
+})
+
+const rerunPreviewMismatchedItems = computed(() => {
+  const mismatched = Array.isArray(rerunPreviewData.value?.mismatched) ? rerunPreviewData.value.mismatched : []
+  return mismatched.map(normalizeRerunPreviewItem)
 })
 
 const displaySecretToken = computed(() => triggerSettings.secret_token || triggerSettings.webhook_token || '-')
@@ -1618,10 +1843,91 @@ const openRunExecutionView = async (run) => {
   await hydrateExecutionViewIfVisible()
 }
 
+const closeParameterDrawer = () => {
+  parameterDrawerVisible.value = false
+  parameterDrawerLoading.value = false
+  parameterDrawerRun.value = null
+  parameterDrawerNodes.value = []
+}
+
+const viewRunParameters = async (run) => {
+  if (!run?.id) return
+  parameterDrawerRun.value = run
+  parameterDrawerVisible.value = true
+  parameterDrawerLoading.value = true
+  parameterDrawerNodes.value = []
+
+  try {
+    const response = await getPipelineRunParameterView(pipelineId.value, run.id)
+    if (response?.code === 200) {
+      const normalized = normalizeRunParameterViewPayload(response.data)
+      parameterDrawerNodes.value = normalized.nodes
+      return
+    }
+    ElMessage.error(response?.message || '获取参数视图失败')
+  } catch (error) {
+    console.error('获取参数视图失败:', error)
+    ElMessage.error('获取参数视图失败')
+  } finally {
+    parameterDrawerLoading.value = false
+  }
+}
+
+const closeRerunPreviewDialog = () => {
+  rerunPreviewVisible.value = false
+  rerunPreviewLoading.value = false
+  rerunSourceRun.value = null
+  rerunPreviewData.value = normalizeRerunPreviewPayload(null)
+}
+
+const openRunDialogFromRerunPreview = async () => {
+  if (!rerunSourceRun.value?.id || rerunPreviewBlocked.value) return
+
+  const sourceRun = rerunSourceRun.value
+  const preview = rerunPreviewData.value
+  const [latestPipeline] = await Promise.all([
+    fetchPipelineDetail(),
+    fetchPipelineTaskDefinitions()
+  ])
+  if (!latestPipeline) return
+
+  initializeRunInputs(preview)
+  runDialogPrefillSource.value = sourceRun
+  closeRerunPreviewDialog()
+  runDialogVisible.value = true
+}
+
+const handleRerun = async (run) => {
+  if (!run?.id) return
+  rerunSourceRun.value = run
+  rerunPreviewVisible.value = true
+  rerunPreviewLoading.value = true
+  rerunPreviewData.value = normalizeRerunPreviewPayload(null)
+
+  try {
+    const response = await previewPipelineRunRerun(pipelineId.value, run.id)
+    const normalized = normalizeRerunPreviewPayload(response?.data)
+    rerunPreviewData.value = normalized
+    if (response?.code !== 200) {
+      ElMessage.error(response?.message || '获取重新运行预览失败')
+    }
+  } catch (error) {
+    console.error('获取重新运行预览失败:', error)
+    rerunPreviewData.value = normalizeRerunPreviewPayload({
+      failure: {
+        message: error.response?.data?.message || error.message || '获取重新运行预览失败'
+      }
+    })
+  } finally {
+    rerunPreviewLoading.value = false
+  }
+}
+
 // 运行流水线
 const handleRun = async () => {
   runDialogVisible.value = false
   runForm.inputs = {}
+  runDialogPrefillSource.value = null
 
   const [latestPipeline] = await Promise.all([
     fetchPipelineDetail(),
@@ -3117,6 +3423,189 @@ onUnmounted(() => {
         animation: pulse 2s ease-in-out infinite;
       }
     }
+  }
+
+  .parameter-drawer {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+
+    .parameter-drawer__meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .parameter-node-list {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .parameter-node-card__header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .parameter-node-card__title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .parameter-node-card__id {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: 'Consolas', 'Monaco', monospace;
+    }
+
+    .parameter-sections {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .parameter-section {
+      padding: 12px;
+      border-radius: 8px;
+      background: var(--bg-secondary);
+    }
+
+    .parameter-section__title {
+      margin-bottom: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .parameter-kv-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .parameter-kv-item {
+      display: grid;
+      grid-template-columns: 120px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+    }
+
+    .parameter-kv-item__key {
+      font-size: 12px;
+      color: var(--text-muted);
+      word-break: break-word;
+    }
+
+    .parameter-kv-item__value {
+      font-size: 12px;
+      color: var(--text-primary);
+      white-space: pre-wrap;
+      word-break: break-all;
+      font-family: 'Consolas', 'Monaco', monospace;
+    }
+  }
+
+  .rerun-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+
+    .rerun-preview__meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .rerun-preview__section {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .rerun-preview__section-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .rerun-preview__detail-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .rerun-preview__detail-card {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+      border-radius: 8px;
+      background: var(--bg-secondary);
+      border: 1px solid #ebeef5;
+
+      &.rerun-preview__detail-card--warning {
+        background: var(--warning-light);
+        border-color: rgba(230, 162, 60, 0.2);
+      }
+    }
+
+    .rerun-preview__detail-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .rerun-preview__detail-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .rerun-preview__detail-subtitle {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .rerun-preview__detail-item {
+      display: grid;
+      grid-template-columns: 96px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+    }
+
+    .rerun-preview__detail-label {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .rerun-preview__detail-value {
+      font-size: 12px;
+      color: var(--text-primary);
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-all;
+      overflow-wrap: anywhere;
+      font-family: 'Consolas', 'Monaco', monospace;
+    }
+  }
+
+  .manual-run-prefill-hint {
+    margin-bottom: 16px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.6;
   }
 }
 </style>
