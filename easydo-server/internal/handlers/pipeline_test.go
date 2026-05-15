@@ -16,6 +16,61 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type pipelineStatisticsTestResponseEnvelope[T any] struct {
+	Code int `json:"code"`
+	Data T   `json:"data"`
+}
+
+type pipelineStatisticsTestResponse struct {
+	TotalRuns      int64                            `json:"total_runs"`
+	SuccessfulRuns int64                            `json:"successful_runs"`
+	FailedRuns     int64                            `json:"failed_runs"`
+	SuccessRate    float64                          `json:"success_rate"`
+	AvgDuration    float64                          `json:"avg_duration"`
+	DailyRuns      []DailyRun                       `json:"daily_runs"`
+	Distribution   []pipelineStatisticsDistribution `json:"distribution"`
+	RecentFailures []pipelineStatisticsFailure      `json:"recent_failures"`
+}
+
+type pipelineStatisticsDistribution struct {
+	Status string  `json:"status"`
+	Count  int64   `json:"count"`
+	Rate   float64 `json:"rate"`
+}
+
+type pipelineStatisticsFailure struct {
+	RunID       uint64 `json:"run_id"`
+	BuildNumber int    `json:"build_number"`
+	Status      string `json:"status"`
+	ErrorMsg    string `json:"error_msg"`
+	CreatedAt   string `json:"created_at"`
+}
+
+func performPipelineStatisticsRequest(t *testing.T, handler func(*gin.Context), workspaceID uint64, pipelineID uint64, target string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, target, nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipelineID, 10)}}
+	c.Set("workspace_id", workspaceID)
+
+	handler(c)
+
+	return w
+}
+
+func mustDecodePipelineStatisticsResponse[T any](t *testing.T, recorder *httptest.ResponseRecorder) pipelineStatisticsTestResponseEnvelope[T] {
+	t.Helper()
+
+	var response pipelineStatisticsTestResponseEnvelope[T]
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, recorder.Body.String())
+	}
+
+	return response
+}
+
 func TestPipelineConfig_GetEdges(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -2402,6 +2457,176 @@ func TestGetPipelineStatistics_ExcludesDeploymentRequestRuns(t *testing.T) {
 	}
 	if !bytes.Contains(w.Body.Bytes(), []byte(`"failed_runs":0`)) {
 		t.Fatalf("expected deployment-triggered failures excluded from statistics, got %s", w.Body.String())
+	}
+}
+
+func TestGetPipelineStatistics_RejectsInvalidDateRangeContracts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "pipeline-stats-range-contract-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{Name: "stats-contract-pipeline", WorkspaceID: workspace.ID, OwnerID: user.ID, Config: `{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo hi"}}],"edges":[]}`}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	testCases := []struct {
+		name   string
+		target string
+	}{
+		{name: "missing end date", target: "/api/pipelines/1/statistics?start_date=2026-03-01"},
+		{name: "invalid start date", target: "/api/pipelines/1/statistics?start_date=bad&end_date=2026-03-01"},
+		{name: "reversed range", target: "/api/pipelines/1/statistics?start_date=2026-03-02&end_date=2026-03-01"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := performPipelineStatisticsRequest(t, h.GetPipelineStatistics, workspace.ID, pipeline.ID, tc.target)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected status 400, got %d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestGetPipelineStatistics_UsesInclusiveRequestedDateRangeWithTrendDistributionAndRecentFailures(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "pipeline-stats-range-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{Name: "stats-range-pipeline", WorkspaceID: workspace.ID, OwnerID: user.ID, Config: `{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo hi"}}],"edges":[]}`}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	runs := []struct {
+		buildNumber int
+		status      string
+		duration    int
+		errorMsg    string
+		createdAt   time.Time
+	}{
+		{buildNumber: 1, status: models.PipelineRunStatusSuccess, duration: 90, createdAt: time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)},
+		{buildNumber: 2, status: models.PipelineRunStatusFailed, duration: 45, errorMsg: "npm install failed", createdAt: time.Date(2026, 3, 2, 9, 0, 0, 0, time.UTC)},
+		{buildNumber: 3, status: models.PipelineRunStatusCancelled, duration: 30, createdAt: time.Date(2026, 3, 3, 23, 59, 59, 0, time.UTC)},
+		{buildNumber: 4, status: models.PipelineRunStatusFailed, duration: 60, errorMsg: "tests failed", createdAt: time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC)},
+	}
+	for _, run := range runs {
+		pipelineRun := models.PipelineRun{
+			WorkspaceID: workspace.ID,
+			PipelineID:  pipeline.ID,
+			BuildNumber: run.buildNumber,
+			Status:      run.status,
+			TriggerType: "manual",
+			Duration:    run.duration,
+			ErrorMsg:    run.errorMsg,
+		}
+		if err := db.Create(&pipelineRun).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
+		if err := db.Model(&pipelineRun).Update("created_at", run.createdAt).Error; err != nil {
+			t.Fatalf("update run created_at failed: %v", err)
+		}
+	}
+
+	w := performPipelineStatisticsRequest(t, h.GetPipelineStatistics, workspace.ID, pipeline.ID, "/api/pipelines/1/statistics?start_date=2026-03-02&end_date=2026-03-03")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	response := mustDecodePipelineStatisticsResponse[pipelineStatisticsTestResponse](t, w)
+	if response.Data.TotalRuns != 2 {
+		t.Fatalf("expected 2 runs in inclusive range, got %d body=%s", response.Data.TotalRuns, w.Body.String())
+	}
+	if response.Data.SuccessfulRuns != 0 {
+		t.Fatalf("expected 0 successful runs in range, got %d body=%s", response.Data.SuccessfulRuns, w.Body.String())
+	}
+	if response.Data.FailedRuns != 1 {
+		t.Fatalf("expected 1 failed run in range, got %d body=%s", response.Data.FailedRuns, w.Body.String())
+	}
+	if response.Data.SuccessRate != 0 {
+		t.Fatalf("expected 0 success rate, got %v body=%s", response.Data.SuccessRate, w.Body.String())
+	}
+	if len(response.Data.DailyRuns) != 2 {
+		t.Fatalf("expected 2 daily trend points, got %d body=%s", len(response.Data.DailyRuns), w.Body.String())
+	}
+	if response.Data.DailyRuns[0].Date != "2026-03-02" || response.Data.DailyRuns[0].Failed != 1 || response.Data.DailyRuns[0].Total != 1 {
+		t.Fatalf("unexpected first trend point: %+v body=%s", response.Data.DailyRuns[0], w.Body.String())
+	}
+	if response.Data.DailyRuns[1].Date != "2026-03-03" || response.Data.DailyRuns[1].Total != 1 {
+		t.Fatalf("unexpected second trend point: %+v body=%s", response.Data.DailyRuns[1], w.Body.String())
+	}
+	if len(response.Data.Distribution) == 0 {
+		t.Fatalf("expected distribution buckets, got none body=%s", w.Body.String())
+	}
+	distributionByStatus := make(map[string]int64, len(response.Data.Distribution))
+	for _, bucket := range response.Data.Distribution {
+		distributionByStatus[bucket.Status] = bucket.Count
+	}
+	if distributionByStatus[models.PipelineRunStatusFailed] != 1 {
+		t.Fatalf("expected failed distribution count=1, got %d body=%s", distributionByStatus[models.PipelineRunStatusFailed], w.Body.String())
+	}
+	if distributionByStatus[models.PipelineRunStatusCancelled] != 1 {
+		t.Fatalf("expected cancelled distribution count=1, got %d body=%s", distributionByStatus[models.PipelineRunStatusCancelled], w.Body.String())
+	}
+	if len(response.Data.RecentFailures) != 1 {
+		t.Fatalf("expected 1 recent failure in range, got %d body=%s", len(response.Data.RecentFailures), w.Body.String())
+	}
+	if response.Data.RecentFailures[0].BuildNumber != 2 || response.Data.RecentFailures[0].ErrorMsg != "npm install failed" {
+		t.Fatalf("unexpected recent failure payload: %+v body=%s", response.Data.RecentFailures[0], w.Body.String())
+	}
+}
+
+func TestGetPipelineStatistics_RecentFailuresRemainNewestFirstAndExcludeDeploymentRequestRuns(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "pipeline-stats-failure-order-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{Name: "stats-failure-order-pipeline", WorkspaceID: workspace.ID, OwnerID: user.ID, Config: `{"version":"2.0","nodes":[{"id":"1","type":"shell","name":"Build","config":{"script":"echo hi"}}],"edges":[]}`}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	runs := []struct {
+		buildNumber int
+		status      string
+		triggerType string
+		errorMsg    string
+		createdAt   time.Time
+	}{
+		{buildNumber: 10, status: models.PipelineRunStatusFailed, triggerType: "manual", errorMsg: "older failure", createdAt: time.Date(2026, 3, 2, 10, 0, 0, 0, time.UTC)},
+		{buildNumber: 11, status: models.PipelineRunStatusFailed, triggerType: "deployment_request", errorMsg: "deployment failure", createdAt: time.Date(2026, 3, 3, 10, 0, 0, 0, time.UTC)},
+		{buildNumber: 12, status: models.PipelineRunStatusFailed, triggerType: "manual", errorMsg: "newest failure", createdAt: time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC)},
+	}
+	for _, run := range runs {
+		pipelineRun := models.PipelineRun{
+			WorkspaceID: workspace.ID,
+			PipelineID:  pipeline.ID,
+			BuildNumber: run.buildNumber,
+			Status:      run.status,
+			TriggerType: run.triggerType,
+			Duration:    60,
+			ErrorMsg:    run.errorMsg,
+		}
+		if err := db.Create(&pipelineRun).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
+		if err := db.Model(&pipelineRun).Update("created_at", run.createdAt).Error; err != nil {
+			t.Fatalf("update run created_at failed: %v", err)
+		}
+	}
+
+	w := performPipelineStatisticsRequest(t, h.GetPipelineStatistics, workspace.ID, pipeline.ID, "/api/pipelines/1/statistics?start_date=2026-03-01&end_date=2026-03-05")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	response := mustDecodePipelineStatisticsResponse[pipelineStatisticsTestResponse](t, w)
+	if len(response.Data.RecentFailures) != 2 {
+		t.Fatalf("expected 2 recent manual failures, got %d body=%s", len(response.Data.RecentFailures), w.Body.String())
+	}
+	if response.Data.RecentFailures[0].BuildNumber != 12 || response.Data.RecentFailures[1].BuildNumber != 10 {
+		t.Fatalf("expected failures newest-first, got %+v body=%s", response.Data.RecentFailures, w.Body.String())
 	}
 }
 

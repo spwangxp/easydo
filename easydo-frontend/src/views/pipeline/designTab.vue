@@ -18,7 +18,7 @@
     </div>
 
     <!-- 左侧组件库面板 -->
-    <div class="components-panel" :class="{ collapsed: leftPanelCollapsed }" :style="{ width: leftPanelCollapsed ? '0' : '260px' }">
+    <div class="components-panel" :class="{ collapsed: leftPanelCollapsed }" :style="{ width: leftPanelCollapsed ? '0' : '220px' }">
       <div class="panel-header">
         <span>组件库</span>
       </div>
@@ -996,7 +996,6 @@ const formatResourceOptionLabel = (resource) => {
   return `${resource.name} (${resource.endpoint || resource.type || 'resource'})`
 }
 
-// 获取连接路径 - 使用节点两侧锚点，确保终点箭头在节点外侧清晰可见
 const getConnectionPath = (conn) => buildConnectionPath({
   conn,
   nodes: nodes.value,
@@ -1101,6 +1100,7 @@ const handleDrop = (event) => {
       x: gridSnap.value ? Math.round(finalX / 20) * 20 : finalX,
       y: gridSnap.value ? Math.round(finalY / 20) * 20 : finalY,
       width: 200,
+      height: 90,
       inputs: (component.inputs || []).map(i => ({ ...i, connected: false })),
       outputs: (component.outputs || []).map(o => ({ ...o, connected: false })),
       params: buildDefaultNodeParams(component.type),
@@ -1131,6 +1131,7 @@ const addNodeFromLibrary = (component) => {
     x: 100 + Math.random() * 200,
     y: 100 + Math.random() * 200,
     width: 200,
+    height: 90,
     inputs: component.inputs.map(i => ({ ...i, connected: false })),
     outputs: component.outputs.map(o => ({ ...o, connected: false })),
     params: buildDefaultNodeParams(component.type),
@@ -2249,6 +2250,7 @@ const loadPipeline = async () => {
               x: typeof node.metadata?.x === 'number' ? node.metadata.x : (typeof node.x === 'number' ? node.x : 100 + (parseInt(String(nodeID || '').replace(/[^0-9]/g, '') || '0') % 20) * 50),
               y: typeof node.metadata?.y === 'number' ? node.metadata.y : (typeof node.y === 'number' ? node.y : 100 + (parseInt(String(nodeID || '').replace(/[^0-9]/g, '') || '0') % 20) * 50),
               width: 200,
+              height: 90,
               inputs: getNodePorts(taskType, 'input').map(i => ({ ...i, connected: false })),
               outputs: getNodePorts(taskType, 'output').map(o => ({ ...o, connected: false })),
               params: paramsWithCredentialBindings,
@@ -2302,6 +2304,7 @@ const loadPipeline = async () => {
                 x: typeof node.x === 'number' ? node.x : 100,
                 y: typeof node.y === 'number' ? node.y : 100,
                 width: node.width || 200,
+                height: 90,
                 inputs: getNodePorts(taskType, 'input').map(i => ({ ...i, connected: false })),
                 outputs: getNodePorts(taskType, 'output').map(o => ({ ...o, connected: false })),
                 params: paramsWithCredentialBindings,
@@ -2384,15 +2387,20 @@ onUnmounted(() => {
 .pipeline-design-container {
   position: relative;
   display: flex;
-  height: calc(100vh - 120px);
-  background: var(--bg-primary);
+  flex: 1;
+  height: 100%;
+  min-height: 100%;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color-light);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
 
 .library-toggle-anchor {
   position: absolute;
   top: 18px;
-  left: 244px;
+  left: 204px;
   z-index: 30;
   transition: left 0.3s ease;
 
@@ -2422,7 +2430,7 @@ onUnmounted(() => {
 
 /* 左侧组件库面板 */
 .components-panel {
-  width: 260px;
+  width: 220px;
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-color);
   transition: width 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
@@ -2555,6 +2563,7 @@ onUnmounted(() => {
 /* 画布区域 */
 .canvas-area {
   flex: 1;
+  min-height: 0;
   position: relative;
   overflow: hidden;
   display: flex;
@@ -2607,6 +2616,7 @@ onUnmounted(() => {
 
 .canvas-wrapper {
   flex: 1;
+  min-height: 0;
   position: relative;
   overflow: hidden;
   cursor: grab;

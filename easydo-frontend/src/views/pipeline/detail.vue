@@ -3,103 +3,76 @@
     <!-- 头部信息 -->
     <div class="detail-header">
       <div class="header-left">
-        <div class="back-btn" @click="goBack">
+        <button type="button" class="back-btn back-btn--icon" @click="goBack" title="返回列表" aria-label="返回列表">
           <el-icon><ArrowLeft /></el-icon>
-          <span>返回首页</span>
-        </div>
-        <div class="pipeline-info">
-          <div class="pipeline-icon" :style="{ background: pipeline?.color || '#409EFF' }">
+        </button>
+        <div class="pipeline-info pipeline-info--compact">
+          <div class="pipeline-icon">
             {{ pipeline?.name?.charAt(0)?.toUpperCase() || 'P' }}
           </div>
-          <div class="pipeline-meta">
-            <h1 class="pipeline-name">{{ pipeline?.name || '-' }}</h1>
-            <div class="pipeline-tags">
-              <el-tag size="small" :type="getEnvironmentType(pipeline?.environment)">
-                {{ getEnvironmentText(pipeline?.environment) }}
-              </el-tag>
-              <span class="create-time">创建于 {{ formatDate(pipeline?.created_at) }}</span>
-            </div>
-          </div>
+          <div class="pipeline-name">{{ pipeline?.name || '-' }}</div>
+          <el-tag size="small" :type="getEnvironmentType(pipeline?.environment)" class="pipeline-env-tag">
+            {{ getEnvironmentText(pipeline?.environment) }}
+          </el-tag>
+          <div class="pipeline-project-name">{{ currentProjectOption?.name || pipeline?.project?.name || '-' }}</div>
         </div>
+        <div class="header-divider">|</div>
       </div>
-      <div class="header-right">
-        <el-button type="primary" @click="handleRun">
+
+      <div class="detail-tabs">
+        <el-button
+          class="header-tab-btn"
+          type="primary"
+          :plain="activeTab !== 'design'"
+          @click="activeTab = 'design'"
+        >
+          <el-icon><Edit /></el-icon>
+          <span>设计</span>
+        </el-button>
+        <el-button
+          class="header-tab-btn"
+          type="primary"
+          :plain="activeTab !== 'history'"
+          @click="activeTab = 'history'"
+        >
+          <el-icon><Clock /></el-icon>
+          <span>历史</span>
+          <span class="tab-count">{{ totalRuns }}</span>
+        </el-button>
+        <el-button
+          v-if="currentRun"
+          class="header-tab-btn"
+          type="primary"
+          :plain="activeTab !== 'execution'"
+          @click="activeTab = 'execution'"
+        >
+          <el-icon><VideoPlay /></el-icon>
+          <span>执行过程</span>
+          <el-tag v-if="currentRun.status === 'running'" type="warning" size="small" class="running-tag">运行中</el-tag>
+          <el-tag v-else-if="currentRun.status === 'queued'" type="info" size="small" class="running-tag">排队中</el-tag>
+        </el-button>
+        <el-button
+          class="header-tab-btn"
+          type="primary"
+          :plain="activeTab !== 'statistics'"
+          @click="activeTab = 'statistics'"
+        >
+          <el-icon><DataAnalysis /></el-icon>
+          <span>统计</span>
+        </el-button>
+        <el-button
+          class="header-tab-btn"
+          type="primary"
+          :plain="activeTab !== 'settings'"
+          @click="activeTab = 'settings'"
+        >
+          <el-icon><Setting /></el-icon>
+          <span>设置</span>
+        </el-button>
+        <el-button class="header-tab-btn header-tab-btn--run" type="primary" @click="handleRun">
           <el-icon><VideoPlay /></el-icon>
           运行流水线
         </el-button>
-        <el-dropdown trigger="click" @command="handleCommand">
-          <el-button :icon="MoreFilled">更多</el-button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item command="edit">编辑</el-dropdown-item>
-              <el-dropdown-item command="copy">复制</el-dropdown-item>
-              <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-      </div>
-    </div>
-    
-    <!-- Tab 导航 -->
-    <div class="detail-tabs">
-      <div 
-        class="tab-item" 
-        :class="{ active: activeTab === 'design' }"
-        @click="activeTab = 'design'"
-      >
-        <el-icon><Edit /></el-icon>
-        <span>设计</span>
-      </div>
-      <div 
-        class="tab-item" 
-        :class="{ active: activeTab === 'history' }"
-        @click="activeTab = 'history'"
-      >
-        <el-icon><Clock /></el-icon>
-        <span>历史</span>
-        <span class="tab-count">{{ totalRuns }}</span>
-      </div>
-      <div 
-        class="tab-item" 
-        :class="{ active: activeTab === 'execution' }"
-        @click="activeTab = 'execution'"
-        v-if="currentRun"
-      >
-        <el-icon><VideoPlay /></el-icon>
-        <span>执行过程</span>
-        <el-tag v-if="currentRun.status === 'running'" type="warning" size="small" class="running-tag">运行中</el-tag>
-        <el-tag v-else-if="currentRun.status === 'queued'" type="info" size="small" class="running-tag">排队中</el-tag>
-      </div>
-      <div 
-        class="tab-item" 
-        :class="{ active: activeTab === 'report' }"
-        @click="activeTab = 'report'"
-      >
-        <el-icon><Document /></el-icon>
-        <span>测试报告</span>
-      </div>
-      <div 
-        class="tab-item" 
-        :class="{ active: activeTab === 'statistics' }"
-        @click="activeTab = 'statistics'"
-      >
-        <el-icon><DataAnalysis /></el-icon>
-        <span>统计</span>
-      </div>
-      <div 
-        class="tab-item" 
-        :class="{ active: activeTab === 'settings' }"
-        @click="activeTab = 'settings'"
-      >
-        <el-icon><Setting /></el-icon>
-        <span>设置</span>
-      </div>
-      <div class="tab-expand" @click="expanded = !expanded">
-        <el-icon>
-          <Fold v-if="expanded" />
-          <Expand v-else />
-        </el-icon>
-        <span>{{ expanded ? '收起' : '展开' }}</span>
       </div>
     </div>
     
@@ -140,7 +113,7 @@
                 {{ getRunTriggerUser(row) }}
               </template>
             </el-table-column>
-            <el-table-column label="分支" width="150">
+            <el-table-column label="分支" min-width="150">
               <template #default="{ row }">
                 {{ getRunBranch(row) }}
               </template>
@@ -155,7 +128,7 @@
                 {{ formatDateTime(row.created_at) }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="280" fixed="right">
+            <el-table-column label="操作" min-width="280" fixed="right">
               <template #default="{ row }">
                 <el-button type="primary" link size="small" @click="viewExecutionDetail(row)">
                   查看执行
@@ -347,66 +320,6 @@
         </div>
       </div>
       
-      <!-- 测试报告 Tab -->
-      <div v-show="activeTab === 'report'" class="tab-panel report-panel">
-        <div class="panel-header">
-          <h3>测试报告</h3>
-        </div>
-        <div class="report-content">
-          <div class="report-summary">
-            <el-card class="summary-card">
-              <div class="summary-item">
-                <span class="summary-value">{{ reportStats.total }}</span>
-                <span class="summary-label">总测试数</span>
-              </div>
-              <div class="summary-item success">
-                <span class="summary-value">{{ reportStats.passed }}</span>
-                <span class="summary-label">通过</span>
-              </div>
-              <div class="summary-item danger">
-                <span class="summary-value">{{ reportStats.failed }}</span>
-                <span class="summary-label">失败</span>
-              </div>
-              <div class="summary-item warning">
-                <span class="summary-value">{{ reportStats.skipped }}</span>
-                <span class="summary-label">跳过</span>
-              </div>
-              <div class="summary-item info">
-                <span class="summary-value">{{ reportStats.passRate }}%</span>
-                <span class="summary-label">通过率</span>
-              </div>
-            </el-card>
-          </div>
-          <div class="report-list">
-            <el-table :data="testReports" style="width: 100%">
-              <el-table-column prop="name" label="测试套件" min-width="200" />
-              <el-table-column prop="total" label="总数" width="100" align="center" />
-              <el-table-column prop="passed" label="通过" width="80" align="center">
-                <template #default="{ row }">
-                  <span class="text-success">{{ row.passed }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="failed" label="失败" width="80" align="center">
-                <template #default="{ row }">
-                  <span class="text-danger">{{ row.failed }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="duration" label="耗时" width="100">
-                <template #default="{ row }">
-                  {{ formatDuration(row.duration) }}
-                </template>
-              </el-table-column>
-              <el-table-column prop="run_time" label="执行时间" width="180">
-                <template #default="{ row }">
-                  {{ formatDateTime(row.run_time) }}
-                </template>
-              </el-table-column>
-            </el-table>
-            <el-empty v-if="testReports.length === 0" description="暂无测试报告" />
-          </div>
-        </div>
-      </div>
-      
       <!-- 统计 Tab -->
       <div v-show="activeTab === 'statistics'" class="tab-panel statistics-panel">
         <div class="panel-header">
@@ -451,20 +364,86 @@
             <el-col :span="12">
               <el-card class="chart-card">
                 <template #header>
-                  <span>成功率趋势</span>
+                  <span>运行趋势</span>
                 </template>
-                <div class="chart-placeholder">
-                  <el-empty description="趋势图表" :image-size="100" />
+                <div class="chart-area">
+                  <div v-if="statisticsTrend.length > 0" class="bar-chart">
+                    <div
+                      v-for="(day, index) in statisticsTrend"
+                      :key="`${day.date}-${index}`"
+                      class="bar-item"
+                    >
+                      <div class="bar-container">
+                        <div class="bar-stack" :style="{ height: `${getTrendStackHeight(day)}%` }">
+                          <div
+                            v-if="day.failed > 0"
+                            class="bar-segment failed"
+                            :style="{ height: `${(day.failed / day.total) * 100}%` }"
+                          >
+                            <span class="bar-value">{{ day.failed }}</span>
+                          </div>
+                          <div
+                            v-if="day.success > 0"
+                            class="bar-segment success"
+                            :style="{ height: `${(day.success / day.total) * 100}%` }"
+                          >
+                            <span class="bar-value">{{ day.success }}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="bar-label">{{ day.date_label || '' }}</div>
+                      <div class="bar-total" v-if="day.total > 0">{{ day.total }}</div>
+                      <div class="bar-total empty" v-else>-</div>
+                    </div>
+                  </div>
+                  <el-empty v-else description="暂无趋势数据" :image-size="100" />
+                  <div v-if="statisticsTrend.length > 0" class="trend-summary">
+                    <span class="trend-total">总计: {{ statisticsTrendTotalCount }} 次运行</span>
+                    <span class="trend-success">成功: {{ statisticsTrendSuccessCount }}</span>
+                    <span class="trend-failed">失败: {{ statisticsTrendFailedCount }}</span>
+                  </div>
                 </div>
               </el-card>
             </el-col>
             <el-col :span="12">
               <el-card class="chart-card">
                 <template #header>
-                  <span>运行分布</span>
+                  <span>状态分布</span>
                 </template>
-                <div class="chart-placeholder">
-                  <el-empty description="分布图表" :image-size="100" />
+                <div class="chart-area chart-area--distribution">
+                  <div v-if="statisticsDistribution.length > 0" class="pie-container">
+                    <svg viewBox="0 0 100 100" class="pie-svg">
+                      <circle
+                        cx="50" cy="50" r="40"
+                        fill="transparent"
+                        stroke="var(--success-color)"
+                        stroke-width="20"
+                        :stroke-dasharray="successDashArray"
+                        stroke-dashoffset="0"
+                        transform="rotate(-90 50 50)"
+                      />
+                      <circle
+                        cx="50" cy="50" r="40"
+                        fill="transparent"
+                        stroke="var(--danger-color)"
+                        stroke-width="20"
+                        :stroke-dasharray="failedDashArray"
+                        :stroke-dashoffset="failedDashOffset"
+                        transform="rotate(-90 50 50)"
+                      />
+                    </svg>
+                    <div class="pie-center">
+                      <span class="pie-percentage">{{ statistics.success_rate }}%</span>
+                      <span class="pie-label">成功率</span>
+                    </div>
+                  </div>
+                  <el-empty v-else description="暂无分布数据" :image-size="100" />
+                  <div v-if="statisticsDistribution.length > 0" class="pie-legend pie-legend--stacked">
+                    <div v-for="item in statisticsDistribution" :key="item.status" class="legend-item">
+                      <span class="legend-dot" :class="item.status === 'success' ? 'success' : 'failed'"></span>
+                      <span>{{ getDistributionStatusLabel(item.status) }}: {{ item.count }} 次 ({{ item.rate }}%)</span>
+                    </div>
+                  </div>
                 </div>
               </el-card>
             </el-col>
@@ -479,8 +458,12 @@
                   <span class="build-number">#{{ row.build_number }}</span>
                 </template>
               </el-table-column>
-              <el-table-column prop="stage" label="阶段" width="120" />
-              <el-table-column prop="error" label="错误信息" min-width="200" show-overflow-tooltip />
+              <el-table-column prop="status" label="状态" width="120">
+                <template #default="{ row }">
+                  {{ getStatusText(row.status) }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="error_msg" label="错误信息" min-width="200" show-overflow-tooltip />
               <el-table-column prop="created_at" label="时间" width="180">
                 <template #default="{ row }">
                   {{ formatDateTime(row.created_at) }}
@@ -505,12 +488,23 @@
                   <el-input v-model="settingsForm.name" placeholder="请输入流水线名称" />
                 </el-form-item>
                 <el-form-item label="所属项目">
-                  <el-select v-model="settingsForm.project_id" placeholder="请选择项目" style="width: 100%">
+                  <el-select
+                    v-model="settingsForm.project_id"
+                    placeholder="请选择项目"
+                    style="width: 100%"
+                    filterable
+                    remote
+                    reserve-keyword
+                    :remote-method="handleProjectSearch"
+                    :loading="projectQuery.loading"
+                    popper-class="pipeline-project-select-dropdown"
+                    @visible-change="handleProjectDropdownVisibleChange"
+                  >
                     <el-option
-                      v-for="project in projectList"
+                      v-for="project in projectOptions"
                       :key="project.id"
                       :label="project.name"
-                      :value="project.id"
+                      :value="normalizeProjectSelectionValue(project.id)"
                     />
                   </el-select>
                 </el-form-item>
@@ -716,11 +710,19 @@
                       </div>
 
                       <el-form-item label="Webhook URL">
-                        <el-input :model-value="triggerSettings.webhook_url || '-'" readonly />
+                        <div class="trigger-inline-field">
+                          <el-input :model-value="displayedWebhookURL" readonly />
+                          <el-button :disabled="!canCopyWebhookURL" @click="copyTriggerField(displayedWebhookURL)">
+                            复制
+                          </el-button>
+                        </div>
                       </el-form-item>
                       <el-form-item label="Secret Token">
                         <div class="trigger-inline-field">
                           <el-input :model-value="displaySecretToken" readonly />
+                          <el-button :disabled="!canCopySecretToken" @click="copyTriggerField(displaySecretToken)">
+                            复制
+                          </el-button>
                           <el-button :loading="triggerSettingsSaving" @click="handleRotateTriggerSecret">
                             轮换
                           </el-button>
@@ -1010,14 +1012,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowLeft,
   VideoPlay,
-  MoreFilled,
   Edit,
   Clock,
-  Document,
   DataAnalysis,
   Setting,
-  Fold,
-  Expand,
   Refresh,
   Loading,
   SuccessFilled,
@@ -1025,14 +1023,16 @@ import {
   Warning,
   Close
 } from '@element-plus/icons-vue'
-import { getPipelineDetail, getPipelineTaskTypes, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineRunDetail, getRunTasks, getPipelineStatistics, getPipelineTestReports, cancelPipelineRun, getPipelineRunParameterView, previewPipelineRunRerun } from '@/api/pipeline'
+import { getPipelineDetail, getPipelineTaskTypes, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineRunDetail, getRunTasks, getPipelineStatistics, cancelPipelineRun, getPipelineRunParameterView, previewPipelineRunRerun } from '@/api/pipeline'
 import { getTaskLogs as fetchTaskLogsFromApi } from '@/api/task'
 import { getProjectList } from '@/api/project'
+import { buildStatisticsDateParams, getDefaultStatisticsDateRange } from '@/views/statistics/dateRange'
 import DesignTab from './designTab.vue'
 import LogViewer from './components/LogViewer.vue'
 import realtime from '@/utils/realtime'
 import { buildRunInputsPayload as buildManualRunPayload, createRunInputs, createRunInputsFromRerunPreview, getManualRunNodes, normalizeRerunPreviewPayload, normalizeRunParameterViewPayload, parseJSONField } from './runtimeConfig'
 import { applyTaskStatusPayload, getTaskOutputDisplayKind, normalizeExecutionTaskOutputs } from './executionRealtimeState'
+import { buildDisplayedWebhookURL, buildDisplayedSecretToken, canCopyDisplayValue, copyDisplayedValue } from './triggerWebhookDisplay.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -1041,7 +1041,6 @@ const pipelineId = computed(() => parseInt(route.params.id))
 
 // 状态
 const activeTab = ref('design')
-const expanded = ref(true)
 const historyLoading = ref(false)
 const runDialogVisible = ref(false)
 const runLoading = ref(false)
@@ -1058,8 +1057,10 @@ const pipeline = ref(null)
 const runHistory = ref([])
 const totalRuns = ref(0)
 const projectList = ref([])
-const testReports = ref([])
+const projectSelectRef = ref(null)
 const recentFailures = ref([])
+const statisticsTrend = ref([])
+const statisticsDistribution = ref([])
 const pipelineTaskDefinitions = ref([])
 const parameterDrawerRun = ref(null)
 const parameterDrawerNodes = ref([])
@@ -1171,6 +1172,144 @@ const settingsForm = reactive({
   description: ''
 })
 
+const normalizeProjectSelectionValue = (value) => {
+  if (value === null || value === undefined || value === '') {
+    return null
+  }
+
+  const numericValue = Number(value)
+  return Number.isNaN(numericValue) ? value : numericValue
+}
+
+const currentProjectOption = computed(() => {
+  const project = pipeline.value?.project
+  if (!project?.id || !project?.name) return null
+  return {
+    id: normalizeProjectSelectionValue(project.id),
+    name: project.name
+  }
+})
+
+const projectOptions = computed(() => {
+  const options = []
+  const seen = new Set()
+
+  const pushOption = (project) => {
+    if (!project?.id || !project?.name) return
+    const normalizedID = normalizeProjectSelectionValue(project.id)
+    const cacheKey = String(normalizedID)
+    if (seen.has(cacheKey)) return
+    seen.add(cacheKey)
+    options.push({
+      id: normalizedID,
+      name: project.name
+    })
+  }
+
+  pushOption(currentProjectOption.value)
+  projectList.value.forEach(pushOption)
+
+  return options
+})
+
+const projectQuery = reactive({
+  keyword: '',
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  loading: false,
+  initialized: false,
+  visible: false
+})
+
+let projectDropdownScrollCleanup = null
+
+const resetProjectQuery = (keyword = '') => {
+  projectQuery.keyword = keyword
+  projectQuery.page = 1
+  projectQuery.total = 0
+}
+
+const fetchProjects = async ({ append = false } = {}) => {
+  if (projectQuery.loading) return
+
+  projectQuery.loading = true
+  try {
+    const response = await getProjectList({
+      page: projectQuery.page,
+      page_size: projectQuery.pageSize,
+      keyword: projectQuery.keyword
+    })
+    const fetchedProjects = Array.isArray(response?.data?.list) ? response.data.list : []
+    projectQuery.total = Number(response?.data?.total || 0)
+    projectList.value = append ? [...projectList.value, ...fetchedProjects] : fetchedProjects
+    projectQuery.initialized = true
+  } catch (error) {
+    console.error('获取项目列表失败:', error)
+  } finally {
+    projectQuery.loading = false
+    nextTick(() => {
+      bindProjectDropdownScroll()
+    })
+  }
+}
+
+const loadMoreProjects = async () => {
+  if (projectQuery.loading) return
+  if (projectList.value.length >= projectQuery.total) return
+
+  projectQuery.page += 1
+  await fetchProjects({ append: true })
+}
+
+const bindProjectDropdownScroll = () => {
+  if (!projectQuery.visible) return
+
+  const dropdown = document.querySelector('.pipeline-project-select-dropdown .el-select-dropdown__wrap')
+  if (!dropdown || dropdown.dataset.easydoBound === 'true') return
+
+  const onScroll = () => {
+    const threshold = 24
+    const reachedBottom = dropdown.scrollTop + dropdown.clientHeight >= dropdown.scrollHeight - threshold
+    if (reachedBottom) {
+      loadMoreProjects()
+    }
+  }
+
+  dropdown.addEventListener('scroll', onScroll)
+  dropdown.dataset.easydoBound = 'true'
+  projectDropdownScrollCleanup = () => {
+    dropdown.removeEventListener('scroll', onScroll)
+    delete dropdown.dataset.easydoBound
+  }
+}
+
+const handleProjectSearch = async (keyword) => {
+  resetProjectQuery((keyword || '').trim())
+  await fetchProjects()
+}
+
+const handleProjectDropdownVisibleChange = async (visible) => {
+  projectQuery.visible = visible
+  if (!visible) {
+    if (projectDropdownScrollCleanup) {
+      projectDropdownScrollCleanup()
+      projectDropdownScrollCleanup = null
+    }
+    return
+  }
+
+  if (!projectQuery.initialized) {
+    resetProjectQuery(projectQuery.keyword)
+    await fetchProjects()
+    return
+  }
+
+  nextTick(() => {
+    bindProjectDropdownScroll()
+  })
+}
+
 // 触发设置
 const triggerSettings = reactive({
   provider: '',
@@ -1225,7 +1364,7 @@ const notificationSettings = reactive({
 })
 
 // 统计
-const statsDateRange = ref(null)
+const statsDateRange = ref(getDefaultStatisticsDateRange())
 const statistics = reactive({
   total_runs: 0,
   successful_runs: 0,
@@ -1234,14 +1373,47 @@ const statistics = reactive({
   avg_duration: 0
 })
 
-// 报告统计
-const reportStats = reactive({
-  total: 0,
-  passed: 0,
-  failed: 0,
-  skipped: 0,
-  passRate: 0
+const maxStatisticsTrendValue = computed(() => {
+  if (!statisticsTrend.value.length) return 1
+  return Math.max(...statisticsTrend.value.map(item => Number(item.total || 0)), 1)
 })
+
+const statisticsTrendSuccessCount = computed(() => statisticsTrend.value.reduce((sum, item) => sum + Number(item.success || 0), 0))
+const statisticsTrendFailedCount = computed(() => statisticsTrend.value.reduce((sum, item) => sum + Number(item.failed || 0), 0))
+const statisticsTrendTotalCount = computed(() => statisticsTrend.value.reduce((sum, item) => sum + Number(item.total || 0), 0))
+const distributionTotalCount = computed(() => statisticsDistribution.value.reduce((sum, item) => sum + Number(item.count || 0), 0))
+
+const statisticsChartCircumference = 2 * Math.PI * 40
+
+const successDistribution = computed(() => statisticsDistribution.value.find(item => item.status === 'success') || { count: 0, rate: 0 })
+const failedDistribution = computed(() => {
+  const count = statisticsDistribution.value
+    .filter(item => item.status !== 'success')
+    .reduce((sum, item) => sum + Number(item.count || 0), 0)
+  const rate = distributionTotalCount.value > 0 ? (count * 100) / distributionTotalCount.value : 0
+  return {
+    count,
+    rate
+  }
+})
+
+const successDashArray = computed(() => {
+  const successLength = (Number(successDistribution.value.rate || 0) / 100) * statisticsChartCircumference
+  return `${successLength} ${statisticsChartCircumference}`
+})
+
+const failedDashArray = computed(() => {
+  const failedLength = (Number(failedDistribution.value.rate || 0) / 100) * statisticsChartCircumference
+  return `${failedLength} ${statisticsChartCircumference}`
+})
+
+const failedDashOffset = computed(() => -((Number(successDistribution.value.rate || 0) / 100) * statisticsChartCircumference))
+
+const getTrendStackHeight = (item) => {
+  const total = Number(item?.total || 0)
+  if (total <= 0) return 0
+  return Math.max((total / maxStatisticsTrendValue.value) * 100, 8)
+}
 
 // 执行过程相关
 const currentRun = ref(null)
@@ -1492,7 +1664,18 @@ const rerunPreviewMismatchedItems = computed(() => {
   return mismatched.map(normalizeRerunPreviewItem)
 })
 
-const displaySecretToken = computed(() => triggerSettings.secret_token || triggerSettings.webhook_token || '-')
+const currentPageOrigin = window.location.origin
+const displayedWebhookURL = computed(() => buildDisplayedWebhookURL({
+  origin: currentPageOrigin,
+  webhookToken: triggerSettings.webhook_token,
+  fallbackURL: triggerSettings.webhook_url
+}))
+const displaySecretToken = computed(() => buildDisplayedSecretToken({
+  secretToken: triggerSettings.secret_token,
+  webhookToken: triggerSettings.webhook_token
+}))
+const canCopyWebhookURL = computed(() => canCopyDisplayValue(displayedWebhookURL.value))
+const canCopySecretToken = computed(() => canCopyDisplayValue(displaySecretToken.value))
 const webhookSectionEnabled = computed(() => Boolean(
   triggerSettings.push_enabled
   || triggerSettings.tag_enabled
@@ -1666,7 +1849,7 @@ const fetchPipelineDetail = async () => {
       pipeline.value = response.data
       // 更新设置表单
       settingsForm.name = pipeline.value.name
-      settingsForm.project_id = pipeline.value.project_id
+      settingsForm.project_id = normalizeProjectSelectionValue(pipeline.value.project_id)
       settingsForm.environment = pipeline.value.environment
       settingsForm.description = pipeline.value.description || ''
       return pipeline.value
@@ -1767,19 +1950,10 @@ const fetchRunHistory = async (options = {}) => {
 }
 
 // 获取项目列表
-const fetchProjects = async () => {
-  try {
-    const response = await getProjectList({})
-    projectList.value = response.data.list || []
-  } catch (error) {
-    console.error('获取项目列表失败:', error)
-  }
-}
-
 // 获取统计数据
 const fetchStatistics = async () => {
   try {
-    const response = await getPipelineStatistics(pipelineId.value)
+    const response = await getPipelineStatistics(pipelineId.value, buildStatisticsDateParams(statsDateRange.value))
     if (response.code === 200) {
       const data = response.data
       statistics.total_runs = data.total_runs || 0
@@ -1787,44 +1961,12 @@ const fetchStatistics = async () => {
       statistics.failed_runs = data.failed_runs || 0
       statistics.success_rate = data.success_rate || 0
       statistics.avg_duration = data.avg_duration || 0
+      statisticsTrend.value = Array.isArray(data.daily_runs) ? data.daily_runs : []
+      statisticsDistribution.value = Array.isArray(data.distribution) ? data.distribution : []
+      recentFailures.value = Array.isArray(data.recent_failures) ? data.recent_failures : []
     }
   } catch (error) {
     console.error('获取统计数据失败:', error)
-  }
-  
-  // 模拟最近失败数据
-  recentFailures.value = [
-    { id: 1, build_number: 15, stage: '构建', error: 'npm install failed', created_at: new Date(Date.now() - 86400000).toISOString() },
-    { id: 2, build_number: 12, stage: '测试', error: 'test failed: 2 cases', created_at: new Date(Date.now() - 172800000).toISOString() }
-  ]
-}
-
-// 获取测试报告
-const fetchTestReports = async () => {
-  try {
-    const response = await getPipelineTestReports(pipelineId.value)
-    if (response.code === 200) {
-      testReports.value = response.data.list || []
-      
-      // 计算统计数据
-      reportStats.total = 0
-      reportStats.passed = 0
-      reportStats.failed = 0
-      reportStats.skipped = 0
-      
-      testReports.value.forEach(report => {
-        reportStats.total += report.total || 0
-        reportStats.passed += report.passed || 0
-        reportStats.failed += report.failed || 0
-        reportStats.skipped += report.skipped || 0
-      })
-      
-      if (reportStats.total > 0) {
-        reportStats.passRate = Math.round((reportStats.passed / reportStats.total) * 100)
-      }
-    }
-  } catch (error) {
-    console.error('获取测试报告失败:', error)
   }
 }
 
@@ -1967,21 +2109,6 @@ const confirmRun = async () => {
     ElMessage.error(errorMessage)
   } finally {
     runLoading.value = false
-  }
-}
-
-// 处理下拉菜单命令
-const handleCommand = (command) => {
-  switch (command) {
-    case 'edit':
-      ElMessage.info('编辑功能开发中')
-      break
-    case 'copy':
-      ElMessage.info('复制功能开发中')
-      break
-    case 'delete':
-      ElMessage.info('请在列表页删除')
-      break
   }
 }
 
@@ -2346,6 +2473,16 @@ const handleRotateTriggerSecret = async () => {
   await saveTriggerSettings(true)
 }
 
+const copyTriggerField = async (value) => {
+  await copyDisplayedValue({
+    value,
+    canCopy: canCopyDisplayValue,
+    writeText: (text) => navigator.clipboard.writeText(text),
+    onSuccess: (message) => ElMessage.success(message),
+    onError: (message) => ElMessage.error(message)
+  })
+}
+
 // 保存通知设置
 const handleSaveNotifications = () => {
   ElMessage.success('通知设置已保存')
@@ -2424,6 +2561,18 @@ const getStatusText = (status) => {
   return texts[status] || status
 }
 
+const getDistributionStatusLabel = (status) => {
+  const texts = {
+    success: '成功',
+    failed: '失败',
+    cancelled: '取消',
+    running: '运行中',
+    queued: '排队中',
+    pending: '等待中'
+  }
+  return texts[status] || getStatusText(status)
+}
+
 const getEnvironmentType = (env) => {
   const types = {
     development: '',
@@ -2450,8 +2599,6 @@ watch(activeTab, (newTab) => {
     hydrateExecutionViewIfVisible()
   } else if (newTab === 'statistics') {
     fetchStatistics()
-  } else if (newTab === 'report') {
-    fetchTestReports()
   }
 })
 
@@ -2622,7 +2769,6 @@ onMounted(() => {
   window.addEventListener('resize', updateDetailContainerWidth)
   fetchPipelineDetail()
   fetchTriggerSettings()
-  fetchProjects()
   fetchRunHistory({ rehydrateExecution: true })
   setupRealtimeUpdates()
 })
@@ -2634,12 +2780,18 @@ onUnmounted(() => {
     detailResizeObserver.disconnect()
     detailResizeObserver = null
   }
+  if (projectDropdownScrollCleanup) {
+    projectDropdownScrollCleanup()
+    projectDropdownScrollCleanup = null
+  }
   stopRealtimeUpdates()
   teardownRealtimeUpdates()
 })
 </script>
 
 <style lang="scss" scoped>
+@import '@/assets/styles/variables.scss';
+
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
@@ -2651,166 +2803,239 @@ onUnmounted(() => {
 }
 
 .pipeline-detail-container {
+  display: flex;
+  flex-direction: column;
   width: 100%;
   min-width: 0;
   min-height: 100%;
+  height: 100%;
+  padding: 0;
   background: var(--bg-secondary);
-  
+  border-radius: $radius-2xl;
+
   .detail-header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    padding: 16px 24px;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin: 0;
+    padding: 12px 14px;
     background: var(--bg-card);
-    border-bottom: 1px solid #e4e7ed;
-    
+    border: 1px solid var(--border-color-light);
+    border-radius: $radius-xl;
+    box-shadow: var(--shadow-sm);
+
     .header-left {
       display: flex;
       align-items: center;
-      gap: 24px;
-      
-      .back-btn {
-        display: flex;
-        align-items: center;
-        gap: 4px;
-        color: var(--text-secondary);
-        cursor: pointer;
-        padding: 8px 12px;
-        border-radius: 4px;
-        transition: background 0.3s;
-        
-        &:hover {
-          background: var(--bg-secondary);
-        }
-      }
-      
-      .pipeline-info {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        
-        .pipeline-icon {
-          width: 48px;
-          height: 48px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          color: white;
-          font-size: 20px;
-          font-weight: 600;
-          border-radius: 8px;
-        }
-        
-        .pipeline-meta {
-          .pipeline-name {
-            font-size: 20px;
-            font-weight: 600;
-            color: var(--text-primary);
-            margin: 0 0 8px;
-          }
-          
-          .pipeline-tags {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            
-            .create-time {
-              color: var(--text-muted);
-              font-size: 12px;
-            }
-          }
-        }
-      }
-    }
-    
-    .header-right {
-      display: flex;
       gap: 12px;
+      min-width: 0;
+      flex-shrink: 0;
     }
-  }
-  
-  .detail-tabs {
-    display: flex;
-    align-items: center;
-    padding: 0 24px;
-    background: var(--bg-card);
-    border-bottom: 1px solid #e4e7ed;
-    
-    .tab-item {
-      display: flex;
+
+    .back-btn,
+    .tab-expand {
+      display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 6px;
-      min-width: 108px;
-      padding: 16px 20px;
+      height: 34px;
+      padding: 0 10px;
+      border: none;
+      border-radius: 10px;
+      background: transparent;
       color: var(--text-secondary);
       cursor: pointer;
-      border-bottom: 2px solid transparent;
-      transition: all 0.3s;
-      
+      transition: background 0.2s ease, color 0.2s ease;
+
       &:hover {
-        color: var(--primary-color);
-      }
-      
-      &.active {
-        color: var(--primary-color);
-        border-bottom-color: var(--primary-color);
-      }
-      
-      .tab-count {
-        font-size: 12px;
-        color: var(--text-muted);
-        margin-left: 4px;
+        background: var(--bg-secondary);
+        color: var(--text-primary);
       }
     }
-    
-    .tab-expand {
-      margin-left: auto;
+
+    .back-btn--icon {
+      width: 28px;
+      min-width: 28px;
+      padding: 0;
+      border: 1px solid var(--border-color-light);
+      background: var(--bg-elevated);
+    }
+
+    .pipeline-info {
       display: flex;
       align-items: center;
-      gap: 4px;
-      padding: 16px;
-      color: var(--text-secondary);
-      cursor: pointer;
-      
-      &:hover {
-        color: var(--primary-color);
+      gap: 10px;
+      min-width: 0;
+
+      &.pipeline-info--compact {
+        .pipeline-icon {
+          width: 32px;
+          height: 32px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-shrink: 0;
+          border-radius: 10px;
+          color: #fff;
+          font-size: 14px;
+          font-weight: 700;
+          background: linear-gradient(140deg, var(--primary-color) 0%, var(--primary-hover) 100%);
+          box-shadow: 0 8px 18px rgba(64, 158, 255, 0.24);
+        }
+
+        .pipeline-name {
+          min-width: 0;
+          font-size: 16px;
+          font-weight: 600;
+          color: var(--text-primary);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .pipeline-env-tag {
+          flex-shrink: 0;
+        }
+
+        .pipeline-project-name {
+          font-size: 13px;
+          color: var(--text-secondary);
+          white-space: nowrap;
+        }
+      }
+    }
+
+    .header-divider {
+      color: var(--border-color);
+      font-size: 14px;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+
+    .detail-tabs {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+      flex-wrap: wrap;
+
+      .header-tab-btn {
+        height: 36px;
+        padding: 0 14px;
+        border-radius: 10px;
+        font-weight: 500;
+
+        :deep(.el-button) {
+          font-weight: 500;
+        }
+
+        :deep(.el-icon) {
+          margin-right: 0;
+        }
+
+        &:not(.is-plain) {
+          color: #fff;
+          border-color: transparent;
+          background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
+
+          :deep(span),
+          :deep(.el-icon) {
+            color: #fff;
+          }
+        }
+
+        &.is-plain {
+          color: var(--primary-color);
+          border-color: rgba(64, 158, 255, 0.28);
+          background: rgba(64, 158, 255, 0.08);
+
+          :deep(span),
+          :deep(.el-icon) {
+            color: var(--primary-color);
+          }
+
+          &:hover {
+            border-color: rgba(64, 158, 255, 0.42);
+            background: rgba(64, 158, 255, 0.14);
+          }
+
+          .tab-count {
+            background: rgba(64, 158, 255, 0.12);
+            color: var(--primary-color);
+          }
+        }
+
+        .tab-count {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 18px;
+          height: 18px;
+          padding: 0 5px;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.16);
+          font-size: 12px;
+          line-height: 1;
+        }
+      }
+
+      .header-tab-btn--run {
+        margin-left: auto;
       }
     }
   }
-  
+
   .detail-content {
-    padding: 24px;
-    
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    padding: 10px 0 0;
+
     .tab-panel {
-      background: var(--bg-card);
-      border-radius: 8px;
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      flex: 1;
       min-height: 500px;
-      
+      background: var(--bg-card);
+      border: 1px solid var(--border-color-light);
+      border-radius: $radius-xl;
+      box-shadow: var(--shadow-sm);
+      overflow: hidden;
+
       .panel-header {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 16px 20px;
-        border-bottom: 1px solid #ebeef5;
-        
+        gap: 12px;
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--border-color-light);
+
         h3 {
           margin: 0;
-          font-size: 16px;
+          font-size: 15px;
           font-weight: 600;
           color: var(--text-primary);
         }
       }
     }
-    
+
     // 设计面板
     .design-panel {
-      min-height: calc(100vh - 280px);
+      display: flex;
+      flex: 1;
+      min-height: 0;
       background: transparent;
+      border: none;
       border-radius: 0;
+      box-shadow: none;
+      overflow: hidden;
       padding: 0;
     }
-    
+
     // 历史面板
     .history-panel {
       .history-list {
@@ -2820,48 +3045,6 @@ onUnmounted(() => {
           color: var(--primary-color);
           font-weight: 500;
         }
-      }
-    }
-    
-    // 报告面板
-    .report-panel {
-      .report-content {
-        padding: 20px;
-        
-        .report-summary {
-          margin-bottom: 20px;
-          
-          .summary-card {
-            :deep(.el-card__body) {
-              display: flex;
-              justify-content: space-around;
-            }
-            
-            .summary-item {
-              text-align: center;
-              
-              .summary-value {
-                display: block;
-                font-size: 28px;
-                font-weight: 600;
-                color: var(--text-primary);
-              }
-              
-              .summary-label {
-                font-size: 12px;
-                color: var(--text-muted);
-              }
-              
-              &.success .summary-value { color: #67C23A; }
-              &.danger .summary-value { color: #F56C6C; }
-              &.warning .summary-value { color: #E6A23C; }
-              &.info .summary-value { color: var(--primary-color); }
-            }
-          }
-        }
-        
-        .text-success { color: #67C23A; }
-        .text-danger { color: #F56C6C; }
       }
     }
     
@@ -2889,11 +3072,172 @@ onUnmounted(() => {
           margin-bottom: 20px;
           
           .chart-card {
-            .chart-placeholder {
-              height: 250px;
+            .chart-area {
+              min-height: 250px;
+              display: flex;
+              flex-direction: column;
+
+              &.chart-area--distribution {
+                justify-content: center;
+                align-items: center;
+                gap: 16px;
+              }
+            }
+
+            .bar-chart {
+              flex: 1;
+              display: flex;
+              align-items: flex-end;
+              justify-content: space-around;
+              gap: 8px;
+              padding: 0 10px;
+            }
+
+            .bar-item {
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              flex: 1;
+              max-width: 56px;
+            }
+
+            .bar-container {
+              width: 100%;
+              height: 128px;
+              display: flex;
+              align-items: flex-end;
+              justify-content: center;
+            }
+
+            .bar-stack {
+              width: 100%;
+              display: flex;
+              flex-direction: column;
+              justify-content: flex-end;
+              border-radius: 6px 6px 0 0;
+              overflow: hidden;
+            }
+
+            .bar-segment {
+              width: 100%;
               display: flex;
               align-items: center;
               justify-content: center;
+
+              &.failed {
+                background: linear-gradient(180deg, var(--danger-color), rgba(231, 90, 90, 0.72));
+              }
+
+              &.success {
+                background: linear-gradient(180deg, var(--success-color), rgba(31, 188, 132, 0.72));
+              }
+            }
+
+            .bar-value,
+            .bar-total {
+              font-size: 12px;
+              color: var(--text-secondary);
+            }
+
+            .bar-value {
+              color: #fff;
+              font-weight: 600;
+            }
+
+            .bar-label {
+              margin-top: 10px;
+              font-size: 12px;
+              color: var(--text-muted);
+            }
+
+            .bar-total.empty {
+              color: var(--text-muted);
+            }
+
+            .trend-summary {
+              display: flex;
+              gap: 16px;
+              margin-top: 12px;
+              flex-wrap: wrap;
+              font-size: 13px;
+
+              .trend-total {
+                color: var(--text-secondary);
+              }
+
+              .trend-success {
+                color: var(--success-color);
+              }
+
+              .trend-failed {
+                color: var(--danger-color);
+              }
+            }
+
+            .pie-container {
+              position: relative;
+              width: 170px;
+              height: 170px;
+            }
+
+            .pie-svg {
+              width: 100%;
+              height: 100%;
+            }
+
+            .pie-center {
+              position: absolute;
+              inset: 0;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              justify-content: center;
+            }
+
+            .pie-percentage {
+              font-size: 28px;
+              font-weight: 700;
+              color: var(--text-primary);
+            }
+
+            .pie-label {
+              margin-top: 4px;
+              font-size: 12px;
+              color: var(--text-muted);
+            }
+
+            .pie-legend {
+              display: flex;
+              gap: 12px;
+              flex-wrap: wrap;
+              justify-content: center;
+
+              &.pie-legend--stacked {
+                flex-direction: column;
+                align-items: flex-start;
+              }
+            }
+
+            .legend-item {
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              font-size: 13px;
+              color: var(--text-secondary);
+            }
+
+            .legend-dot {
+              width: 10px;
+              height: 10px;
+              border-radius: 999px;
+
+              &.success {
+                background: var(--success-color);
+              }
+
+              &.failed {
+                background: var(--danger-color);
+              }
             }
           }
         }

@@ -622,6 +622,31 @@ func regularPipelineRunsQuery(db *gorm.DB) *gorm.DB {
 	return db.Where("(trigger_type IS NULL OR trigger_type = '' OR trigger_type <> ?)", pipelineRunTriggerTypeDeploymentRequest)
 }
 
+type pipelineStatisticsResponse struct {
+	TotalRuns      int64                              `json:"total_runs"`
+	SuccessfulRuns int64                              `json:"successful_runs"`
+	FailedRuns     int64                              `json:"failed_runs"`
+	SuccessRate    float64                            `json:"success_rate"`
+	AvgDuration    float64                            `json:"avg_duration"`
+	DailyRuns      []DailyRun                         `json:"daily_runs"`
+	Distribution   []pipelineStatisticsStatusBucket   `json:"distribution"`
+	RecentFailures []pipelineStatisticsRecentFailure  `json:"recent_failures"`
+}
+
+type pipelineStatisticsStatusBucket struct {
+	Status string  `json:"status"`
+	Count  int64   `json:"count"`
+	Rate   float64 `json:"rate"`
+}
+
+type pipelineStatisticsRecentFailure struct {
+	RunID       uint64    `json:"run_id"`
+	BuildNumber int       `json:"build_number"`
+	Status      string    `json:"status"`
+	ErrorMsg    string    `json:"error_msg"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 func (h *PipelineHandler) GetPipelineDetail(c *gin.Context) {
 	id := c.Param("id")
 	workspaceID := c.GetUint64("workspace_id")
@@ -4043,16 +4068,28 @@ func (h *PipelineHandler) GetPipelineStatistics(c *gin.Context) {
 		return
 	}
 
+	dateRange, ok := parseStatisticsDateRange(c)
+	if !ok {
+		return
+	}
+
+	buildPipelineStatisticsQuery := func() *gorm.DB {
+		return applyStatisticsDateRange(
+			regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipelineID),
+			dateRange,
+		)
+	}
+
 	var totalRuns, successfulRuns, failedRuns int64
 	var avgDuration float64
 
-	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipelineID).Count(&totalRuns)
-	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ? AND pipeline_id = ? AND status = ?", workspaceID, pipelineID, models.PipelineRunStatusSuccess).Count(&successfulRuns)
-	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ? AND pipeline_id = ? AND status = ?", workspaceID, pipelineID, models.PipelineRunStatusFailed).Count(&failedRuns)
+	buildPipelineStatisticsQuery().Count(&totalRuns)
+	buildPipelineStatisticsQuery().Where("status = ?", models.PipelineRunStatusSuccess).Count(&successfulRuns)
+	buildPipelineStatisticsQuery().Where("status = ?", models.PipelineRunStatusFailed).Count(&failedRuns)
 
 	// 计算平均耗时
 	var totalDuration int64
-	regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Select("COALESCE(SUM(duration), 0)").Where("workspace_id = ? AND pipeline_id = ? AND duration > 0", workspaceID, pipelineID).Scan(&totalDuration)
+	buildPipelineStatisticsQuery().Where("duration > 0").Select("COALESCE(SUM(duration), 0)").Scan(&totalDuration)
 	if totalRuns > 0 {
 		avgDuration = float64(totalDuration) / float64(totalRuns) / 60 // 转换为分钟
 	}
@@ -4062,14 +4099,92 @@ func (h *PipelineHandler) GetPipelineStatistics(c *gin.Context) {
 		successRate = float64(successfulRuns) * 100 / float64(totalRuns)
 	}
 
+	dailyRuns := make([]DailyRun, 0)
+	if !dateRange.Start.IsZero() && !dateRange.End.IsZero() {
+		type pipelineTrendRow struct {
+			Date    string
+			Total   int64
+			Success int64
+			Failed  int64
+		}
+
+		var rows []pipelineTrendRow
+		applyStatisticsDateRange(
+			regularPipelineRunsQuery(h.DB.Model(&models.PipelineRun{})).Where("workspace_id = ? AND pipeline_id = ?", workspaceID, pipelineID),
+			dateRange,
+		).Select(`DATE(created_at) AS date,
+			COUNT(*) AS total,
+			SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
+			SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed`).
+			Group("DATE(created_at)").
+			Order("date ASC").
+			Scan(&rows)
+
+		rowByDate := make(map[string]pipelineTrendRow, len(rows))
+		for _, row := range rows {
+			rowByDate[row.Date] = row
+		}
+
+		days := int(dateRange.End.Sub(dateRange.Start).Hours()/24 + 0.5)
+		for i := 0; i < days; i++ {
+			date := dateRange.Start.AddDate(0, 0, i)
+			dateKey := date.Format("2006-01-02")
+			row := rowByDate[dateKey]
+			daySuccessRate := float64(0)
+			if row.Total > 0 {
+				daySuccessRate = float64(row.Success) * 100 / float64(row.Total)
+			}
+			dailyRuns = append(dailyRuns, DailyRun{
+				Date:        dateKey,
+				DateLabel:   getWeekdayLabel(date.Weekday()),
+				Total:       row.Total,
+				Success:     row.Success,
+				Failed:      row.Failed,
+				SuccessRate: math.Round(daySuccessRate*100) / 100,
+			})
+		}
+	}
+
+	type distributionRow struct {
+		Status string
+		Count  int64
+	}
+	var distributionRows []distributionRow
+	buildPipelineStatisticsQuery().Select("status, COUNT(*) AS count").Group("status").Order("status ASC").Scan(&distributionRows)
+	distribution := make([]pipelineStatisticsStatusBucket, 0, len(distributionRows))
+	for _, row := range distributionRows {
+		rate := float64(0)
+		if totalRuns > 0 {
+			rate = float64(row.Count) * 100 / float64(totalRuns)
+		}
+		distribution = append(distribution, pipelineStatisticsStatusBucket{
+			Status: row.Status,
+			Count:  row.Count,
+			Rate:   math.Round(rate*100) / 100,
+		})
+	}
+
+	recentFailures := make([]pipelineStatisticsRecentFailure, 0)
+	if err := buildPipelineStatisticsQuery().Where("status = ?", models.PipelineRunStatusFailed).
+		Select("id AS run_id, build_number, status, error_msg, created_at").
+		Order("created_at DESC").
+		Limit(10).
+		Scan(&recentFailures).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "获取流水线统计失败"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
-		"data": gin.H{
-			"total_runs":      totalRuns,
-			"successful_runs": successfulRuns,
-			"failed_runs":     failedRuns,
-			"success_rate":    math.Round(successRate*100) / 100,
-			"avg_duration":    math.Round(avgDuration*100) / 100,
+		"data": pipelineStatisticsResponse{
+			TotalRuns:      totalRuns,
+			SuccessfulRuns: successfulRuns,
+			FailedRuns:     failedRuns,
+			SuccessRate:    math.Round(successRate*100) / 100,
+			AvgDuration:    math.Round(avgDuration*100) / 100,
+			DailyRuns:      dailyRuns,
+			Distribution:   distribution,
+			RecentFailures: recentFailures,
 		},
 	})
 }

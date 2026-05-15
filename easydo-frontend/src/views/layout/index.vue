@@ -112,7 +112,7 @@
         </div>
       </header>
 
-      <section class="content-wrapper">
+      <section class="content-wrapper" :class="{ 'content-wrapper--pipeline-detail': isPipelineDetailPage }">
         <router-view />
       </section>
     </main>
@@ -203,6 +203,8 @@ const currentPageTitle = computed(() => {
   const matchedItem = pageTitleMatchers.find((item) => item.match(route.path))
   return matchedItem?.name || '工作台'
 })
+
+const isPipelineDetailPage = computed(() => route.path.startsWith('/pipeline/') && route.path !== '/pipeline')
 
 watch(() => userStore.currentWorkspaceId, async () => {
   await notificationStore.refreshUnreadCount()
@@ -324,7 +326,7 @@ const handleLogout = async () => {
   position: relative;
   z-index: 2;
   width: $sidebar-width;
-  margin: 14px 0 14px 14px;
+  margin: 8px 0 8px 8px;
   padding: 8px;
   display: flex;
   flex-direction: column;
@@ -608,18 +610,18 @@ const handleLogout = async () => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  margin: 14px;
+  margin: 8px;
   border-radius: $radius-2xl;
   overflow: hidden;
 }
 
 .topbar {
   height: $header-height;
-  padding: 0 20px;
+  padding: 0 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   border: 1px solid var(--glass-border);
   border-radius: $radius-2xl;
   background: var(--glass-bg);
@@ -723,14 +725,26 @@ const handleLogout = async () => {
 
 .content-wrapper {
   flex: 1;
-  margin-top: 12px;
-  padding: 20px;
+  margin-top: 8px;
+  padding: 0 10px 10px;
   border-radius: $radius-2xl;
   border: 1px solid var(--glass-border);
-  background: rgba(255, 255, 255, 0.34);
+  background: var(--glass-bg);
   backdrop-filter: $blur-sm;
   -webkit-backdrop-filter: $blur-sm;
   overflow: auto;
+
+  &.content-wrapper--pipeline-detail {
+    margin-top: 8px;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
 }
 
 @media (max-width: 1200px) {
