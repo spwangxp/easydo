@@ -28,46 +28,46 @@ func NewAIAgentHandler() *AIAgentHandler {
 }
 
 type aiProviderRequest struct {
-	Name         string                 `json:"name" binding:"required"`
-	Description  string                 `json:"description"`
-	ProviderType string                 `json:"provider_type" binding:"required"`
-	BaseURL      string                 `json:"base_url"`
-	CredentialID uint64                 `json:"credential_id"`
-	HeadersJSON  map[string]interface{} `json:"headers_json"`
-	SettingsJSON map[string]interface{} `json:"settings_json"`
-	MetadataJSON map[string]interface{} `json:"metadata_json"`
-	Status       string                 `json:"status"`
+	Name         string         `json:"name" binding:"required"`
+	Description  string         `json:"description"`
+	ProviderType string         `json:"provider_type" binding:"required"`
+	BaseURL      string         `json:"base_url"`
+	CredentialID uint64         `json:"credential_id"`
+	HeadersJSON  map[string]any `json:"headers_json"`
+	SettingsJSON map[string]any `json:"settings_json"`
+	MetadataJSON map[string]any `json:"metadata_json"`
+	Status       string         `json:"status"`
 }
 
 type aiModelBindingRequest struct {
-	ModelID          uint64                 `json:"model_id" binding:"required"`
-	ProviderModelKey string                 `json:"provider_model_key"`
-	CapabilitiesJSON map[string]interface{} `json:"capabilities_json"`
-	SettingsJSON     map[string]interface{} `json:"settings_json"`
-	MetadataJSON     map[string]interface{} `json:"metadata_json"`
-	Status           string                 `json:"status"`
+	ModelID          uint64         `json:"model_id" binding:"required"`
+	ProviderModelKey string         `json:"provider_model_key"`
+	CapabilitiesJSON map[string]any `json:"capabilities_json"`
+	SettingsJSON     map[string]any `json:"settings_json"`
+	MetadataJSON     map[string]any `json:"metadata_json"`
+	Status           string         `json:"status"`
 }
 
 type aiAgentRequest struct {
-	Name               string                 `json:"name" binding:"required"`
-	Description        string                 `json:"description"`
-	Scenario           string                 `json:"scenario" binding:"required"`
-	ScopeType          string                 `json:"scope_type"`
-	SystemPrompt       string                 `json:"system_prompt"`
-	UserPromptTemplate string                 `json:"user_prompt_template"`
-	InputSchemaJSON    map[string]interface{} `json:"input_schema_json"`
-	OutputSchemaJSON   map[string]interface{} `json:"output_schema_json"`
-	ToolPolicyJSON     map[string]interface{} `json:"tool_policy_json"`
-	Status             string                 `json:"status"`
+	Name               string         `json:"name" binding:"required"`
+	Description        string         `json:"description"`
+	Scenario           string         `json:"scenario" binding:"required"`
+	ScopeType          string         `json:"scope_type"`
+	SystemPrompt       string         `json:"system_prompt"`
+	UserPromptTemplate string         `json:"user_prompt_template"`
+	InputSchemaJSON    map[string]any `json:"input_schema_json"`
+	OutputSchemaJSON   map[string]any `json:"output_schema_json"`
+	ToolPolicyJSON     map[string]any `json:"tool_policy_json"`
+	Status             string         `json:"status"`
 }
 
 type aiAgentRuntimeProfileRequest struct {
-	Name                string                   `json:"name" binding:"required"`
-	ModelID             uint64                   `json:"model_id" binding:"required"`
-	BindingPriorityJSON []map[string]interface{} `json:"binding_priority_json"`
-	RuntimeSettingsJSON map[string]interface{}   `json:"runtime_settings_json"`
-	FallbackEnabled     *bool                    `json:"fallback_enabled"`
-	Status              string                   `json:"status"`
+	Name                string           `json:"name" binding:"required"`
+	ModelID             uint64           `json:"model_id" binding:"required"`
+	BindingPriorityJSON []map[string]any `json:"binding_priority_json"`
+	RuntimeSettingsJSON map[string]any   `json:"runtime_settings_json"`
+	FallbackEnabled     *bool            `json:"fallback_enabled"`
+	Status              string           `json:"status"`
 }
 
 func ensureProviderExists(db *gorm.DB, workspaceID, providerID uint64) error {
@@ -80,7 +80,7 @@ func ensureModelExists(db *gorm.DB, modelID uint64) error {
 	return db.First(&model, modelID).Error
 }
 
-func validateRuntimeProfileBindings(db *gorm.DB, workspaceID, modelID uint64, items []map[string]interface{}) error {
+func validateRuntimeProfileBindings(db *gorm.DB, workspaceID, modelID uint64, items []map[string]any) error {
 	for _, item := range items {
 		bindingID := toUint64Value(item["binding_id"])
 		if bindingID == 0 {
@@ -97,7 +97,7 @@ func validateRuntimeProfileBindings(db *gorm.DB, workspaceID, modelID uint64, it
 	return nil
 }
 
-func marshalJSONOrEmpty(v interface{}) string {
+func marshalJSONOrEmpty(v any) string {
 	if v == nil {
 		return ""
 	}
@@ -108,14 +108,30 @@ func marshalJSONOrEmpty(v interface{}) string {
 	return string(data)
 }
 
-func requireWorkspaceOwnerOrAdmin(c *gin.Context, db *gorm.DB) (uint64, uint64, string, bool) {
-	userID, role := getRequestUser(c)
-	workspaceID, _ := getRequestWorkspace(c)
-	if workspaceID == 0 || !isWorkspaceOwner(db, workspaceID, userID, role) {
-		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "仅系统管理员或工作空间 Owner 可执行该操作"})
-		return 0, 0, "", false
+func aiGovernanceContext(c *gin.Context, db *gorm.DB) GovernanceContext {
+	ctx := BuildGovernanceContext(c)
+	if db == nil || ctx.WorkspaceID == 0 {
+		return ctx
 	}
-	return workspaceID, userID, role, true
+	return governanceContextForWorkspace(db, ctx.WorkspaceID, ctx.UserID, ctx.SystemRole)
+}
+
+func requirePlatformGovernance(c *gin.Context, db *gorm.DB) (uint64, uint64, bool) {
+	ctx := aiGovernanceContext(c, db)
+	if ctx.WorkspaceID == 0 || !RequirePlatformGovernance(ctx) {
+		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "仅平台治理上下文可执行该操作"})
+		return 0, 0, false
+	}
+	return ctx.WorkspaceID, ctx.UserID, true
+}
+
+func requireWorkspaceGovernance(c *gin.Context, db *gorm.DB) (uint64, uint64, bool) {
+	ctx := aiGovernanceContext(c, db)
+	if ctx.WorkspaceID == 0 || !RequireWorkspaceGovernance(ctx) {
+		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "仅普通工作空间治理上下文可执行该操作"})
+		return 0, 0, false
+	}
+	return ctx.WorkspaceID, ctx.UserID, true
 }
 
 func (h *AIProviderHandler) ListProviders(c *gin.Context) {
@@ -134,7 +150,7 @@ func (h *AIProviderHandler) ListProviders(c *gin.Context) {
 }
 
 func (h *AIProviderHandler) CreateProvider(c *gin.Context) {
-	workspaceID, userID, _, ok := requireWorkspaceOwnerOrAdmin(c, h.DB)
+	workspaceID, userID, ok := requirePlatformGovernance(c, h.DB)
 	if !ok {
 		return
 	}
@@ -164,7 +180,7 @@ func (h *AIProviderHandler) CreateProvider(c *gin.Context) {
 }
 
 func (h *AIProviderHandler) UpdateProvider(c *gin.Context) {
-	workspaceID, _, _, ok := requireWorkspaceOwnerOrAdmin(c, h.DB)
+	workspaceID, _, ok := requirePlatformGovernance(c, h.DB)
 	if !ok {
 		return
 	}
@@ -178,7 +194,7 @@ func (h *AIProviderHandler) UpdateProvider(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
 		return
 	}
-	updates := map[string]interface{}{
+	updates := map[string]any{
 		"name":          strings.TrimSpace(req.Name),
 		"description":   req.Description,
 		"provider_type": strings.TrimSpace(req.ProviderType),
@@ -198,7 +214,7 @@ func (h *AIProviderHandler) UpdateProvider(c *gin.Context) {
 }
 
 func (h *AIProviderHandler) DeleteProvider(c *gin.Context) {
-	workspaceID, _, _, ok := requireWorkspaceOwnerOrAdmin(c, h.DB)
+	workspaceID, _, ok := requirePlatformGovernance(c, h.DB)
 	if !ok {
 		return
 	}
@@ -230,7 +246,7 @@ func (h *AIProviderHandler) ListBindings(c *gin.Context) {
 }
 
 func (h *AIProviderHandler) CreateBinding(c *gin.Context) {
-	workspaceID, userID, _, ok := requireWorkspaceOwnerOrAdmin(c, h.DB)
+	workspaceID, userID, ok := requirePlatformGovernance(c, h.DB)
 	if !ok {
 		return
 	}
@@ -271,7 +287,7 @@ func (h *AIProviderHandler) CreateBinding(c *gin.Context) {
 }
 
 func (h *AIProviderHandler) UpdateBinding(c *gin.Context) {
-	workspaceID, _, _, ok := requireWorkspaceOwnerOrAdmin(c, h.DB)
+	workspaceID, _, ok := requirePlatformGovernance(c, h.DB)
 	if !ok {
 		return
 	}
@@ -294,7 +310,7 @@ func (h *AIProviderHandler) UpdateBinding(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "模型不存在"})
 		return
 	}
-	updates := map[string]interface{}{
+	updates := map[string]any{
 		"model_id":           req.ModelID,
 		"provider_model_key": strings.TrimSpace(req.ProviderModelKey),
 		"capabilities_json":  marshalJSONOrEmpty(req.CapabilitiesJSON),
@@ -311,7 +327,7 @@ func (h *AIProviderHandler) UpdateBinding(c *gin.Context) {
 }
 
 func (h *AIProviderHandler) DeleteBinding(c *gin.Context) {
-	workspaceID, _, _, ok := requireWorkspaceOwnerOrAdmin(c, h.DB)
+	workspaceID, _, ok := requirePlatformGovernance(c, h.DB)
 	if !ok {
 		return
 	}
@@ -343,7 +359,7 @@ func (h *AIAgentHandler) ListAgents(c *gin.Context) {
 }
 
 func (h *AIAgentHandler) CreateAgent(c *gin.Context) {
-	workspaceID, userID, _, ok := requireWorkspaceOwnerOrAdmin(c, h.DB)
+	workspaceID, userID, ok := requireWorkspaceGovernance(c, h.DB)
 	if !ok {
 		return
 	}
@@ -374,7 +390,7 @@ func (h *AIAgentHandler) CreateAgent(c *gin.Context) {
 }
 
 func (h *AIAgentHandler) UpdateAgent(c *gin.Context) {
-	workspaceID, _, _, ok := requireWorkspaceOwnerOrAdmin(c, h.DB)
+	workspaceID, _, ok := requireWorkspaceGovernance(c, h.DB)
 	if !ok {
 		return
 	}
@@ -388,7 +404,7 @@ func (h *AIAgentHandler) UpdateAgent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
 		return
 	}
-	updates := map[string]interface{}{
+	updates := map[string]any{
 		"name":                 strings.TrimSpace(req.Name),
 		"description":          req.Description,
 		"scenario":             strings.TrimSpace(req.Scenario),
@@ -409,7 +425,7 @@ func (h *AIAgentHandler) UpdateAgent(c *gin.Context) {
 }
 
 func (h *AIAgentHandler) DeleteAgent(c *gin.Context) {
-	workspaceID, _, _, ok := requireWorkspaceOwnerOrAdmin(c, h.DB)
+	workspaceID, _, ok := requireWorkspaceGovernance(c, h.DB)
 	if !ok {
 		return
 	}
@@ -437,7 +453,7 @@ func (h *AIAgentHandler) ListRuntimeProfiles(c *gin.Context) {
 }
 
 func (h *AIAgentHandler) CreateRuntimeProfile(c *gin.Context) {
-	workspaceID, userID, _, ok := requireWorkspaceOwnerOrAdmin(c, h.DB)
+	workspaceID, userID, ok := requireWorkspaceGovernance(c, h.DB)
 	if !ok {
 		return
 	}
@@ -487,7 +503,7 @@ func (h *AIAgentHandler) CreateRuntimeProfile(c *gin.Context) {
 }
 
 func (h *AIAgentHandler) UpdateRuntimeProfile(c *gin.Context) {
-	workspaceID, _, _, ok := requireWorkspaceOwnerOrAdmin(c, h.DB)
+	workspaceID, _, ok := requireWorkspaceGovernance(c, h.DB)
 	if !ok {
 		return
 	}
@@ -518,7 +534,7 @@ func (h *AIAgentHandler) UpdateRuntimeProfile(c *gin.Context) {
 	if req.FallbackEnabled != nil {
 		fallbackEnabled = *req.FallbackEnabled
 	}
-	updates := map[string]interface{}{
+	updates := map[string]any{
 		"name":                  strings.TrimSpace(req.Name),
 		"model_id":              req.ModelID,
 		"binding_priority_json": marshalJSONOrEmpty(req.BindingPriorityJSON),
@@ -535,7 +551,7 @@ func (h *AIAgentHandler) UpdateRuntimeProfile(c *gin.Context) {
 }
 
 func (h *AIAgentHandler) DeleteRuntimeProfile(c *gin.Context) {
-	workspaceID, _, _, ok := requireWorkspaceOwnerOrAdmin(c, h.DB)
+	workspaceID, _, ok := requireWorkspaceGovernance(c, h.DB)
 	if !ok {
 		return
 	}

@@ -146,9 +146,9 @@
           </div>
         </div>
         
-        <!-- 用户管理 -->
+        <!-- 工作空间成员 -->
         <div v-if="activeMenu === 'users'" class="settings-section">
-          <h2 class="section-title">工作空间成员管理</h2>
+          <h2 class="section-title">工作空间成员</h2>
 
           <div v-if="!userStore.currentWorkspaceId" class="empty-hint">请先在顶部切换到一个工作空间</div>
 
@@ -158,11 +158,6 @@
                 <div class="workspace-name">{{ userStore.currentWorkspace?.name }}</div>
                 <div class="workspace-role">当前角色：{{ roleText(userStore.currentWorkspace?.role) }}</div>
               </div>
-              <div class="member-actions" v-if="canManageMembers || canCreateUsers">
-                <el-button v-if="isPlatformAdmin" type="success" plain @click="openCreateWorkspaceDialog">创建工作空间</el-button>
-                <el-button v-if="canCreateUsers" type="primary" plain @click="openCreateUserDialog">创建用户</el-button>
-                <el-button v-if="canManageMembers" type="primary" @click="inviteDialogVisible = true">邀请成员</el-button>
-              </div>
             </div>
 
             <el-table :data="members" style="width: 100%">
@@ -170,18 +165,7 @@
               <el-table-column prop="email" label="邮箱" min-width="220" />
               <el-table-column prop="role" label="角色" width="180">
                 <template #default="{ row }">
-                  <el-select
-                    v-if="canManageMembers"
-                    :model-value="row.role"
-                    size="small"
-                    @change="(value) => handleRoleChange(row, value)"
-                  >
-                    <el-option label="Viewer" value="viewer" />
-                    <el-option label="Developer" value="developer" />
-                    <el-option label="Maintainer" value="maintainer" />
-                    <el-option label="Owner" value="owner" />
-                  </el-select>
-                  <el-tag v-else size="small">{{ roleText(row.role) }}</el-tag>
+                  <el-tag size="small">{{ roleText(row.role) }}</el-tag>
                 </template>
               </el-table-column>
               <el-table-column prop="status" label="状态" width="120">
@@ -191,123 +175,10 @@
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="120">
-                <template #default="{ row }">
-                  <el-button v-if="canManageMembers" type="danger" link size="small" @click="handleRemoveMember(row)">移除</el-button>
-                </template>
+              <el-table-column prop="created_at" label="加入时间" width="180">
+                <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
               </el-table-column>
             </el-table>
-
-            <div class="invitation-block">
-              <h3>待处理邀请</h3>
-              <el-table :data="invitations" style="width: 100%">
-                <el-table-column prop="email" label="邮箱" min-width="220" />
-                <el-table-column prop="role" label="角色" width="140">
-                  <template #default="{ row }">{{ roleText(row.role) }}</template>
-                </el-table-column>
-                <el-table-column prop="status" label="状态" width="120" />
-                <el-table-column prop="expires_at" label="过期时间" width="180">
-                  <template #default="{ row }">{{ formatDateTime(row.expires_at) }}</template>
-                </el-table-column>
-                <el-table-column label="操作" width="120">
-                  <template #default="{ row }">
-                    <el-button v-if="canManageMembers && row.status === 'pending'" type="danger" link size="small" @click="handleRevokeInvitation(row)">撤销</el-button>
-                  </template>
-                </el-table-column>
-              </el-table>
-            </div>
-
-            <el-dialog v-model="inviteDialogVisible" title="邀请成员" width="460px">
-              <el-form :model="inviteForm" label-width="80px">
-                <el-form-item label="邮箱">
-                  <el-input v-model="inviteForm.email" placeholder="member@example.com" />
-                </el-form-item>
-                <el-form-item label="角色">
-                  <el-select v-model="inviteForm.role" style="width: 100%">
-                    <el-option label="Viewer" value="viewer" />
-                    <el-option label="Developer" value="developer" />
-                    <el-option label="Maintainer" value="maintainer" />
-                    <el-option label="Owner" value="owner" />
-                  </el-select>
-                </el-form-item>
-              </el-form>
-              <template #footer>
-                <el-button @click="inviteDialogVisible = false">取消</el-button>
-                <el-button type="primary" :loading="inviteLoading" @click="handleInviteSubmit">发送邀请</el-button>
-              </template>
-            </el-dialog>
-
-            <el-dialog v-model="inviteResultVisible" title="邀请链接" width="520px">
-              <div class="invite-result-text">请复制下面的邀请链接并发送给成员，成员登录后访问该链接即可加入工作空间。</div>
-              <el-input :model-value="inviteResultLink" readonly />
-              <template #footer>
-                <el-button @click="inviteResultVisible = false">关闭</el-button>
-                <el-button type="primary" @click="copyInviteLink">复制链接</el-button>
-              </template>
-            </el-dialog>
-
-            <el-dialog v-model="createUserDialogVisible" title="创建用户" width="520px">
-              <el-form :model="createUserForm" label-width="100px">
-                <el-form-item label="用户名">
-                  <el-input v-model="createUserForm.username" placeholder="请输入用户名" />
-                </el-form-item>
-                <el-form-item label="初始密码">
-                  <el-input v-model="createUserForm.password" type="password" show-password placeholder="请输入初始密码" />
-                </el-form-item>
-                <el-form-item label="邮箱">
-                  <el-input v-model="createUserForm.email" placeholder="请输入邮箱" />
-                </el-form-item>
-                <el-form-item label="昵称">
-                  <el-input v-model="createUserForm.nickname" placeholder="请输入昵称" />
-                </el-form-item>
-                <el-form-item v-if="isPlatformAdmin" label="平台角色">
-                  <el-select v-model="createUserForm.system_role" style="width: 100%">
-                    <el-option label="User" value="user" />
-                    <el-option label="Admin" value="admin" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item v-if="isPlatformAdmin" label="额外绑定">
-                  <el-switch v-model="createUserForm.bind_workspace" active-text="绑定其他工作空间" inactive-text="仅创建个人工作空间" />
-                </el-form-item>
-                <el-form-item v-if="isPlatformAdmin" label="绑定工作空间">
-                  <el-select v-model="createUserForm.workspace_id" :disabled="!createUserForm.bind_workspace" style="width: 100%" filterable clearable placeholder="可选：选择额外绑定的工作空间">
-                    <el-option v-for="workspace in workspaceOptions" :key="workspace.id" :label="workspace.name" :value="workspace.id" />
-                  </el-select>
-                  <div class="form-hint">不选择时，仅创建用户及其个人工作空间，不会自动加入当前工作空间。</div>
-                </el-form-item>
-                <el-form-item v-else label="绑定工作空间">
-                  <el-input :model-value="userStore.currentWorkspace?.name || '-'" disabled />
-                </el-form-item>
-                <el-form-item v-if="!isPlatformAdmin || createUserForm.bind_workspace" label="工作空间角色">
-                  <el-select v-model="createUserForm.workspace_role" style="width: 100%">
-                    <el-option v-for="role in createUserRoleOptions" :key="role.value" :label="role.label" :value="role.value" />
-                  </el-select>
-                </el-form-item>
-              </el-form>
-              <template #footer>
-                <el-button @click="createUserDialogVisible = false">取消</el-button>
-                <el-button type="primary" :loading="createUserLoading" @click="handleCreateUserSubmit">创建</el-button>
-              </template>
-            </el-dialog>
-
-            <el-dialog v-model="createWorkspaceDialogVisible" title="创建工作空间" width="520px">
-              <el-form :model="createWorkspaceForm" label-width="100px">
-                <el-form-item label="名称">
-                  <el-input v-model="createWorkspaceForm.name" placeholder="请输入工作空间名称" />
-                </el-form-item>
-                <el-form-item label="标识">
-                  <el-input v-model="createWorkspaceForm.slug" placeholder="可选：用于生成工作空间标识" />
-                </el-form-item>
-                <el-form-item label="描述">
-                  <el-input v-model="createWorkspaceForm.description" type="textarea" :rows="3" placeholder="可选：描述该工作空间用途" />
-                </el-form-item>
-              </el-form>
-              <div class="form-hint">创建后仅会将当前管理员加入该工作空间并设为 Owner，不会自动创建其他成员、项目、流水线或私有执行器。</div>
-              <template #footer>
-                <el-button @click="createWorkspaceDialogVisible = false">取消</el-button>
-                <el-button type="primary" :loading="createWorkspaceLoading" @click="handleCreateWorkspaceSubmit">创建</el-button>
-              </template>
-            </el-dialog>
           </template>
         </div>
         
@@ -351,123 +222,6 @@
           </div>
         </div>
 
-        <div v-if="activeMenu === 'ai'" class="settings-section">
-          <div class="section-header-row">
-            <div>
-              <h2 class="section-title">AI Agent 管理</h2>
-              <div class="workspace-role">仅系统管理员和当前工作空间 Owner 可编辑 AI Agent / AI 运行策略。</div>
-            </div>
-            <el-button v-if="canManageAI" type="primary" @click="openAgentDialog()">新建 AI Agent</el-button>
-          </div>
-
-          <div v-if="!canManageAI" class="empty-hint">当前角色仅可查看，无法编辑 AI Agent 配置。</div>
-
-            <el-table :data="aiAgents" style="width: 100%">
-            <el-table-column prop="name" label="AI Agent" min-width="180" />
-            <el-table-column prop="scenario" label="场景" width="180" />
-            <el-table-column prop="status" label="状态" width="120" />
-            <el-table-column label="运行策略数" min-width="180">
-              <template #default="{ row }">
-                {{ Array.isArray(row.runtime_profiles) ? row.runtime_profiles.length : 0 }}
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="280" fixed="right">
-              <template #default="{ row }">
-                <el-button link type="primary" @click="openProfilesDialog(row)">运行策略</el-button>
-                  <el-button v-if="canManageAI" link type="primary" @click="openAgentDialog(row)">编辑</el-button>
-                  <el-button v-if="canManageAI" link type="danger" @click="removeAgent(row)">删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-
-          <el-dialog v-model="agentDialogVisible" :title="agentForm.id ? '编辑 AI Agent' : '新建 AI Agent'" width="560px">
-            <el-form :model="agentForm" label-width="100px">
-              <el-form-item label="名称">
-                <el-input v-model="agentForm.name" />
-              </el-form-item>
-              <el-form-item label="场景">
-                <el-select v-model="agentForm.scenario" style="width: 100%">
-                  <el-option label="MR 质量检测" value="mr_quality_check" />
-                  <el-option label="需求缺陷助手" value="requirement_defect_assistant" />
-                </el-select>
-              </el-form-item>
-              <el-form-item label="状态">
-                <el-select v-model="agentForm.status" style="width: 100%">
-                  <el-option label="Draft" value="draft" />
-                  <el-option label="Active" value="active" />
-                  <el-option label="Archived" value="archived" />
-                </el-select>
-              </el-form-item>
-              <el-form-item label="描述">
-                <el-input v-model="agentForm.description" type="textarea" :rows="3" />
-              </el-form-item>
-            </el-form>
-            <template #footer>
-              <el-button @click="agentDialogVisible = false">取消</el-button>
-              <el-button type="primary" :loading="agentSaving" @click="submitAgent">保存</el-button>
-            </template>
-          </el-dialog>
-
-          <el-dialog v-model="profilesDialogVisible" :title="`运行策略 - ${activeDefinition?.name || ''}`" width="1000px">
-            <div class="dialog-actions" v-if="canManageAI">
-              <el-button type="primary" @click="openProfileDialog()">新增运行策略</el-button>
-            </div>
-            <el-table :data="activeRuntimeProfiles" style="width: 100%">
-              <el-table-column prop="name" label="名称" min-width="180" />
-              <el-table-column label="模型" width="180">
-                <template #default="{ row }">
-                  {{ aiModels.find(item => Number(item.id) === Number(row.model_id))?.display_name || aiModels.find(item => Number(item.id) === Number(row.model_id))?.name || row.model_id }}
-                </template>
-              </el-table-column>
-              <el-table-column prop="fallback_enabled" label="允许降级" width="120">
-                <template #default="{ row }">
-                  <el-tag :type="row.fallback_enabled ? 'success' : 'info'" size="small">{{ row.fallback_enabled ? '是' : '否' }}</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="status" label="状态" width="120" />
-              <el-table-column prop="binding_priority_json" label="模型绑定顺序" min-width="260" show-overflow-tooltip />
-              <el-table-column label="操作" width="180">
-                <template #default="{ row }">
-                  <el-button v-if="canManageAI" link type="primary" @click="openProfileDialog(row)">编辑</el-button>
-                  <el-button v-if="canManageAI" link type="danger" @click="removeProfile(row)">删除</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
-          </el-dialog>
-
-          <el-dialog v-model="profileDialogVisible" :title="profileForm.id ? '编辑运行策略' : '新增运行策略'" width="780px">
-            <el-form :model="profileForm" label-width="140px">
-              <el-form-item label="名称">
-                <el-input v-model="profileForm.name" placeholder="例如 MR Review Default" />
-              </el-form-item>
-              <el-form-item label="模型">
-                <el-select v-model="profileForm.model_id" style="width: 100%" clearable>
-                  <el-option v-for="model in aiModels" :key="model.id" :label="model.display_name || model.name" :value="model.id" />
-                </el-select>
-              </el-form-item>
-              <el-form-item label="模型绑定顺序(JSON)">
-                <el-input v-model="profileForm.binding_priority_json" type="textarea" :rows="6" placeholder='[{"binding_id":1,"priority":1,"enabled":true,"fallback_on_error":true}]' />
-              </el-form-item>
-              <el-form-item label="运行参数(JSON)">
-                <el-input v-model="profileForm.runtime_settings_json" type="textarea" :rows="4" placeholder='{"output_language":"zh-CN"}' />
-              </el-form-item>
-              <el-form-item label="状态">
-                <el-select v-model="profileForm.status" style="width: 100%">
-                  <el-option label="Draft" value="draft" />
-                  <el-option label="Active" value="active" />
-                  <el-option label="Disabled" value="disabled" />
-                </el-select>
-              </el-form-item>
-              <el-form-item label="允许降级">
-                <el-switch v-model="profileForm.fallback_enabled" />
-              </el-form-item>
-            </el-form>
-            <template #footer>
-              <el-button @click="profileDialogVisible = false">取消</el-button>
-              <el-button type="primary" :loading="profileSaving" @click="submitProfile">保存</el-button>
-            </template>
-          </el-dialog>
-        </div>
       </main>
     </div>
   </div>
@@ -475,7 +229,7 @@
 
 <script setup>
 import { ref, reactive, computed, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { useUserStore } from '@/stores/user'
 import {
   NOTIFICATION_CHANNELS,
@@ -485,57 +239,34 @@ import {
   upsertNotificationPreference,
   upsertNotificationPreferenceInList
 } from '@/api/notification'
+import { getWorkspaceMembers } from '@/api/workspace'
 import {
-  getAIAgents,
-  createAIAgent,
-  updateAIAgent,
-  deleteAIAgent,
-  getAIRuntimeProfiles,
-  createAIRuntimeProfile,
-  updateAIRuntimeProfile,
-  deleteAIRuntimeProfile,
-  getAIProviders,
-  getAIModelBindings,
-  getAIModelCatalog
-} from '@/api/store'
-import { createWorkspace, createWorkspaceInvitation, getWorkspaceInvitations, getWorkspaceList, getWorkspaceMembers, removeWorkspaceMember, revokeWorkspaceInvitation, updateWorkspaceMember } from '@/api/workspace'
-import { createUser } from '@/api/user'
-import { 
-  Setting, 
-  Lock, 
-  Bell, 
-  User, 
+  Setting,
+  Lock,
+  Bell,
+  User,
   Link,
   Upload,
   ChatDotRound,
   ChatLineRound,
-  Key,
-  Search
+  Key
 } from '@element-plus/icons-vue'
 
 const userStore = useUserStore()
 const activeMenu = ref('basic')
 const members = ref([])
-const invitations = ref([])
-const inviteDialogVisible = ref(false)
-const inviteLoading = ref(false)
-const inviteResultVisible = ref(false)
-const inviteResultLink = ref('')
-const createUserDialogVisible = ref(false)
-const createUserLoading = ref(false)
-const createWorkspaceDialogVisible = ref(false)
-const createWorkspaceLoading = ref(false)
-const workspaceOptions = ref([])
-const aiAgents = ref([])
-const aiProviders = ref([])
-const aiModels = ref([])
-const agentDialogVisible = ref(false)
-const agentSaving = ref(false)
-const profilesDialogVisible = ref(false)
-const profileDialogVisible = ref(false)
-const profileSaving = ref(false)
-const activeAgent = ref(null)
-const activeRuntimeProfiles = ref([])
+const notificationPreferences = ref([])
+const notificationPreferencesLoading = ref(false)
+const notificationSavingKeys = ref([])
+const activeNotificationModule = ref(NOTIFICATION_EVENT_GROUPS[0]?.value || '')
+const settings = reactive({
+  systemName: 'EasyDo',
+  theme: 'light',
+  twoFactorEnabled: false
+})
+const showPasswordDialog = ref(false)
+const showDevicesDialog = ref(false)
+
 const notificationEventGroups = computed(() => {
   return NOTIFICATION_EVENT_GROUPS.map(group => ({
     ...group,
@@ -543,68 +274,14 @@ const notificationEventGroups = computed(() => {
   }))
 })
 const notificationChannels = NOTIFICATION_CHANNELS
-const notificationPreferences = ref([])
-const notificationPreferencesLoading = ref(false)
-const notificationSavingKeys = ref([])
-const activeNotificationModule = ref(NOTIFICATION_EVENT_GROUPS[0]?.value || '')
-const inviteForm = reactive({
-  email: '',
-  role: 'viewer'
-})
-const createUserForm = reactive({
-  username: '',
-  password: '',
-  email: '',
-  nickname: '',
-  system_role: 'user',
-  bind_workspace: false,
-  workspace_id: undefined,
-  workspace_role: 'viewer'
-})
-const createWorkspaceForm = reactive({
-  name: '',
-  slug: '',
-  description: ''
-})
-const agentForm = reactive({ id: 0, name: '', description: '', scenario: 'mr_quality_check', status: 'draft' })
-const profileForm = reactive({ id: 0, name: '', model_id: undefined, binding_priority_json: '[]', runtime_settings_json: '{}', fallback_enabled: true, status: 'draft' })
 
 const menuItems = [
   { key: 'basic', name: '基本设置', icon: Setting },
   { key: 'security', name: '安全设置', icon: Lock },
   { key: 'notifications', name: '通知设置', icon: Bell },
-  { key: 'users', name: '用户管理', icon: User },
-  { key: 'ai', name: 'AI Agent', icon: Search },
+  { key: 'users', name: '工作空间成员', icon: User },
   { key: 'integrations', name: '第三方集成', icon: Link }
 ]
-
-const settings = reactive({
-  systemName: 'EasyDo',
-  theme: 'light',
-  twoFactorEnabled: false
-})
-
-const showPasswordDialog = ref(false)
-const showDevicesDialog = ref(false)
-const canManageMembers = computed(() => userStore.hasPermission('workspace.member.manage'))
-const isPlatformAdmin = computed(() => userStore.userInfo?.role === 'admin')
-const canCreateUsers = computed(() => isPlatformAdmin.value || canManageMembers.value)
-const canManageAI = computed(() => isPlatformAdmin.value || userStore.currentWorkspace?.role === 'owner')
-const modelOptions = computed(() => aiModels.value)
-const createUserRoleOptions = computed(() => {
-  if (isPlatformAdmin.value || userStore.currentWorkspace?.role === 'owner') {
-    return [
-      { label: 'Viewer', value: 'viewer' },
-      { label: 'Developer', value: 'developer' },
-      { label: 'Maintainer', value: 'maintainer' },
-      { label: 'Owner', value: 'owner' }
-    ]
-  }
-  return [
-    { label: 'Viewer', value: 'viewer' },
-    { label: 'Developer', value: 'developer' }
-  ]
-})
 
 const roleText = (role) => {
   const map = {
@@ -622,176 +299,24 @@ const formatDateTime = (timestamp) => {
   return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('zh-CN')
 }
 
-const loadWorkspaceManagementData = async () => {
+const loadWorkspaceMembers = async () => {
   if (!userStore.currentWorkspaceId) {
     members.value = []
-    invitations.value = []
     return
   }
   try {
-    const requests = [getWorkspaceMembers(userStore.currentWorkspaceId)]
-    if (canManageMembers.value) {
-      requests.push(getWorkspaceInvitations(userStore.currentWorkspaceId))
-    }
-    const [memberRes, invitationRes] = await Promise.all(requests)
+    const memberRes = await getWorkspaceMembers(userStore.currentWorkspaceId)
     const memberList = memberRes?.data?.list || []
-    members.value = isPlatformAdmin.value
+    members.value = userStore.isPlatformAdmin
       ? memberList
       : memberList.filter(member => String(member.system_role || '').toLowerCase() !== 'admin')
-    invitations.value = invitationRes?.data?.list || []
   } catch (error) {
-    ElMessage.error('加载工作空间管理数据失败')
+    ElMessage.error('加载工作空间成员失败')
   }
 }
 
 const saveSettings = () => {
   ElMessage.success('当前阶段未实现基础设置保存')
-}
-
-const resetAgentForm = () => {
-	agentForm.id = 0
-	agentForm.name = ''
-	agentForm.description = ''
-	agentForm.scenario = 'mr_quality_check'
-	agentForm.status = 'draft'
-}
-
-const resetProfileForm = () => {
-  profileForm.id = 0
-  profileForm.name = ''
-  profileForm.model_id = undefined
-  profileForm.binding_priority_json = '[]'
-  profileForm.runtime_settings_json = '{}'
-  profileForm.fallback_enabled = true
-  profileForm.status = 'draft'
-}
-
-const loadAIManagementData = async () => {
-  try {
-    const [definitionsRes, providersRes, modelsRes] = await Promise.all([
-      getAIAgents(),
-      getAIProviders(),
-      getAIModelCatalog()
-    ])
-		aiAgents.value = Array.isArray(definitionsRes.data) ? definitionsRes.data : []
-    aiProviders.value = Array.isArray(providersRes.data) ? providersRes.data : []
-    aiModels.value = Array.isArray(modelsRes.data) ? modelsRes.data : []
-  } catch (error) {
-    ElMessage.error('加载 AI 管理数据失败')
-  }
-}
-
-const openAgentDialog = (row = null) => {
-	resetAgentForm()
-	if (row) {
-		agentForm.id = row.id
-		agentForm.name = row.name || ''
-		agentForm.description = row.description || ''
-		agentForm.scenario = row.scenario || 'mr_quality_check'
-		agentForm.status = row.status || 'draft'
-	}
-	agentDialogVisible.value = true
-}
-
-const submitAgent = async () => {
-	agentSaving.value = true
-	try {
-		const payload = {
-			name: agentForm.name,
-			description: agentForm.description,
-			scenario: agentForm.scenario,
-			status: agentForm.status
-		}
-		if (agentForm.id) {
-			await updateAIAgent(agentForm.id, payload)
-		} else {
-			await createAIAgent(payload)
-		}
-		agentDialogVisible.value = false
-		await loadAIManagementData()
-		ElMessage.success('AI Agent 已保存')
-	} catch (error) {
-		ElMessage.error('保存 AI Agent 失败')
-	} finally {
-		agentSaving.value = false
-	}
-}
-
-const removeAgent = async (row) => {
-  try {
-    await ElMessageBox.confirm(`确认删除 AI Agent ${row.name} 吗？`, '删除 AI Agent', { type: 'warning' })
-    await deleteAIAgent(row.id)
-    await loadAIManagementData()
-    ElMessage.success('AI Agent 已删除')
-  } catch (error) {
-    if (error !== 'cancel' && error !== 'close') {
-      ElMessage.error('删除 AI Agent 失败')
-    }
-  }
-}
-
-const openProfilesDialog = async (row) => {
-	activeAgent.value = row
-	const res = await getAIRuntimeProfiles(row.id)
-	activeRuntimeProfiles.value = Array.isArray(res.data) ? res.data : []
-	profilesDialogVisible.value = true
-}
-
-const openProfileDialog = (row = null) => {
-  resetProfileForm()
-  if (row) {
-    profileForm.id = row.id
-    profileForm.name = row.name || ''
-    profileForm.model_id = row.model_id || undefined
-    profileForm.binding_priority_json = row.binding_priority_json || '[]'
-    profileForm.runtime_settings_json = row.runtime_settings_json || '{}'
-    profileForm.fallback_enabled = Boolean(row.fallback_enabled)
-    profileForm.status = row.status || 'draft'
-  }
-  profileDialogVisible.value = true
-}
-
-const submitProfile = async () => {
-	if (!activeAgent.value) return
-  profileSaving.value = true
-  try {
-    const payload = {
-      name: profileForm.name,
-      model_id: profileForm.model_id,
-      binding_priority_json: JSON.parse(profileForm.binding_priority_json || '[]'),
-      runtime_settings_json: JSON.parse(profileForm.runtime_settings_json || '{}'),
-      fallback_enabled: profileForm.fallback_enabled,
-      status: profileForm.status
-    }
-    if (profileForm.id) {
-		await updateAIRuntimeProfile(activeAgent.value.id, profileForm.id, payload)
-		} else {
-			await createAIRuntimeProfile(activeAgent.value.id, payload)
-		}
-		profileDialogVisible.value = false
-		await openProfilesDialog(activeAgent.value)
-    await loadAIManagementData()
-    ElMessage.success('运行策略已保存')
-  } catch (error) {
-    ElMessage.error('保存运行策略失败')
-  } finally {
-    profileSaving.value = false
-  }
-}
-
-const removeProfile = async (row) => {
-	if (!activeAgent.value) return
-  try {
-    await ElMessageBox.confirm(`确认删除运行策略 ${row.name} 吗？`, '删除运行策略', { type: 'warning' })
-		await deleteAIRuntimeProfile(activeAgent.value.id, row.id)
-		await openProfilesDialog(activeAgent.value)
-    await loadAIManagementData()
-    ElMessage.success('运行策略已删除')
-  } catch (error) {
-    if (error !== 'cancel' && error !== 'close') {
-      ElMessage.error('删除运行策略失败')
-    }
-  }
 }
 
 const getPreferenceSavingKey = (workspaceId, eventType, channel) => {
@@ -876,212 +401,12 @@ const updateWorkspacePreference = async (event, channel, enabled) => {
   }
 }
 
-const handleInviteSubmit = async () => {
-  if (!inviteForm.email) {
-    ElMessage.warning('请输入邮箱')
-    return
-  }
-  inviteLoading.value = true
-  try {
-    const res = await createWorkspaceInvitation(userStore.currentWorkspaceId, inviteForm)
-    if (res.code === 200) {
-    inviteResultLink.value = `${window.location.origin}/workspace-invitations/${res.data.id}`
-      inviteResultVisible.value = true
-      ElMessage.success('邀请已生成')
-      inviteDialogVisible.value = false
-      inviteForm.email = ''
-      inviteForm.role = 'viewer'
-      await loadWorkspaceManagementData()
-    } else {
-      ElMessage.error(res.message || '邀请失败')
-    }
-  } catch (error) {
-    ElMessage.error('邀请失败')
-  } finally {
-    inviteLoading.value = false
-  }
-}
-
-const copyInviteLink = async () => {
-  try {
-    await navigator.clipboard.writeText(inviteResultLink.value)
-    ElMessage.success('邀请链接已复制')
-  } catch (error) {
-    ElMessage.error('复制失败，请手动复制链接')
-  }
-}
-
-const resetCreateUserForm = () => {
-  createUserForm.username = ''
-  createUserForm.password = ''
-  createUserForm.email = ''
-  createUserForm.nickname = ''
-  createUserForm.system_role = 'user'
-  createUserForm.bind_workspace = false
-  createUserForm.workspace_id = isPlatformAdmin.value ? undefined : userStore.currentWorkspaceId
-  createUserForm.workspace_role = createUserRoleOptions.value[0]?.value || 'viewer'
-}
-
-const resetCreateWorkspaceForm = () => {
-  createWorkspaceForm.name = ''
-  createWorkspaceForm.slug = ''
-  createWorkspaceForm.description = ''
-}
-
-const openCreateUserDialog = async () => {
-  resetCreateUserForm()
-  if (isPlatformAdmin.value) {
-    try {
-      const res = await getWorkspaceList()
-      workspaceOptions.value = res?.data?.list || []
-    } catch (error) {
-      workspaceOptions.value = []
-      ElMessage.error('加载工作空间列表失败')
-      return
-    }
-  } else {
-    workspaceOptions.value = []
-  }
-  createUserDialogVisible.value = true
-}
-
-const openCreateWorkspaceDialog = () => {
-  resetCreateWorkspaceForm()
-  createWorkspaceDialogVisible.value = true
-}
-
-const handleCreateUserSubmit = async () => {
-  if (!createUserForm.username || !createUserForm.password) {
-    ElMessage.warning('请输入用户名和初始密码')
-    return
-  }
-  if (isPlatformAdmin.value && createUserForm.bind_workspace && !createUserForm.workspace_id) {
-    ElMessage.warning('请选择额外绑定的工作空间，或关闭额外绑定')
-    return
-  }
-  createUserLoading.value = true
-  try {
-    const payload = {
-      username: createUserForm.username,
-      password: createUserForm.password,
-      email: createUserForm.email,
-      nickname: createUserForm.nickname
-    }
-    if (isPlatformAdmin.value) {
-      payload.system_role = createUserForm.system_role
-      if (createUserForm.bind_workspace && createUserForm.workspace_id) {
-        payload.workspace_id = createUserForm.workspace_id
-        payload.workspace_role = createUserForm.workspace_role
-      }
-    } else {
-      payload.workspace_id = userStore.currentWorkspaceId
-      payload.workspace_role = createUserForm.workspace_role
-    }
-    const res = await createUser(payload)
-    if (res.code === 200) {
-      ElMessage.success('用户创建成功')
-      createUserDialogVisible.value = false
-      if (Number(payload.workspace_id) === Number(userStore.currentWorkspaceId)) {
-        await loadWorkspaceManagementData()
-      }
-    } else {
-      ElMessage.error(res.message || '创建用户失败')
-    }
-  } catch (error) {
-    ElMessage.error(error.response?.data?.message || '创建用户失败')
-  } finally {
-    createUserLoading.value = false
-  }
-}
-
-const handleCreateWorkspaceSubmit = async () => {
-  if (!createWorkspaceForm.name) {
-    ElMessage.warning('请输入工作空间名称')
-    return
-  }
-  createWorkspaceLoading.value = true
-  try {
-    const res = await createWorkspace({
-      name: createWorkspaceForm.name,
-      slug: createWorkspaceForm.slug,
-      description: createWorkspaceForm.description
-    })
-    if (res.code === 200) {
-      ElMessage.success('工作空间创建成功')
-      createWorkspaceDialogVisible.value = false
-      await userStore.getUserInfoAction()
-      if (isPlatformAdmin.value) {
-        const workspaceRes = await getWorkspaceList()
-        workspaceOptions.value = workspaceRes?.data?.list || []
-      }
-    } else {
-      ElMessage.error(res.message || '创建工作空间失败')
-    }
-  } catch (error) {
-    ElMessage.error(error.response?.data?.message || '创建工作空间失败')
-  } finally {
-    createWorkspaceLoading.value = false
-  }
-}
-
-const handleRoleChange = async (row, role) => {
-  try {
-    const res = await updateWorkspaceMember(userStore.currentWorkspaceId, row.id, { role })
-    if (res.code === 200) {
-      ElMessage.success('角色已更新')
-      await loadWorkspaceManagementData()
-      await userStore.getUserInfoAction()
-    } else {
-      ElMessage.error(res.message || '更新失败')
-    }
-  } catch (error) {
-    ElMessage.error('更新失败')
-  }
-}
-
-const handleRemoveMember = async (row) => {
-  try {
-    await ElMessageBox.confirm(`确认移除成员 ${row.username} 吗？`, '移除成员', { type: 'warning' })
-    const res = await removeWorkspaceMember(userStore.currentWorkspaceId, row.id)
-    if (res.code === 200) {
-      ElMessage.success('成员已移除')
-      await loadWorkspaceManagementData()
-    } else {
-      ElMessage.error(res.message || '移除失败')
-    }
-  } catch (error) {
-    if (error !== 'cancel' && error !== 'close') {
-      ElMessage.error('移除失败')
-    }
-  }
-}
-
-const handleRevokeInvitation = async (row) => {
-  try {
-    await ElMessageBox.confirm(`确认撤销发往 ${row.email} 的邀请吗？`, '撤销邀请', { type: 'warning' })
-    const res = await revokeWorkspaceInvitation(userStore.currentWorkspaceId, row.id)
-    if (res.code === 200) {
-      ElMessage.success('邀请已撤销')
-      await loadWorkspaceManagementData()
-    } else {
-      ElMessage.error(res.message || '撤销失败')
-    }
-  } catch (error) {
-    if (error !== 'cancel' && error !== 'close') {
-      ElMessage.error('撤销失败')
-    }
-  }
-}
-
 watch(() => [activeMenu.value, userStore.currentWorkspaceId], async ([menu]) => {
   if (menu === 'users') {
-    await loadWorkspaceManagementData()
+    await loadWorkspaceMembers()
   }
   if (menu === 'notifications') {
     await loadNotificationPreferences()
-  }
-  if (menu === 'ai') {
-    await loadAIManagementData()
   }
 }, { immediate: true })
 </script>

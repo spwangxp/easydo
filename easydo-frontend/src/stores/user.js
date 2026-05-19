@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { login, logout, getUserInfo, refreshAuthToken } from '@/api/user'
+import { deriveGovernanceMode } from './userGovernance.js'
 import { pickNextWorkspace, shouldRecoverFromWorkspaceError } from './workspaceRecovery'
 
 const DEFAULT_REFRESH_INTERVAL_SECONDS = 10 * 60
@@ -19,6 +20,18 @@ export const useUserStore = defineStore('user', () => {
 
   const isLoggedIn = computed(() => !!token.value)
   const currentWorkspaceId = computed(() => currentWorkspace.value?.id || 0)
+  const governanceMode = computed(() => deriveGovernanceMode({
+    currentWorkspace: currentWorkspace.value,
+    userInfo: userInfo.value
+  }))
+  const currentWorkspaceKind = computed(() => governanceMode.value.currentWorkspaceKind)
+  const currentSystemRole = computed(() => governanceMode.value.currentSystemRole)
+  const currentWorkspaceRole = computed(() => governanceMode.value.currentWorkspaceRole)
+  const isAdminWorkspace = computed(() => governanceMode.value.isAdminWorkspace)
+  const isNormalWorkspace = computed(() => governanceMode.value.isNormalWorkspace)
+  const isPlatformAdmin = computed(() => governanceMode.value.isPlatformAdmin)
+  const canAccessPlatformGovernance = computed(() => governanceMode.value.canAccessPlatformGovernance)
+  const canAccessWorkspaceGovernance = computed(() => governanceMode.value.canAccessWorkspaceGovernance)
 
   function clearRefreshTimer() {
     if (refreshTimer) {
@@ -228,7 +241,15 @@ export const useUserStore = defineStore('user', () => {
     workspaces,
     currentWorkspace,
     currentWorkspaceId,
+    currentWorkspaceKind,
+    currentSystemRole,
+    currentWorkspaceRole,
     isLoggedIn,
+    isAdminWorkspace,
+    isNormalWorkspace,
+    isPlatformAdmin,
+    canAccessPlatformGovernance,
+    canAccessWorkspaceGovernance,
     doLogin,
     getUserInfoAction,
     setToken,

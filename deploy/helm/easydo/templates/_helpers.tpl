@@ -23,6 +23,18 @@ app.kubernetes.io/name: {{ include "easydo.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{- define "easydo.renderIniValue" -}}
+{{- $value := . -}}
+{{- if or (kindIs "float64" $value) (kindIs "float32" $value) -}}
+{{- $rendered := printf "%.15f" $value -}}
+{{- $rendered = regexReplaceAll "0+$" $rendered "" -}}
+{{- $rendered = regexReplaceAll "\\.$" $rendered "" -}}
+{{- $rendered -}}
+{{- else -}}
+{{- printf "%v" $value -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "easydo.serverFullname" -}}
 {{- printf "%s-server" (include "easydo.fullname" .) -}}
 {{- end -}}

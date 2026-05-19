@@ -11,31 +11,77 @@ import (
 	"gorm.io/gorm"
 )
 
-func (h *UserHandler) resolveExplicitCreateUserWorkspace(c *gin.Context, actorID uint64) (uint64, string, int, string) {
+func (h *UserHandler) resolveCreateUserActorContext(c *gin.Context, actorID uint64, actorSystemRole string) (GovernanceContext, int, string) {
 	rawWorkspaceID := strings.TrimSpace(c.GetHeader(middleware.WorkspaceHeaderKey))
 	if rawWorkspaceID == "" {
 		rawWorkspaceID = strings.TrimSpace(c.Query("workspace_id"))
 	}
 	if rawWorkspaceID == "" {
-		return 0, "", http.StatusBadRequest, "必须指定当前工作空间"
+		return GovernanceContext{}, http.StatusBadRequest, "必须指定当前工作空间"
 	}
 
 	workspaceID, err := strconv.ParseUint(rawWorkspaceID, 10, 64)
 	if err != nil || workspaceID == 0 {
-		return 0, "", http.StatusBadRequest, "无效的工作空间ID"
-	}
-
-	workspaceRole, ok := userWorkspaceRole(h.DB, workspaceID, actorID)
-	if !ok {
-		return 0, "", http.StatusForbidden, "无权访问该工作空间"
+		return GovernanceContext{}, http.StatusBadRequest, "无效的工作空间ID"
 	}
 
 	var workspace models.Workspace
 	if err := h.DB.Where("id = ? AND status = ?", workspaceID, models.WorkspaceStatusActive).First(&workspace).Error; err != nil {
-		return 0, "", http.StatusForbidden, "无权访问该工作空间"
+		return GovernanceContext{}, http.StatusForbidden, "无权访问该工作空间"
 	}
 
-	return workspaceID, workspaceRole, http.StatusOK, ""
+	workspaceKind := normalizeWorkspaceKind(workspace.Kind)
+	if workspaceKind == "" {
+		workspaceKind = models.WorkspaceKindNormal
+	}
+
+	ctx := GovernanceContext{
+		UserID:        actorID,
+		SystemRole:    actorSystemRole,
+		WorkspaceID:   workspace.ID,
+		WorkspaceRole: models.WorkspaceRoleOwner,
+		WorkspaceKind: workspaceKind,
+	}
+	if isAdminRole(actorSystemRole) {
+		return ctx, http.StatusOK, ""
+	}
+
+	workspaceRole, ok := userWorkspaceRole(h.DB, workspaceID, actorID)
+	if !ok {
+		return GovernanceContext{}, http.StatusForbidden, "无权访问该工作空间"
+	}
+	ctx.WorkspaceRole = workspaceRole
+	return ctx, http.StatusOK, ""
+}
+
+func (h *UserHandler) resolveWorkspaceScopedCreateTarget(req CreateUserRequest, actorCtx GovernanceContext) (string, uint64, string, int, string) {
+	if !RequireWorkspaceGovernance(actorCtx) {
+		return "", 0, "", http.StatusForbidden, "无权创建用户"
+	}
+	if strings.TrimSpace(req.SystemRole) != "" && normalizeSystemRole(req.SystemRole) != "user" {
+		return "", 0, "", http.StatusForbidden, "无权设置平台管理员角色"
+	}
+	if req.WorkspaceID != 0 && req.WorkspaceID != actorCtx.WorkspaceID {
+		return "", 0, "", http.StatusForbidden, "只能绑定当前工作空间"
+	}
+
+	targetWorkspaceRole := models.NormalizeWorkspaceRole(req.WorkspaceRole)
+	actorRole := effectiveWorkspaceActorRole(actorCtx.SystemRole, actorCtx.WorkspaceRole)
+	if !workspaceRoleEditableBy(actorRole, models.WorkspaceRoleViewer, targetWorkspaceRole) {
+		return "", 0, "", http.StatusForbidden, "无权设置该工作空间角色"
+	}
+
+	return "user", actorCtx.WorkspaceID, targetWorkspaceRole, http.StatusOK, ""
+}
+
+func (h *UserHandler) resolvePlatformScopedCreateTarget(req CreateUserRequest, actorCtx GovernanceContext) (string, uint64, string, int, string) {
+	if !RequirePlatformGovernance(actorCtx) {
+		return "", 0, "", http.StatusForbidden, "无权创建平台用户"
+	}
+	if req.WorkspaceID != 0 || strings.TrimSpace(req.WorkspaceRole) != "" {
+		return "", 0, "", http.StatusBadRequest, "平台级创建不能绑定工作空间"
+	}
+	return normalizeSystemRole(req.SystemRole), 0, "", http.StatusOK, ""
 }
 
 func (h *UserHandler) CreateUser(c *gin.Context) {
@@ -50,76 +96,34 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"code": 409, "message": "用户名已存在"})
 		return
 	}
-
-	actorSystemRole := c.GetString("role")
-	actorID := c.GetUint64("user_id")
-	currentWorkspaceID := uint64(0)
-	currentWorkspaceRole := ""
-	if !isAdminRole(actorSystemRole) {
-		resolvedWorkspaceID, resolvedWorkspaceRole, statusCode, message := h.resolveExplicitCreateUserWorkspace(c, actorID)
-		if statusCode != http.StatusOK {
-			c.JSON(statusCode, gin.H{"code": statusCode, "message": message})
-			return
-		}
-		currentWorkspaceID = resolvedWorkspaceID
-		currentWorkspaceRole = resolvedWorkspaceRole
+	if strings.TrimSpace(req.SystemRole) != "" && !isValidSystemRole(req.SystemRole) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的平台角色"})
+		return
 	}
-
-	allowCreate := isAdminRole(actorSystemRole) || currentWorkspaceRole == models.WorkspaceRoleOwner || currentWorkspaceRole == models.WorkspaceRoleMaintainer
-	if !allowCreate {
-		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权创建用户"})
+	if strings.TrimSpace(req.WorkspaceRole) != "" && !isValidWorkspaceRole(req.WorkspaceRole) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的工作空间角色"})
 		return
 	}
 
-	targetSystemRole := "user"
+	actorSystemRole := c.GetString("role")
+	actorID := c.GetUint64("user_id")
+	actorCtx, statusCode, message := h.resolveCreateUserActorContext(c, actorID, actorSystemRole)
+	if statusCode != http.StatusOK {
+		c.JSON(statusCode, gin.H{"code": statusCode, "message": message})
+		return
+	}
+
+	targetSystemRole := ""
 	targetWorkspaceID := uint64(0)
 	targetWorkspaceRole := ""
-
-	if isAdminRole(actorSystemRole) {
-		if strings.TrimSpace(req.SystemRole) != "" && !isValidSystemRole(req.SystemRole) {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的平台角色"})
-			return
-		}
-		if strings.TrimSpace(req.WorkspaceRole) != "" && !isValidWorkspaceRole(req.WorkspaceRole) {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的工作空间角色"})
-			return
-		}
-		targetSystemRole = normalizeSystemRole(req.SystemRole)
-		targetWorkspaceID = req.WorkspaceID
-		if targetWorkspaceID > 0 {
-			targetWorkspaceRole = models.NormalizeWorkspaceRole(req.WorkspaceRole)
-			var workspace models.Workspace
-			if err := h.DB.Where("id = ? AND status = ?", targetWorkspaceID, models.WorkspaceStatusActive).First(&workspace).Error; err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "目标工作空间不存在"})
-				return
-			}
-		} else if strings.TrimSpace(req.WorkspaceRole) != "" {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "未绑定工作空间时不能指定工作空间角色"})
-			return
-		}
+	if actorCtx.WorkspaceKind == models.WorkspaceKindAdmin {
+		targetSystemRole, targetWorkspaceID, targetWorkspaceRole, statusCode, message = h.resolvePlatformScopedCreateTarget(req, actorCtx)
 	} else {
-		if strings.TrimSpace(req.SystemRole) != "" && !isValidSystemRole(req.SystemRole) {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的平台角色"})
-			return
-		}
-		if strings.TrimSpace(req.WorkspaceRole) != "" && !isValidWorkspaceRole(req.WorkspaceRole) {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的工作空间角色"})
-			return
-		}
-		if strings.TrimSpace(req.SystemRole) != "" && normalizeSystemRole(req.SystemRole) != "user" {
-			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权设置平台管理员角色"})
-			return
-		}
-		if req.WorkspaceID != 0 && req.WorkspaceID != currentWorkspaceID {
-			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "只能绑定当前工作空间"})
-			return
-		}
-		targetWorkspaceID = currentWorkspaceID
-		targetWorkspaceRole = models.NormalizeWorkspaceRole(req.WorkspaceRole)
-		if !workspaceRoleEditableBy(currentWorkspaceRole, models.WorkspaceRoleViewer, targetWorkspaceRole) {
-			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权设置该工作空间角色"})
-			return
-		}
+		targetSystemRole, targetWorkspaceID, targetWorkspaceRole, statusCode, message = h.resolveWorkspaceScopedCreateTarget(req, actorCtx)
+	}
+	if statusCode != http.StatusOK {
+		c.JSON(statusCode, gin.H{"code": statusCode, "message": message})
+		return
 	}
 
 	var createdUser *models.User

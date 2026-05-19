@@ -720,6 +720,9 @@ func TestWorkspaceAcceptInvitationSupportsInvitationIDLocator(t *testing.T) {
 	if err := db.Create(&workspace).Error; err != nil {
 		t.Fatalf("create workspace failed: %v", err)
 	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: owner.ID, Role: models.WorkspaceRoleOwner, Status: models.WorkspaceMemberStatusActive, InvitedBy: owner.ID}).Error; err != nil {
+		t.Fatalf("create owner membership failed: %v", err)
+	}
 	token, tokenHash, err := generateInviteToken()
 	if err != nil {
 		t.Fatalf("generate invite token failed: %v", err)
@@ -767,6 +770,9 @@ func TestWorkspaceAcceptInvitationSupportsLegacyTokenLocator(t *testing.T) {
 	if err := db.Create(&workspace).Error; err != nil {
 		t.Fatalf("create workspace failed: %v", err)
 	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: owner.ID, Role: models.WorkspaceRoleOwner, Status: models.WorkspaceMemberStatusActive, InvitedBy: owner.ID}).Error; err != nil {
+		t.Fatalf("create owner membership failed: %v", err)
+	}
 	token, tokenHash, err := generateInviteToken()
 	if err != nil {
 		t.Fatalf("generate invite token failed: %v", err)
@@ -805,6 +811,9 @@ func TestWorkspaceAcceptInvitationRejectsMismatchedUserForIDLocator(t *testing.T
 	workspace := models.Workspace{Name: "invite-mismatch-ws", Slug: "invite-mismatch-ws", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, CreatedBy: owner.ID}
 	if err := db.Create(&workspace).Error; err != nil {
 		t.Fatalf("create workspace failed: %v", err)
+	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: owner.ID, Role: models.WorkspaceRoleOwner, Status: models.WorkspaceMemberStatusActive, InvitedBy: owner.ID}).Error; err != nil {
+		t.Fatalf("create owner membership failed: %v", err)
 	}
 	token, tokenHash, err := generateInviteToken()
 	if err != nil {

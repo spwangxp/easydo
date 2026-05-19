@@ -8,6 +8,9 @@ const (
 
 	WorkspaceVisibilityPrivate = "private"
 
+	WorkspaceKindNormal = "normal"
+	WorkspaceKindAdmin  = "admin"
+
 	WorkspaceMemberStatusActive   = "active"
 	WorkspaceMemberStatusDisabled = "disabled"
 
@@ -32,6 +35,7 @@ type Workspace struct {
 	Description string `gorm:"type:text" json:"description"`
 	Status      string `gorm:"size:32;default:'active';index" json:"status"`
 	Visibility  string `gorm:"size:32;default:'private'" json:"visibility"`
+	Kind        string `gorm:"size:32;default:'normal';index" json:"kind"`
 	CreatedBy   uint64 `gorm:"not null;index" json:"created_by"`
 
 	Creator *User             `gorm:"foreignKey:CreatedBy" json:"creator,omitempty"`

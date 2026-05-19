@@ -3330,6 +3330,46 @@ func shouldExposeHistoricalLegacyDefaultKey(key string) bool {
 	return true
 }
 
+func buildHistoricalRuntimeInputsFromResolvedNodes(raw string) map[string]map[string]interface{} {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+
+	var resolvedNodes []map[string]interface{}
+	if err := json.Unmarshal([]byte(trimmed), &resolvedNodes); err != nil {
+		return nil
+	}
+
+	runtimeInputs := make(map[string]map[string]interface{})
+	for _, node := range resolvedNodes {
+		nodeID := strings.TrimSpace(toString(node["node_id"]))
+		if nodeID == "" {
+			continue
+		}
+		resolvedInputs, ok := node["resolved_inputs"].(map[string]interface{})
+		if !ok || len(resolvedInputs) == 0 {
+			continue
+		}
+		copiedInputs := make(map[string]interface{}, len(resolvedInputs))
+		for key, value := range resolvedInputs {
+			paramKey := strings.TrimSpace(key)
+			if paramKey == "" {
+				continue
+			}
+			copiedInputs[paramKey] = value
+		}
+		if len(copiedInputs) == 0 {
+			continue
+		}
+		runtimeInputs[nodeID] = copiedInputs
+	}
+	if len(runtimeInputs) == 0 {
+		return nil
+	}
+	return runtimeInputs
+}
+
 func buildHistoricalRunParameterView(run models.PipelineRun) historicalRunParameterView {
 	view := historicalRunParameterView{
 		RunID:       run.ID,
@@ -3343,15 +3383,11 @@ func buildHistoricalRunParameterView(run models.PipelineRun) historicalRunParame
 		Nodes: []historicalRunNodeParamView{},
 	}
 
-	type runtimeSnapshot struct {
-		Trigger models.PipelineRunTriggerSnapshot `json:"trigger"`
-		Inputs  map[string]map[string]interface{} `json:"inputs"`
-	}
-	var runSnapshot runtimeSnapshot
-	hasRunSnapshot := false
+	var runSnapshot models.PipelineRunConfigSnapshot
+	runtimeInputs := map[string]map[string]interface{}{}
 	if trimmed := strings.TrimSpace(run.RunConfig); trimmed != "" {
 		if err := json.Unmarshal([]byte(trimmed), &runSnapshot); err == nil {
-			hasRunSnapshot = true
+			runtimeInputs = runSnapshot.Inputs
 			if value := strings.TrimSpace(runSnapshot.Trigger.Type); value != "" {
 				view.Trigger.Type = value
 			}
@@ -3362,6 +3398,9 @@ func buildHistoricalRunParameterView(run models.PipelineRun) historicalRunParame
 				view.Trigger.Operator = value
 			}
 		}
+	}
+	if len(runtimeInputs) == 0 {
+		runtimeInputs = buildHistoricalRuntimeInputsFromResolvedNodes(run.ResolvedNodes)
 	}
 
 	runtimeSource := strings.TrimSpace(view.Trigger.Source)
@@ -3437,9 +3476,9 @@ func buildHistoricalRunParameterView(run models.PipelineRun) historicalRunParame
 		}
 	}
 
-	if hasRunSnapshot {
+	if len(runtimeInputs) > 0 {
 		runtimeOnlyNodeIDs := make([]string, 0)
-		for nodeID := range runSnapshot.Inputs {
+		for nodeID := range runtimeInputs {
 			trimmedNodeID := strings.TrimSpace(nodeID)
 			if trimmedNodeID == "" {
 				continue
@@ -3453,7 +3492,7 @@ func buildHistoricalRunParameterView(run models.PipelineRun) historicalRunParame
 			ensureNode(nodeID, "")
 		}
 		for _, nodeID := range nodeOrder {
-			inputs, ok := runSnapshot.Inputs[nodeID]
+			inputs, ok := runtimeInputs[nodeID]
 			if !ok {
 				continue
 			}

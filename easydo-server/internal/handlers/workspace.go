@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"easydo-server/internal/models"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type WorkspaceHandler struct {
@@ -22,6 +24,12 @@ type WorkspaceHandler struct {
 func NewWorkspaceHandler() *WorkspaceHandler {
 	return &WorkspaceHandler{DB: models.DB}
 }
+
+var (
+	errWorkspaceMemberNotFound      = errors.New("workspace member not found")
+	errWorkspaceMemberRoleForbidden = errors.New("workspace member role change forbidden")
+	errWorkspaceLastOwnerDenied     = errors.New("workspace must retain at least one owner")
+)
 
 func workspaceRoleEditableBy(actorRole string, targetRole string, newRole string) bool {
 	actorRole = models.NormalizeWorkspaceRole(actorRole)
@@ -39,6 +47,59 @@ func workspaceRoleEditableBy(actorRole string, targetRole string, newRole string
 	return newRole == models.WorkspaceRoleViewer || newRole == models.WorkspaceRoleDeveloper
 }
 
+func effectiveWorkspaceActorRole(systemRole string, workspaceRole string) string {
+	if isAdminRole(systemRole) {
+		return models.WorkspaceRoleOwner
+	}
+	return models.NormalizeWorkspaceRole(workspaceRole)
+}
+
+func activeWorkspaceOwnerCount(db *gorm.DB, workspaceID uint64) (int64, error) {
+	var owners []models.WorkspaceMember
+	err := db.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("workspace_id = ? AND status = ? AND role = ?", workspaceID, models.WorkspaceMemberStatusActive, models.WorkspaceRoleOwner).
+		Find(&owners).Error
+	return int64(len(owners)), err
+}
+
+func ensureWorkspaceRetainsOwner(db *gorm.DB, workspaceID uint64, member *models.WorkspaceMember, nextRole string) error {
+	if member == nil {
+		return errWorkspaceMemberNotFound
+	}
+	if models.NormalizeWorkspaceRole(member.Role) != models.WorkspaceRoleOwner {
+		return nil
+	}
+	if models.NormalizeWorkspaceRole(nextRole) == models.WorkspaceRoleOwner {
+		return nil
+	}
+	ownerCount, err := activeWorkspaceOwnerCount(db, workspaceID)
+	if err != nil {
+		return err
+	}
+	if ownerCount <= 1 {
+		return errWorkspaceLastOwnerDenied
+	}
+	return nil
+}
+
+func inviterCanGrantWorkspaceRoleNow(db *gorm.DB, invitation *models.WorkspaceInvitation) bool {
+	if db == nil || invitation == nil {
+		return false
+	}
+	var inviter models.User
+	if err := db.First(&inviter, invitation.InvitedBy).Error; err != nil {
+		return false
+	}
+	if strings.TrimSpace(strings.ToLower(inviter.Status)) != "active" {
+		return false
+	}
+	ctx := governanceContextForWorkspace(db, invitation.WorkspaceID, inviter.ID, inviter.Role)
+	if !RequireWorkspaceGovernance(ctx) {
+		return false
+	}
+	return workspaceRoleEditableBy(effectiveWorkspaceActorRole(ctx.SystemRole, ctx.WorkspaceRole), models.WorkspaceRoleViewer, invitation.Role)
+}
+
 func generateInviteToken() (string, string, error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
@@ -54,7 +115,7 @@ func (h *WorkspaceHandler) getWorkspaceForUser(c *gin.Context, workspaceID uint6
 	role := c.GetString("role")
 	if isAdminRole(role) {
 		var workspace models.Workspace
-		if err := h.DB.First(&workspace, workspaceID).Error; err != nil {
+		if err := h.DB.Where("id = ? AND status = ?", workspaceID, models.WorkspaceStatusActive).First(&workspace).Error; err != nil {
 			return nil, "", false
 		}
 		return &workspace, models.WorkspaceRoleOwner, true
@@ -64,7 +125,7 @@ func (h *WorkspaceHandler) getWorkspaceForUser(c *gin.Context, workspaceID uint6
 		return nil, "", false
 	}
 	var workspace models.Workspace
-	if err := h.DB.First(&workspace, workspaceID).Error; err != nil {
+	if err := h.DB.Where("id = ? AND status = ?", workspaceID, models.WorkspaceStatusActive).First(&workspace).Error; err != nil {
 		return nil, "", false
 	}
 	return &workspace, workspaceRole, true
@@ -73,7 +134,7 @@ func (h *WorkspaceHandler) getWorkspaceForUser(c *gin.Context, workspaceID uint6
 func (h *WorkspaceHandler) GetWorkspaceList(c *gin.Context) {
 	userID := c.GetUint64("user_id")
 	role := c.GetString("role")
-	query := h.DB.Model(&models.Workspace{}).Order("created_at ASC")
+	query := h.DB.Model(&models.Workspace{}).Where("status = ?", models.WorkspaceStatusActive).Order("created_at ASC")
 	if !isAdminRole(role) {
 		workspaceSubQuery := h.DB.Model(&models.WorkspaceMember{}).
 			Select("workspace_id").
@@ -96,7 +157,6 @@ func (h *WorkspaceHandler) GetWorkspaceList(c *gin.Context) {
 		result = append(result, gin.H{
 			"id":           workspace.ID,
 			"name":         workspace.Name,
-			"slug":         workspace.Slug,
 			"description":  workspace.Description,
 			"status":       workspace.Status,
 			"visibility":   workspace.Visibility,
@@ -116,21 +176,20 @@ func (h *WorkspaceHandler) GetWorkspaceList(c *gin.Context) {
 func (h *WorkspaceHandler) CreateWorkspace(c *gin.Context) {
 	var req struct {
 		Name        string `json:"name" binding:"required,min=2,max=128"`
-		Slug        string `json:"slug"`
 		Description string `json:"description"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误: " + err.Error()})
 		return
 	}
-	userID := c.GetUint64("user_id")
-	slug := sanitizeWorkspaceSlug(req.Slug)
-	if slug == "workspace" {
-		slug = sanitizeWorkspaceSlug(req.Name)
+	if !isValidWorkspaceName(req.Name) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "工作区名称只允许英文字母和数字"})
+		return
 	}
+	userID := c.GetUint64("user_id")
 	workspace := models.Workspace{
 		Name:        req.Name,
-		Slug:        slug + "-" + strconv.FormatUint(userID, 10),
+		Slug:        req.Name,
 		Description: req.Description,
 		Status:      models.WorkspaceStatusActive,
 		Visibility:  models.WorkspaceVisibilityPrivate,
@@ -153,7 +212,15 @@ func (h *WorkspaceHandler) CreateWorkspace(c *gin.Context) {
 		return
 	}
 	_ = middleware.BumpWorkspaceAuthVersion(c.Request.Context(), workspace.ID)
-	c.JSON(http.StatusOK, gin.H{"code": 200, "data": workspace})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+		"id":          workspace.ID,
+		"name":        workspace.Name,
+		"description": workspace.Description,
+		"status":      workspace.Status,
+		"visibility":  workspace.Visibility,
+		"kind":        workspace.Kind,
+		"created_by":  workspace.CreatedBy,
+	}})
 }
 
 func (h *WorkspaceHandler) GetWorkspace(c *gin.Context) {
@@ -166,7 +233,6 @@ func (h *WorkspaceHandler) GetWorkspace(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
 		"id":           workspace.ID,
 		"name":         workspace.Name,
-		"slug":         workspace.Slug,
 		"description":  workspace.Description,
 		"status":       workspace.Status,
 		"visibility":   workspace.Visibility,
@@ -177,8 +243,13 @@ func (h *WorkspaceHandler) GetWorkspace(c *gin.Context) {
 
 func (h *WorkspaceHandler) UpdateWorkspace(c *gin.Context) {
 	workspaceID, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-	workspace, workspaceRole, ok := h.getWorkspaceForUser(c, workspaceID)
-	if !ok || !middleware.WorkspaceRoleAtLeast(workspaceRole, models.WorkspaceRoleOwner) {
+	workspace, _, ok := h.getWorkspaceForUser(c, workspaceID)
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权修改该工作空间"})
+		return
+	}
+	governanceCtx := governanceContextForWorkspace(h.DB, workspaceID, c.GetUint64("user_id"), c.GetString("role"))
+	if !RequireWorkspaceGovernance(governanceCtx) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权修改该工作空间"})
 		return
 	}
@@ -191,9 +262,14 @@ func (h *WorkspaceHandler) UpdateWorkspace(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误: " + err.Error()})
 		return
 	}
-	updates := map[string]interface{}{}
-	if strings.TrimSpace(req.Name) != "" {
+	updates := map[string]any{}
+	if req.Name != "" {
+		if !isValidWorkspaceName(req.Name) {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "工作区名称只允许英文字母和数字"})
+			return
+		}
 		updates["name"] = req.Name
+		updates["slug"] = req.Name
 	}
 	if req.Description != "" {
 		updates["description"] = req.Description
@@ -247,17 +323,16 @@ func (h *WorkspaceHandler) ListMembers(c *gin.Context) {
 
 func (h *WorkspaceHandler) UpdateMember(c *gin.Context) {
 	workspaceID, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-	_, actorRole, ok := h.getWorkspaceForUser(c, workspaceID)
-	if !ok || !middleware.WorkspaceRoleAtLeast(actorRole, models.WorkspaceRoleMaintainer) {
+	if _, _, ok := h.getWorkspaceForUser(c, workspaceID); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权管理成员"})
+		return
+	}
+	governanceCtx := governanceContextForWorkspace(h.DB, workspaceID, c.GetUint64("user_id"), c.GetString("role"))
+	if !RequireWorkspaceGovernance(governanceCtx) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权管理成员"})
 		return
 	}
 	memberID, _ := strconv.ParseUint(c.Param("member_id"), 10, 64)
-	var member models.WorkspaceMember
-	if err := h.DB.Where("workspace_id = ? AND id = ?", workspaceID, memberID).First(&member).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "成员不存在"})
-		return
-	}
 	var req struct {
 		Role string `json:"role" binding:"required"`
 	}
@@ -266,15 +341,40 @@ func (h *WorkspaceHandler) UpdateMember(c *gin.Context) {
 		return
 	}
 	newRole := models.NormalizeWorkspaceRole(req.Role)
-	if !workspaceRoleEditableBy(actorRole, member.Role, newRole) {
-		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权调整该成员角色"})
+	actorRole := effectiveWorkspaceActorRole(governanceCtx.SystemRole, governanceCtx.WorkspaceRole)
+
+	var member models.WorkspaceMember
+	if err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("workspace_id = ? AND id = ?", workspaceID, memberID).First(&member).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errWorkspaceMemberNotFound
+			}
+			return err
+		}
+		if !workspaceRoleEditableBy(actorRole, member.Role, newRole) {
+			return errWorkspaceMemberRoleForbidden
+		}
+		if err := ensureWorkspaceRetainsOwner(tx, workspaceID, &member, newRole); err != nil {
+			return err
+		}
+		if err := tx.Model(&member).Update("role", newRole).Error; err != nil {
+			return err
+		}
+		member.Role = newRole
+		return nil
+	}); err != nil {
+		switch {
+		case errors.Is(err, errWorkspaceMemberNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "成员不存在"})
+		case errors.Is(err, errWorkspaceMemberRoleForbidden):
+			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权调整该成员角色"})
+		case errors.Is(err, errWorkspaceLastOwnerDenied):
+			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "至少保留一个 owner"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "更新成员角色失败"})
+		}
 		return
 	}
-	if err := h.DB.Model(&member).Update("role", newRole).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "更新成员角色失败"})
-		return
-	}
-	member.Role = newRole
 	emitWorkspaceMemberRoleUpdatedNotification(h.DB, workspaceID, &member, c.GetUint64("user_id"))
 	_ = middleware.BumpWorkspaceAuthVersion(c.Request.Context(), workspaceID)
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "更新成功"})
@@ -282,23 +382,47 @@ func (h *WorkspaceHandler) UpdateMember(c *gin.Context) {
 
 func (h *WorkspaceHandler) RemoveMember(c *gin.Context) {
 	workspaceID, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-	_, actorRole, ok := h.getWorkspaceForUser(c, workspaceID)
-	if !ok || !middleware.WorkspaceRoleAtLeast(actorRole, models.WorkspaceRoleMaintainer) {
+	if _, _, ok := h.getWorkspaceForUser(c, workspaceID); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权移除成员"})
+		return
+	}
+	governanceCtx := governanceContextForWorkspace(h.DB, workspaceID, c.GetUint64("user_id"), c.GetString("role"))
+	if !RequireWorkspaceGovernance(governanceCtx) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权移除成员"})
 		return
 	}
 	memberID, _ := strconv.ParseUint(c.Param("member_id"), 10, 64)
+	actorRole := effectiveWorkspaceActorRole(governanceCtx.SystemRole, governanceCtx.WorkspaceRole)
+
 	var member models.WorkspaceMember
-	if err := h.DB.Where("workspace_id = ? AND id = ?", workspaceID, memberID).First(&member).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "成员不存在"})
-		return
-	}
-	if !workspaceRoleEditableBy(actorRole, member.Role, models.WorkspaceRoleViewer) {
-		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权移除该成员"})
-		return
-	}
-	if err := h.DB.Delete(&member).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "移除成员失败"})
+	if err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("workspace_id = ? AND id = ?", workspaceID, memberID).First(&member).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errWorkspaceMemberNotFound
+			}
+			return err
+		}
+		if !workspaceRoleEditableBy(actorRole, member.Role, models.WorkspaceRoleViewer) {
+			return errWorkspaceMemberRoleForbidden
+		}
+		if err := ensureWorkspaceRetainsOwner(tx, workspaceID, &member, ""); err != nil {
+			return err
+		}
+		if err := tx.Delete(&member).Error; err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		switch {
+		case errors.Is(err, errWorkspaceMemberNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "成员不存在"})
+		case errors.Is(err, errWorkspaceMemberRoleForbidden):
+			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权移除该成员"})
+		case errors.Is(err, errWorkspaceLastOwnerDenied):
+			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "至少保留一个 owner"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "移除成员失败"})
+		}
 		return
 	}
 	emitWorkspaceMemberRemovedNotification(h.DB, workspaceID, &member, c.GetUint64("user_id"))
@@ -323,11 +447,17 @@ func (h *WorkspaceHandler) ListInvitations(c *gin.Context) {
 
 func (h *WorkspaceHandler) CreateInvitation(c *gin.Context) {
 	workspaceID, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-	workspace, actorRole, ok := h.getWorkspaceForUser(c, workspaceID)
-	if !ok || !middleware.WorkspaceRoleAtLeast(actorRole, models.WorkspaceRoleMaintainer) {
+	workspace, _, ok := h.getWorkspaceForUser(c, workspaceID)
+	if !ok {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权邀请成员"})
 		return
 	}
+	governanceCtx := governanceContextForWorkspace(h.DB, workspaceID, c.GetUint64("user_id"), c.GetString("role"))
+	if !RequireWorkspaceGovernance(governanceCtx) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权邀请成员"})
+		return
+	}
+	actorRole := effectiveWorkspaceActorRole(governanceCtx.SystemRole, governanceCtx.WorkspaceRole)
 	var req struct {
 		Email string `json:"email" binding:"required,email"`
 		Role  string `json:"role"`
@@ -370,15 +500,19 @@ func (h *WorkspaceHandler) CreateInvitation(c *gin.Context) {
 
 func (h *WorkspaceHandler) RevokeInvitation(c *gin.Context) {
 	workspaceID, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-	_, actorRole, ok := h.getWorkspaceForUser(c, workspaceID)
-	if !ok || !middleware.WorkspaceRoleAtLeast(actorRole, models.WorkspaceRoleMaintainer) {
+	if _, _, ok := h.getWorkspaceForUser(c, workspaceID); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权撤销邀请"})
+		return
+	}
+	governanceCtx := governanceContextForWorkspace(h.DB, workspaceID, c.GetUint64("user_id"), c.GetString("role"))
+	if !RequireWorkspaceGovernance(governanceCtx) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权撤销邀请"})
 		return
 	}
 	inviteID, _ := strconv.ParseUint(c.Param("invite_id"), 10, 64)
 	if err := h.DB.Model(&models.WorkspaceInvitation{}).
 		Where("id = ? AND workspace_id = ?", inviteID, workspaceID).
-		Updates(map[string]interface{}{"status": models.WorkspaceInvitationStatusRevoked}).Error; err != nil {
+		Updates(map[string]any{"status": models.WorkspaceInvitationStatusRevoked}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "撤销邀请失败"})
 		return
 	}
@@ -418,10 +552,14 @@ func (h *WorkspaceHandler) AcceptInvitation(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "当前用户邮箱不匹配该邀请"})
 		return
 	}
+	if !inviterCanGrantWorkspaceRoleNow(h.DB, &invitation) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "邀请已失效"})
+		return
+	}
 	var member models.WorkspaceMember
 	if err := h.DB.Where("workspace_id = ? AND user_id = ?", invitation.WorkspaceID, user.ID).First(&member).Error; err == nil {
 		acceptedByUser := user.ID
-		h.DB.Model(&invitation).Updates(map[string]interface{}{
+		h.DB.Model(&invitation).Updates(map[string]any{
 			"status":           models.WorkspaceInvitationStatusAccepted,
 			"accepted_at":      time.Now().Unix(),
 			"accepted_by_user": acceptedByUser,
@@ -443,7 +581,7 @@ func (h *WorkspaceHandler) AcceptInvitation(c *gin.Context) {
 	}
 	_ = middleware.BumpWorkspaceAuthVersion(c.Request.Context(), invitation.WorkspaceID)
 	acceptedByUser := user.ID
-	if err := h.DB.Model(&invitation).Updates(map[string]interface{}{
+	if err := h.DB.Model(&invitation).Updates(map[string]any{
 		"status":           models.WorkspaceInvitationStatusAccepted,
 		"accepted_at":      time.Now().Unix(),
 		"accepted_by_user": acceptedByUser,

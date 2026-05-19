@@ -95,20 +95,24 @@
         </div>
 
         <div class="topbar-right">
-          <el-select
-            v-if="userStore.workspaces?.length"
-            :model-value="userStore.currentWorkspaceId || undefined"
-            class="workspace-select"
-            placeholder="选择工作空间"
-            @change="handleWorkspaceChange"
-          >
-            <el-option
-              v-for="workspace in userStore.workspaces"
-              :key="workspace.id"
-              :label="workspace.name"
-              :value="workspace.id"
-            />
-          </el-select>
+          <div v-if="userStore.workspaces?.length" class="workspace-switcher">
+            <span class="workspace-switcher__label">工作空间：</span>
+            <div class="workspace-switcher__field">
+              <el-select
+                :model-value="userStore.currentWorkspaceId || undefined"
+                class="workspace-select"
+                placeholder="选择工作空间"
+                @change="handleWorkspaceChange"
+              >
+                <el-option
+                  v-for="workspace in userStore.workspaces"
+                  :key="workspace.id"
+                  :label="workspace.name"
+                  :value="workspace.id"
+                />
+              </el-select>
+            </div>
+          </div>
         </div>
       </header>
 
@@ -126,6 +130,7 @@ import { ElMessageBox } from 'element-plus'
 import { useUserStore } from '@/stores/user'
 import { useNotificationStore } from '@/stores/notification'
 import { useThemeStore } from '@/stores/theme'
+import { filterGovernanceMenuItems, canAccessRouteScope, resolveGovernanceFallback } from './governanceMenu.js'
 import {
   House,
   Connection,
@@ -170,16 +175,18 @@ const toggleTheme = () => {
 }
 
 const menuItems = [
-  { name: '工作台', path: '/', icon: House },
-  { name: '流水线', path: '/pipeline', icon: Connection, permission: 'pipeline.read' },
-  { name: '项目', path: '/project', icon: Box, permission: 'project.read' },
-  { name: '商店', path: '/store', icon: Shop, permission: 'store.template.read' },
-  { name: '执行器', path: '/agent', icon: Monitor, permission: 'agent.read' },
-  { name: '资源管理', path: '/resources', icon: Collection, permission: 'resource.read' },
-  { name: '发布', path: '/deploy', icon: Promotion },
-  { name: '凭据管理', path: '/credentials', icon: Key, permission: 'credential.read' },
-  { name: '统计', path: '/statistics', icon: DataAnalysis, permission: 'workspace.read' },
-  { name: '设置', path: '/settings', icon: Setting, permission: 'workspace.read' }
+  { name: '工作台', path: '/', icon: House, scope: 'workspace-business' },
+  { name: '流水线', path: '/pipeline', icon: Connection, permission: 'pipeline.read', scope: 'workspace-business' },
+  { name: '项目', path: '/project', icon: Box, permission: 'project.read', scope: 'workspace-business' },
+  { name: '商店', path: '/store', icon: Shop, permission: 'store.template.read', scope: 'workspace-business' },
+  { name: '执行器', path: '/agent', icon: Monitor, permission: 'agent.read', scope: 'workspace-business' },
+  { name: '资源管理', path: '/resources', icon: Collection, permission: 'resource.read', scope: 'workspace-business' },
+  { name: '发布', path: '/deploy', icon: Promotion, permission: 'resource.use', scope: 'workspace-business' },
+  { name: '凭据管理', path: '/credentials', icon: Key, permission: 'credential.read', scope: 'workspace-business' },
+  { name: '统计', path: '/statistics', icon: DataAnalysis, permission: 'workspace.read', scope: 'workspace-business' },
+  { name: '工作区治理', path: '/workspace-governance', icon: User, scope: 'workspace-governance' },
+  { name: '平台治理', path: '/platform-governance', icon: Setting, scope: 'platform-governance' },
+  { name: '设置', path: '/settings', icon: Setting, permission: 'workspace.read', scope: 'workspace-business' }
 ]
 
 const pageTitleMatchers = [
@@ -192,12 +199,19 @@ const pageTitleMatchers = [
   { name: '发布', match: (path) => path === '/deploy' || path.startsWith('/deploy/') },
   { name: '凭据管理', match: (path) => path === '/credentials' || path.startsWith('/credentials/') },
   { name: '统计', match: (path) => path === '/statistics' || path.startsWith('/statistics/') },
+  { name: '工作区治理', match: (path) => path === '/workspace-governance' || path.startsWith('/workspace-governance/') },
+  { name: '平台治理', match: (path) => path === '/platform-governance' || path.startsWith('/platform-governance/') },
   { name: '设置', match: (path) => path === '/settings' || path.startsWith('/settings/') },
   { name: '消息', match: (path) => path === '/messages' || path.startsWith('/messages/') },
   { name: '个人中心', match: (path) => path === '/profile' || path.startsWith('/profile/') }
 ]
 
-const filteredMenuItems = computed(() => menuItems.filter((item) => !item.permission || userStore.hasPermission(item.permission)))
+const filteredMenuItems = computed(() => filterGovernanceMenuItems(menuItems, {
+  isAdminWorkspace: userStore.isAdminWorkspace,
+  canAccessWorkspaceGovernance: userStore.canAccessWorkspaceGovernance,
+  canAccessPlatformGovernance: userStore.canAccessPlatformGovernance,
+  hasPermission: permission => userStore.hasPermission(permission)
+}))
 
 const currentPageTitle = computed(() => {
   const matchedItem = pageTitleMatchers.find((item) => item.match(route.path))
@@ -238,6 +252,17 @@ const handleUserInfoClick = () => {
 const handleWorkspaceChange = async (workspaceId) => {
   userStore.setCurrentWorkspaceById(workspaceId)
   await userStore.getUserInfoAction()
+  if (route.meta.scope && !canAccessRouteScope(route.meta.scope, {
+    isAdminWorkspace: userStore.isAdminWorkspace,
+    canAccessWorkspaceGovernance: userStore.canAccessWorkspaceGovernance,
+    canAccessPlatformGovernance: userStore.canAccessPlatformGovernance
+  })) {
+    router.push(resolveGovernanceFallback(route.meta.scope, {
+      canAccessWorkspaceGovernance: userStore.canAccessWorkspaceGovernance,
+      canAccessPlatformGovernance: userStore.canAccessPlatformGovernance
+    }))
+    return
+  }
   if (route.meta.permission && !userStore.hasPermission(route.meta.permission)) {
     router.push('/')
   }
@@ -684,6 +709,29 @@ const handleLogout = async () => {
   flex-shrink: 1;
 }
 
+.workspace-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.workspace-switcher__label {
+  color: var(--text-secondary);
+  font-size: 14px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.workspace-switcher__field {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--text-primary);
+}
+
 .workspace-select {
   width: min(280px, 32vw);
   min-width: 140px;
@@ -692,6 +740,10 @@ const handleLogout = async () => {
 
   :deep(.el-input__wrapper) {
     min-width: 0;
+    box-shadow: none;
+    background: transparent;
+    padding-left: 4px;
+    padding-right: 4px;
   }
 
   :deep(.el-select__selected-item),

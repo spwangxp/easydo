@@ -105,5 +105,11 @@ func openHandlerTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("load master key failed: %v", err)
 	}
 
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = originalDB
+	})
+
 	return db
 }

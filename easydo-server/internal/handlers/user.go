@@ -6,6 +6,7 @@ import (
 	"easydo-server/internal/models"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,15 +23,39 @@ func NewUserHandler() *UserHandler {
 	return &UserHandler{DB: models.DB}
 }
 
+var workspaceNamePattern = regexp.MustCompile(`^[A-Za-z0-9]+$`)
+
 func sanitizeWorkspaceSlug(input string) string {
-	input = strings.ToLower(strings.TrimSpace(input))
-	input = strings.ReplaceAll(input, " ", "-")
-	input = strings.ReplaceAll(input, "_", "-")
-	input = strings.Trim(input, "-")
+	input = strings.TrimSpace(input)
 	if input == "" {
-		return "workspace"
+		return "Workspace"
 	}
-	return input
+	var builder strings.Builder
+	builder.Grow(len(input))
+	for _, r := range input {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+		}
+	}
+	if builder.Len() == 0 {
+		return "Workspace"
+	}
+	return builder.String()
+}
+
+func isValidWorkspaceName(input string) bool {
+	return workspaceNamePattern.MatchString(input)
+}
+
+func defaultPersonalWorkspaceName(user *models.User) string {
+	if user != nil && isAdminRole(user.Role) {
+		return "AdminWorkspace"
+	}
+	base := sanitizeWorkspaceSlug(user.Username)
+	if base == "" {
+		base = "Workspace"
+	}
+	return base + "Workspace"
 }
 
 func (h *UserHandler) ensurePersonalWorkspace(user *models.User) (*models.Workspace, error) {
@@ -57,13 +82,32 @@ func ensurePersonalWorkspaceWithDB(db *gorm.DB, user *models.User) (*models.Work
 			return &workspace, nil
 		}
 	}
+	if isAdminRole(user.Role) {
+		var workspace models.Workspace
+		if err := db.Where("created_by = ? AND status = ? AND kind = ?", user.ID, models.WorkspaceStatusActive, models.WorkspaceKindAdmin).
+			Order("created_at ASC").
+			First(&workspace).Error; err == nil {
+			return &workspace, nil
+		}
+		if err := db.Where("created_by = ? AND status = ?", user.ID, models.WorkspaceStatusActive).
+			Order("created_at ASC").
+			First(&workspace).Error; err == nil {
+			return &workspace, nil
+		}
+	}
 
-	baseSlug := sanitizeWorkspaceSlug(user.Username)
+	workspaceName := defaultPersonalWorkspaceName(user)
+	baseSlug := sanitizeWorkspaceSlug(workspaceName)
+	workspaceKind := models.WorkspaceKindNormal
+	if isAdminRole(user.Role) {
+		workspaceKind = models.WorkspaceKindAdmin
+	}
 	workspace := &models.Workspace{
-		Name:       fmt.Sprintf("%s Workspace", user.Username),
-		Slug:       fmt.Sprintf("%s-%d", baseSlug, user.ID),
+		Name:       workspaceName,
+		Slug:       baseSlug,
 		Status:     models.WorkspaceStatusActive,
 		Visibility: models.WorkspaceVisibilityPrivate,
+		Kind:       workspaceKind,
 		CreatedBy:  user.ID,
 	}
 	if err := db.Create(workspace).Error; err != nil {
@@ -330,6 +374,31 @@ func (h *UserHandler) Register(c *gin.Context) {
 	})
 }
 
+func ensureAdminWorkspaceWithDB(db *gorm.DB, user *models.User) error {
+	if db == nil || user == nil || !isAdminRole(user.Role) {
+		return nil
+	}
+	var adminWorkspaceCount int64
+	if err := db.Model(&models.Workspace{}).
+		Where("created_by = ? AND status = ? AND kind = ?", user.ID, models.WorkspaceStatusActive, models.WorkspaceKindAdmin).
+		Count(&adminWorkspaceCount).Error; err != nil {
+		return err
+	}
+	if adminWorkspaceCount > 0 {
+		return nil
+	}
+	var workspace models.Workspace
+	if err := db.Where("created_by = ? AND status = ?", user.ID, models.WorkspaceStatusActive).
+		Order("created_at ASC").
+		First(&workspace).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil
+		}
+		return err
+	}
+	return db.Model(&workspace).Update("kind", models.WorkspaceKindAdmin).Error
+}
+
 func (h *UserHandler) GetUserInfo(c *gin.Context) {
 	userID := c.GetUint64("user_id")
 
@@ -349,12 +418,27 @@ func (h *UserHandler) GetUserInfo(c *gin.Context) {
 		})
 		return
 	}
+	if err := ensureAdminWorkspaceWithDB(h.DB, &user); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": "加载平台工作空间失败",
+		})
+		return
+	}
 
 	var memberships []models.WorkspaceMember
 	requestedWorkspaceID := c.GetUint64("workspace_id")
 	currentWorkspace := gin.H{}
 	permissions := []string{}
 	workspaces := []gin.H{}
+
+	workspaceKindForResponse := func(kind string) string {
+		normalized := normalizeWorkspaceKind(kind)
+		if normalized == "" {
+			return models.WorkspaceKindNormal
+		}
+		return normalized
+	}
 
 	if isAdminRole(user.Role) {
 		var workspaceModels []models.Workspace
@@ -372,7 +456,7 @@ func (h *UserHandler) GetUserInfo(c *gin.Context) {
 			entry := gin.H{
 				"id":           workspace.ID,
 				"name":         workspace.Name,
-				"slug":         workspace.Slug,
+				"kind":         workspaceKindForResponse(workspace.Kind),
 				"role":         models.WorkspaceRoleOwner,
 				"status":       workspace.Status,
 				"visibility":   workspace.Visibility,
@@ -380,11 +464,16 @@ func (h *UserHandler) GetUserInfo(c *gin.Context) {
 				"capabilities": ownerCapabilities,
 			}
 			workspaces = append(workspaces, entry)
-			if requestedWorkspaceID == 0 || workspace.ID == requestedWorkspaceID {
-				if len(currentWorkspace) == 0 || workspace.ID == requestedWorkspaceID {
+			if requestedWorkspaceID > 0 {
+				if workspace.ID == requestedWorkspaceID {
 					currentWorkspace = entry
 					permissions = ownerCapabilities
 				}
+				continue
+			}
+			if len(currentWorkspace) == 0 || workspaceKindForResponse(workspace.Kind) == models.WorkspaceKindAdmin {
+				currentWorkspace = entry
+				permissions = ownerCapabilities
 			}
 		}
 	} else {
@@ -408,7 +497,7 @@ func (h *UserHandler) GetUserInfo(c *gin.Context) {
 			entry := gin.H{
 				"id":           membership.Workspace.ID,
 				"name":         membership.Workspace.Name,
-				"slug":         membership.Workspace.Slug,
+				"kind":         workspaceKindForResponse(membership.Workspace.Kind),
 				"role":         models.NormalizeWorkspaceRole(membership.Role),
 				"status":       membership.Workspace.Status,
 				"visibility":   membership.Workspace.Visibility,
@@ -553,6 +642,15 @@ func (h *UserHandler) Logout(c *gin.Context) {
 }
 
 func (h *UserHandler) GetUserList(c *gin.Context) {
+	ctx := governanceContextForWorkspace(h.DB, c.GetUint64("workspace_id"), c.GetUint64("user_id"), c.GetString("role"))
+	if ctx.WorkspaceID == 0 || !RequirePlatformGovernance(ctx) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "仅平台治理上下文可查看平台用户",
+		})
+		return
+	}
+
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
 

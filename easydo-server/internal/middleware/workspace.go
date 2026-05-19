@@ -127,6 +127,9 @@ func ResolveUserWorkspace(userID uint64, requestedWorkspaceID uint64) (*models.W
 	if err := models.DB.Where("id = ? AND status = ?", member.WorkspaceID, models.WorkspaceStatusActive).First(&workspace).Error; err != nil {
 		return nil, nil, err
 	}
+	if strings.TrimSpace(workspace.Kind) == "" {
+		workspace.Kind = models.WorkspaceKindNormal
+	}
 	cacheWorkspaceResolution(context.Background(), userID, requestedWorkspaceID, &workspace, &member)
 
 	return &workspace, &member, nil
@@ -139,6 +142,9 @@ func loadActiveWorkspaceByID(workspaceID uint64) (*models.Workspace, error) {
 	var workspace models.Workspace
 	if err := models.DB.Where("id = ? AND status = ?", workspaceID, models.WorkspaceStatusActive).First(&workspace).Error; err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(workspace.Kind) == "" {
+		workspace.Kind = models.WorkspaceKindNormal
 	}
 	return &workspace, nil
 }
@@ -246,6 +252,7 @@ func WorkspaceContext() gin.HandlerFunc {
 				capabilities := ExpandWorkspaceCapabilities(models.WorkspaceRoleOwner)
 				c.Set("workspace_id", workspace.ID)
 				c.Set("workspace", workspace)
+				c.Set("workspace_kind", workspace.Kind)
 				c.Set("workspace_role", models.WorkspaceRoleOwner)
 				c.Set("workspace_member", &models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: userID, Role: models.WorkspaceRoleOwner, Status: models.WorkspaceMemberStatusActive})
 				c.Set("capabilities", capabilities)
@@ -271,6 +278,7 @@ func WorkspaceContext() gin.HandlerFunc {
 			capabilities := ExpandWorkspaceCapabilities(member.Role)
 			c.Set("workspace_id", workspace.ID)
 			c.Set("workspace", workspace)
+			c.Set("workspace_kind", workspace.Kind)
 			c.Set("workspace_role", models.NormalizeWorkspaceRole(member.Role))
 			c.Set("workspace_member", member)
 			c.Set("capabilities", capabilities)

@@ -355,6 +355,42 @@ test('normalizeRunParameterViewPayload keeps runtime and default params as separ
   })
 })
 
+test('normalizeRunParameterViewPayload converts historical param arrays into keyed records', () => {
+  const normalized = normalizeRunParameterViewPayload({
+    nodes: [
+      {
+        node_id: 'node_1',
+        node_name: 'Build',
+        runtime_params: [
+          { key: 'script', value: 'echo historical' },
+          { key: 'args', value: ['--prod'] }
+        ],
+        default_params: [
+          { key: 'script', value: 'echo default' },
+          { key: 'image', value: 'node:20' }
+        ]
+      }
+    ]
+  })
+
+  assert.deepEqual(normalized, {
+    nodes: [
+      {
+        node_id: 'node_1',
+        node_name: 'Build',
+        runtime_params: {
+          script: 'echo historical',
+          args: ['--prod']
+        },
+        default_params: {
+          script: 'echo default',
+          image: 'node:20'
+        }
+      }
+    ]
+  })
+})
+
 test('extractManualRunNodes uses task version specific field schema and preserves richer input types', () => {
   const manualRunNodes = extractManualRunNodes({
     nodes: [

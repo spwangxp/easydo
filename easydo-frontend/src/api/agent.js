@@ -131,3 +131,71 @@ export function removeAgent(id) {
     method: 'post'
   })
 }
+
+export function getWorkspaceAIAgents() {
+  return request({
+    url: '/ai/agents',
+    method: 'get'
+  })
+}
+
+export function createWorkspaceAIAgent(data) {
+  return request({
+    url: '/ai/agents',
+    method: 'post',
+    data
+  })
+}
+
+export function updateWorkspaceAIAgent(id, data) {
+  return request({
+    url: `/ai/agents/${id}`,
+    method: 'put',
+    data
+  })
+}
+
+export function deleteWorkspaceAIAgent(id) {
+  return request({
+    url: `/ai/agents/${id}`,
+    method: 'delete'
+  })
+}
+
+export function getWorkspaceAIRuntimeProfiles(id) {
+  return request({
+    url: `/ai/agents/${id}/runtime-profiles`,
+    method: 'get'
+  })
+}
+
+export function createWorkspaceAIRuntimeProfile(id, data) {
+  return request({
+    url: `/ai/agents/${id}/runtime-profiles`,
+    method: 'post',
+    data
+  })
+}
+
+export function updateWorkspaceAIRuntimeProfile(id, profileId, data) {
+  return request({
+    url: `/ai/agents/${id}/runtime-profiles/${profileId}`,
+    method: 'put',
+    data
+  })
+}
+
+export function deleteWorkspaceAIRuntimeProfile(id, profileId) {
+  return request({
+    url: `/ai/agents/${id}/runtime-profiles/${profileId}`,
+    method: 'delete'
+  })
+}
+
+export function getWorkspaceAIModelCatalog(params) {
+  return request({
+    url: '/store/ai-models',
+    method: 'get',
+    params
+  })
+}

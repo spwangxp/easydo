@@ -83,3 +83,134 @@ func TestWorkspaceContext_AllowsAdminIntoArbitraryWorkspaceAsOwner(t *testing.T)
 		t.Fatalf("expected owner capabilities for admin workspace context, got=%v", capList)
 	}
 }
+
+func TestWorkspaceContext_SetsWorkspaceKindForRequestedAdminWorkspace(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openMiddlewareTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = originalDB
+	})
+
+	admin := models.User{Username: "admin-workspace-kind", Role: "admin", Status: "active"}
+	if err := db.Create(&admin).Error; err != nil {
+		t.Fatalf("create admin failed: %v", err)
+	}
+	workspace := models.Workspace{Name: "governance", Slug: "governance", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindAdmin, CreatedBy: admin.ID}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("GET", "/?workspace_id="+fmt.Sprintf("%d", workspace.ID), nil)
+	c.Request.Header.Set(WorkspaceHeaderKey, fmt.Sprintf("%d", workspace.ID))
+	c.Set("user_id", admin.ID)
+	c.Set("role", "admin")
+
+	WorkspaceContext()(c)
+
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := c.GetString("workspace_kind"); got != models.WorkspaceKindAdmin {
+		t.Fatalf("workspace_kind=%s, want=%s", got, models.WorkspaceKindAdmin)
+	}
+	workspaceValue, exists := c.Get("workspace")
+	if !exists {
+		t.Fatal("workspace missing from context")
+	}
+	storedWorkspace, ok := workspaceValue.(*models.Workspace)
+	if !ok {
+		t.Fatalf("workspace has unexpected type %T", workspaceValue)
+	}
+	if got := storedWorkspace.Kind; got != models.WorkspaceKindAdmin {
+		t.Fatalf("workspace.Kind=%s, want=%s", got, models.WorkspaceKindAdmin)
+	}
+}
+
+func TestWorkspaceContext_AdminWorkspaceWithoutRequestDoesNotResolveDefaultContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openMiddlewareTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = originalDB
+	})
+
+	admin := models.User{Username: "admin-no-request", Role: "admin", Status: "active"}
+	if err := db.Create(&admin).Error; err != nil {
+		t.Fatalf("create admin failed: %v", err)
+	}
+	workspace := models.Workspace{Name: "implicit-admin", Slug: "implicit-admin", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindAdmin, CreatedBy: admin.ID}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	member := models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: admin.ID, Role: models.WorkspaceRoleOwner, Status: models.WorkspaceMemberStatusActive}
+	if err := db.Create(&member).Error; err != nil {
+		t.Fatalf("create workspace member failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("GET", "/", nil)
+	c.Set("user_id", admin.ID)
+	c.Set("role", "admin")
+
+	WorkspaceContext()(c)
+
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := c.GetUint64("workspace_id"); got != 0 {
+		t.Fatalf("workspace_id=%d, want=0", got)
+	}
+	if got := c.GetString("workspace_kind"); got != "" {
+		t.Fatalf("workspace_kind=%s, want empty", got)
+	}
+}
+
+func TestWorkspaceContext_SetsWorkspaceKindForNormalMemberWorkspace(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openMiddlewareTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = originalDB
+	})
+
+	user := models.User{Username: "member-workspace-kind", Role: "user", Status: "active"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	workspace := models.Workspace{Name: "team-normal", Slug: "team-normal", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: user.ID}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	member := models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: user.ID, Role: models.WorkspaceRoleDeveloper, Status: models.WorkspaceMemberStatusActive}
+	if err := db.Create(&member).Error; err != nil {
+		t.Fatalf("create workspace member failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("GET", "/", nil)
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+
+	WorkspaceContext()(c)
+
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := c.GetUint64("workspace_id"); got != workspace.ID {
+		t.Fatalf("workspace_id=%d, want=%d", got, workspace.ID)
+	}
+	if got := c.GetString("workspace_kind"); got != models.WorkspaceKindNormal {
+		t.Fatalf("workspace_kind=%s, want=%s", got, models.WorkspaceKindNormal)
+	}
+	if got := c.GetString("workspace_role"); got != models.WorkspaceRoleDeveloper {
+		t.Fatalf("workspace_role=%s, want=%s", got, models.WorkspaceRoleDeveloper)
+	}
+}

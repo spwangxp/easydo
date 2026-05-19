@@ -37,6 +37,14 @@ export function updatePassword(data) {
   })
 }
 
+export function getUserList(params) {
+  return request({
+    url: '/users',
+    method: 'get',
+    params
+  })
+}
+
 export function createUser(data) {
   return request({
     url: '/users',

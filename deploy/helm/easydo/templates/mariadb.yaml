@@ -8,12 +8,12 @@ metadata:
 data:
   zz-easydo.cnf: |
     [mysqld]
-    innodb_buffer_pool_size={{ .Values.mariadb.config.innodb_buffer_pool_size }}
-    innodb_flush_log_at_trx_commit={{ .Values.mariadb.config.innodb_flush_log_at_trx_commit }}
-    sync_binlog={{ .Values.mariadb.config.sync_binlog }}
-    performance_schema={{ .Values.mariadb.config.performance_schema }}
-    slow_query_log={{ .Values.mariadb.config.slow_query_log }}
-    long_query_time={{ .Values.mariadb.config.long_query_time }}
+    innodb_buffer_pool_size={{ include "easydo.renderIniValue" .Values.mariadb.config.innodb_buffer_pool_size }}
+    innodb_flush_log_at_trx_commit={{ include "easydo.renderIniValue" .Values.mariadb.config.innodb_flush_log_at_trx_commit }}
+    sync_binlog={{ include "easydo.renderIniValue" .Values.mariadb.config.sync_binlog }}
+    performance_schema={{ include "easydo.renderIniValue" .Values.mariadb.config.performance_schema }}
+    slow_query_log={{ include "easydo.renderIniValue" .Values.mariadb.config.slow_query_log }}
+    long_query_time={{ include "easydo.renderIniValue" .Values.mariadb.config.long_query_time }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet

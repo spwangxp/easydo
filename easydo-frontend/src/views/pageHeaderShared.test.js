@@ -21,12 +21,15 @@ test('shared page header component still exists for out-of-scope pages', async (
   assert.match(source, /<slot\s+name="actions"\s*\/>/)
 })
 
-test('layout shell keeps only top title and workspace switch in the top bar', async () => {
+test('layout shell keeps only top title and labeled workspace switch in the top bar', async () => {
   const source = await readView('layout/index.vue')
 
   assert.match(source, /<header class="topbar">/)
   assert.match(source, /<div class="title-block">/)
   assert.match(source, /<h1>\{\{ currentPageTitle \}\}<\/h1>/)
+  assert.match(source, /class="workspace-switcher"/)
+  assert.match(source, /工作空间：/)
+  assert.doesNotMatch(source, /workspace-switcher__bracket/)
   assert.match(source, /class="workspace-select"/)
   assert.doesNotMatch(source, /el-breadcrumb/)
   assert.doesNotMatch(source, /time-chip/)
@@ -46,12 +49,14 @@ test('layout shell keeps sidebar footer actions and collapsed user affordance', 
   assert.match(source, /showUserMenu\.value = false/)
 })
 
-test('layout shell removes sidebar slogan and keeps title/workspace truncation rules', async () => {
+test('layout shell removes sidebar slogan and keeps labeled workspace switch truncation rules', async () => {
   const source = await readView('layout/index.vue')
 
   assert.doesNotMatch(source, /Delivery Control/)
   assert.match(source, /text-overflow:\s*ellipsis/)
   assert.match(source, /white-space:\s*nowrap/)
+  assert.match(source, /workspace-switcher \{/)
+  assert.match(source, /workspace-switcher__label/)
   assert.match(source, /workspace-select \{/)
   assert.match(source, /width:\s*min\(280px,\s*32vw\)/)
 })

@@ -254,15 +254,15 @@ func TestDiscoverEmbeddedMigrationsIncludesAIAgentFoundationMigration(t *testing
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 5 {
-		t.Fatalf("embedded migration count=%d, want 5", len(migrations))
+	if len(migrations) != 6 {
+		t.Fatalf("embedded migration count=%d, want 6", len(migrations))
 	}
 	latest := migrations[len(migrations)-1]
-	if latest.Version != 5 {
-		t.Fatalf("latest migration version=%d, want 5", latest.Version)
+	if latest.Version != 6 {
+		t.Fatalf("latest migration version=%d, want 6", latest.Version)
 	}
-	if latest.Script != "V5__resource_runtime_labels.sql" {
-		t.Fatalf("latest migration script=%s, want V5__resource_runtime_labels.sql", latest.Script)
+	if latest.Script != "V6__workspace_governance_and_platform_governance.sql" {
+		t.Fatalf("latest migration script=%s, want V6__workspace_governance_and_platform_governance.sql", latest.Script)
 	}
 }
 
@@ -306,8 +306,8 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 5 {
-		t.Fatalf("embedded migration count=%d, want 5", len(migrations))
+	if len(migrations) != 6 {
+		t.Fatalf("embedded migration count=%d, want 6", len(migrations))
 	}
 	if migrations[0].VersionText != "1" || migrations[0].Script != "V1__schema.sql" {
 		t.Fatalf("unexpected first embedded migration: %+v", migrations[0])
@@ -324,7 +324,10 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if migrations[4].VersionText != "5" || migrations[4].Script != "V5__resource_runtime_labels.sql" {
 		t.Fatalf("unexpected fifth embedded migration: %+v", migrations[4])
 	}
-	if len(migrations[0].Statements) == 0 || len(migrations[1].Statements) == 0 || len(migrations[2].Statements) == 0 || len(migrations[3].Statements) == 0 || len(migrations[4].Statements) == 0 {
+	if migrations[5].VersionText != "6" || migrations[5].Script != "V6__workspace_governance_and_platform_governance.sql" {
+		t.Fatalf("unexpected sixth embedded migration: %+v", migrations[5])
+	}
+	if len(migrations[0].Statements) == 0 || len(migrations[1].Statements) == 0 || len(migrations[2].Statements) == 0 || len(migrations[3].Statements) == 0 || len(migrations[4].Statements) == 0 || len(migrations[5].Statements) == 0 {
 		t.Fatalf("expected parsed statements for embedded migrations, got %+v", migrations)
 	}
 }
@@ -367,6 +370,35 @@ func TestEmbeddedSeedDataIncludesVLLMExtraTipValues(t *testing.T) {
 	// Verify extra_tip column is explicitly listed in INSERT
 	if !strings.Contains(text, "`extra_tip`") {
 		t.Fatalf("expected V2 seed data INSERT to explicitly list extra_tip column")
+	}
+}
+
+func TestEmbeddedSeedDataUsesNormalizedWorkspaceNames(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V2__bootstrap_seed_data.sql")
+	if err != nil {
+		t.Fatalf("read V2 seed data failed: %v", err)
+	}
+	text := string(content)
+	for _, unexpected := range []string{
+		"demo Workspace",
+		"admin Workspace",
+		"test Workspace",
+		"demo-workspace",
+		"admin-workspace",
+		"test-workspace",
+	} {
+		if strings.Contains(text, unexpected) {
+			t.Fatalf("expected V2 seed data not to contain legacy workspace value %q", unexpected)
+		}
+	}
+	for _, expected := range []string{
+		"demoWorkspace",
+		"AdminWorkspace",
+		"testWorkspace",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected V2 seed data to contain normalized workspace value %q", expected)
+		}
 	}
 }
 

@@ -42,6 +42,56 @@ func TestEnsurePersonalWorkspaceWithDB_IgnoresInactiveMembership(t *testing.T) {
 	}
 }
 
+func TestEnsurePersonalWorkspaceWithDB_CreatesAlphaNumericWorkspaceNameForUser(t *testing.T) {
+	db := openHandlerTestDB(t)
+	user := &models.User{Username: "CaseUser9", Role: "user", Status: "active"}
+	if err := user.SetPassword("1qaz2WSX"); err != nil {
+		t.Fatalf("set password failed: %v", err)
+	}
+	if err := db.Create(user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+
+	workspace, err := ensurePersonalWorkspaceWithDB(db, user)
+	if err != nil {
+		t.Fatalf("ensurePersonalWorkspaceWithDB returned error: %v", err)
+	}
+	if workspace.Name != "CaseUser9Workspace" {
+		t.Fatalf("workspace name=%s, want=CaseUser9Workspace", workspace.Name)
+	}
+	if workspace.Slug != workspace.Name {
+		t.Fatalf("workspace slug=%s, want name=%s", workspace.Slug, workspace.Name)
+	}
+	if workspace.Kind != models.WorkspaceKindNormal {
+		t.Fatalf("workspace kind=%s, want=%s", workspace.Kind, models.WorkspaceKindNormal)
+	}
+}
+
+func TestEnsurePersonalWorkspaceWithDB_CreatesAdminWorkspaceForAdminUser(t *testing.T) {
+	db := openHandlerTestDB(t)
+	user := &models.User{Username: "admin", Role: "admin", Status: "active"}
+	if err := user.SetPassword("1qaz2WSX"); err != nil {
+		t.Fatalf("set password failed: %v", err)
+	}
+	if err := db.Create(user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+
+	workspace, err := ensurePersonalWorkspaceWithDB(db, user)
+	if err != nil {
+		t.Fatalf("ensurePersonalWorkspaceWithDB returned error: %v", err)
+	}
+	if workspace.Name != "AdminWorkspace" {
+		t.Fatalf("workspace name=%s, want=AdminWorkspace", workspace.Name)
+	}
+	if workspace.Slug != workspace.Name {
+		t.Fatalf("workspace slug=%s, want name=%s", workspace.Slug, workspace.Name)
+	}
+	if workspace.Kind != models.WorkspaceKindAdmin {
+		t.Fatalf("workspace kind=%s, want=%s", workspace.Kind, models.WorkspaceKindAdmin)
+	}
+}
+
 func TestGetUserInfo_NonAdminFiltersInactiveWorkspaces(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)

@@ -1514,7 +1514,7 @@ func (h *WebSocketHandler) dispatchPendingTasks(agentID uint64) int {
 // still be woken up. Every message is revalidated against current DB task state
 // and current Redis presence before it can drive a pull_task_now message.
 func (h *WebSocketHandler) consumeAgentStream(ctx context.Context, client *wsClient) {
-	if client == nil || client.agentID == 0 {
+	if client == nil || client.agentID == 0 || utils.RedisClient == nil || models.DB == nil {
 		return
 	}
 	lastID := "0"

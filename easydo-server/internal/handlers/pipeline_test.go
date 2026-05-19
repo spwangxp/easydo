@@ -332,8 +332,8 @@ func TestParseAndValidatePipelineConfig_PreservesNodeCoordinates(t *testing.T) {
 	raw := `{
 		"version":"2.0",
 		"nodes":[
-			{"id":"1","type":"shell","name":"Build","x":0,"y":0,"config":{"script":"echo build"}},
-			{"id":"2","type":"shell","name":"Test","x":520,"y":340,"config":{"script":"echo test"}}
+			{"id":"1","type":"shell","name":"Build","timeout":300,"x":0,"y":0,"config":{"script":"echo build"}},
+			{"id":"2","type":"shell","name":"Test","timeout":300,"x":520,"y":340,"config":{"script":"echo test"}}
 		],
 		"edges":[
 			{"from":"1","to":"2"}
@@ -985,7 +985,7 @@ func TestParseAndValidatePipelineConfig_NormalizesTaskType(t *testing.T) {
 	raw := `{
 		"version":"2.0",
 		"nodes":[
-			{"id":"1","type":"github","name":"Clone","task_version":1,"params":[{"key":"git_repo_url","label":"Repo","value":"https://example.com/repo.git","is_flexible":false}]}
+			{"id":"1","type":"github","name":"Clone","task_version":1,"timeout":300,"params":[{"key":"git_repo_url","label":"Repo","value":"https://example.com/repo.git","is_flexible":false}]}
 		],
 		"edges":[]
 	}`
@@ -1617,6 +1617,126 @@ func TestBuildHistoricalRunParameterView_AppendsRuntimeOnlyNodesInStableOrder(t 
 	}
 }
 
+func TestBuildHistoricalRunParameterView_FallsBackToResolvedNodesWhenRunConfigInputsMissing(t *testing.T) {
+	run := models.PipelineRun{
+		BaseModel:   models.BaseModel{ID: 25},
+		PipelineID:  15,
+		BuildNumber: 9,
+		TriggerType: "manual",
+		TriggerUser: "alice",
+		RunConfig:   `{"trigger":{"type":"manual","operator":"alice"},"inputs":{}}`,
+		ResolvedNodes: `[
+			{"node_id":"node_1","resolved_inputs":{"script":"echo fallback","args":["--prod"]}},
+			{"node_id":"node_2","resolved_inputs":{"image":"nginx:1.27"}}
+		]`,
+		PipelineSnapshot: `{
+			"nodes": [
+				{
+					"node_id": "node_1",
+					"node_name": "Build",
+					"params": [
+						{"key": "script", "label": "脚本", "value": "echo default", "is_flexible": true},
+						{"key": "args", "label": "参数", "value": ["--dev"], "is_flexible": true}
+					]
+				},
+				{
+					"node_id": "node_2",
+					"node_name": "Deploy",
+					"params": [
+						{"key": "image", "label": "镜像", "value": "nginx:latest", "is_flexible": true}
+					]
+				}
+			]
+		}`,
+	}
+
+	view := buildHistoricalRunParameterView(run)
+	if len(view.Nodes) != 2 {
+		t.Fatalf("nodes len=%d, want 2", len(view.Nodes))
+	}
+	if len(view.Nodes[0].RuntimeParams) != 2 {
+		t.Fatalf("expected fallback runtime params for node_1, got %#v", view.Nodes[0].RuntimeParams)
+	}
+	if view.Nodes[0].RuntimeParams[0].Key != "args" || view.Nodes[0].RuntimeParams[0].Value == nil {
+		t.Fatalf("unexpected first fallback runtime param: %#v", view.Nodes[0].RuntimeParams[0])
+	}
+	if view.Nodes[0].RuntimeParams[1].Key != "script" || view.Nodes[0].RuntimeParams[1].Value != "echo fallback" {
+		t.Fatalf("unexpected second fallback runtime param: %#v", view.Nodes[0].RuntimeParams[1])
+	}
+	if len(view.Nodes[1].RuntimeParams) != 1 || view.Nodes[1].RuntimeParams[0].Key != "image" || view.Nodes[1].RuntimeParams[0].Value != "nginx:1.27" {
+		t.Fatalf("unexpected fallback runtime params for node_2: %#v", view.Nodes[1].RuntimeParams)
+	}
+}
+
+func TestBuildHistoricalRunParameterView_PrefersRunConfigInputsOverResolvedNodes(t *testing.T) {
+	run := models.PipelineRun{
+		BaseModel:   models.BaseModel{ID: 26},
+		PipelineID:  16,
+		BuildNumber: 10,
+		TriggerType: "manual",
+		TriggerUser: "alice",
+		RunConfig: `{
+			"trigger": {"type": "manual", "operator": "alice"},
+			"inputs": {"node_1": {"script": "echo primary"}}
+		}`,
+		ResolvedNodes: `[
+			{"node_id":"node_1","resolved_inputs":{"script":"echo fallback"}}
+		]`,
+		PipelineSnapshot: `{
+			"nodes": [
+				{
+					"node_id": "node_1",
+					"node_name": "Build",
+					"params": [
+						{"key": "script", "label": "脚本", "value": "echo default", "is_flexible": true}
+					]
+				}
+			]
+		}`,
+	}
+
+	view := buildHistoricalRunParameterView(run)
+	if len(view.Nodes) != 1 || len(view.Nodes[0].RuntimeParams) != 1 {
+		t.Fatalf("unexpected runtime params: %#v", view.Nodes)
+	}
+	if view.Nodes[0].RuntimeParams[0].Value != "echo primary" {
+		t.Fatalf("expected run_config input to win, got %#v", view.Nodes[0].RuntimeParams[0])
+	}
+}
+
+func TestBuildHistoricalRunParameterView_FallbackRuntimeParamsDoNotRequireSnapshotLabels(t *testing.T) {
+	run := models.PipelineRun{
+		BaseModel:     models.BaseModel{ID: 27},
+		PipelineID:    17,
+		BuildNumber:   11,
+		TriggerType:   "manual",
+		TriggerUser:   "alice",
+		TriggerSource: "pipeline_detail",
+		RunConfig:     `{"trigger":{"type":"manual","source":"pipeline_detail","operator":"alice"},"inputs":{}}`,
+		ResolvedNodes: `[
+			{"node_id":"legacy_node","resolved_inputs":{"script":"echo legacy","image":"nginx:1.27"}}
+		]`,
+		PipelineSnapshot: `{"nodes":[]}`,
+	}
+
+	view := buildHistoricalRunParameterView(run)
+	if len(view.Nodes) != 1 {
+		t.Fatalf("nodes len=%d, want 1", len(view.Nodes))
+	}
+	if view.Nodes[0].NodeID != "legacy_node" {
+		t.Fatalf("unexpected fallback node id: %#v", view.Nodes[0])
+	}
+	if len(view.Nodes[0].RuntimeParams) != 2 {
+		t.Fatalf("expected fallback runtime params without snapshot labels, got %#v", view.Nodes[0].RuntimeParams)
+	}
+	if view.Nodes[0].RuntimeParams[0].Key != "image" || view.Nodes[0].RuntimeParams[0].Label != "" || view.Nodes[0].RuntimeParams[0].Value != "nginx:1.27" {
+		t.Fatalf("unexpected first fallback runtime param: %#v", view.Nodes[0].RuntimeParams[0])
+	}
+	if view.Nodes[0].RuntimeParams[1].Key != "script" || view.Nodes[0].RuntimeParams[1].Label != "" || view.Nodes[0].RuntimeParams[1].Value != "echo legacy" {
+		t.Fatalf("unexpected second fallback runtime param: %#v", view.Nodes[0].RuntimeParams[1])
+	}
+}
+
 func TestGetRunDetail_PrefersRunRecordResolvedNodesAndOutputs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
@@ -2210,7 +2330,7 @@ func TestCreatePipeline_WithoutProjectIDStoresNullProject(t *testing.T) {
 	h := &PipelineHandler{DB: db}
 	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "create-null-project", models.WorkspaceRoleDeveloper)
 
-	body := bytes.NewBufferString(`{"name":"pipeline-without-project","environment":"development","config":"{\"version\":\"2.0\",\"nodes\":[{\"id\":\"1\",\"type\":\"in_app\",\"name\":\"Notify\",\"config\":{\"title\":\"done\"}}],\"edges\":[]}"}`)
+	body := bytes.NewBufferString(`{"name":"pipeline-without-project","environment":"development","config":"{\"version\":\"2.0\",\"nodes\":[{\"id\":\"1\",\"type\":\"in_app\",\"name\":\"Notify\",\"timeout\":300,\"config\":{\"title\":\"done\"}}],\"edges\":[]}"}`)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/pipelines", body)

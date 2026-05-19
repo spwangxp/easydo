@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 
-	"easydo-server/internal/middleware"
 	"easydo-server/internal/models"
 	"gorm.io/gorm"
 )
@@ -48,14 +47,7 @@ func userWorkspaceRole(db *gorm.DB, workspaceID, userID uint64) (string, bool) {
 }
 
 func userHasWorkspaceRole(db *gorm.DB, workspaceID, userID uint64, systemRole string, minRole string) bool {
-	if isAdminRole(systemRole) {
-		return true
-	}
-	role, ok := userWorkspaceRole(db, workspaceID, userID)
-	if !ok {
-		return false
-	}
-	return middleware.WorkspaceRoleAtLeast(role, minRole)
+	return hasWorkspaceMembership(db, workspaceID, userID, systemRole, minRole)
 }
 
 func userCanAccessWorkspace(db *gorm.DB, workspaceID, userID uint64, systemRole string) bool {
@@ -89,48 +81,23 @@ func pipelineWorkspaceID(db *gorm.DB, pipelineID uint64) uint64 {
 }
 
 func pipelineBelongsToWorkspace(db *gorm.DB, pipelineID, workspaceID uint64) bool {
-	if db == nil || pipelineID == 0 || workspaceID == 0 {
-		return false
-	}
-	var count int64
-	db.Model(&models.Pipeline{}).Where("id = ? AND workspace_id = ?", pipelineID, workspaceID).Count(&count)
-	return count > 0
+	return belongsToWorkspaceByModel(db, &models.Pipeline{}, pipelineID, workspaceID)
 }
 
 func pipelineRunBelongsToWorkspace(db *gorm.DB, runID, workspaceID uint64) bool {
-	if db == nil || runID == 0 || workspaceID == 0 {
-		return false
-	}
-	var count int64
-	db.Model(&models.PipelineRun{}).Where("id = ? AND workspace_id = ?", runID, workspaceID).Count(&count)
-	return count > 0
+	return belongsToWorkspaceByModel(db, &models.PipelineRun{}, runID, workspaceID)
 }
 
 func taskBelongsToWorkspace(db *gorm.DB, taskID, workspaceID uint64) bool {
-	if db == nil || taskID == 0 || workspaceID == 0 {
-		return false
-	}
-	var count int64
-	db.Model(&models.AgentTask{}).Where("id = ? AND workspace_id = ?", taskID, workspaceID).Count(&count)
-	return count > 0
+	return belongsToWorkspaceByModel(db, &models.AgentTask{}, taskID, workspaceID)
 }
 
 func webhookConfigBelongsToWorkspace(db *gorm.DB, configID, workspaceID uint64) bool {
-	if db == nil || configID == 0 || workspaceID == 0 {
-		return false
-	}
-	var count int64
-	db.Model(&models.WebhookConfig{}).Where("id = ? AND workspace_id = ?", configID, workspaceID).Count(&count)
-	return count > 0
+	return belongsToWorkspaceByModel(db, &models.WebhookConfig{}, configID, workspaceID)
 }
 
 func projectBelongsToWorkspace(db *gorm.DB, projectID, workspaceID uint64) bool {
-	if db == nil || projectID == 0 || workspaceID == 0 {
-		return false
-	}
-	var count int64
-	db.Model(&models.Project{}).Where("id = ? AND workspace_id = ?", projectID, workspaceID).Count(&count)
-	return count > 0
+	return belongsToWorkspaceByModel(db, &models.Project{}, projectID, workspaceID)
 }
 
 func userOwnsProject(db *gorm.DB, projectID, userID uint64) bool {

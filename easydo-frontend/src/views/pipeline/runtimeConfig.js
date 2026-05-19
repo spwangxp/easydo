@@ -194,7 +194,20 @@ export const createRunInputs = (manualRunNodes = []) => {
 }
 
 const normalizeParamRecord = (value) => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  if (Array.isArray(value)) {
+    const result = {}
+
+    value.forEach((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return
+      const key = String(item.key || '').trim()
+      if (!key) return
+      result[key] = item.value
+    })
+
+    return result
+  }
+
+  if (!value || typeof value !== 'object') return {}
   return value
 }
 

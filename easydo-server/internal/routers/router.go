@@ -109,7 +109,7 @@ func InitRouter() *gin.Engine {
 
 		// 用户管理（仅管理员）
 		users := api.Group("/users")
-		users.Use(middleware.JWTAuth())
+		users.Use(middleware.JWTAuth(), middleware.WorkspaceContext())
 		{
 			userHandler := handlers.NewUserHandler()
 			users.POST("", userHandler.CreateUser)

@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { useUserStore } from '@/stores/user'
+import { canAccessRouteScope, resolveGovernanceFallback } from '@/views/layout/governanceMenu.js'
 
 const routes = [
   {
@@ -18,7 +18,7 @@ const routes = [
       path: '/terminal',
       name: 'ResourceTerminal',
       component: () => import('@/views/resources/terminal/index.vue'),
-      meta: { requiresAuth: true, permission: 'resource.use' }
+      meta: { requiresAuth: true, permission: 'resource.use', scope: 'workspace-business' }
     },
   {
     path: '',
@@ -28,42 +28,44 @@ const routes = [
       {
         path: '',
         name: 'Dashboard',
-        component: () => import('@/views/dashboard/index.vue')
+        component: () => import('@/views/dashboard/index.vue'),
+        meta: { scope: 'workspace-business' }
       },
       {
         path: 'pipeline',
         name: 'Pipeline',
         component: () => import('@/views/pipeline/index.vue'),
-        meta: { permission: 'pipeline.read' }
+        meta: { permission: 'pipeline.read', scope: 'workspace-business' }
       },
       {
         path: 'pipeline/:id',
         name: 'PipelineDetail',
-        component: () => import('@/views/pipeline/detail.vue')
+        component: () => import('@/views/pipeline/detail.vue'),
+        meta: { scope: 'workspace-business' }
       },
       {
         path: 'project',
         name: 'Project',
         component: () => import('@/views/project/index.vue'),
-        meta: { permission: 'project.read' }
+        meta: { permission: 'project.read', scope: 'workspace-business' }
       },
       {
         path: 'deploy',
         name: 'Deploy',
         component: () => import('@/views/deploy/index.vue'),
-        meta: { permission: 'resource.use' }
+        meta: { permission: 'resource.use', scope: 'workspace-business' }
       },
       {
         path: 'resources',
         name: 'Resources',
         component: () => import('@/views/resources/index.vue'),
-        meta: { permission: 'resource.read' }
+        meta: { permission: 'resource.read', scope: 'workspace-business' }
       },
       {
         path: 'resources/:id/k8s',
         name: 'ResourceK8sBrowser',
         component: () => import('@/views/resources/k8s/index.vue'),
-        meta: { permission: 'resource.read' }
+        meta: { permission: 'resource.read', scope: 'workspace-business' }
       },
       {
         path: 'store',
@@ -73,25 +75,37 @@ const routes = [
         path: 'store/apps',
         name: 'AppStore',
         component: () => import('@/views/store/apps.vue'),
-        meta: { permission: 'store.template.read' }
+        meta: { permission: 'store.template.read', scope: 'workspace-business' }
       },
       {
 		path: 'store/ai',
 		name: 'AIStore',
 		component: () => import('@/views/store/ai-store.vue'),
-		meta: { permission: 'store.template.read' }
+		meta: { permission: 'store.template.read', scope: 'workspace-business' }
       },
       {
         path: 'statistics',
         name: 'Statistics',
         component: () => import('@/views/statistics/index.vue'),
-        meta: { permission: 'workspace.read' }
+        meta: { permission: 'workspace.read', scope: 'workspace-business' }
+      },
+      {
+        path: 'workspace-governance',
+        name: 'WorkspaceGovernance',
+        component: () => import('@/views/workspace-governance/index.vue'),
+        meta: { scope: 'workspace-governance' }
+      },
+      {
+        path: 'platform-governance',
+        name: 'PlatformGovernance',
+        component: () => import('@/views/platform-governance/index.vue'),
+        meta: { scope: 'platform-governance' }
       },
       {
         path: 'settings',
         name: 'Settings',
         component: () => import('@/views/settings/index.vue'),
-        meta: { permission: 'workspace.read' }
+        meta: { permission: 'workspace.read', scope: 'workspace-business' }
       },
       {
         path: 'messages',
@@ -107,19 +121,19 @@ const routes = [
         path: 'agent',
         name: 'Agent',
         component: () => import('@/views/agent/index.vue'),
-        meta: { permission: 'agent.read' }
+        meta: { permission: 'agent.read', scope: 'workspace-business' }
       },
       {
         path: 'agent/pending',
         name: 'AgentPending',
         component: () => import('@/views/agent/pending.vue'),
-        meta: { permission: 'agent.approve' }
+        meta: { permission: 'agent.approve', scope: 'workspace-business' }
       },
       {
         path: 'credentials',
         name: 'Credentials',
         component: () => import('@/views/credentials/index.vue'),
-        meta: { permission: 'credential.read' }
+        meta: { permission: 'credential.read', scope: 'workspace-business' }
       }
     ]
   },
@@ -135,18 +149,27 @@ const router = createRouter({
 })
 
 // 路由守卫
-router.beforeEach((to, from, next) => {
+router.beforeEach((to, _from, next) => {
   // 延迟导入store，避免循环依赖
   import('@/stores/user').then(async ({ useUserStore }) => {
     const userStore = useUserStore()
     if (userStore.isLoggedIn && !userStore.userInfo?.id) {
       await userStore.getUserInfoAction()
     }
-    
+
     if (to.meta.requiresAuth && !userStore.isLoggedIn) {
       next({ name: 'Login', query: { redirect: to.fullPath } })
     } else if (to.name === 'Login' && userStore.isLoggedIn) {
       next({ name: 'Dashboard' })
+    } else if (to.meta.scope && !canAccessRouteScope(to.meta.scope, {
+      isAdminWorkspace: userStore.isAdminWorkspace,
+      canAccessWorkspaceGovernance: userStore.canAccessWorkspaceGovernance,
+      canAccessPlatformGovernance: userStore.canAccessPlatformGovernance
+    })) {
+      next(resolveGovernanceFallback(to.meta.scope, {
+        canAccessWorkspaceGovernance: userStore.canAccessWorkspaceGovernance,
+        canAccessPlatformGovernance: userStore.canAccessPlatformGovernance
+      }))
     } else if (to.meta.permission && !userStore.hasPermission(to.meta.permission)) {
       next({ name: 'Dashboard' })
     } else {

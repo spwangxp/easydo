@@ -2,7 +2,7 @@
 
 INSERT INTO `users` VALUES (1,'2026-03-20 14:25:13.792','2026-03-20 14:25:13.792','demo','$2a$10$ihwf.vuO5jcYB9OQ2yMmT.enCjA5TpYVdmEK9jobbmXCc8.Hlcn/a','demo@example.com','','Demo用户','','','user','active',0),(2,'2026-03-20 14:25:13.875','2026-03-20 14:25:13.875','admin','$2a$10$D3GysIFZ/qWZ3b1Ueu7dT.ZYzaOG5E7Ru79lSATZV8G7Mv5XPzrvO','admin@example.com','','管理员','','','admin','active',0),(3,'2026-03-20 14:25:13.957','2026-03-20 14:25:13.957','test','$2a$10$H1ls6dtTLzxvZpu8e9oPReBaUQMDEOhzgPLLD0NbuBDRRqeSQp..u','test@example.com','','测试用户','','','user','active',0);
 
-INSERT INTO `workspaces` VALUES (1,'2026-03-20 14:25:13.961','2026-03-20 14:25:13.961','demo Workspace','demo-workspace','','active','private',1),(2,'2026-03-20 14:25:13.966','2026-03-20 14:25:13.966','admin Workspace','admin-workspace','','active','private',2),(3,'2026-03-20 14:25:13.969','2026-03-20 14:25:13.969','test Workspace','test-workspace','','active','private',3);
+INSERT INTO `workspaces` VALUES (1,'2026-03-20 14:25:13.961','2026-03-20 14:25:13.961','demoWorkspace','demoWorkspace','','active','private',1),(2,'2026-03-20 14:25:13.966','2026-03-20 14:25:13.966','AdminWorkspace','AdminWorkspace','','active','private',2),(3,'2026-03-20 14:25:13.969','2026-03-20 14:25:13.969','testWorkspace','testWorkspace','','active','private',3);
 
 INSERT INTO `workspace_members` VALUES (1,'2026-03-20 14:25:13.963','2026-03-20 14:25:13.963',1,1,'owner','active',1,1774016713),(2,'2026-03-20 14:25:13.967','2026-03-20 14:25:13.967',2,2,'owner','active',2,1774016713),(3,'2026-03-20 14:25:13.970','2026-03-20 14:25:13.970',3,3,'owner','active',3,1774016713);
 
