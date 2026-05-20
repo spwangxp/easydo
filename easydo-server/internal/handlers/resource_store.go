@@ -4353,6 +4353,7 @@ func buildCanonicalVMBaseInfo(resourceID uint64, stdout, source string) (Resourc
 
 	workloads := parseVMRuntimeWorkloads(sections.runtimeWorkloadRows)
 	pidParentByPID := parseVMProcessTreeRows(sections.processTreeRows)
+	gpuProcesses := parseVMGPUProcessRows(sections.gpuProcessRows)
 	serviceByPID := map[int]ResourceBaseInfoService{}
 	serviceKeyByPID := map[int]string{}
 	servicePriorityByPID := map[int]int{}
@@ -4386,6 +4387,42 @@ func buildCanonicalVMBaseInfo(resourceID uint64, stdout, source string) (Resourc
 		}
 	}
 
+	for _, proc := range gpuProcesses {
+		rawPID := parseIntValue(fmt.Sprint(proc["pid"]))
+		if rawPID <= 0 {
+			continue
+		}
+		pid := reconcileVMGPUProcessPID(rawPID, servicePriorityByPID, pidParentByPID)
+		if pid <= 0 {
+			continue
+		}
+		gpuIndex := parseIntValue(fmt.Sprint(proc["gpuIndex"]))
+		if strings.TrimSpace(gpuInstanceIDs[gpuIndex]) == "" {
+			continue
+		}
+		if _, exists := serviceByPID[pid]; exists {
+			continue
+		}
+		workload := map[string]interface{}{
+			"name":    fmt.Sprintf("pid-%d", pid),
+			"pid":     pid,
+			"runtime": "process",
+		}
+		serviceKey := buildCanonicalVMServiceKey(workload)
+		serviceOrder = append(serviceOrder, pid)
+		serviceKeyByPID[pid] = serviceKey
+		servicePriorityByPID[pid] = canonicalVMWorkloadPriority(workload)
+		serviceByPID[pid] = ResourceBaseInfoService{
+			ID:       buildResourceBaseInfoServiceID(resourceID, serviceKey),
+			Name:     fmt.Sprintf("pid-%d", pid),
+			EntityID: hostEntityID,
+			Fields: []ResourceBaseInfoField{
+				newResourceBaseInfoField("pid", pid),
+				newResourceBaseInfoField("runtime", "process"),
+			},
+		}
+	}
+
 	filteredServiceOrder := make([]int, 0, len(serviceOrder))
 	filteredServiceByPID := map[int]ResourceBaseInfoService{}
 	filteredServiceKeyByPID := map[int]string{}
@@ -4403,7 +4440,7 @@ func buildCanonicalVMBaseInfo(resourceID uint64, stdout, source string) (Resourc
 
 	allocationByID := map[string]*ResourceBaseInfoAllocation{}
 	seenClaimByAllocationID := map[string]map[string]struct{}{}
-	for _, proc := range parseVMGPUProcessRows(sections.gpuProcessRows) {
+	for _, proc := range gpuProcesses {
 		rawPID := parseIntValue(fmt.Sprint(proc["pid"]))
 		pid := reconcileVMGPUProcessPID(rawPID, servicePriorityByPID, pidParentByPID)
 		service, ok := serviceByPID[pid]

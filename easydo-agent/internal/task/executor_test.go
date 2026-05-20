@@ -42,7 +42,8 @@ func processTerminated(pid int) (bool, string, error) {
 
 func TestBuildAITaskPrompt_IncludesOutputLanguageInstruction(t *testing.T) {
 	prompt := buildAITaskPrompt(aiTaskPayload{
-		Scenario: "mr_quality_check",
+		TaskType:  "mr_quality_check",
+		SceneCode: "pipeline_task:mr_quality_check:agent:8",
 		Request: map[string]interface{}{
 			"input_text":      "review this MR",
 			"output_language": "en-US",
@@ -50,6 +51,19 @@ func TestBuildAITaskPrompt_IncludesOutputLanguageInstruction(t *testing.T) {
 	})
 	if !strings.Contains(prompt, "Use en-US for all human-readable text fields") {
 		t.Fatalf("expected prompt to include output language instruction, got=%s", prompt)
+	}
+}
+
+func TestBuildAITaskPrompt_PrefersSceneCodeSemanticKey(t *testing.T) {
+	prompt := buildAITaskPrompt(aiTaskPayload{
+		TaskType:  "shell",
+		SceneCode: "pipeline_task:requirement_defect_check:agent:8",
+		Request: map[string]interface{}{
+			"input_text": "需求没有量化标准",
+		},
+	})
+	if !strings.Contains(prompt, "requirement defect analysis agent") {
+		t.Fatalf("expected prompt to follow scene semantic key, got=%s", prompt)
 	}
 }
 
@@ -81,7 +95,7 @@ func TestExecuteAITask_UsesNestedRequestPayload(t *testing.T) {
 		TaskType: "mr_quality_check",
 		Params: map[string]interface{}{
 			"ai_session_id": float64(9),
-			"scenario":      "mr_quality_check",
+			"task_type":     "mr_quality_check",
 			"request": map[string]interface{}{
 				"input_text":      "TODO: check nested request path",
 				"output_language": "en-US",
@@ -116,7 +130,7 @@ func TestExecuteAITask_UsesPassedCallback(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatal("expected callback events")
 	}
-	if !strings.Contains(got[0], "104|info|system|starting ai-task scenario=mr_quality_check") {
+	if !strings.Contains(got[0], "104|info|system|starting ai-task task_type=mr_quality_check") {
 		t.Fatalf("unexpected first callback event: %q", got[0])
 	}
 }
@@ -129,7 +143,7 @@ func TestExecute_UsesAITaskModeFromParams(t *testing.T) {
 		Params: map[string]interface{}{
 			"mode":          "ai-task",
 			"ai_session_id": float64(7),
-			"scenario":      "mr_quality_check",
+			"task_type":     "mr_quality_check",
 			"request": map[string]interface{}{
 				"input_text": "TODO: verify execution mode routing",
 			},
@@ -220,8 +234,9 @@ func TestIsAITaskPayload(t *testing.T) {
 		want     bool
 	}{
 		{name: "mode ai-task", taskType: "shell", params: map[string]interface{}{"mode": "ai-task"}, want: true},
-		{name: "scenario mr review", taskType: "shell", params: map[string]interface{}{"scenario": "mr_quality_check"}, want: true},
-		{name: "legacy ai task type", taskType: "requirement_defect_assistant", want: true},
+		{name: "task type in params", taskType: "shell", params: map[string]interface{}{"task_type": "mr_quality_check"}, want: true},
+		{name: "scene code in params", taskType: "shell", params: map[string]interface{}{"scene_code": "pipeline_task:mr_quality_check:agent:9"}, want: true},
+		{name: "ai task type", taskType: "requirement_defect_check", want: true},
 		{name: "ordinary shell", taskType: "shell", params: map[string]interface{}{"mode": "shell"}, want: false},
 	}
 	for _, tt := range tests {

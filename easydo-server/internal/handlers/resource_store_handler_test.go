@@ -1101,6 +1101,143 @@ func TestParseVMBaseInfoOutput_DedupesRepeatedGPUProcessRows(t *testing.T) {
 	}
 }
 
+func TestParseVMBaseInfoOutput_SynthesizesProcessWorkloadWhenRuntimeWorkloadsMissing(t *testing.T) {
+	stdout := "EASYDO_BASE_INFO_BEGIN\n" +
+		"EASYDO_HOSTNAME=fallback-host\n" +
+		"EASYDO_PRIMARY_IPV4=10.0.0.11\n" +
+		"EASYDO_OS_NAME=Ubuntu 22.04.4 LTS\n" +
+		"EASYDO_OS_VERSION=22.04\n" +
+		"EASYDO_KERNEL_VERSION=6.5.0-18-generic\n" +
+		"EASYDO_ARCH=x86_64\n" +
+		"EASYDO_CPU_MODEL=Intel(R) Xeon(R)\n" +
+		"EASYDO_CPU_LOGICAL_CORES=16\n" +
+		"EASYDO_CPU_USED_CORES=1.0\n" +
+		"EASYDO_MEMORY_TOTAL_BYTES=68719476736\n" +
+		"EASYDO_MEMORY_USED_BYTES=21474836480\n" +
+		"EASYDO_ROOT_TOTAL_BYTES=485687422976\n" +
+		"EASYDO_TOTAL_DISK_BYTES=2512510000000\n" +
+		"EASYDO_GPU_COUNT=1\n" +
+		"EASYDO_RESOURCE_LABELS_JSON={}\n" +
+		"EASYDO_DISK_ROWS_BEGIN\n" +
+		"EASYDO_DISK_ROWS_END\n" +
+		"EASYDO_GPU_CSV_BEGIN\n" +
+		"0,NVIDIA H100 PCIe,81920,GPU-aaa,0000:01:00.0,NVIDIA,2048,79872,12,41\n" +
+		"EASYDO_GPU_CSV_END\n" +
+		"EASYDO_RUNTIME_WORKLOADS_BEGIN\n" +
+		"EASYDO_RUNTIME_WORKLOADS_END\n" +
+		"EASYDO_PROCESS_TREE_BEGIN\n" +
+		"4242,1\n" +
+		"EASYDO_PROCESS_TREE_END\n" +
+		"EASYDO_GPU_PROCESS_CSV_BEGIN\n" +
+		"{\"gpuIndex\":0,\"pid\":4242,\"memoryUsedBytes\":8589934592}\n" +
+		"EASYDO_GPU_PROCESS_CSV_END\n" +
+		"EASYDO_BASE_INFO_END\n"
+
+	baseInfoJSON, source, _, err := parseVMBaseInfoOutput(stdout, "remote_task")
+	if err != nil {
+		t.Fatalf("parseVMBaseInfoOutput returned error: %v", err)
+	}
+	if source != "remote_task" {
+		t.Fatalf("source=%q, want remote_task", source)
+	}
+	var payload ResourceBaseInfoV3
+	if err := json.Unmarshal([]byte(baseInfoJSON), &payload); err != nil {
+		t.Fatalf("unmarshal canonical base info failed: %v", err)
+	}
+	if len(payload.Services) != 1 {
+		t.Fatalf("services len=%d, want 1 synthesized process workload", len(payload.Services))
+	}
+	service := payload.Services[0]
+	runtimeByName := map[string]interface{}{}
+	for _, field := range service.Fields {
+		runtimeByName[field.Name] = field.Value
+	}
+	if runtimeByName["runtime"] != "process" {
+		t.Fatalf("expected synthesized process runtime, got %+v", service.Fields)
+	}
+	if pid, _ := runtimeByName["pid"].(float64); pid != 4242 {
+		t.Fatalf("expected synthesized process pid, got %+v", service.Fields)
+	}
+	if service.Name != "pid-4242" {
+		t.Fatalf("expected synthesized process fallback name, got %+v", service)
+	}
+	gpu0ID := buildResourceBaseInfoResourceInstanceID(0, "gpu", "0")
+	if got := len(service.ResourceInstanceIDs); got != 1 || service.ResourceInstanceIDs[0] != gpu0ID {
+		t.Fatalf("expected synthesized service to bind gpu0, got %+v", service)
+	}
+	if len(payload.Allocations) != 1 {
+		t.Fatalf("allocations len=%d, want 1 synthesized allocation", len(payload.Allocations))
+	}
+	if len(payload.Allocations[0].Claims) != 1 {
+		t.Fatalf("claims len=%d, want 1 synthesized claim", len(payload.Allocations[0].Claims))
+	}
+	claim := payload.Allocations[0].Claims[0]
+	if claim.ResourceInstanceID != gpu0ID {
+		t.Fatalf("expected synthesized allocation to target gpu0, got %+v", claim)
+	}
+	dimensions := map[string]interface{}{}
+	for _, field := range claim.Dimensions {
+		dimensions[field.Name] = field.Value
+	}
+	if pid, _ := dimensions["pid"].(float64); pid != 4242 {
+		t.Fatalf("expected synthesized claim pid, got %+v", claim.Dimensions)
+	}
+	if memoryUsedBytes, _ := dimensions["memoryUsedBytes"].(float64); memoryUsedBytes != 8589934592 {
+		t.Fatalf("expected synthesized claim memoryUsedBytes, got %+v", claim.Dimensions)
+	}
+}
+
+func TestParseVMBaseInfoOutput_DoesNotSynthesizeProcessWorkloadForUnknownGPUIndex(t *testing.T) {
+	stdout := "EASYDO_BASE_INFO_BEGIN\n" +
+		"EASYDO_HOSTNAME=fallback-host\n" +
+		"EASYDO_PRIMARY_IPV4=10.0.0.11\n" +
+		"EASYDO_OS_NAME=Ubuntu 22.04.4 LTS\n" +
+		"EASYDO_OS_VERSION=22.04\n" +
+		"EASYDO_KERNEL_VERSION=6.5.0-18-generic\n" +
+		"EASYDO_ARCH=x86_64\n" +
+		"EASYDO_CPU_MODEL=Intel(R) Xeon(R)\n" +
+		"EASYDO_CPU_LOGICAL_CORES=16\n" +
+		"EASYDO_CPU_USED_CORES=1.0\n" +
+		"EASYDO_MEMORY_TOTAL_BYTES=68719476736\n" +
+		"EASYDO_MEMORY_USED_BYTES=21474836480\n" +
+		"EASYDO_ROOT_TOTAL_BYTES=485687422976\n" +
+		"EASYDO_TOTAL_DISK_BYTES=2512510000000\n" +
+		"EASYDO_GPU_COUNT=1\n" +
+		"EASYDO_RESOURCE_LABELS_JSON={}\n" +
+		"EASYDO_DISK_ROWS_BEGIN\n" +
+		"EASYDO_DISK_ROWS_END\n" +
+		"EASYDO_GPU_CSV_BEGIN\n" +
+		"0,NVIDIA H100 PCIe,81920,GPU-aaa,0000:01:00.0,NVIDIA,2048,79872,12,41\n" +
+		"EASYDO_GPU_CSV_END\n" +
+		"EASYDO_RUNTIME_WORKLOADS_BEGIN\n" +
+		"EASYDO_RUNTIME_WORKLOADS_END\n" +
+		"EASYDO_PROCESS_TREE_BEGIN\n" +
+		"4242,1\n" +
+		"EASYDO_PROCESS_TREE_END\n" +
+		"EASYDO_GPU_PROCESS_CSV_BEGIN\n" +
+		"{\"gpuIndex\":9,\"pid\":4242,\"memoryUsedBytes\":8589934592}\n" +
+		"EASYDO_GPU_PROCESS_CSV_END\n" +
+		"EASYDO_BASE_INFO_END\n"
+
+	baseInfoJSON, source, _, err := parseVMBaseInfoOutput(stdout, "remote_task")
+	if err != nil {
+		t.Fatalf("parseVMBaseInfoOutput returned error: %v", err)
+	}
+	if source != "remote_task" {
+		t.Fatalf("source=%q, want remote_task", source)
+	}
+	var payload ResourceBaseInfoV3
+	if err := json.Unmarshal([]byte(baseInfoJSON), &payload); err != nil {
+		t.Fatalf("unmarshal canonical base info failed: %v", err)
+	}
+	if len(payload.Services) != 0 {
+		t.Fatalf("services len=%d, want 0 when gpu index is unknown", len(payload.Services))
+	}
+	if len(payload.Allocations) != 0 {
+		t.Fatalf("allocations len=%d, want 0 when gpu index is unknown", len(payload.Allocations))
+	}
+}
+
 func TestBuildResourceBaseInfoJSON_VMCanonicalMergeKeepsOnlyTopLevelDurableLabels(t *testing.T) {
 	paramsJSON, err := json.Marshal(resourceBaseInfoTaskPayload{
 		Collection: resourceBaseInfoCollectionSnapshot{

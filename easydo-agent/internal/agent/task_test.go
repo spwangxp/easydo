@@ -596,7 +596,7 @@ func TestTaskHandlerUpdateTaskConcurrencyRefreshesRuntimeMirrors(t *testing.T) {
 
 func TestTaskHandlerWithTaskSlotRunsTasksSequentiallyWhenLimitIsOne(t *testing.T) {
 	h := &TaskHandler{taskLimit: 1}
-h.taskConcurrencyCV = sync.NewCond(&h.taskConcurrencyMu)
+	h.taskConcurrencyCV = sync.NewCond(&h.taskConcurrencyMu)
 	var mu sync.Mutex
 	current := 0
 	maxConcurrent := 0
@@ -640,7 +640,7 @@ h.taskConcurrencyCV = sync.NewCond(&h.taskConcurrencyMu)
 
 func TestTaskHandlerWithTaskSlotHotExpandWakesWaiters(t *testing.T) {
 	h := &TaskHandler{taskLimit: 1}
-h.taskConcurrencyCV = sync.NewCond(&h.taskConcurrencyMu)
+	h.taskConcurrencyCV = sync.NewCond(&h.taskConcurrencyMu)
 	started := make(chan string, 3)
 	allowFinish := make(chan struct{})
 
@@ -688,7 +688,7 @@ h.taskConcurrencyCV = sync.NewCond(&h.taskConcurrencyMu)
 
 func TestTaskHandlerWithTaskSlotHotShrinkKeepsRunningTasksAndBlocksLaterStarts(t *testing.T) {
 	h := &TaskHandler{taskLimit: 3}
-h.taskConcurrencyCV = sync.NewCond(&h.taskConcurrencyMu)
+	h.taskConcurrencyCV = sync.NewCond(&h.taskConcurrencyMu)
 	started := make(chan string, 4)
 	releaseFirstWave := make(chan struct{})
 	releaseSecondWave := make(chan struct{})
@@ -799,7 +799,7 @@ func TestBuildTaskResultPayload_AITaskStructuredOutputs(t *testing.T) {
 
 func TestBuildTaskResultPayload_AITaskStructuredOutputsForShellMode(t *testing.T) {
 	h := &TaskHandler{}
-	task := &Task{ID: 67, TaskType: "shell", Params: `{"mode":"ai-task","scenario":"mr_quality_check"}`}
+	task := &Task{ID: 67, TaskType: "shell", Params: `{"mode":"ai-task","task_type":"mr_quality_check"}`}
 	result := &agenttask.Result{
 		ExitCode: 0,
 		Stdout:   `{"summary":"ok","quality_score":92,"issues":[],"issues_count":0}`,

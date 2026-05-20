@@ -155,6 +155,7 @@ const formatBytes = (value) => {
 
 <style lang="scss" scoped>
 .gpu-grid {
+  --gpu-summary-row-height: 62px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -162,34 +163,46 @@ const formatBytes = (value) => {
 
 .gpu-row {
   display: grid;
-  grid-template-columns: 160px minmax(0, 1fr);
+  grid-template-columns: 128px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
 }
 
 .node-column {
   min-width: 0;
+  display: flex;
+  align-items: flex-start;
 }
 
 .node-card {
+  width: 100%;
+  height: var(--gpu-summary-row-height);
   display: flex;
   flex-direction: column;
+  justify-content: center;
   gap: 2px;
   padding: 8px 10px;
   border: 1px solid var(--border-color-light);
   border-radius: 8px;
   background: var(--bg-card);
+  overflow: hidden;
 
   strong {
     color: var(--text-primary);
     font-size: 12px;
     line-height: 1.25;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   span {
     color: var(--text-secondary);
     font-size: 11px;
     line-height: 1.25;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
@@ -206,11 +219,11 @@ const formatBytes = (value) => {
 }
 
 .gpu-cell {
+  height: var(--gpu-summary-row-height);
   display: flex;
   flex-direction: column;
   gap: 4px;
-  min-height: 62px;
-  max-height: 86px;
+  min-height: var(--gpu-summary-row-height);
   padding: 6px;
   border: 1px solid var(--border-color-light);
   border-radius: 8px;
@@ -320,5 +333,16 @@ const formatBytes = (value) => {
 .gpu-empty {
   color: var(--text-placeholder);
   font-size: 11px;
+}
+
+@media (max-width: 768px) {
+  .gpu-row {
+    grid-template-columns: 1fr;
+  }
+
+  .node-card {
+    height: auto;
+    min-height: var(--gpu-summary-row-height);
+  }
 }
 </style>

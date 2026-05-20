@@ -22,7 +22,6 @@
       </el-table-column>
       <el-table-column prop="provider_model_key" label="Provider Model Key" min-width="220" show-overflow-tooltip />
       <el-table-column prop="status" label="状态" width="120" />
-      <el-table-column prop="capabilities_json" label="Capabilities JSON" min-width="220" show-overflow-tooltip />
       <el-table-column label="操作" width="180" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" @click="openBindingDialog(row)">编辑</el-button>
@@ -41,11 +40,11 @@
         <el-form-item label="Provider Model Key">
           <el-input v-model="bindingForm.provider_model_key" />
         </el-form-item>
-        <el-form-item label="Capabilities JSON">
-          <el-input v-model="bindingForm.capabilities_json" type="textarea" :rows="4" />
-        </el-form-item>
         <el-form-item label="Settings JSON">
           <el-input v-model="bindingForm.settings_json" type="textarea" :rows="4" />
+        </el-form-item>
+        <el-form-item label="Metadata JSON">
+          <el-input v-model="bindingForm.metadata_json" type="textarea" :rows="4" />
         </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="bindingForm.status" style="width: 100%">
@@ -84,8 +83,8 @@ const bindingForm = reactive({
   id: 0,
   model_id: undefined,
   provider_model_key: '',
-  capabilities_json: '{}',
   settings_json: '{}',
+  metadata_json: '{}',
   status: 'active'
 })
 
@@ -149,8 +148,8 @@ const openBindingDialog = (row = null) => {
   bindingForm.id = row?.id || 0
   bindingForm.model_id = row?.model_id || undefined
   bindingForm.provider_model_key = row?.provider_model_key || ''
-  bindingForm.capabilities_json = row?.capabilities_json || '{}'
   bindingForm.settings_json = row?.settings_json || '{}'
+  bindingForm.metadata_json = row?.metadata_json || '{}'
   bindingForm.status = row?.status || 'active'
   dialogVisible.value = true
 }
@@ -165,8 +164,8 @@ const submitBinding = async () => {
     const payload = {
       model_id: bindingForm.model_id,
       provider_model_key: bindingForm.provider_model_key,
-      capabilities_json: parseJsonField('Capabilities', bindingForm.capabilities_json, {}),
       settings_json: parseJsonField('Settings', bindingForm.settings_json, {}),
+      metadata_json: parseJsonField('Metadata', bindingForm.metadata_json, {}),
       status: bindingForm.status
     }
     const res = bindingForm.id

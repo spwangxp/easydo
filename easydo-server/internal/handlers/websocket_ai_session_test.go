@@ -39,7 +39,7 @@ func TestUpdateAISessionStateForTask_UpdatesTerminalStateAndResponse(t *testing.
 
 	session := models.AISession{
 		WorkspaceID: 1,
-		Scenario:    "mr_quality_check",
+		TaskType:    "mr_quality_check",
 		Status:      models.AISessionStatusQueued,
 		CreatedBy:   1,
 	}
@@ -97,7 +97,7 @@ func TestUpdateAISessionStateForTask_UsesAISessionIDFromParamsEvenWhenTaskTypeIs
 
 	session := models.AISession{
 		WorkspaceID: 1,
-		Scenario:    "mr_quality_check",
+		TaskType:    "mr_quality_check",
 		Status:      models.AISessionStatusQueued,
 		CreatedBy:   1,
 	}
@@ -141,7 +141,7 @@ func TestUpdateAISessionStateForTask_RunningDoesNotOverwriteStartedAtWhenAlready
 
 	session := models.AISession{
 		WorkspaceID: 1,
-		Scenario:    "mr_quality_check",
+		TaskType:    "mr_quality_check",
 		Status:      models.AISessionStatusRunning,
 		StartedAt:   100,
 		CreatedBy:   1,

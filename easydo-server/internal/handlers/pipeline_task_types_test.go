@@ -12,35 +12,82 @@ import (
 )
 
 func TestBuildAgentTaskParams_UsesExecutorPayloadForAITasks(t *testing.T) {
-	nodeConfig := map[string]interface{}{"input_text": "raw"}
-	executorPayload := map[string]interface{}{
+	nodeConfig := map[string]any{"input_text": "raw"}
+	executorPayload := map[string]any{
 		"mode":          "ai-task",
 		"ai_session_id": float64(88),
-		"scenario":      "mr_quality_check",
-		"request":       map[string]interface{}{"input_text": "normalized"},
+		"task_type":     "mr_quality_check",
+		"request":       map[string]any{"input_text": "normalized"},
 	}
 
 	params := buildAgentTaskParams(nodeConfig, executorPayload)
-	if params["scenario"] != "mr_quality_check" {
+	if params["task_type"] != "mr_quality_check" {
 		t.Fatalf("expected ai executor payload to be used, got=%#v", params)
 	}
 	if _, exists := params["request"]; !exists {
 		t.Fatalf("expected nested request payload for ai task, got=%#v", params)
 	}
+	if _, exists := params["scenario"]; exists {
+		t.Fatalf("expected ai-task payload to stop exposing scenario, got=%#v", params)
+	}
 
 	shellAIParams := buildAgentTaskParams(nodeConfig, executorPayload)
-	if shellAIParams["scenario"] != "mr_quality_check" {
+	if shellAIParams["task_type"] != "mr_quality_check" {
 		t.Fatalf("expected ai-task payload to be preserved even for shell task type, got=%#v", shellAIParams)
 	}
 
-	nonAIParams := buildAgentTaskParams(nodeConfig, map[string]interface{}{"script": "echo hi"})
+	nonAIParams := buildAgentTaskParams(nodeConfig, map[string]any{"script": "echo hi"})
 	if nonAIParams["input_text"] != "raw" {
 		t.Fatalf("expected non-ai tasks to keep node config, got=%#v", nonAIParams)
 	}
 }
 
+func TestBuildAISessionRequestPayload_UsesSceneAwareRuntimeContract(t *testing.T) {
+	scene := &models.AIScene{BaseModel: models.BaseModel{ID: 17}, SceneType: pipelineTaskSceneType, Code: "pipeline_task:mr_quality_check:agent:9"}
+	payload := buildAISessionRequestPayload(&models.PipelineRun{BaseModel: models.BaseModel{ID: 9}, WorkspaceID: 11}, &PipelineNode{ID: "mr-review", Name: "MR Review"}, "mr_quality_check", map[string]any{
+		"input_text":      "review this MR",
+		"output_language": "en-US",
+	}, scene)
+	if payload["task_type"] != "mr_quality_check" {
+		t.Fatalf("task_type=%v, want mr_quality_check", payload["task_type"])
+	}
+	if toUint64Value(payload["scene_id"]) != scene.ID {
+		t.Fatalf("scene_id=%v, want %d", payload["scene_id"], scene.ID)
+	}
+	if payload["scene_code"] != scene.Code {
+		t.Fatalf("scene_code=%v, want %s", payload["scene_code"], scene.Code)
+	}
+	if payload["scene_type"] != scene.SceneType {
+		t.Fatalf("scene_type=%v, want %s", payload["scene_type"], scene.SceneType)
+	}
+	if _, exists := payload["scenario"]; exists {
+		t.Fatalf("expected request payload to stop exposing scenario, got=%#v", payload)
+	}
+}
+
+func TestBuildAIExecutorPayload_UsesSceneAwareRuntimeContract(t *testing.T) {
+	sceneID := uint64(17)
+	scene := &models.AIScene{BaseModel: models.BaseModel{ID: sceneID}, SceneType: pipelineTaskSceneType, Code: "pipeline_task:mr_quality_check:agent:9"}
+	payload := buildAIExecutorPayload(models.AISession{BaseModel: models.BaseModel{ID: 7}, SceneID: &sceneID, TaskType: "mr_quality_check"}, scene)
+	if payload["task_type"] != "mr_quality_check" {
+		t.Fatalf("task_type=%v, want mr_quality_check", payload["task_type"])
+	}
+	if toUint64Value(payload["scene_id"]) != scene.ID {
+		t.Fatalf("scene_id=%v, want %d", payload["scene_id"], scene.ID)
+	}
+	if payload["scene_code"] != scene.Code {
+		t.Fatalf("scene_code=%v, want %s", payload["scene_code"], scene.Code)
+	}
+	if payload["scene_type"] != scene.SceneType {
+		t.Fatalf("scene_type=%v, want %s", payload["scene_type"], scene.SceneType)
+	}
+	if _, exists := payload["scenario"]; exists {
+		t.Fatalf("expected executor payload to stop exposing scenario, got=%#v", payload)
+	}
+}
+
 func TestGetTaskDefinition_UsesAITaskExecutionModeForAIJobs(t *testing.T) {
-	for _, taskType := range []string{"mr_quality_check", "requirement_defect_assistant"} {
+	for _, taskType := range []string{"mr_quality_check", "requirement_defect_check"} {
 		def, ok := getTaskDefinition(taskType)
 		if !ok {
 			t.Fatalf("expected typed task definition for %s", taskType)
@@ -50,6 +97,9 @@ func TestGetTaskDefinition_UsesAITaskExecutionModeForAIJobs(t *testing.T) {
 		}
 		if def.ExecutionSpec.ScriptTemplate != "" {
 			t.Fatalf("expected empty script template for %s, got %q", taskType, def.ExecutionSpec.ScriptTemplate)
+		}
+		if _, ok := findTaskField(def.FieldsSchema, "scene_code"); ok {
+			t.Fatalf("expected scene_code to stay backend-managed for %s", taskType)
 		}
 	}
 }
@@ -222,7 +272,7 @@ func TestDockerTaskDefinitionIncludesRequiredImageField(t *testing.T) {
 }
 
 func TestRenderPipelineAgentScript_DockerIncludesPreBuildScript(t *testing.T) {
-	_, script, err := renderPipelineAgentScript("docker", map[string]interface{}{
+	_, script, err := renderPipelineAgentScript("docker", map[string]any{
 		"image_name":       "demo/app",
 		"pre_build_script": "cd ${outputs.clone.git_checkout_path}",
 	})
@@ -326,7 +376,7 @@ func TestValidateTaskTypes(t *testing.T) {
 }
 
 func TestRenderPipelineAgentScript(t *testing.T) {
-	_, script, err := renderPipelineAgentScript("git_clone", map[string]interface{}{
+	_, script, err := renderPipelineAgentScript("git_clone", map[string]any{
 		"git_repo_url":      "https://example.com/repo.git",
 		"git_ref":           "main",
 		"git_checkout_path": "./src",
@@ -341,21 +391,21 @@ func TestRenderPipelineAgentScript(t *testing.T) {
 		t.Fatalf("expected script to contain target directory")
 	}
 
-	_, _, err = renderPipelineAgentScript("shell", map[string]interface{}{
+	_, _, err = renderPipelineAgentScript("shell", map[string]any{
 		"script": "echo hello",
 	})
 	if err != nil {
 		t.Fatalf("expected shell script render success, got err: %v", err)
 	}
 
-	_, _, err = renderPipelineAgentScript("unsupported_type", map[string]interface{}{})
+	_, _, err = renderPipelineAgentScript("unsupported_type", map[string]any{})
 	if err == nil {
 		t.Fatalf("expected unsupported type render error")
 	}
 }
 
 func TestNormalizePipelineNodeConfig(t *testing.T) {
-	normalized := normalizePipelineNodeConfig("git_clone", "git_clone", map[string]interface{}{
+	normalized := normalizePipelineNodeConfig("git_clone", "git_clone", map[string]any{
 		"git_repo_url":      "https://example.com/repo.git",
 		"git_ref":           "main",
 		"git_checkout_path": "./work",
@@ -371,7 +421,7 @@ func TestNormalizePipelineNodeConfig(t *testing.T) {
 	if normalized["git_checkout_path"] != "./work" {
 		t.Fatalf("expected git_checkout_path to be preserved")
 	}
-	env, ok := normalized["env"].(map[string]interface{})
+	env, ok := normalized["env"].(map[string]any)
 	if !ok || env["A"] != "B" {
 		t.Fatalf("expected env json to be parsed, got: %#v", normalized["env"])
 	}
@@ -380,7 +430,7 @@ func TestNormalizePipelineNodeConfig(t *testing.T) {
 func TestResolveTaskMaxRetries(t *testing.T) {
 	tests := []struct {
 		name     string
-		config   map[string]interface{}
+		config   map[string]any
 		expected int
 	}{
 		{
@@ -390,26 +440,26 @@ func TestResolveTaskMaxRetries(t *testing.T) {
 		},
 		{
 			name:     "missing retry_count",
-			config:   map[string]interface{}{},
+			config:   map[string]any{},
 			expected: 0,
 		},
 		{
 			name: "retry_count explicit zero",
-			config: map[string]interface{}{
+			config: map[string]any{
 				"retry_count": 0,
 			},
 			expected: 0,
 		},
 		{
 			name: "retry_count positive",
-			config: map[string]interface{}{
+			config: map[string]any{
 				"retry_count": 2,
 			},
 			expected: 2,
 		},
 		{
 			name: "retry_count negative",
-			config: map[string]interface{}{
+			config: map[string]any{
 				"retry_count": -1,
 			},
 			expected: 0,
@@ -520,24 +570,39 @@ func TestAIPipelineTaskDefinitions(t *testing.T) {
 	if len(mrDef.FieldsSchema) == 0 || len(mrDef.OutputsSchema) == 0 {
 		t.Fatalf("expected mr_quality_check to expose fields and outputs schema")
 	}
+	if field, ok := findTaskField(mrDef.FieldsSchema, "runtime_profile_id"); !ok || field.Required {
+		t.Fatalf("expected mr_quality_check runtime_profile_id to be optional")
+	}
 
-	_, reqDef, ok := getPipelineTaskDefinition("requirement_defect_assistant")
+	_, reqDef, ok := getPipelineTaskDefinition("requirement_defect_check")
 	if !ok {
-		t.Fatalf("expected requirement_defect_assistant definition")
+		t.Fatalf("expected requirement_defect_check definition")
 	}
 	if reqDef.ExecMode != taskExecModeAgent {
-		t.Fatalf("expected requirement_defect_assistant to be agent executed")
+		t.Fatalf("expected requirement_defect_check to be agent executed")
 	}
-	if _, script, err := renderPipelineAgentScript("mr_quality_check", map[string]interface{}{"input_text": "demo"}); err != nil || script != "" {
+	if field, ok := findTaskField(reqDef.FieldsSchema, "runtime_profile_id"); !ok || field.Required {
+		t.Fatalf("expected requirement_defect_check runtime_profile_id to be optional")
+	}
+	if _, script, err := renderPipelineAgentScript("mr_quality_check", map[string]any{"input_text": "demo"}); err != nil || script != "" {
 		t.Fatalf("expected AI pipeline task to render empty script without error, got script=%q err=%v", script, err)
 	}
-	if _, script, err := renderPipelineAgentScript("requirement_defect_assistant", map[string]interface{}{"input_text": "demo"}); err != nil || script != "" {
+	if _, script, err := renderPipelineAgentScript("requirement_defect_check", map[string]any{"input_text": "demo"}); err != nil || script != "" {
 		t.Fatalf("expected ai-task execution mode to render empty script without error, got script=%q err=%v", script, err)
 	}
 }
 
+func findTaskField(fields []models.TaskDefinitionField, key string) (models.TaskDefinitionField, bool) {
+	for _, field := range fields {
+		if field.Key == key {
+			return field, true
+		}
+	}
+	return models.TaskDefinitionField{}, false
+}
+
 func TestRenderPipelineAgentScript_SSHPasswordCredentialIntegration(t *testing.T) {
-	_, script, err := renderPipelineAgentScript("ssh", map[string]interface{}{
+	_, script, err := renderPipelineAgentScript("ssh", map[string]any{
 		"host":   "10.0.0.8",
 		"script": "echo ok",
 	})
@@ -556,7 +621,7 @@ func TestRenderPipelineAgentScript_SSHPasswordCredentialIntegration(t *testing.T
 }
 
 func TestRenderPipelineAgentScript_KubernetesCredentialIntegration(t *testing.T) {
-	_, script, err := renderPipelineAgentScript("kubernetes", map[string]interface{}{
+	_, script, err := renderPipelineAgentScript("kubernetes", map[string]any{
 		"manifest": "./k8s/deploy.yaml",
 	})
 	if err != nil {
@@ -571,7 +636,7 @@ func TestRenderPipelineAgentScript_KubernetesCredentialIntegration(t *testing.T)
 }
 
 func TestRenderPipelineAgentScript_KubernetesComplexCommandIsShellParsable(t *testing.T) {
-	_, script, err := renderPipelineAgentScript("kubernetes", map[string]interface{}{
+	_, script, err := renderPipelineAgentScript("kubernetes", map[string]any{
 		"command": strings.Join([]string{
 			"set -e",
 			"cat <<\"EOF\" > input_params_values.yaml",
@@ -624,7 +689,7 @@ func TestRenderPipelineAgentScript_KubernetesComplexCommandExecutesWithoutWrappe
 	writeStub("tar", "#!/bin/sh\nexit 0\n")
 	writeStub("helm", "#!/bin/sh\nexit 0\n")
 
-	_, script, err := renderPipelineAgentScript("kubernetes", map[string]interface{}{
+	_, script, err := renderPipelineAgentScript("kubernetes", map[string]any{
 		"command": strings.Join([]string{
 			"set -e",
 			"cat <<\"EOF\" > input_params_values.yaml",
@@ -666,7 +731,7 @@ func TestRenderPipelineAgentScript_KubernetesComplexCommandExecutesWithoutWrappe
 }
 
 func TestRenderPipelineAgentScript_DockerRunCredentialIntegration(t *testing.T) {
-	_, script, err := renderPipelineAgentScript("docker-run", map[string]interface{}{
+	_, script, err := renderPipelineAgentScript("docker-run", map[string]any{
 		"host":       "10.0.0.8",
 		"user":       "root",
 		"image_name": "app",
@@ -693,7 +758,7 @@ func TestRenderPipelineAgentScript_DockerRunCredentialIntegration(t *testing.T) 
 }
 
 func TestRenderPipelineAgentScript_DockerRunEncodesRemoteArguments(t *testing.T) {
-	_, script, err := renderPipelineAgentScript("docker-run", map[string]interface{}{
+	_, script, err := renderPipelineAgentScript("docker-run", map[string]any{
 		"host":       "10.0.0.8",
 		"user":       "root",
 		"image_name": "nginx",
@@ -715,7 +780,7 @@ func TestRenderPipelineAgentScript_DockerRunEncodesRemoteArguments(t *testing.T)
 }
 
 func TestRenderPipelineAgentScript_DockerRunDetachesAndChecksStability(t *testing.T) {
-	_, script, err := renderPipelineAgentScript("docker-run", map[string]interface{}{
+	_, script, err := renderPipelineAgentScript("docker-run", map[string]any{
 		"host":       "10.0.0.8",
 		"user":       "root",
 		"image_name": "nginx",
@@ -742,7 +807,7 @@ func TestRenderPipelineAgentScript_DockerRunDetachesAndChecksStability(t *testin
 }
 
 func TestRenderPipelineAgentScript_DockerRunFailsOnDuplicateContainerName(t *testing.T) {
-	_, script, err := renderPipelineAgentScript("docker-run", map[string]interface{}{
+	_, script, err := renderPipelineAgentScript("docker-run", map[string]any{
 		"host":           "10.0.0.8",
 		"user":           "root",
 		"image_name":     "nginx",
@@ -764,7 +829,7 @@ func TestRenderPipelineAgentScript_DockerRunFailsOnDuplicateContainerName(t *tes
 }
 
 func TestRenderPipelineAgentScript_GitCloneCredentialIntegration(t *testing.T) {
-	_, script, err := renderPipelineAgentScript("git_clone", map[string]interface{}{
+	_, script, err := renderPipelineAgentScript("git_clone", map[string]any{
 		"git_repo_url": "https://example.com/repo.git",
 	})
 	if err != nil {
@@ -788,7 +853,7 @@ func TestRenderPipelineAgentScript_GitCloneCredentialIntegration(t *testing.T) {
 }
 
 func TestRenderPipelineAgentScript_CustomShellLogsSanitizedPreview(t *testing.T) {
-	_, script, err := renderPipelineAgentScript("shell", map[string]interface{}{
+	_, script, err := renderPipelineAgentScript("shell", map[string]any{
 		"script": "curl -H 'Authorization: Bearer super-secret-token' https://example.com && echo password=hunter2",
 	})
 	if err != nil {

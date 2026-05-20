@@ -242,6 +242,7 @@
                       <el-tag v-if="task.display_status === 'not_executed'" type="info" size="small">暂未执行</el-tag>
                       <el-tag v-else-if="task.display_status === 'blocked'" type="warning" size="small">已阻塞</el-tag>
                       <span class="task-agent" v-if="task.Agent">{{ task.Agent.name }}</span>
+                      <span class="task-runtime" v-if="task.runtime_summary">{{ task.runtime_summary }}</span>
                       <span class="task-start-time">开始: {{ formatDateTime(task.start_time) }}</span>
                       <span class="task-duration" v-if="task.duration > 0">耗时: {{ formatDuration(task.duration) }}</span>
                       <span class="task-exit-code" v-if="shouldShowTaskExitCode(task)">退出码: {{ getTaskExitCode(task) }}</span>
@@ -709,6 +710,163 @@
                         </div>
                       </div>
 
+                      <div class="webhook-runtime-config">
+                        <div class="webhook-runtime-config__header">
+                          <div>
+                            <div class="webhook-runtime-config__title">运行时输入映射</div>
+                            <p>按 JSONPath 从 Webhook Payload 提取值，并写入当前流水线允许在运行时覆盖的参数；未映射的参数继续使用节点默认值。</p>
+                          </div>
+                        </div>
+
+                        <el-alert
+                          v-if="webhookRuntimeConfigStatusText"
+                          :title="webhookRuntimeConfigStatusText"
+                          :type="webhookRuntimeConfigStatusType"
+                          :closable="false"
+                          show-icon
+                        >
+                          <template #default>
+                            <div>{{ triggerSettings.webhook_config_invalid_reason || '当前保存的配置可正常用于 Webhook 触发。' }}</div>
+                          </template>
+                        </el-alert>
+
+                        <div v-if="webhookRuntimeTargets.length === 0" class="webhook-runtime-empty">
+                          当前流水线里还没有可用于 Webhook 运行时映射的参数。
+                        </div>
+                        <div v-else class="webhook-runtime-table">
+                          <div
+                            v-for="(row, index) in webhookRuntimeMappingRows"
+                            :key="row.id || `mapping-${index}`"
+                            :class="['webhook-runtime-row-card', { 'is-deleted': row.deleted }]"
+                          >
+                            <div class="webhook-runtime-row">
+                              <div class="webhook-runtime-row__index">{{ index + 1 }}</div>
+                              <div class="webhook-runtime-row__target-card">
+                                <div class="webhook-runtime-row__target-label">{{ getWebhookRuntimeTargetLabel(row) }}</div>
+                                <div class="webhook-runtime-row__target-key">{{ getWebhookRuntimeMappingTargetKey(row) }}</div>
+                              </div>
+                              <el-input
+                                v-model="row.source_expr"
+                                :disabled="row.deleted"
+                                placeholder="JSONPath，例如 $.ref 或 $.object_attributes.source_branch"
+                                class="webhook-runtime-row__expr"
+                              />
+                              <el-select v-model="row.missing_policy" :disabled="row.deleted" class="webhook-runtime-row__policy">
+                                <el-option label="缺失时忽略" value="ignore" />
+                                <el-option label="缺失时报错" value="fail" />
+                              </el-select>
+                              <el-button
+                                text
+                                :type="row.deleted ? 'primary' : 'danger'"
+                                @click="toggleWebhookRuntimeMappingDeleted(row, !row.deleted)"
+                              >
+                                {{ row.deleted ? '恢复' : '删除' }}
+                              </el-button>
+                            </div>
+                            <div v-if="getWebhookRuntimeMappingRowErrors(row).length > 0" class="webhook-runtime-row__errors">
+                              <div v-for="(item, errorIndex) in getWebhookRuntimeMappingRowErrors(row)" :key="`${row.id || index}-error-${errorIndex}`">
+                                {{ item }}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div v-if="webhookRuntimeTargets.length > 0" class="webhook-runtime-config__footer-actions">
+                          <el-button @click="applyGitlabWebhookRuntimePreset">一键填充 GitLab 常用映射</el-button>
+                        </div>
+
+                        <div class="webhook-runtime-preview" v-loading="webhookRuntimePreviewLoading">
+                          <div class="webhook-runtime-preview__header">
+                            <div>
+                              <div class="webhook-runtime-config__title">示例 Payload 预览</div>
+                              <p>保存前可先验证映射结果、缺失项和类型问题。</p>
+                            </div>
+                            <div class="webhook-runtime-preview__actions">
+                              <el-button text @click="webhookRuntimePreviewExpanded = !webhookRuntimePreviewExpanded">
+                                {{ webhookRuntimePreviewExpanded ? '收起预览' : '展开预览' }}
+                              </el-button>
+                              <el-button
+                                v-if="webhookRuntimePreviewExpanded"
+                                type="primary"
+                                plain
+                                :disabled="activeWebhookRuntimeMappingRows.length === 0 || hasInvalidActiveWebhookRuntimeMapping"
+                                @click="handlePreviewWebhookRuntimeMappings"
+                              >
+                                运行预览
+                              </el-button>
+                            </div>
+                          </div>
+
+                          <template v-if="webhookRuntimePreviewExpanded">
+                            <el-input
+                              v-model="webhookRuntimeSamplePayload"
+                              type="textarea"
+                              :rows="8"
+                              placeholder='示例：{"ref":"refs/heads/main"}'
+                            />
+
+                            <el-alert
+                              v-if="webhookRuntimePreviewRequestError"
+                              :title="webhookRuntimePreviewRequestError"
+                              type="warning"
+                              :closable="false"
+                              show-icon
+                            />
+
+                            <div v-if="webhookRuntimePreviewSummary.total > 0" class="webhook-runtime-preview__summary">
+                              <div class="trigger-meta-card">
+                                <span class="trigger-meta-label">总规则</span>
+                                <span class="trigger-meta-value">{{ webhookRuntimePreviewSummary.total }}</span>
+                              </div>
+                              <div class="trigger-meta-card">
+                                <span class="trigger-meta-label">命中</span>
+                                <span class="trigger-meta-value">{{ webhookRuntimePreviewSummary.matched }}</span>
+                              </div>
+                              <div class="trigger-meta-card">
+                                <span class="trigger-meta-label">缺失</span>
+                                <span class="trigger-meta-value">{{ webhookRuntimePreviewSummary.missing }}</span>
+                              </div>
+                              <div class="trigger-meta-card">
+                                <span class="trigger-meta-label">失败</span>
+                                <span class="trigger-meta-value">{{ webhookRuntimePreviewSummary.failed }}</span>
+                              </div>
+                            </div>
+
+                            <div v-if="webhookRuntimePreviewRows.length > 0" class="webhook-runtime-preview__results">
+                              <div
+                                v-for="row in webhookRuntimePreviewRows"
+                                :key="`preview-${row.id}`"
+                                class="webhook-runtime-preview__row"
+                              >
+                                <div class="webhook-runtime-preview__row-head">
+                                  <span>{{ row.target_label }}</span>
+                                  <el-tag size="small" :type="row.result_code === 'matched' ? 'success' : row.result_code ? 'warning' : 'info'">
+                                    {{ row.result_code || '未预览' }}
+                                  </el-tag>
+                                </div>
+                                <div class="webhook-runtime-preview__row-item">
+                                  <span>JSONPath</span>
+                                  <span>{{ row.source_expr || '-' }}</span>
+                                </div>
+                                <div class="webhook-runtime-preview__row-item">
+                                  <span>缺失策略</span>
+                                  <span>{{ row.missing_policy === 'fail' ? '缺失时报错' : '缺失时忽略' }}</span>
+                                </div>
+                                <div class="webhook-runtime-preview__row-item">
+                                  <span>预览值</span>
+                                  <span>{{ formatTaskOutputValue(row.preview_value) || '-' }}</span>
+                                </div>
+                                <div v-if="row.errors.length > 0" class="webhook-runtime-preview__errors">
+                                  <div v-for="(item, errorIndex) in row.errors" :key="`${row.id}-error-${errorIndex}`">
+                                    {{ item.message || item.code || '预览失败' }}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </template>
+                        </div>
+                      </div>
+
                       <el-form-item label="Webhook URL">
                         <div class="trigger-inline-field">
                           <el-input :model-value="displayedWebhookURL" readonly />
@@ -744,7 +902,7 @@
                       <span class="form-tip">始终允许手动触发</span>
                     </el-form-item>
                     <el-form-item>
-                      <el-button type="primary" :loading="triggerSettingsSaving" @click="handleSaveTriggers">保存触发设置</el-button>
+                      <el-button type="primary" :loading="triggerSettingsSaving" :disabled="hasInvalidActiveWebhookRuntimeMapping" @click="handleSaveTriggers">保存触发设置</el-button>
                     </el-form-item>
                   </section>
                 </div>
@@ -1023,14 +1181,31 @@ import {
   Warning,
   Close
 } from '@element-plus/icons-vue'
-import { getPipelineDetail, getPipelineTaskTypes, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineRunDetail, getRunTasks, getPipelineStatistics, cancelPipelineRun, getPipelineRunParameterView, previewPipelineRunRerun } from '@/api/pipeline'
+import { getPipelineDetail, getPipelineTaskTypes, getPipelineTriggers, runPipeline, updatePipeline, updatePipelineTriggers, getPipelineRuns, getPipelineRunDetail, getRunTasks, getPipelineStatistics, cancelPipelineRun, getPipelineRunParameterView, previewPipelineRunRerun, previewPipelineWebhookRuntimeMappings } from '@/api/pipeline'
 import { getTaskLogs as fetchTaskLogsFromApi } from '@/api/task'
 import { getProjectList } from '@/api/project'
 import { buildStatisticsDateParams, getDefaultStatisticsDateRange } from '@/views/statistics/dateRange'
 import DesignTab from './designTab.vue'
 import LogViewer from './components/LogViewer.vue'
 import realtime from '@/utils/realtime'
-import { buildRunInputsPayload as buildManualRunPayload, createRunInputs, createRunInputsFromRerunPreview, getManualRunNodes, normalizeRerunPreviewPayload, normalizeRunParameterViewPayload, parseJSONField } from './runtimeConfig'
+import {
+  applyGitlabWebhookRuntimePresetToRows,
+  buildWebhookRuntimeMappingEditorRows,
+  buildRunInputsPayload as buildManualRunPayload,
+  createRunInputs,
+  createRunInputsFromRerunPreview,
+  createWebhookRuntimeInputMappingRow,
+  getManualRunNodes,
+  getWebhookRuntimeInputTargets,
+  normalizeRerunPreviewPayload,
+  normalizeRunParameterViewPayload,
+  normalizeWebhookRuntimePreviewPayload,
+  normalizeWebhookRuntimeStructuredErrors,
+  normalizeWebhookRuntimeTriggerConfig,
+  parseJSONField,
+  serializeWebhookRuntimeInputMappings,
+  validateWebhookRuntimeJSONPath
+} from './runtimeConfig'
 import { applyTaskStatusPayload, getTaskOutputDisplayKind, normalizeExecutionTaskOutputs } from './executionRealtimeState'
 import { buildDisplayedWebhookURL, buildDisplayedSecretToken, canCopyDisplayValue, copyDisplayedValue } from './triggerWebhookDisplay.js'
 
@@ -1067,6 +1242,16 @@ const parameterDrawerNodes = ref([])
 const rerunSourceRun = ref(null)
 const rerunPreviewData = ref(normalizeRerunPreviewPayload(null))
 const runDialogPrefillSource = ref(null)
+const webhookRuntimeMappingRows = ref([])
+const webhookRuntimeSamplePayload = ref(`{
+  "ref": "refs/heads/main"
+}`)
+const webhookRuntimePreviewLoading = ref(false)
+const webhookRuntimePreviewData = ref(normalizeWebhookRuntimePreviewPayload(null))
+const webhookRuntimePreviewRequestError = ref('')
+const webhookRuntimePreviewExpanded = ref(false)
+const webhookRuntimeSavedMappings = ref([])
+const webhookRuntimeDraftRows = ref([])
 
 // 运行表单（node-scoped runtime inputs）
 const runForm = reactive({
@@ -1133,6 +1318,17 @@ const manualRunNodes = computed(() => getManualRunNodes({
   ...pipeline.value,
   task_definitions: pipelineTaskDefinitions.value
 }))
+
+const webhookRuntimeTargets = computed(() => getWebhookRuntimeInputTargets({
+  ...pipeline.value,
+  task_definitions: pipelineTaskDefinitions.value
+}))
+
+const webhookRuntimeTargetMap = computed(() => new Map(
+  webhookRuntimeTargets.value.map(target => [target.target_key, target])
+))
+
+const activeWebhookRuntimeMappingRows = computed(() => webhookRuntimeMappingRows.value.filter(row => row?.deleted !== true))
 
 const initializeRunInputs = (rerunPreview = null) => {
   runForm.inputs = rerunPreview
@@ -1321,6 +1517,9 @@ const triggerSettings = reactive({
   tag_filters: '',
   merge_request_source_branch_filters: '',
   merge_request_target_branch_filters: '',
+  webhook_runtime_input_mappings: '',
+  webhook_config_status: '',
+  webhook_config_invalid_reason: '',
   schedule_enabled: false,
   cron_expression: '',
   timezone: '',
@@ -1681,6 +1880,149 @@ const webhookSectionEnabled = computed(() => Boolean(
   || triggerSettings.tag_enabled
   || triggerSettings.merge_request_enabled
 ))
+const webhookRuntimeConfigStatusType = computed(() => {
+  const status = String(triggerSettings.webhook_config_status || '').trim()
+  if (!status || status === 'valid') return 'success'
+  return 'warning'
+})
+const webhookRuntimeConfigStatusText = computed(() => {
+  const status = String(triggerSettings.webhook_config_status || '').trim()
+  if (!status) return ''
+  if (status === 'valid') return '配置校验正常'
+  return '配置待修正'
+})
+const webhookRuntimePreviewSummary = computed(() => webhookRuntimePreviewData.value?.summary || {
+  total: 0,
+  matched: 0,
+  missing: 0,
+  failed: 0
+})
+const webhookRuntimePreviewErrorMap = computed(() => {
+  return normalizeWebhookRuntimeStructuredErrors(webhookRuntimePreviewData.value?.errors).reduce((acc, item) => {
+    if (!item?.mapping_id) return acc
+    if (!acc[item.mapping_id]) acc[item.mapping_id] = []
+    acc[item.mapping_id].push(item)
+    return acc
+  }, {})
+})
+const cloneWebhookRuntimeEditorRow = (row) => ({
+  ...row,
+  target: {
+    ...(row?.target || {})
+  }
+})
+
+const mergeWebhookRuntimeEditorRows = (targets = [], preferredRows = [], fallbackRows = []) => {
+  return buildWebhookRuntimeMappingEditorRows(targets, [
+    ...fallbackRows,
+    ...preferredRows
+  ])
+}
+
+const getWebhookRuntimeMappingTargetKey = (row) => {
+  const targetKey = String(row?.target_key || '').trim()
+  if (targetKey) return targetKey
+  const normalizedRow = createWebhookRuntimeInputMappingRow(row)
+  if (!normalizedRow.target.node_id || !normalizedRow.target.param_key) return ''
+  return `${normalizedRow.target.node_id}.${normalizedRow.target.param_key}`
+}
+
+const getWebhookRuntimeTargetLabel = (row) => {
+  const targetKey = getWebhookRuntimeMappingTargetKey(row)
+  const target = targetKey ? webhookRuntimeTargetMap.value.get(targetKey) : null
+  const nodeIndex = Number(target?.node_index ?? row?.node_index)
+  const nodeName = target?.node_name || row?.node_name || row?.node_id || '-'
+  const paramLabel = target?.param_label || row?.param_label || row?.param_key || '-'
+  const paramKey = target?.param_key || row?.param_key || '-'
+  const nodePrefix = Number.isFinite(nodeIndex) && nodeIndex > 0 ? `#${nodeIndex} ` : ''
+  return `${nodePrefix}${nodeName} / ${paramLabel === paramKey ? paramLabel : `${paramLabel} (${paramKey})`}`
+}
+
+const getWebhookRuntimeMappingRowErrors = (row) => {
+  const normalizedRow = createWebhookRuntimeInputMappingRow(row)
+  if (normalizedRow.deleted === true) return []
+  if (validateWebhookRuntimeJSONPath(normalizedRow.source_expr)) {
+    return ['请填写合法的 JSONPath']
+  }
+  return []
+}
+
+const hasInvalidActiveWebhookRuntimeMapping = computed(() => {
+  return webhookRuntimeMappingRows.value.some(row => getWebhookRuntimeMappingRowErrors(row).length > 0)
+})
+
+const webhookRuntimePreviewRows = computed(() => {
+  return activeWebhookRuntimeMappingRows.value.map((row, index) => {
+    const normalizedRow = createWebhookRuntimeInputMappingRow(row, index)
+    const targetKey = getWebhookRuntimeMappingTargetKey(row)
+    const target = targetKey ? webhookRuntimeTargetMap.value.get(targetKey) : null
+    const ruleResult = webhookRuntimePreviewData.value?.rule_results?.[normalizedRow.id] || null
+    const previewValue = ruleResult && Object.prototype.hasOwnProperty.call(ruleResult, 'value')
+      ? ruleResult.value
+      : undefined
+
+    return {
+      ...normalizedRow,
+      target_key: targetKey,
+      target_label: getWebhookRuntimeTargetLabel(target || row),
+      result_code: ruleResult?.code || '',
+      preview_value: previewValue,
+      errors: webhookRuntimePreviewErrorMap.value[normalizedRow.id] || []
+    }
+  })
+})
+
+const resetWebhookRuntimePreviewState = () => {
+  webhookRuntimePreviewData.value = normalizeWebhookRuntimePreviewPayload(null)
+  webhookRuntimePreviewRequestError.value = ''
+}
+
+const syncWebhookRuntimeMappingsToTriggerSettings = () => {
+  triggerSettings.webhook_runtime_input_mappings = serializeWebhookRuntimeInputMappings(webhookRuntimeMappingRows.value)
+}
+
+const validateWebhookRuntimeMappings = () => {
+  const invalidIndex = webhookRuntimeMappingRows.value.findIndex((row) => getWebhookRuntimeMappingRowErrors(row).length > 0)
+  if (invalidIndex === -1) return true
+
+  ElMessage.error(`请先修正第 ${invalidIndex + 1} 条映射规则的 JSONPath`)
+  return false
+}
+
+const toggleWebhookRuntimeMappingDeleted = (row, deleted) => {
+  row.deleted = deleted
+}
+
+const applyGitlabWebhookRuntimePreset = () => {
+  const presetEligibleParamKeys = new Set(['git_ref', 'ref', 'branch', 'branch_name', 'source_branch', 'target_branch', 'commit_sha', 'git_commit', 'sha'])
+  const matchedCount = webhookRuntimeMappingRows.value.filter((row) => {
+    return presetEligibleParamKeys.has(String(row?.param_key || '').trim()) && String(row?.runtime_value_type || '').trim() === 'string'
+  }).length
+  if (matchedCount === 0) {
+    ElMessage.warning('当前流水线里没有可直接套用 GitLab 预设的运行时参数')
+    return
+  }
+
+  webhookRuntimeMappingRows.value = applyGitlabWebhookRuntimePresetToRows(webhookRuntimeMappingRows.value)
+  ElMessage.success(`已填入 ${matchedCount} 条 GitLab 常用映射`)
+}
+
+watch(webhookRuntimeMappingRows, (rows) => {
+  syncWebhookRuntimeMappingsToTriggerSettings()
+  if (webhookRuntimeTargets.value.length > 0) {
+    webhookRuntimeDraftRows.value = rows.map(cloneWebhookRuntimeEditorRow)
+  }
+  resetWebhookRuntimePreviewState()
+}, { deep: true })
+
+watch(webhookRuntimeSamplePayload, () => {
+  resetWebhookRuntimePreviewState()
+})
+
+watch(webhookRuntimeTargets, (targets) => {
+  const normalizedTargets = Array.isArray(targets) ? targets : []
+  webhookRuntimeMappingRows.value = mergeWebhookRuntimeEditorRows(normalizedTargets, webhookRuntimeDraftRows.value, webhookRuntimeSavedMappings.value)
+}, { deep: true })
 
 const normalizeCronExpression = (expression = '') => String(expression || '').trim().replace(/\s+/g, ' ')
 
@@ -1818,6 +2160,8 @@ watch(
 )
 
 const applyTriggerSettings = (data = {}) => {
+  const normalizedWebhookRuntime = normalizeWebhookRuntimeTriggerConfig(data)
+
   triggerSettings.provider = data.provider || ''
   triggerSettings.webhook_enabled = Boolean(data.webhook_enabled)
   triggerSettings.push_enabled = Boolean(data.push_enabled)
@@ -1827,6 +2171,12 @@ const applyTriggerSettings = (data = {}) => {
   triggerSettings.tag_filters = data.tag_filters || ''
   triggerSettings.merge_request_source_branch_filters = data.merge_request_source_branch_filters || ''
   triggerSettings.merge_request_target_branch_filters = data.merge_request_target_branch_filters || ''
+  triggerSettings.webhook_runtime_input_mappings = normalizedWebhookRuntime.webhook_runtime_input_mappings
+  triggerSettings.webhook_config_status = normalizedWebhookRuntime.webhook_config_status
+  triggerSettings.webhook_config_invalid_reason = normalizedWebhookRuntime.webhook_config_invalid_reason
+  webhookRuntimeSavedMappings.value = normalizedWebhookRuntime.mapping_rows
+  webhookRuntimeMappingRows.value = mergeWebhookRuntimeEditorRows(webhookRuntimeTargets.value, normalizedWebhookRuntime.mapping_rows)
+  webhookRuntimeDraftRows.value = webhookRuntimeMappingRows.value.map(cloneWebhookRuntimeEditorRow)
   triggerSettings.schedule_enabled = Boolean(data.schedule_enabled)
   triggerSettings.cron_expression = normalizeCronExpression(data.cron_expression)
   triggerSettings.timezone = data.timezone || ''
@@ -1838,6 +2188,7 @@ const applyTriggerSettings = (data = {}) => {
   triggerSettings.last_triggered_at = data.last_triggered_at || ''
   triggerSettings.manual = data.manual !== undefined ? Boolean(data.manual) : true
 
+  resetWebhookRuntimePreviewState()
   applyScheduleBuilderState(deriveScheduleBuilderFromCron(triggerSettings.cron_expression))
 }
 
@@ -2356,7 +2707,7 @@ const formatTaskOutputs = (outputs, taskType) => {
     }
   }
 
-  if (taskType === 'requirement_defect_assistant') {
+  if (taskType === 'requirement_defect_check') {
     if (outputs.summary) lines.push({ label: 'Summary', value: outputs.summary, type: 'info' })
     if (outputs.defect_count !== undefined) lines.push({ label: 'Defect Count', value: outputs.defect_count, type: outputs.defect_count > 0 ? 'warning' : 'success' })
     if (Array.isArray(outputs.defects) && outputs.defects.length > 0) {
@@ -2424,9 +2775,13 @@ const handleSaveSettings = async () => {
 
 // 保存触发设置
 const saveTriggerSettings = async (rotateSecret = false) => {
-  triggerSettingsSaving.value = true
   const cronExpression = triggerSettings.schedule_enabled ? buildScheduleCronExpression() : ''
   triggerSettings.cron_expression = cronExpression
+
+  if (!validateWebhookRuntimeMappings()) return
+
+  triggerSettingsSaving.value = true
+  syncWebhookRuntimeMappingsToTriggerSettings()
 
   const payload = {
     manual: true,
@@ -2438,6 +2793,7 @@ const saveTriggerSettings = async (rotateSecret = false) => {
     tag_filters: triggerSettings.tag_filters?.trim() || '',
     merge_request_source_branch_filters: triggerSettings.merge_request_source_branch_filters?.trim() || '',
     merge_request_target_branch_filters: triggerSettings.merge_request_target_branch_filters?.trim() || '',
+    webhook_runtime_input_mappings: triggerSettings.webhook_runtime_input_mappings,
     schedule_enabled: Boolean(triggerSettings.schedule_enabled),
     cron_expression: cronExpression,
     timezone: triggerSettings.timezone?.trim() || '',
@@ -2471,6 +2827,43 @@ const handleSaveTriggers = async () => {
 
 const handleRotateTriggerSecret = async () => {
   await saveTriggerSettings(true)
+}
+
+const handlePreviewWebhookRuntimeMappings = async () => {
+  if (!validateWebhookRuntimeMappings()) return
+
+  let parsedPayload
+  try {
+    parsedPayload = webhookRuntimeSamplePayload.value.trim()
+      ? JSON.parse(webhookRuntimeSamplePayload.value)
+      : {}
+  } catch {
+    webhookRuntimePreviewRequestError.value = '示例 Payload 不是合法 JSON'
+    webhookRuntimePreviewData.value = normalizeWebhookRuntimePreviewPayload(null)
+    return
+  }
+
+  syncWebhookRuntimeMappingsToTriggerSettings()
+  webhookRuntimePreviewLoading.value = true
+  webhookRuntimePreviewRequestError.value = ''
+
+  try {
+    const response = await previewPipelineWebhookRuntimeMappings(pipelineId.value, {
+      payload: parsedPayload,
+      webhook_runtime_input_mappings: triggerSettings.webhook_runtime_input_mappings
+    })
+
+    webhookRuntimePreviewData.value = normalizeWebhookRuntimePreviewPayload(response)
+    if (response?.code !== 200) {
+      webhookRuntimePreviewRequestError.value = response?.message || '预览失败'
+    }
+  } catch (error) {
+    const responseData = error.response?.data || {}
+    webhookRuntimePreviewData.value = normalizeWebhookRuntimePreviewPayload(responseData)
+    webhookRuntimePreviewRequestError.value = responseData.message || error.message || '预览失败'
+  } finally {
+    webhookRuntimePreviewLoading.value = false
+  }
 }
 
 const copyTriggerField = async (value) => {
@@ -3013,6 +3406,7 @@ onUnmounted(() => {
         gap: 12px;
         padding: 16px 18px;
         border-bottom: 1px solid var(--border-color-light);
+        flex-shrink: 0;
 
         h3 {
           margin: 0;
@@ -3038,21 +3432,35 @@ onUnmounted(() => {
 
     // 历史面板
     .history-panel {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+
       .history-list {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
         padding: 20px;
-        
+
         .build-number {
           color: var(--primary-color);
           font-weight: 500;
         }
       }
     }
-    
+
     // 统计面板
     .statistics-panel {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+
       .statistics-content {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
         padding: 20px;
-        
+
         .stats-overview {
           margin-bottom: 20px;
           
@@ -3251,9 +3659,16 @@ onUnmounted(() => {
     
     // 设置面板
     .settings-panel {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+
       .settings-content {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
         padding: 20px;
-        
+
         .settings-form {
           max-width: 600px;
 
@@ -3414,6 +3829,185 @@ onUnmounted(() => {
                   margin-bottom: 0;
                 }
               }
+
+              .webhook-runtime-config {
+                display: flex;
+                flex-direction: column;
+                gap: 16px;
+                margin-bottom: 20px;
+                padding: 16px;
+                border: 1px solid #ebeef5;
+                border-radius: 8px;
+                background: var(--bg-secondary);
+
+                .webhook-runtime-config__header,
+                .webhook-runtime-preview__header {
+                  display: flex;
+                  justify-content: space-between;
+                  align-items: flex-start;
+                  gap: 16px;
+                }
+
+                .webhook-runtime-config__title {
+                  margin-bottom: 6px;
+                  font-size: 14px;
+                  font-weight: 600;
+                  color: var(--text-primary);
+                }
+
+                .webhook-runtime-config__footer-actions,
+                .webhook-runtime-preview__actions {
+                  display: flex;
+                  gap: 8px;
+                  flex-wrap: wrap;
+                  align-items: center;
+                }
+
+                .webhook-runtime-empty {
+                  padding: 12px 14px;
+                  border-radius: 8px;
+                  background: var(--bg-card);
+                  color: var(--text-secondary);
+                  font-size: 13px;
+                }
+
+                .webhook-runtime-table {
+                  display: flex;
+                  flex-direction: column;
+                  gap: 10px;
+                }
+
+                .webhook-runtime-row-card {
+                  display: flex;
+                  flex-direction: column;
+                  gap: 6px;
+                  padding: 12px;
+                  border: 1px solid #ebeef5;
+                  border-radius: 8px;
+                  background: var(--bg-card);
+                  transition: opacity 0.2s ease;
+
+                  &.is-deleted {
+                    opacity: 0.66;
+                  }
+                }
+
+                .webhook-runtime-row {
+                  display: grid;
+                  grid-template-columns: 32px minmax(260px, 1.4fr) minmax(240px, 1.6fr) 140px auto;
+                  gap: 10px;
+                  align-items: center;
+                }
+
+                .webhook-runtime-row__index {
+                  font-size: 12px;
+                  color: var(--text-muted);
+                  text-align: center;
+                }
+
+                .webhook-runtime-row__target-card {
+                  display: flex;
+                  flex-direction: column;
+                  gap: 4px;
+                  min-width: 0;
+                  padding: 10px 12px;
+                  border-radius: 8px;
+                  background: var(--bg-secondary);
+                  border: 1px solid #ebeef5;
+                }
+
+                .webhook-runtime-row__target-label {
+                  font-size: 13px;
+                  font-weight: 600;
+                  color: var(--text-primary);
+                  white-space: nowrap;
+                  overflow: hidden;
+                  text-overflow: ellipsis;
+                }
+
+                .webhook-runtime-row__target-key {
+                  font-size: 12px;
+                  color: var(--text-muted);
+                  font-family: 'Consolas', 'Monaco', monospace;
+                  word-break: break-all;
+                }
+
+                .webhook-runtime-row__errors {
+                  padding-left: 42px;
+                  color: var(--danger-color);
+                  font-size: 12px;
+                  line-height: 1.5;
+                }
+
+                .webhook-runtime-preview {
+                  display: flex;
+                  flex-direction: column;
+                  gap: 12px;
+                  padding-top: 4px;
+                }
+
+                .webhook-runtime-preview__summary {
+                  display: grid;
+                  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+                  gap: 12px;
+                }
+
+                .webhook-runtime-preview__results {
+                  display: flex;
+                  flex-direction: column;
+                  gap: 10px;
+                }
+
+                .webhook-runtime-preview__row {
+                  display: flex;
+                  flex-direction: column;
+                  gap: 8px;
+                  padding: 12px;
+                  border-radius: 8px;
+                  border: 1px solid #ebeef5;
+                  background: var(--bg-card);
+                }
+
+                .webhook-runtime-preview__row-head {
+                  display: flex;
+                  justify-content: space-between;
+                  align-items: center;
+                  gap: 12px;
+                  flex-wrap: wrap;
+                  font-size: 13px;
+                  font-weight: 600;
+                  color: var(--text-primary);
+                }
+
+                .webhook-runtime-preview__row-item {
+                  display: grid;
+                  grid-template-columns: 84px minmax(0, 1fr);
+                  gap: 8px;
+                  align-items: start;
+                  font-size: 12px;
+
+                  span:first-child {
+                    color: var(--text-muted);
+                  }
+
+                  span:last-child {
+                    color: var(--text-primary);
+                    white-space: pre-wrap;
+                    word-break: break-all;
+                    overflow-wrap: anywhere;
+                    font-family: 'Consolas', 'Monaco', monospace;
+                  }
+                }
+
+                .webhook-runtime-preview__errors {
+                  padding: 10px 12px;
+                  border-radius: 8px;
+                  background: var(--warning-light);
+                  color: #e6a23c;
+                  font-size: 12px;
+                  line-height: 1.6;
+                }
+              }
             }
           }
 
@@ -3448,25 +4042,32 @@ onUnmounted(() => {
     
     // 执行面板
     .execution-panel {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+
       .execution-header-left {
         display: flex;
         align-items: center;
         gap: 16px;
-        
+
         h3 {
           margin: 0;
         }
       }
-      
+
       .execution-header-right {
         display: flex;
         align-items: center;
         gap: 12px;
       }
-      
+
       .execution-content {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
         padding: 20px;
-        
+
         .execution-summary {
           display: flex;
           gap: 16px;

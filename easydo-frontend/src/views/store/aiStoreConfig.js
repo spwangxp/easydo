@@ -48,7 +48,6 @@ export function buildAiStoreSummary(payload = {}) {
 export function buildModelRows({ models = [], providers = [], runtimeProfiles = [], agents = [], deployments = [], keyword = '' } = {}) {
   const state = normalizeAiStoreState({ models, providers, runtimeProfiles, agents, deployments })
   const normalizedKeyword = String(keyword).trim().toLowerCase()
-  const agentById = new Map(state.agents.map((agent) => [String(agent.id), agent]))
 
   return state.models
     .map((model) => {
@@ -57,26 +56,47 @@ export function buildModelRows({ models = [], providers = [], runtimeProfiles = 
         return provider.bindings.some((binding) => String(binding.model_id) === String(model.id))
       })
       const modelDeployments = state.deployments.filter((deployment) => String(deployment.model_id) === String(model.id))
-      const modelRuntimeProfiles = state.runtimeProfiles.filter((runtimeProfile) => String(runtimeProfile.model_id) === String(model.id))
 
       const providerRows = modelProviders.map((provider) => {
         const providerBindings = provider.bindings.filter((binding) => String(binding.model_id) === String(model.id))
         return buildProviderRow(provider, providerBindings)
       })
 
-      const runtimeUsage = modelRuntimeProfiles.map((runtimeProfile) => {
-        const agent = agentById.get(String(runtimeProfile.agent_id))
-        const bindingPriorityText = String(
-          runtimeProfile.binding_priority_json || runtimeProfile.bindingPriorityJSON || ''
-        ).trim() || '-'
+      const modelRuntimeProfiles = state.runtimeProfiles.filter(
+        (runtimeProfile) => String(runtimeProfile.model_id) === String(model.id)
+      )
 
-        return {
-          id: runtimeProfile.id,
+      const runtimeUsage = modelRuntimeProfiles.flatMap((runtimeProfile) => {
+        const bindingPriorityText = normalizeBindingPriorityText(
+          runtimeProfile.binding_priority_json ?? runtimeProfile.bindingPriorityJSON
+        )
+
+        const referencingAgents = state.agents.filter((agent) => {
+          const runtimeProfileId = agent.runtime_profile_id ?? agent.runtimeProfileID ?? agent.runtime_profile?.id ?? null
+          return runtimeProfileId != null && runtimeProfileId !== '' && String(runtimeProfileId) === String(runtimeProfile.id)
+        })
+
+        if (referencingAgents.length === 0) {
+          return [{
+            id: `${runtimeProfile.id}-unbound`,
+            runtime_profile_id: runtimeProfile.id,
+            runtime_name: runtimeProfile.runtime_name || runtimeProfile.name || '',
+            agent_id: null,
+            agent_name: '未绑定 Agent',
+            binding_priority_text: bindingPriorityText,
+            status: runtimeProfile.status || ''
+          }]
+        }
+
+        return referencingAgents.map((agent) => ({
+          id: `${runtimeProfile.id}-${agent.id}`,
+          runtime_profile_id: runtimeProfile.id,
           runtime_name: runtimeProfile.runtime_name || runtimeProfile.name || '',
-          agent_name: agent?.name || runtimeProfile.agent_name || '',
+          agent_id: agent.id,
+          agent_name: agent.name || '',
           binding_priority_text: bindingPriorityText,
           status: runtimeProfile.status || ''
-        }
+        }))
       })
 
       const row = {
@@ -87,7 +107,7 @@ export function buildModelRows({ models = [], providers = [], runtimeProfiles = 
         source: model.source || '',
         deploymentCount: modelDeployments.length,
         providerCount: modelProviders.length,
-        runtimeCount: modelRuntimeProfiles.length,
+        runtimeCount: runtimeUsage.length,
         providers: providerRows,
         deployments: modelDeployments,
         runtimeUsage,
@@ -332,6 +352,19 @@ function normalizeBindings(...candidates) {
     }
   }
   return []
+}
+
+function normalizeBindingPriorityText(value) {
+  if (value == null) return '-'
+  if (typeof value === 'string') {
+    const normalized = value.trim()
+    return normalized || '-'
+  }
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return '-'
+  }
 }
 
 function normalizeParameterFields(fields = []) {

@@ -955,7 +955,7 @@ fi`,
 		ExecMode:      taskExecModeAgent,
 		FieldsSchema: []models.TaskDefinitionField{
 			{Key: "agent_id", Label: "AI Agent", Type: "number", Required: true, UIComponent: "input"},
-			{Key: "runtime_profile_id", Label: "Runtime Profile", Type: "number", Required: true, UIComponent: "input"},
+			{Key: "runtime_profile_id", Label: "Runtime Profile", Type: "number", UIComponent: "input"},
 			{Key: "input_text", Label: "检测内容", Type: "text", Required: true, UIComponent: "textarea"},
 			{Key: "output_language", Label: "输出语言", Type: "string", UIComponent: "input", Default: "zh-CN"},
 		},
@@ -966,15 +966,15 @@ fi`,
 			{Key: "issues_count", Label: "问题数量", Type: "number", Description: "Total issue count"},
 		},
 	},
-	"requirement_defect_assistant": {
-		CanonicalType: "requirement_defect_assistant",
-		Name:          "需求缺陷助手",
+	"requirement_defect_check": {
+		CanonicalType: "requirement_defect_check",
+		Name:          "需求缺陷检测",
 		Description:   "Use AI session execution to inspect requirement text and produce defect analysis.",
 		Category:      "ai",
 		ExecMode:      taskExecModeAgent,
 		FieldsSchema: []models.TaskDefinitionField{
 			{Key: "agent_id", Label: "AI Agent", Type: "number", Required: true, UIComponent: "input"},
-			{Key: "runtime_profile_id", Label: "Runtime Profile", Type: "number", Required: true, UIComponent: "input"},
+			{Key: "runtime_profile_id", Label: "Runtime Profile", Type: "number", UIComponent: "input"},
 			{Key: "input_text", Label: "需求内容", Type: "text", Required: true, UIComponent: "textarea"},
 			{Key: "output_language", Label: "输出语言", Type: "string", UIComponent: "input", Default: "zh-CN"},
 		},
@@ -1150,13 +1150,13 @@ func isServerPipelineTaskType(taskType string) bool {
 	return ok && def.ExecMode == taskExecModeServer
 }
 
-func normalizePipelineNodeConfig(rawType, canonical string, nodeConfig map[string]interface{}) map[string]interface{} {
+func normalizePipelineNodeConfig(_ string, canonical string, nodeConfig map[string]any) map[string]any {
 	cfg := cloneMap(nodeConfig)
 	if cfg == nil {
-		cfg = make(map[string]interface{})
+		cfg = make(map[string]any)
 	}
 	if envRaw, ok := cfg["env"].(string); ok && strings.TrimSpace(envRaw) != "" {
-		var envMap map[string]interface{}
+		var envMap map[string]any
 		if err := json.Unmarshal([]byte(envRaw), &envMap); err == nil {
 			cfg["env"] = envMap
 		}
@@ -1165,7 +1165,7 @@ func normalizePipelineNodeConfig(rawType, canonical string, nodeConfig map[strin
 		cfg["shell"] = normalizeTaskShellValue(cfg["shell"])
 	}
 	if canonical == "git_clone" {
-		if repository, ok := cfg["repository"].(map[string]interface{}); ok {
+		if repository, ok := cfg["repository"].(map[string]any); ok {
 			if cfg["git_repo_url"] == nil && strings.TrimSpace(toString(repository["url"])) != "" {
 				cfg["git_repo_url"] = repository["url"]
 			}
@@ -1180,7 +1180,7 @@ func normalizePipelineNodeConfig(rawType, canonical string, nodeConfig map[strin
 	return cfg
 }
 
-func normalizeTaskShellValue(value interface{}) string {
+func normalizeTaskShellValue(value any) string {
 	switch strings.ToLower(strings.TrimSpace(toString(value))) {
 	case "", taskShellSH:
 		return taskShellSH
@@ -1191,7 +1191,7 @@ func normalizeTaskShellValue(value interface{}) string {
 	}
 }
 
-func renderPipelineAgentScript(taskType string, nodeConfig map[string]interface{}) (string, string, error) {
+func renderPipelineAgentScript(taskType string, nodeConfig map[string]any) (string, string, error) {
 	canonical, def, ok := getPipelineTaskDefinition(taskType)
 	if !ok {
 		return "", "", fmt.Errorf("unsupported task type: %s", taskType)
@@ -1256,8 +1256,8 @@ easydo_mask_url() {
 }`)
 }
 
-func renderTaskTemplate(shellTemplate string, params map[string]interface{}) (string, error) {
-	dig := func(path string) interface{} {
+func renderTaskTemplate(shellTemplate string, params map[string]any) (string, error) {
+	dig := func(path string) any {
 		return getNestedValue(params, path)
 	}
 	funcMap := template.FuncMap{
@@ -1266,7 +1266,7 @@ func renderTaskTemplate(shellTemplate string, params map[string]interface{}) (st
 		"toInt":   toInt,
 		"boolStr": boolString,
 		"shq":     shellQuote,
-		"logq": func(v interface{}) string {
+		"logq": func(v any) string {
 			return shellQuote(sanitizeTaskLogPreview(toString(v), 2400))
 		},
 	}
@@ -1283,36 +1283,36 @@ func renderTaskTemplate(shellTemplate string, params map[string]interface{}) (st
 	return strings.TrimSpace(buf.String()), nil
 }
 
-func templateDefault(def, val interface{}) interface{} {
+func templateDefault(def, val any) any {
 	if isTemplateEmpty(val) {
 		return def
 	}
 	return val
 }
 
-func isTemplateEmpty(v interface{}) bool {
+func isTemplateEmpty(v any) bool {
 	if v == nil {
 		return true
 	}
 	switch val := v.(type) {
 	case string:
 		return strings.TrimSpace(val) == ""
-	case []interface{}:
+	case []any:
 		return len(val) == 0
-	case map[string]interface{}:
+	case map[string]any:
 		return len(val) == 0
 	}
 	return false
 }
 
-func getNestedValue(data map[string]interface{}, path string) interface{} {
+func getNestedValue(data map[string]any, path string) any {
 	if data == nil {
 		return nil
 	}
 	parts := strings.Split(path, ".")
-	var current interface{} = data
+	var current any = data
 	for _, part := range parts {
-		obj, ok := current.(map[string]interface{})
+		obj, ok := current.(map[string]any)
 		if !ok {
 			return nil
 		}
@@ -1325,7 +1325,7 @@ func getNestedValue(data map[string]interface{}, path string) interface{} {
 	return current
 }
 
-func toInt(v interface{}) int {
+func toInt(v any) int {
 	switch val := v.(type) {
 	case int:
 		return val
@@ -1353,7 +1353,7 @@ func toInt(v interface{}) int {
 	}
 }
 
-func boolString(v interface{}) string {
+func boolString(v any) string {
 	switch val := v.(type) {
 	case bool:
 		if val {
@@ -1375,27 +1375,27 @@ func boolString(v interface{}) string {
 	return "false"
 }
 
-func shellQuote(v interface{}) string {
+func shellQuote(v any) string {
 	s := fmt.Sprintf("%v", v)
 	s = strings.ReplaceAll(s, `'`, `'"'"'`)
 	return "'" + s + "'"
 }
 
-func cloneMap(input map[string]interface{}) map[string]interface{} {
+func cloneMap(input map[string]any) map[string]any {
 	if input == nil {
 		return nil
 	}
 	data, err := json.Marshal(input)
 	if err != nil {
-		out := make(map[string]interface{}, len(input))
+		out := make(map[string]any, len(input))
 		for k, v := range input {
 			out[k] = v
 		}
 		return out
 	}
-	var out map[string]interface{}
+	var out map[string]any
 	if err := json.Unmarshal(data, &out); err != nil {
-		out = make(map[string]interface{}, len(input))
+		out = make(map[string]any, len(input))
 		for k, v := range input {
 			out[k] = v
 		}

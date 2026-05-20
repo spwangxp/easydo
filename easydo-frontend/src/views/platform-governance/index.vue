@@ -27,15 +27,19 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import PlatformUserManagement from './components/PlatformUserManagement.vue'
 import WorkspaceCatalogManagement from './components/WorkspaceCatalogManagement.vue'
 import PlatformModelManagement from './components/PlatformModelManagement.vue'
 import PlatformRuntimePolicyManagement from './components/PlatformRuntimePolicyManagement.vue'
 
+const route = useRoute()
+const router = useRouter()
 const userStore = useUserStore()
-const activeTab = ref('platform-users')
+const governanceTabs = ['platform-users', 'workspaces', 'models-providers', 'runtime-policies']
+const activeTab = ref(normalizeGovernanceTab(route.query.tab))
 
 const workspaceKindText = computed(() => {
   if (userStore.currentWorkspaceKind === 'admin') {
@@ -46,6 +50,35 @@ const workspaceKindText = computed(() => {
   }
   return '-'
 })
+
+watch(() => route.query.tab, (tab) => {
+  const nextTab = normalizeGovernanceTab(tab)
+  if (activeTab.value !== nextTab) {
+    activeTab.value = nextTab
+  }
+}, { immediate: true })
+
+watch(activeTab, (tab) => {
+  const nextTab = normalizeGovernanceTab(tab)
+  const currentTab = normalizeGovernanceTab(route.query.tab)
+  const hasExplicitTab = Array.isArray(route.query.tab) ? route.query.tab.length > 0 : route.query.tab != null
+  if (currentTab === nextTab && (nextTab !== 'platform-users' || !hasExplicitTab)) {
+    return
+  }
+  const query = { ...route.query }
+  if (nextTab === 'platform-users') {
+    delete query.tab
+  } else {
+    query.tab = nextTab
+  }
+  router.replace({ query })
+})
+
+function normalizeGovernanceTab(tab) {
+  const raw = Array.isArray(tab) ? tab[0] : tab
+  const normalized = String(raw || '').trim()
+  return governanceTabs.includes(normalized) ? normalized : 'platform-users'
+}
 </script>
 
 <style lang="scss" scoped>

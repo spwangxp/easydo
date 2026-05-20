@@ -38,6 +38,9 @@ type pipelineTriggerPayload struct {
 	TagFilters                      string `json:"tag_filters"`
 	MergeRequestSourceBranchFilters string `json:"merge_request_source_branch_filters"`
 	MergeRequestTargetBranchFilters string `json:"merge_request_target_branch_filters"`
+	WebhookRuntimeInputMappings     string `json:"webhook_runtime_input_mappings"`
+	WebhookConfigStatus             string `json:"webhook_config_status"`
+	WebhookConfigInvalidReason      string `json:"webhook_config_invalid_reason"`
 	RotateSecret                    bool   `json:"rotate_secret"`
 }
 
@@ -55,12 +58,29 @@ type pipelineTriggerResponse struct {
 	TagFilters                      string     `json:"tag_filters"`
 	MergeRequestSourceBranchFilters string     `json:"merge_request_source_branch_filters"`
 	MergeRequestTargetBranchFilters string     `json:"merge_request_target_branch_filters"`
+	WebhookRuntimeInputMappings     string     `json:"webhook_runtime_input_mappings"`
+	WebhookConfigStatus             string     `json:"webhook_config_status"`
+	WebhookConfigInvalidReason      string     `json:"webhook_config_invalid_reason"`
 	SecretToken                     string     `json:"secret_token"`
 	WebhookToken                    string     `json:"webhook_token"`
 	WebhookURL                      string     `json:"webhook_url"`
 	NextRunAt                       *time.Time `json:"next_run_at,omitempty"`
 	LastRunAt                       *time.Time `json:"last_run_at,omitempty"`
 	LastTriggeredAt                 *time.Time `json:"last_triggered_at,omitempty"`
+}
+
+const webhookRuntimeMappingStatusInvalidJSON = "invalid_json"
+
+type webhookPreviewRequest struct {
+	Payload                     interface{} `json:"payload"`
+	WebhookRuntimeInputMappings string      `json:"webhook_runtime_input_mappings"`
+}
+
+type apiMappingError struct {
+	MappingID string `json:"mapping_id"`
+	Field     string `json:"field"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
 }
 
 type pipelineRunTriggerContext struct {
@@ -146,6 +166,19 @@ func (h *PipelineHandler) UpdatePipelineTriggers(c *gin.Context) {
 		nextRunAt = &next
 	}
 
+	mappingsRaw := strings.TrimSpace(req.WebhookRuntimeInputMappings)
+	config, targets, err := h.loadPipelineWebhookRuntimeTargets(pipeline)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "流水线配置解析失败: " + err.Error()})
+		return
+	}
+	mappings, mappingErrs := parseAndValidateWebhookRuntimeMappings(mappingsRaw, targets)
+	if len(mappingErrs) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Webhook runtime 映射配置无效", "errors": buildStructuredMappingErrors(mappingErrs)})
+		return
+	}
+	_ = config
+
 	trigger, err := h.ensurePipelineTrigger(pipeline.ID, pipeline.WorkspaceID, userID, req.RotateSecret)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "初始化触发设置失败: " + err.Error()})
@@ -163,7 +196,11 @@ func (h *PipelineHandler) UpdatePipelineTriggers(c *gin.Context) {
 	trigger.TagFilters = strings.TrimSpace(req.TagFilters)
 	trigger.MergeRequestSourceBranchFilters = strings.TrimSpace(req.MergeRequestSourceBranchFilters)
 	trigger.MergeRequestTargetBranchFilters = strings.TrimSpace(req.MergeRequestTargetBranchFilters)
+	trigger.WebhookRuntimeInputMappings = mappingsRaw
+	trigger.WebhookConfigStatus = "valid"
+	trigger.WebhookConfigInvalidReason = ""
 	trigger.UpdatedBy = userID
+	_ = mappings
 	trigger.NextRunAt = nextRunAt
 	if !req.ScheduleEnabled {
 		trigger.LastRunAt = nil
@@ -187,6 +224,33 @@ func (h *PipelineHandler) UpdatePipelineTriggers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "保存成功", "data": h.buildPipelineTriggerResponse(c, trigger)})
 }
 
+func (h *PipelineHandler) PreviewWebhookRuntimeMappings(c *gin.Context) {
+	pipeline, ok := h.loadWorkspacePipeline(c)
+	if !ok {
+		return
+	}
+	var req webhookPreviewRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误: " + err.Error()})
+		return
+	}
+	_, targets, err := h.loadPipelineWebhookRuntimeTargets(pipeline)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "流水线配置解析失败: " + err.Error()})
+		return
+	}
+	mappings, mappingErrs := parseAndValidateWebhookRuntimeMappings(strings.TrimSpace(req.WebhookRuntimeInputMappings), targets)
+	if len(mappingErrs) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Webhook runtime 映射配置无效", "errors": buildStructuredMappingErrors(mappingErrs)})
+		return
+	}
+	preview, previewErrs := previewWebhookRuntimeMappings(req.Payload, mappings, targets)
+	_, _, runtimeErrs := evaluateWebhookRuntimeMappings(req.Payload, mappings, targets)
+	allErrs := append([]mappingError{}, previewErrs...)
+	allErrs = append(allErrs, runtimeErrs...)
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": preview, "errors": buildStructuredMappingErrors(allErrs)})
+}
+
 func (h *PipelineHandler) HandleGitLabWebhook(c *gin.Context) {
 	token := strings.TrimSpace(c.Param("token"))
 	if token == "" {
@@ -208,8 +272,18 @@ func (h *PipelineHandler) HandleGitLabWebhook(c *gin.Context) {
 		return
 	}
 
+	rawBody, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Webhook Payload 无效: " + err.Error()})
+		return
+	}
 	var payload gitlabWebhookPayload
-	if err := c.ShouldBindJSON(&payload); err != nil {
+	if err := json.Unmarshal(rawBody, &payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Webhook Payload 无效: " + err.Error()})
+		return
+	}
+	var payloadValue interface{}
+	if err := json.Unmarshal(rawBody, &payloadValue); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Webhook Payload 无效: " + err.Error()})
 		return
 	}
@@ -236,7 +310,7 @@ func (h *PipelineHandler) HandleGitLabWebhook(c *gin.Context) {
 		triggerUser = fallbackUser
 	}
 
-	config, err := h.loadPipelineDefinitionConfig(h.DB, pipeline)
+	config, targets, err := h.loadPipelineWebhookRuntimeTargets(pipeline)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "流水线配置解析失败: " + err.Error()})
 		return
@@ -249,9 +323,33 @@ func (h *PipelineHandler) HandleGitLabWebhook(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "流水线凭据配置无效: " + err.Error()})
 		return
 	}
-	runConfigSnapshot := models.PipelineRunConfigSnapshot{
-		Inputs: buildGitReferenceRuntimeInputs(config, refName, commitSHA),
+	mappings, mappingErrs := parseAndValidateWebhookRuntimeMappings(strings.TrimSpace(trigger.WebhookRuntimeInputMappings), targets)
+	if len(mappingErrs) > 0 {
+		status, reason := webhookTriggerConfigInvalidStatus(mappingErrs)
+		h.persistWebhookValidationState(trigger.ID, status, reason)
+		c.JSON(http.StatusOK, gin.H{"code": 422, "message": "Webhook runtime 映射配置无效", "errors": buildStructuredMappingErrors(mappingErrs)})
+		return
 	}
+	liveStatus, liveReason := webhookTriggerValidationStateForConfig(config, trigger.WebhookRuntimeInputMappings)
+	if liveStatus != trigger.WebhookConfigStatus || liveReason != trigger.WebhookConfigInvalidReason {
+		h.persistWebhookValidationState(trigger.ID, liveStatus, liveReason)
+		trigger.WebhookConfigStatus = liveStatus
+		trigger.WebhookConfigInvalidReason = liveReason
+	}
+	if strings.TrimSpace(trigger.WebhookConfigStatus) == "invalid" {
+		reason := strings.TrimSpace(trigger.WebhookConfigInvalidReason)
+		if reason == "" {
+			reason = "webhook trigger config is invalid"
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 422, "message": "Webhook 触发配置无效", "errors": []apiMappingError{{Field: "webhook_runtime_input_mappings", Code: "invalid_trigger_config", Message: reason}}})
+		return
+	}
+	inputs, _, runtimeErrs := evaluateWebhookRuntimeMappings(payloadValue, mappings, targets)
+	if len(runtimeErrs) > 0 {
+		c.JSON(http.StatusOK, gin.H{"code": 422, "message": "Webhook runtime 映射执行失败", "errors": buildStructuredMappingErrors(runtimeErrs)})
+		return
+	}
+	runConfigSnapshot := models.PipelineRunConfigSnapshot{Inputs: inputs}
 
 	idempotencyKeyValue := buildWebhookIdempotencyKey(trigger.ID, eventType, refName, commitSHA)
 	run, buildNumber, err := h.launchPipelineRun(pipeline, config, pipelineRunTriggerContext{
@@ -440,7 +538,7 @@ func (h *PipelineHandler) ensurePipelineTrigger(pipelineID uint64, workspaceID u
 }
 
 func (h *PipelineHandler) buildPipelineTriggerResponse(c *gin.Context, trigger *models.PipelineTrigger) pipelineTriggerResponse {
-	resp := pipelineTriggerResponse{Manual: true, Provider: "gitlab", Timezone: "UTC"}
+	resp := pipelineTriggerResponse{Manual: true, Provider: "gitlab", Timezone: "UTC", WebhookConfigStatus: "valid"}
 	if trigger == nil {
 		return resp
 	}
@@ -459,6 +557,9 @@ func (h *PipelineHandler) buildPipelineTriggerResponse(c *gin.Context, trigger *
 	resp.TagFilters = trigger.TagFilters
 	resp.MergeRequestSourceBranchFilters = trigger.MergeRequestSourceBranchFilters
 	resp.MergeRequestTargetBranchFilters = trigger.MergeRequestTargetBranchFilters
+	resp.WebhookRuntimeInputMappings = trigger.WebhookRuntimeInputMappings
+	resp.WebhookConfigStatus = defaultIfEmpty(trigger.WebhookConfigStatus, "valid")
+	resp.WebhookConfigInvalidReason = trigger.WebhookConfigInvalidReason
 	if resp.Timezone == "" {
 		resp.Timezone = "UTC"
 	}
@@ -490,6 +591,103 @@ func buildGitLabWebhookURL(c *gin.Context, token string) string {
 		return "/api/pipeline/run/webhook/" + token
 	}
 	return fmt.Sprintf("%s://%s/api/pipeline/run/webhook/%s", scheme, host, token)
+}
+
+func (h *PipelineHandler) loadPipelineWebhookRuntimeTargets(pipeline models.Pipeline) (PipelineConfig, map[string]runtimeSettableTarget, error) {
+	config, err := h.loadPipelineDefinitionConfig(h.DB, pipeline)
+	if err != nil {
+		return PipelineConfig{}, nil, err
+	}
+	return config, buildRuntimeSettableTargets(config), nil
+}
+
+func parseWebhookRuntimeMappings(raw string) ([]webhookRuntimeInputMapping, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return []webhookRuntimeInputMapping{}, nil
+	}
+	var mappings []webhookRuntimeInputMapping
+	if err := json.Unmarshal([]byte(trimmed), &mappings); err != nil {
+		return nil, err
+	}
+	return mappings, nil
+}
+
+func parseAndValidateWebhookRuntimeMappings(raw string, targets map[string]runtimeSettableTarget) ([]webhookRuntimeInputMapping, []mappingError) {
+	mappings, err := parseWebhookRuntimeMappings(raw)
+	if err != nil {
+		return nil, []mappingError{{Code: webhookRuntimeMappingStatusInvalidJSON, Message: err.Error()}}
+	}
+	errors := validateWebhookRuntimeMappings(mappings, targets)
+	if len(errors) > 0 {
+		return mappings, errors
+	}
+	return mappings, nil
+}
+
+func buildStructuredMappingErrors(errs []mappingError) []apiMappingError {
+	if len(errs) == 0 {
+		return []apiMappingError{}
+	}
+	result := make([]apiMappingError, 0, len(errs))
+	for _, err := range errs {
+		result = append(result, apiMappingError{
+			MappingID: strings.TrimSpace(err.ID),
+			Field:     mappingErrorField(err),
+			Code:      err.Code,
+			Message:   err.Message,
+		})
+	}
+	return result
+}
+
+func mappingErrorField(err mappingError) string {
+	switch err.Code {
+	case webhookRuntimeMappingStatusInvalidID, webhookRuntimeMappingStatusDuplicateID:
+		return "id"
+	case webhookRuntimeMappingStatusInvalidExpression, webhookRuntimeMappingStatusMissing, webhookRuntimeMappingStatusMultipleValues, webhookRuntimeMappingStatusTypeUnsupported, webhookRuntimeMappingStatusTypeMismatch:
+		return "source_expr"
+	case webhookRuntimeMappingStatusInvalidPolicy:
+		return "missing_policy"
+	case webhookRuntimeMappingStatusInvalidTarget:
+		return "target"
+	case webhookRuntimeMappingStatusInvalidJSON:
+		return "webhook_runtime_input_mappings"
+	default:
+		return "webhook_runtime_input_mappings"
+	}
+}
+
+func webhookTriggerConfigInvalidStatus(errs []mappingError) (string, string) {
+	if len(errs) == 0 {
+		return "valid", ""
+	}
+	messages := make([]string, 0, len(errs))
+	for _, err := range errs {
+		message := strings.TrimSpace(err.Message)
+		if message == "" {
+			message = err.Code
+		}
+		messages = append(messages, message)
+	}
+	return "invalid", strings.Join(messages, "; ")
+}
+
+func webhookTriggerValidationStateForConfig(config PipelineConfig, mappingsRaw string) (string, string) {
+	_, errs := parseAndValidateWebhookRuntimeMappings(mappingsRaw, buildRuntimeSettableTargets(config))
+	return webhookTriggerConfigInvalidStatus(errs)
+}
+
+func (h *PipelineHandler) persistWebhookValidationState(triggerID uint64, status string, reason string) {
+	if h == nil || h.DB == nil || triggerID == 0 {
+		return
+	}
+	if err := h.DB.Model(&models.PipelineTrigger{}).Where("id = ?", triggerID).Updates(map[string]interface{}{
+		"webhook_config_status":         defaultIfEmpty(status, "valid"),
+		"webhook_config_invalid_reason": reason,
+	}).Error; err != nil {
+		fmt.Printf("Failed to persist webhook validation state for trigger %d: %v\n", triggerID, err)
+	}
 }
 
 func enabledGitLabTriggerEvents(trigger models.PipelineTrigger) []string {

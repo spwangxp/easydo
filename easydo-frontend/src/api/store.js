@@ -1,4 +1,15 @@
 import request from './request'
+import {
+  createWorkspaceAIAgent,
+  createWorkspaceAIRuntimeProfile,
+  deleteWorkspaceAIAgent,
+  deleteWorkspaceAIRuntimeProfile,
+  getWorkspaceAIAgents,
+  getWorkspaceAIModelCatalog,
+  getWorkspaceAIRuntimeProfiles,
+  updateWorkspaceAIAgent,
+  updateWorkspaceAIRuntimeProfile
+} from './agent'
 
 export function getTemplateList(params) {
   return request({
@@ -118,11 +129,7 @@ export function uploadTemplateVersionChart(templateId, versionId, file) {
 }
 
 export function getAIModelCatalog(params) {
-  return request({
-		url: '/store/ai-models',
-		method: 'get',
-		params
-	})
+  return getWorkspaceAIModelCatalog(params)
 }
 
 export function importAIModel(data) {
@@ -194,63 +201,35 @@ export function deleteAIModelBinding(providerId, bindingId) {
 }
 
 export function getAIAgents() {
-	return request({
-		url: '/ai/agents',
-		method: 'get'
-	})
+	return getWorkspaceAIAgents()
 }
 
 export function createAIAgent(data) {
-	return request({
-		url: '/ai/agents',
-		method: 'post',
-		data
-	})
+	return createWorkspaceAIAgent(data)
 }
 
 export function updateAIAgent(id, data) {
-	return request({
-		url: `/ai/agents/${id}`,
-		method: 'put',
-		data
-	})
+	return updateWorkspaceAIAgent(id, data)
 }
 
 export function deleteAIAgent(id) {
-	return request({
-		url: `/ai/agents/${id}`,
-		method: 'delete'
-	})
+	return deleteWorkspaceAIAgent(id)
 }
 
-export function getAIRuntimeProfiles(id) {
-	return request({
-		url: `/ai/agents/${id}/runtime-profiles`,
-		method: 'get'
-	})
+export function getAIRuntimeProfiles() {
+	return getWorkspaceAIRuntimeProfiles()
 }
 
-export function createAIRuntimeProfile(id, data) {
-	return request({
-		url: `/ai/agents/${id}/runtime-profiles`,
-		method: 'post',
-		data
-	})
+export function createAIRuntimeProfile(data) {
+	return createWorkspaceAIRuntimeProfile(data)
 }
 
-export function updateAIRuntimeProfile(id, profileId, data) {
-	return request({
-		url: `/ai/agents/${id}/runtime-profiles/${profileId}`,
-		method: 'put',
-		data
-	})
+export function updateAIRuntimeProfile(id, data) {
+	return updateWorkspaceAIRuntimeProfile(id, data)
 }
 
-export function deleteAIRuntimeProfile(id, profileId) {
-	return request({
-		url: `/ai/agents/${id}/runtime-profiles/${profileId}`,
-		method: 'delete'
-	})
+export function deleteAIRuntimeProfile(id) {
+	return deleteWorkspaceAIRuntimeProfile(id)
 }
 
 export function listAIModels(params) {
@@ -270,23 +249,5 @@ export function listAIAgents() {
 }
 
 export async function listAIRuntimeProfiles() {
-	const agentRes = await getAIAgents()
-	const agents = Array.isArray(agentRes?.data) ? agentRes.data : []
-	const runtimeProfilesByAgent = await Promise.all(
-		agents
-			.filter((agent) => agent?.id != null)
-			.map(async (agent) => {
-				const runtimeRes = await getAIRuntimeProfiles(agent.id)
-				const profiles = Array.isArray(runtimeRes?.data) ? runtimeRes.data : []
-				return profiles.map((profile) => ({
-					...profile,
-					agent_id: profile.agent_id ?? agent.id,
-					agent_name: profile.agent_name ?? agent.name
-				}))
-			})
-	)
-
-	return {
-		data: runtimeProfilesByAgent.flat()
-	}
+	return getAIRuntimeProfiles()
 }

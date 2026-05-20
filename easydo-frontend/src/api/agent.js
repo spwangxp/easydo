@@ -162,32 +162,32 @@ export function deleteWorkspaceAIAgent(id) {
   })
 }
 
-export function getWorkspaceAIRuntimeProfiles(id) {
+export function getWorkspaceAIRuntimeProfiles() {
   return request({
-    url: `/ai/agents/${id}/runtime-profiles`,
+    url: '/ai/runtime-profiles',
     method: 'get'
   })
 }
 
-export function createWorkspaceAIRuntimeProfile(id, data) {
+export function createWorkspaceAIRuntimeProfile(data) {
   return request({
-    url: `/ai/agents/${id}/runtime-profiles`,
+    url: '/ai/runtime-profiles',
     method: 'post',
     data
   })
 }
 
-export function updateWorkspaceAIRuntimeProfile(id, profileId, data) {
+export function updateWorkspaceAIRuntimeProfile(id, data) {
   return request({
-    url: `/ai/agents/${id}/runtime-profiles/${profileId}`,
+    url: `/ai/runtime-profiles/${id}`,
     method: 'put',
     data
   })
 }
 
-export function deleteWorkspaceAIRuntimeProfile(id, profileId) {
+export function deleteWorkspaceAIRuntimeProfile(id) {
   return request({
-    url: `/ai/agents/${id}/runtime-profiles/${profileId}`,
+    url: `/ai/runtime-profiles/${id}`,
     method: 'delete'
   })
 }

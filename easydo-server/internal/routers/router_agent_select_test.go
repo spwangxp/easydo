@@ -111,7 +111,7 @@ func TestSelectAgentRouteRequiresAuthentication(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	router := InitRouter()
-	body, err := json.Marshal(map[string]interface{}{"workspace_id": 1})
+	body, err := json.Marshal(map[string]any{"workspace_id": 1})
 	if err != nil {
 		t.Fatalf("marshal payload failed: %v", err)
 	}
@@ -122,5 +122,38 @@ func TestSelectAgentRouteRequiresAuthentication(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 without auth, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAIRuntimeProfileRoutesUseWorkspaceLevelPaths(t *testing.T) {
+	setupRouterUserCreateTestEnv(t)
+	db := openRouterTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = originalDB
+	})
+	if err := db.AutoMigrate(&models.MasterKey{}); err != nil {
+		t.Fatalf("auto migrate master key failed: %v", err)
+	}
+	if _, err := models.LoadOrCreateMasterKey(db); err != nil {
+		t.Fatalf("load master key failed: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := InitRouter()
+
+	workspaceLevelReq := httptest.NewRequest(http.MethodGet, "/api/ai/runtime-profiles?workspace_id=1", nil)
+	workspaceLevelW := httptest.NewRecorder()
+	router.ServeHTTP(workspaceLevelW, workspaceLevelReq)
+	if workspaceLevelW.Code != http.StatusUnauthorized {
+		t.Fatalf("expected workspace-level runtime profile route to require auth, got %d body=%s", workspaceLevelW.Code, workspaceLevelW.Body.String())
+	}
+
+	nestedReq := httptest.NewRequest(http.MethodGet, "/api/ai/agents/1/runtime-profiles?workspace_id=1", nil)
+	nestedW := httptest.NewRecorder()
+	router.ServeHTTP(nestedW, nestedReq)
+	if nestedW.Code != http.StatusNotFound {
+		t.Fatalf("expected nested runtime profile route to be removed, got %d body=%s", nestedW.Code, nestedW.Body.String())
 	}
 }

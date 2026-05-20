@@ -42,23 +42,55 @@ type aiProviderRequest struct {
 type aiModelBindingRequest struct {
 	ModelID          uint64         `json:"model_id" binding:"required"`
 	ProviderModelKey string         `json:"provider_model_key"`
-	CapabilitiesJSON map[string]any `json:"capabilities_json"`
 	SettingsJSON     map[string]any `json:"settings_json"`
 	MetadataJSON     map[string]any `json:"metadata_json"`
 	Status           string         `json:"status"`
 }
 
+func decodeAIModelBindingRequest(c *gin.Context) (aiModelBindingRequest, bool) {
+	var req aiModelBindingRequest
+	body, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
+		return req, false
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
+		return req, false
+	}
+	if _, exists := raw["capabilities_json"]; exists {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "capabilities_json 已废弃，请改用 runtime profile / agent capability 定义"})
+		return req, false
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
+		return req, false
+	}
+	if req.ModelID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "model_id 无效"})
+		return req, false
+	}
+	return req, true
+}
+
 type aiAgentRequest struct {
-	Name               string         `json:"name" binding:"required"`
-	Description        string         `json:"description"`
-	Scenario           string         `json:"scenario" binding:"required"`
-	ScopeType          string         `json:"scope_type"`
-	SystemPrompt       string         `json:"system_prompt"`
-	UserPromptTemplate string         `json:"user_prompt_template"`
-	InputSchemaJSON    map[string]any `json:"input_schema_json"`
-	OutputSchemaJSON   map[string]any `json:"output_schema_json"`
-	ToolPolicyJSON     map[string]any `json:"tool_policy_json"`
-	Status             string         `json:"status"`
+	Name               string           `json:"name" binding:"required"`
+	Description        string           `json:"description"`
+	ScopeType          string           `json:"scope_type"`
+	RuntimeProfileID   *uint64          `json:"runtime_profile_id"`
+	SystemPrompt       *string          `json:"system_prompt"`
+	UserPromptTemplate *string          `json:"user_prompt_template"`
+	InputSchemaJSON    *json.RawMessage `json:"input_schema_json"`
+	OutputSchemaJSON   *json.RawMessage `json:"output_schema_json"`
+	ToolPolicyJSON     *json.RawMessage `json:"tool_policy_json"`
+	ToolsJSON          *json.RawMessage `json:"tools_json"`
+	SkillsJSON         *json.RawMessage `json:"skills_json"`
+	MemoryJSON         *json.RawMessage `json:"memory_json"`
+	MCPServersJSON     *json.RawMessage `json:"mcp_servers_json"`
+	SubAgentsJSON      *json.RawMessage `json:"sub_agents_json"`
+	MetadataJSON       *json.RawMessage `json:"metadata_json"`
+	Status             string           `json:"status"`
 }
 
 type aiAgentRuntimeProfileRequest struct {
@@ -70,6 +102,33 @@ type aiAgentRuntimeProfileRequest struct {
 	Status              string           `json:"status"`
 }
 
+type aiModelSummary struct {
+	ID          uint64 `json:"id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+}
+
+type aiRuntimeProfileSummary struct {
+	ID              uint64                        `json:"id"`
+	WorkspaceID     uint64                        `json:"workspace_id"`
+	Name            string                        `json:"name"`
+	ModelID         uint64                        `json:"model_id"`
+	FallbackEnabled bool                          `json:"fallback_enabled"`
+	Status          models.AIRuntimeProfileStatus `json:"status"`
+	Model           *aiModelSummary               `json:"model,omitempty"`
+}
+
+type aiAgentSummary struct {
+	ID               uint64                   `json:"id"`
+	WorkspaceID      uint64                   `json:"workspace_id"`
+	Name             string                   `json:"name"`
+	Description      string                   `json:"description"`
+	ScopeType        string                   `json:"scope_type"`
+	RuntimeProfileID *uint64                  `json:"runtime_profile_id"`
+	Status           models.AIAgentStatus     `json:"status"`
+	RuntimeProfile   *aiRuntimeProfileSummary `json:"runtime_profile,omitempty"`
+}
+
 func ensureProviderExists(db *gorm.DB, workspaceID, providerID uint64) error {
 	var provider models.AIProvider
 	return db.Where("workspace_id = ? AND id = ?", workspaceID, providerID).First(&provider).Error
@@ -78,6 +137,33 @@ func ensureProviderExists(db *gorm.DB, workspaceID, providerID uint64) error {
 func ensureModelExists(db *gorm.DB, modelID uint64) error {
 	var model models.AIModelCatalog
 	return db.First(&model, modelID).Error
+}
+
+func ensureRuntimeProfileExists(db *gorm.DB, workspaceID, runtimeProfileID uint64) error {
+	if runtimeProfileID == 0 {
+		return nil
+	}
+	var profile models.AIRuntimeProfile
+	return db.Where("workspace_id = ? AND id = ?", workspaceID, runtimeProfileID).First(&profile).Error
+}
+
+func optionalRuntimeProfileID(runtimeProfileID *uint64) *uint64 {
+	if runtimeProfileID == nil || *runtimeProfileID == 0 {
+		return nil
+	}
+	id := *runtimeProfileID
+	return &id
+}
+
+func optionalRuntimeProfileIDOrExisting(runtimeProfileID *uint64, existing *uint64) *uint64 {
+	if runtimeProfileID == nil {
+		if existing == nil {
+			return nil
+		}
+		id := *existing
+		return &id
+	}
+	return optionalRuntimeProfileID(runtimeProfileID)
 }
 
 func validateRuntimeProfileBindings(db *gorm.DB, workspaceID, modelID uint64, items []map[string]any) error {
@@ -106,6 +192,77 @@ func marshalJSONOrEmpty(v any) string {
 		return ""
 	}
 	return string(data)
+}
+
+func normalizeOptionalRawJSON(v *json.RawMessage) string {
+	if v == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(string(*v))
+	if raw == "" || raw == "null" {
+		return ""
+	}
+	var payload any
+	if err := json.Unmarshal(*v, &payload); err != nil {
+		return ""
+	}
+	return marshalJSONOrEmpty(payload)
+}
+
+func normalizeOptionalRawJSONOrExisting(v *json.RawMessage, existing string) string {
+	if v == nil {
+		return existing
+	}
+	return normalizeOptionalRawJSON(v)
+}
+
+func optionalStringValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+func optionalStringValueOrExisting(v *string, existing string) string {
+	if v == nil {
+		return existing
+	}
+	return *v
+}
+
+func buildRuntimeProfileSummary(item *models.AIRuntimeProfile) *aiRuntimeProfileSummary {
+	if item == nil {
+		return nil
+	}
+	summary := &aiRuntimeProfileSummary{
+		ID:              item.ID,
+		WorkspaceID:     item.WorkspaceID,
+		Name:            item.Name,
+		ModelID:         item.ModelID,
+		FallbackEnabled: item.FallbackEnabled,
+		Status:          item.Status,
+	}
+	if item.Model != nil {
+		summary.Model = &aiModelSummary{
+			ID:          item.Model.ID,
+			Name:        item.Model.Name,
+			DisplayName: item.Model.DisplayName,
+		}
+	}
+	return summary
+}
+
+func buildAgentSummary(item models.AIAgent) aiAgentSummary {
+	return aiAgentSummary{
+		ID:               item.ID,
+		WorkspaceID:      item.WorkspaceID,
+		Name:             item.Name,
+		Description:      item.Description,
+		ScopeType:        item.ScopeType,
+		RuntimeProfileID: item.RuntimeProfileID,
+		Status:           item.Status,
+		RuntimeProfile:   buildRuntimeProfileSummary(item.RuntimeProfile),
+	}
 }
 
 func aiGovernanceContext(c *gin.Context, db *gorm.DB) GovernanceContext {
@@ -259,9 +416,8 @@ func (h *AIProviderHandler) CreateBinding(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "provider 不存在"})
 		return
 	}
-	var req aiModelBindingRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
+	req, ok := decodeAIModelBindingRequest(c)
+	if !ok {
 		return
 	}
 	if err := ensureModelExists(h.DB, req.ModelID); err != nil {
@@ -273,7 +429,6 @@ func (h *AIProviderHandler) CreateBinding(c *gin.Context) {
 		ModelID:          req.ModelID,
 		ProviderID:       providerID,
 		ProviderModelKey: strings.TrimSpace(req.ProviderModelKey),
-		CapabilitiesJSON: marshalJSONOrEmpty(req.CapabilitiesJSON),
 		SettingsJSON:     marshalJSONOrEmpty(req.SettingsJSON),
 		MetadataJSON:     marshalJSONOrEmpty(req.MetadataJSON),
 		Status:           models.AIModelBindingStatus(defaultIfEmpty(strings.TrimSpace(req.Status), string(models.AIModelBindingStatusActive))),
@@ -301,9 +456,8 @@ func (h *AIProviderHandler) UpdateBinding(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "AI 模型绑定不存在"})
 		return
 	}
-	var req aiModelBindingRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
+	req, ok := decodeAIModelBindingRequest(c)
+	if !ok {
 		return
 	}
 	if err := ensureModelExists(h.DB, req.ModelID); err != nil {
@@ -313,7 +467,6 @@ func (h *AIProviderHandler) UpdateBinding(c *gin.Context) {
 	updates := map[string]any{
 		"model_id":           req.ModelID,
 		"provider_model_key": strings.TrimSpace(req.ProviderModelKey),
-		"capabilities_json":  marshalJSONOrEmpty(req.CapabilitiesJSON),
 		"settings_json":      marshalJSONOrEmpty(req.SettingsJSON),
 		"metadata_json":      marshalJSONOrEmpty(req.MetadataJSON),
 		"status":             defaultIfEmpty(strings.TrimSpace(req.Status), string(binding.Status)),
@@ -344,18 +497,25 @@ func (h *AIProviderHandler) DeleteBinding(c *gin.Context) {
 }
 
 func (h *AIAgentHandler) ListAgents(c *gin.Context) {
-	workspaceID, _ := getRequestWorkspace(c)
-	userID, role := getRequestUser(c)
-	if workspaceID == 0 || !userCanAccessWorkspace(h.DB, workspaceID, userID, role) {
+	ctx := aiGovernanceContext(c, h.DB)
+	if ctx.WorkspaceID == 0 || !userCanAccessWorkspace(h.DB, ctx.WorkspaceID, ctx.UserID, ctx.SystemRole) {
 		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "无权访问 AI Agent 定义"})
 		return
 	}
 	var items []models.AIAgent
-	if err := h.DB.Preload("RuntimeProfiles").Where("workspace_id = ?", workspaceID).Order("updated_at DESC, id DESC").Find(&items).Error; err != nil {
+	if err := h.DB.Preload("RuntimeProfile").Preload("RuntimeProfile.Model").Where("workspace_id = ?", ctx.WorkspaceID).Order("updated_at DESC, id DESC").Find(&items).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "加载 AI Agent 定义失败"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": items})
+	if RequireWorkspaceGovernance(ctx) {
+		c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": items})
+		return
+	}
+	summaries := make([]aiAgentSummary, 0, len(items))
+	for _, item := range items {
+		summaries = append(summaries, buildAgentSummary(item))
+	}
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": summaries})
 }
 
 func (h *AIAgentHandler) CreateAgent(c *gin.Context) {
@@ -368,17 +528,27 @@ func (h *AIAgentHandler) CreateAgent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
 		return
 	}
+	if err := ensureRuntimeProfileExists(h.DB, workspaceID, toUint64Value(req.RuntimeProfileID)); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "runtime_profile_id 无效"})
+		return
+	}
 	item := models.AIAgent{
 		WorkspaceID:        workspaceID,
 		Name:               strings.TrimSpace(req.Name),
 		Description:        req.Description,
-		Scenario:           strings.TrimSpace(req.Scenario),
 		ScopeType:          defaultIfEmpty(strings.TrimSpace(req.ScopeType), models.AgentScopeWorkspace),
-		SystemPrompt:       req.SystemPrompt,
-		UserPromptTemplate: req.UserPromptTemplate,
-		InputSchemaJSON:    marshalJSONOrEmpty(req.InputSchemaJSON),
-		OutputSchemaJSON:   marshalJSONOrEmpty(req.OutputSchemaJSON),
-		ToolPolicyJSON:     marshalJSONOrEmpty(req.ToolPolicyJSON),
+		RuntimeProfileID:   optionalRuntimeProfileID(req.RuntimeProfileID),
+		SystemPrompt:       optionalStringValue(req.SystemPrompt),
+		UserPromptTemplate: optionalStringValue(req.UserPromptTemplate),
+		InputSchemaJSON:    normalizeOptionalRawJSON(req.InputSchemaJSON),
+		OutputSchemaJSON:   normalizeOptionalRawJSON(req.OutputSchemaJSON),
+		ToolPolicyJSON:     normalizeOptionalRawJSON(req.ToolPolicyJSON),
+		ToolsJSON:          normalizeOptionalRawJSON(req.ToolsJSON),
+		SkillsJSON:         normalizeOptionalRawJSON(req.SkillsJSON),
+		MemoryJSON:         normalizeOptionalRawJSON(req.MemoryJSON),
+		MCPServersJSON:     normalizeOptionalRawJSON(req.MCPServersJSON),
+		SubAgentsJSON:      normalizeOptionalRawJSON(req.SubAgentsJSON),
+		MetadataJSON:       normalizeOptionalRawJSON(req.MetadataJSON),
 		Status:             models.AIAgentStatus(defaultIfEmpty(strings.TrimSpace(req.Status), string(models.AIAgentStatusDraft))),
 		CreatedBy:          userID,
 	}
@@ -386,6 +556,7 @@ func (h *AIAgentHandler) CreateAgent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "创建 AI Agent 定义失败"})
 		return
 	}
+	_ = h.DB.Preload("RuntimeProfile").Preload("RuntimeProfile.Model").First(&item, item.ID).Error
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": item})
 }
 
@@ -404,23 +575,33 @@ func (h *AIAgentHandler) UpdateAgent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
 		return
 	}
+	if err := ensureRuntimeProfileExists(h.DB, workspaceID, toUint64Value(req.RuntimeProfileID)); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "runtime_profile_id 无效"})
+		return
+	}
 	updates := map[string]any{
 		"name":                 strings.TrimSpace(req.Name),
 		"description":          req.Description,
-		"scenario":             strings.TrimSpace(req.Scenario),
 		"scope_type":           defaultIfEmpty(strings.TrimSpace(req.ScopeType), item.ScopeType),
-		"system_prompt":        req.SystemPrompt,
-		"user_prompt_template": req.UserPromptTemplate,
-		"input_schema_json":    marshalJSONOrEmpty(req.InputSchemaJSON),
-		"output_schema_json":   marshalJSONOrEmpty(req.OutputSchemaJSON),
-		"tool_policy_json":     marshalJSONOrEmpty(req.ToolPolicyJSON),
+		"runtime_profile_id":   optionalRuntimeProfileIDOrExisting(req.RuntimeProfileID, item.RuntimeProfileID),
+		"system_prompt":        optionalStringValueOrExisting(req.SystemPrompt, item.SystemPrompt),
+		"user_prompt_template": optionalStringValueOrExisting(req.UserPromptTemplate, item.UserPromptTemplate),
+		"input_schema_json":    normalizeOptionalRawJSONOrExisting(req.InputSchemaJSON, item.InputSchemaJSON),
+		"output_schema_json":   normalizeOptionalRawJSONOrExisting(req.OutputSchemaJSON, item.OutputSchemaJSON),
+		"tool_policy_json":     normalizeOptionalRawJSONOrExisting(req.ToolPolicyJSON, item.ToolPolicyJSON),
+		"tools_json":           normalizeOptionalRawJSONOrExisting(req.ToolsJSON, item.ToolsJSON),
+		"skills_json":          normalizeOptionalRawJSONOrExisting(req.SkillsJSON, item.SkillsJSON),
+		"memory_json":          normalizeOptionalRawJSONOrExisting(req.MemoryJSON, item.MemoryJSON),
+		"mcp_servers_json":     normalizeOptionalRawJSONOrExisting(req.MCPServersJSON, item.MCPServersJSON),
+		"sub_agents_json":      normalizeOptionalRawJSONOrExisting(req.SubAgentsJSON, item.SubAgentsJSON),
+		"metadata_json":        normalizeOptionalRawJSONOrExisting(req.MetadataJSON, item.MetadataJSON),
 		"status":               defaultIfEmpty(strings.TrimSpace(req.Status), string(item.Status)),
 	}
 	if err := h.DB.Model(&item).Updates(updates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "更新 AI Agent 定义失败"})
 		return
 	}
-	_ = h.DB.First(&item, item.ID).Error
+	_ = h.DB.Preload("RuntimeProfile").Preload("RuntimeProfile.Model").First(&item, item.ID).Error
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": item})
 }
 
@@ -437,34 +618,30 @@ func (h *AIAgentHandler) DeleteAgent(c *gin.Context) {
 }
 
 func (h *AIAgentHandler) ListRuntimeProfiles(c *gin.Context) {
-	workspaceID, _ := getRequestWorkspace(c)
-	userID, role := getRequestUser(c)
-	if workspaceID == 0 || !userCanAccessWorkspace(h.DB, workspaceID, userID, role) {
+	ctx := aiGovernanceContext(c, h.DB)
+	if ctx.WorkspaceID == 0 || !userCanAccessWorkspace(h.DB, ctx.WorkspaceID, ctx.UserID, ctx.SystemRole) {
 		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "无权访问 Runtime Profile"})
 		return
 	}
-	agentID, _ := strconv.ParseUint(c.Param("id"), 10, 64)
 	var profiles []models.AIRuntimeProfile
-	if err := h.DB.Where("workspace_id = ? AND agent_id = ?", workspaceID, agentID).Order("updated_at DESC, id DESC").Find(&profiles).Error; err != nil {
+	if err := h.DB.Preload("Model").Where("workspace_id = ?", ctx.WorkspaceID).Order("updated_at DESC, id DESC").Find(&profiles).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "加载 Runtime Profile 失败"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": profiles})
+	if RequireWorkspaceGovernance(ctx) {
+		c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": profiles})
+		return
+	}
+	summaries := make([]*aiRuntimeProfileSummary, 0, len(profiles))
+	for i := range profiles {
+		summaries = append(summaries, buildRuntimeProfileSummary(&profiles[i]))
+	}
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": summaries})
 }
 
 func (h *AIAgentHandler) CreateRuntimeProfile(c *gin.Context) {
 	workspaceID, userID, ok := requireWorkspaceGovernance(c, h.DB)
 	if !ok {
-		return
-	}
-	agentID, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil || agentID == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "agent_id 无效"})
-		return
-	}
-	var agent models.AIAgent
-	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&agent, agentID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "AI Agent 不存在"})
 		return
 	}
 	var req aiAgentRuntimeProfileRequest
@@ -486,7 +663,6 @@ func (h *AIAgentHandler) CreateRuntimeProfile(c *gin.Context) {
 	}
 	item := models.AIRuntimeProfile{
 		WorkspaceID:         workspaceID,
-		AgentID:             agentID,
 		Name:                strings.TrimSpace(req.Name),
 		ModelID:             req.ModelID,
 		BindingPriorityJSON: marshalJSONOrEmpty(req.BindingPriorityJSON),
@@ -499,6 +675,7 @@ func (h *AIAgentHandler) CreateRuntimeProfile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "创建 Runtime Profile 失败"})
 		return
 	}
+	_ = h.DB.Preload("Model").First(&item, item.ID).Error
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": item})
 }
 
@@ -507,13 +684,8 @@ func (h *AIAgentHandler) UpdateRuntimeProfile(c *gin.Context) {
 	if !ok {
 		return
 	}
-	agentID, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil || agentID == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "agent_id 无效"})
-		return
-	}
 	var item models.AIRuntimeProfile
-	if err := h.DB.Where("workspace_id = ? AND agent_id = ?", workspaceID, agentID).First(&item, c.Param("profile_id")).Error; err != nil {
+	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&item, c.Param("profile_id")).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "Runtime Profile 不存在"})
 		return
 	}
@@ -546,8 +718,51 @@ func (h *AIAgentHandler) UpdateRuntimeProfile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "更新 Runtime Profile 失败"})
 		return
 	}
-	_ = h.DB.First(&item, item.ID).Error
+	_ = h.DB.Preload("Model").First(&item, item.ID).Error
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": item})
+}
+
+func pipelineNodeReferencesRuntimeProfile(node PipelineNode, profileID uint64) bool {
+	if profileID == 0 {
+		return false
+	}
+	if toUint64Value(node.Config["runtime_profile_id"]) == profileID {
+		return true
+	}
+	if toUint64Value(node.Params["runtime_profile_id"]) == profileID {
+		return true
+	}
+	for _, param := range node.DefinitionParams {
+		if param.Key == "runtime_profile_id" && toUint64Value(param.Value) == profileID {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *AIAgentHandler) countPipelineDefinitionRuntimeProfileRefs(workspaceID, profileID uint64) (int64, error) {
+	var pipelines []models.Pipeline
+	if err := h.DB.Select("id", "name", "workspace_id", "config", "definition_json").Where("workspace_id = ?", workspaceID).Find(&pipelines).Error; err != nil {
+		return 0, err
+	}
+	var count int64
+	for _, pipeline := range pipelines {
+		raw := strings.TrimSpace(pipelineDefinitionPayload(pipeline))
+		if raw == "" {
+			continue
+		}
+		config, err := parsePipelineConfigJSON(raw)
+		if err != nil {
+			return 0, err
+		}
+		for _, node := range config.Nodes {
+			if pipelineNodeReferencesRuntimeProfile(node, profileID) {
+				count++
+				break
+			}
+		}
+	}
+	return count, nil
 }
 
 func (h *AIAgentHandler) DeleteRuntimeProfile(c *gin.Context) {
@@ -555,12 +770,39 @@ func (h *AIAgentHandler) DeleteRuntimeProfile(c *gin.Context) {
 	if !ok {
 		return
 	}
-	agentID, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil || agentID == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "agent_id 无效"})
+	profileID, err := strconv.ParseUint(c.Param("profile_id"), 10, 64)
+	if err != nil || profileID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "profile_id 无效"})
 		return
 	}
-	if err := h.DB.Where("workspace_id = ? AND agent_id = ?", workspaceID, agentID).Delete(&models.AIRuntimeProfile{}, c.Param("profile_id")).Error; err != nil {
+	var agentRefCount int64
+	if err := h.DB.Model(&models.AIAgent{}).Where("workspace_id = ? AND runtime_profile_id = ?", workspaceID, profileID).Count(&agentRefCount).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "检查 Runtime Profile 引用失败"})
+		return
+	}
+	if agentRefCount > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "该 Runtime Profile 已被 AI Agent 引用，无法删除"})
+		return
+	}
+	var sessionRefCount int64
+	if err := h.DB.Model(&models.AISession{}).Where("workspace_id = ? AND runtime_profile_id = ?", workspaceID, profileID).Count(&sessionRefCount).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "检查 Runtime Profile 引用失败"})
+		return
+	}
+	if sessionRefCount > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "该 Runtime Profile 已被 AI Session 引用，无法删除"})
+		return
+	}
+	pipelineRefCount, err := h.countPipelineDefinitionRuntimeProfileRefs(workspaceID, profileID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "检查 Runtime Profile 引用失败"})
+		return
+	}
+	if pipelineRefCount > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "该 Runtime Profile 已被流水线定义引用，无法删除"})
+		return
+	}
+	if err := h.DB.Where("workspace_id = ?", workspaceID).Delete(&models.AIRuntimeProfile{}, profileID).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "删除 Runtime Profile 失败"})
 		return
 	}

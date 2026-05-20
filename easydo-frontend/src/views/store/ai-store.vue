@@ -4,7 +4,7 @@
       <div class="content-toolbar__start">
         <StoreKindSwitch :model-value="storeKind" @update:model-value="handleStoreTabChange" />
       </div>
-      <div class="content-toolbar__meta store-page-hint">模型、Provider、Deployment、Runtime 一体查看。</div>
+      <div class="content-toolbar__meta store-page-hint">模型、Provider、Deployment、Runtime Profile 与 Agent 引用一体查看。</div>
       <div class="content-toolbar__actions">
         <StoreHeaderActions>
           <el-input
@@ -24,7 +24,7 @@
       <div class="section-header">
         <div>
           <h2>模型总览</h2>
-          <p>按模型聚合展示 Provider、部署与 Runtime 引用，并支持单行展开查看详情。</p>
+          <p>按模型聚合展示 Provider、部署、Runtime Profile 以及 Agent 引用，并支持单行展开查看详情。</p>
         </div>
       </div>
 
@@ -94,14 +94,14 @@
                   <span class="detail-count">{{ row.runtimeCount }}</span>
                 </div>
                 <el-table :data="row.runtimeUsage" size="small" empty-text="暂无 Runtime 引用">
-                  <el-table-column prop="runtime_name" label="Runtime 名称" min-width="180" />
+                  <el-table-column prop="runtime_name" label="Runtime Profile" min-width="180" />
                   <el-table-column prop="agent_name" label="Agent" min-width="180" />
                   <el-table-column prop="binding_priority_text" label="Binding 优先级" min-width="200" />
                   <el-table-column prop="status" label="状态" width="120" />
                   <el-table-column label="操作" width="140" fixed="right">
                     <template #default>
                       <div class="table-actions">
-                        <el-button link type="primary">查看 Runtime</el-button>
+                        <el-button link type="primary" @click.stop="openRuntimeProfile(row)">查看 Runtime</el-button>
                       </div>
                     </template>
                   </el-table-column>
@@ -296,11 +296,11 @@
           </el-form-item>
           <el-collapse>
             <el-collapse-item title="Binding 高级配置">
-              <el-form-item label="Capabilities JSON">
-                <el-input v-model="providerForm.capabilitiesJSON" type="textarea" :rows="3" placeholder='{"chat":true}' />
-              </el-form-item>
               <el-form-item label="Binding Settings JSON">
                 <el-input v-model="providerForm.bindingSettingsJSON" type="textarea" :rows="3" placeholder='{"temperature":0.2}' />
+              </el-form-item>
+              <el-form-item label="Binding Metadata JSON">
+                <el-input v-model="providerForm.bindingMetadataJSON" type="textarea" :rows="3" placeholder='{"source":"manual"}' />
               </el-form-item>
             </el-collapse-item>
           </el-collapse>
@@ -540,6 +540,13 @@ function handleStoreTabChange(name) {
   if (name === 'app') {
     router.push('/store/apps')
   }
+}
+
+function openRuntimeProfile() {
+  router.push({
+    path: '/workspace-governance',
+    query: { tab: 'runtime-profiles' }
+  })
 }
 
 function toggleExpandedRow(row) {
@@ -938,8 +945,8 @@ async function submitProviderDemo() {
     { label: 'Settings JSON', value: providerForm.settingsJSON },
     ...(providerForm.bindModelNow
       ? [
-          { label: 'Capabilities JSON', value: providerForm.capabilitiesJSON },
-          { label: 'Binding Settings JSON', value: providerForm.bindingSettingsJSON }
+          { label: 'Binding Settings JSON', value: providerForm.bindingSettingsJSON },
+          { label: 'Binding Metadata JSON', value: providerForm.bindingMetadataJSON }
         ]
       : [])
   ])
@@ -958,14 +965,18 @@ async function submitProviderDemo() {
         binding_key: providerForm.providerModelKey
       }
     : {}
+  const providerHeaders = providerForm.headersJSON.trim() ? JSON.parse(providerForm.headersJSON) : {}
+  const providerSettings = providerForm.settingsJSON.trim() ? JSON.parse(providerForm.settingsJSON) : {}
+  const bindingSettings = providerForm.bindingSettingsJSON.trim() ? JSON.parse(providerForm.bindingSettingsJSON) : {}
+  const bindingMetadata = providerForm.bindingMetadataJSON.trim() ? JSON.parse(providerForm.bindingMetadataJSON) : {}
 
   try {
     const providerResp = await createAIProvider({
       name: providerForm.providerName.trim(),
       base_url: providerForm.endpoint.trim(),
       credential_id: providerForm.credentialId,
-      headers_json: providerForm.headersJSON.trim(),
-      settings_json: providerForm.settingsJSON.trim(),
+      headers_json: providerHeaders,
+      settings_json: providerSettings,
       status: providerForm.status
     })
 
@@ -974,8 +985,8 @@ async function submitProviderDemo() {
       await createAIModelBinding(createdProvider.id, {
         model_id: providerForm.modelId,
         provider_model_key: providerForm.providerModelKey.trim(),
-        capabilities_json: providerForm.capabilitiesJSON.trim(),
-        settings_json: providerForm.bindingSettingsJSON.trim(),
+        settings_json: bindingSettings,
+        metadata_json: bindingMetadata,
         status: providerForm.status
       })
     }
@@ -1027,8 +1038,8 @@ function createProviderForm() {
     bindModelNow: false,
     modelId: null,
     providerModelKey: '',
-    capabilitiesJSON: '',
     bindingSettingsJSON: '',
+    bindingMetadataJSON: '',
     headersJSON: '',
     settingsJSON: ''
   }

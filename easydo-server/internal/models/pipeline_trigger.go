@@ -21,6 +21,9 @@ type PipelineTrigger struct {
 	SecretToken                     string     `gorm:"size:255" json:"secret_token"`
 	WebhookToken                    string     `gorm:"size:255;index" json:"webhook_token"`
 	LastEventTypes                  string     `gorm:"type:text" json:"last_event_types"`
+	WebhookRuntimeInputMappings     string     `gorm:"type:longtext" json:"webhook_runtime_input_mappings"`
+	WebhookConfigStatus             string     `gorm:"size:32;default:'valid'" json:"webhook_config_status"`
+	WebhookConfigInvalidReason      string     `gorm:"type:text" json:"webhook_config_invalid_reason"`
 	NextRunAt                       *time.Time `json:"next_run_at,omitempty"`
 	LastRunAt                       *time.Time `json:"last_run_at,omitempty"`
 	LastTriggeredAt                 *time.Time `json:"last_triggered_at,omitempty"`

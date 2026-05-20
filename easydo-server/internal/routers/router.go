@@ -81,6 +81,7 @@ func InitRouter() *gin.Engine {
 			pipeline.POST("/:id/run", pipelineHandler.RunPipeline)
 			pipeline.GET("/:id/triggers", pipelineHandler.GetPipelineTriggers)
 			pipeline.PUT("/:id/triggers", pipelineHandler.UpdatePipelineTriggers)
+			pipeline.POST("/:id/triggers/webhook/preview", pipelineHandler.PreviewWebhookRuntimeMappings)
 			pipeline.GET("/:id/history", pipelineHandler.GetPipelineRuns)
 			pipeline.GET("/:id/runs", pipelineHandler.GetPipelineRuns)
 			pipeline.GET("/:id/runs/:run_id", pipelineHandler.GetRunDetail)
@@ -295,10 +296,16 @@ func InitRouter() *gin.Engine {
 			aiAgents.POST("", aiAgentHandler.CreateAgent)
 			aiAgents.PUT("/:id", aiAgentHandler.UpdateAgent)
 			aiAgents.DELETE("/:id", aiAgentHandler.DeleteAgent)
-			aiAgents.GET("/:id/runtime-profiles", aiAgentHandler.ListRuntimeProfiles)
-			aiAgents.POST("/:id/runtime-profiles", aiAgentHandler.CreateRuntimeProfile)
-			aiAgents.PUT("/:id/runtime-profiles/:profile_id", aiAgentHandler.UpdateRuntimeProfile)
-			aiAgents.DELETE("/:id/runtime-profiles/:profile_id", aiAgentHandler.DeleteRuntimeProfile)
+		}
+
+		aiRuntimeProfiles := api.Group("/ai/runtime-profiles")
+		aiRuntimeProfiles.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		{
+			aiAgentHandler := handlers.NewAIAgentHandler()
+			aiRuntimeProfiles.GET("", aiAgentHandler.ListRuntimeProfiles)
+			aiRuntimeProfiles.POST("", aiAgentHandler.CreateRuntimeProfile)
+			aiRuntimeProfiles.PUT("/:profile_id", aiAgentHandler.UpdateRuntimeProfile)
+			aiRuntimeProfiles.DELETE("/:profile_id", aiAgentHandler.DeleteRuntimeProfile)
 		}
 
 		deployments := api.Group("/deployments")

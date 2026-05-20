@@ -164,6 +164,42 @@ test('pipeline design tab fills remaining detail area instead of using viewport-
   assert.doesNotMatch(designSource, /\.pipeline-design-container\s*\{[\s\S]*height: calc\(100vh - 232px\);/)
 })
 
+test('pipeline detail data tabs keep headers fixed and scroll inside panel content', async () => {
+  const source = await readView('detail.vue')
+
+  assert.match(source, /v-show="activeTab === 'history'" class="tab-panel history-panel">[\s\S]*class="panel-header"[\s\S]*class="history-list"/)
+  assert.match(source, /\.history-panel\s*\{[\s\S]*display: flex;/)
+  assert.match(source, /\.history-panel\s*\{[\s\S]*flex-direction: column;/)
+  assert.match(source, /\.history-panel\s*\{[\s\S]*min-height: 0;/)
+  assert.match(source, /\.history-list\s*\{[\s\S]*flex: 1;/)
+  assert.match(source, /\.history-list\s*\{[\s\S]*min-height: 0;/)
+  assert.match(source, /\.history-list\s*\{[\s\S]*overflow-y: auto;/)
+
+  assert.match(source, /v-show="activeTab === 'execution'" class="tab-panel execution-panel"[\s\S]*class="panel-header"[\s\S]*class="execution-content"/)
+  assert.match(source, /\.execution-panel\s*\{[\s\S]*display: flex;/)
+  assert.match(source, /\.execution-panel\s*\{[\s\S]*flex-direction: column;/)
+  assert.match(source, /\.execution-panel\s*\{[\s\S]*min-height: 0;/)
+  assert.match(source, /\.execution-content\s*\{[\s\S]*flex: 1;/)
+  assert.match(source, /\.execution-content\s*\{[\s\S]*min-height: 0;/)
+  assert.match(source, /\.execution-content\s*\{[\s\S]*overflow-y: auto;/)
+
+  assert.match(source, /v-show="activeTab === 'statistics'" class="tab-panel statistics-panel">[\s\S]*class="panel-header"[\s\S]*class="statistics-content"/)
+  assert.match(source, /\.statistics-panel\s*\{[\s\S]*display: flex;/)
+  assert.match(source, /\.statistics-panel\s*\{[\s\S]*flex-direction: column;/)
+  assert.match(source, /\.statistics-panel\s*\{[\s\S]*min-height: 0;/)
+  assert.match(source, /\.statistics-content\s*\{[\s\S]*flex: 1;/)
+  assert.match(source, /\.statistics-content\s*\{[\s\S]*min-height: 0;/)
+  assert.match(source, /\.statistics-content\s*\{[\s\S]*overflow-y: auto;/)
+
+  assert.match(source, /v-show="activeTab === 'settings'" class="tab-panel settings-panel">[\s\S]*class="panel-header"[\s\S]*class="settings-content"/)
+  assert.match(source, /\.settings-panel\s*\{[\s\S]*display: flex;/)
+  assert.match(source, /\.settings-panel\s*\{[\s\S]*flex-direction: column;/)
+  assert.match(source, /\.settings-panel\s*\{[\s\S]*min-height: 0;/)
+  assert.match(source, /\.settings-content\s*\{[\s\S]*flex: 1;/)
+  assert.match(source, /\.settings-content\s*\{[\s\S]*min-height: 0;/)
+  assert.match(source, /\.settings-content\s*\{[\s\S]*overflow-y: auto;/)
+})
+
 test('pipeline design nodes always initialize with explicit 90px height', async () => {
   const source = await readView('designTab.vue')
 

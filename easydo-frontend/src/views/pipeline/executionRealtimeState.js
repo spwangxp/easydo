@@ -34,7 +34,7 @@ export const getTaskOutputDisplayKind = (task = {}) => {
       return 'mr_quality_check'
     }
     if (task?.outputs?.defect_count !== undefined || task?.outputs?.defects !== undefined || task?.outputs?.suggestions !== undefined) {
-      return 'requirement_defect_assistant'
+      return 'requirement_defect_check'
     }
   }
   return ''

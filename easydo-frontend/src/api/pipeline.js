@@ -120,6 +120,14 @@ export function updatePipelineTriggers(id, data) {
   })
 }
 
+export function previewPipelineWebhookRuntimeMappings(id, data) {
+  return request({
+    url: `/pipelines/${id}/triggers/webhook/preview`,
+    method: 'post',
+    data
+  })
+}
+
 export function getPipelineTestReports(id, params) {
   return request({
     url: `/pipelines/${id}/test-reports`,

@@ -1,0 +1,70 @@
+ALTER TABLE `ai_agents`
+  ADD UNIQUE KEY `uk_ai_agents_id_workspace` (`id`,`workspace_id`);
+
+CREATE TABLE `ai_scenes` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `created_at` datetime(3) NOT NULL,
+  `updated_at` datetime(3) NOT NULL,
+  `workspace_id` bigint unsigned NOT NULL,
+  `scene_type` varchar(64) NOT NULL,
+  `code` varchar(128) NOT NULL,
+  `name` varchar(128) NOT NULL,
+  `description` text,
+  `main_agent_id` bigint unsigned DEFAULT NULL,
+  `context_provider` varchar(128) DEFAULT NULL,
+  `enabled` tinyint(1) NOT NULL DEFAULT '1',
+  `display_name_override` varchar(128) DEFAULT NULL,
+  `intro_message_override` text,
+  `metadata_json` longtext,
+  `created_by` bigint unsigned NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_scenes_workspace_code` (`workspace_id`,`code`),
+  UNIQUE KEY `uk_ai_scenes_id_workspace` (`id`,`workspace_id`),
+  KEY `idx_ai_scenes_scene_type` (`scene_type`),
+  KEY `idx_ai_scenes_main_agent_workspace` (`main_agent_id`,`workspace_id`),
+  KEY `idx_ai_scenes_enabled` (`enabled`),
+  KEY `idx_ai_scenes_created_by` (`created_by`),
+  CONSTRAINT `fk_ai_scenes_workspace` FOREIGN KEY (`workspace_id`) REFERENCES `workspaces` (`id`),
+  CONSTRAINT `fk_ai_scenes_main_agent_workspace` FOREIGN KEY (`main_agent_id`,`workspace_id`) REFERENCES `ai_agents` (`id`,`workspace_id`),
+  CONSTRAINT `fk_ai_scenes_creator` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+ALTER TABLE `ai_sessions`
+  ADD COLUMN `scene_id` bigint unsigned DEFAULT NULL AFTER `workspace_id`,
+  ADD COLUMN `parent_session_id` bigint unsigned DEFAULT NULL AFTER `scene_id`,
+  ADD COLUMN `root_session_id` bigint unsigned DEFAULT NULL AFTER `parent_session_id`,
+  ADD COLUMN `context_snapshot_json` longtext AFTER `request_json`,
+  ADD COLUMN `memory_snapshot_json` longtext AFTER `context_snapshot_json`,
+  ADD COLUMN `metadata_json` longtext AFTER `memory_snapshot_json`,
+  ADD UNIQUE KEY `uk_ai_sessions_id_workspace` (`id`,`workspace_id`),
+  ADD KEY `idx_ai_sessions_scene_workspace` (`scene_id`,`workspace_id`),
+  ADD KEY `idx_ai_sessions_parent_workspace` (`parent_session_id`,`workspace_id`),
+  ADD KEY `idx_ai_sessions_root_workspace` (`root_session_id`,`workspace_id`),
+  ADD CONSTRAINT `fk_ai_sessions_scene_workspace` FOREIGN KEY (`scene_id`,`workspace_id`) REFERENCES `ai_scenes` (`id`,`workspace_id`),
+  ADD CONSTRAINT `fk_ai_sessions_parent_session_workspace` FOREIGN KEY (`parent_session_id`,`workspace_id`) REFERENCES `ai_sessions` (`id`,`workspace_id`),
+  ADD CONSTRAINT `fk_ai_sessions_root_session_workspace` FOREIGN KEY (`root_session_id`,`workspace_id`) REFERENCES `ai_sessions` (`id`,`workspace_id`);
+
+CREATE TABLE `ai_session_turns` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `created_at` datetime(3) NOT NULL,
+  `updated_at` datetime(3) NOT NULL,
+  `session_id` bigint unsigned NOT NULL,
+  `turn_seq` int NOT NULL,
+  `turn_type` varchar(64) NOT NULL,
+  `role` varchar(32) NOT NULL DEFAULT 'system',
+  `status` varchar(32) NOT NULL DEFAULT 'completed',
+  `input_json` longtext,
+  `output_json` longtext,
+  `error_msg` text,
+  `metadata_json` longtext,
+  `started_at` bigint DEFAULT NULL,
+  `completed_at` bigint DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_session_turns_session_seq` (`session_id`,`turn_seq`),
+  KEY `idx_ai_session_turns_turn_type` (`turn_type`),
+  KEY `idx_ai_session_turns_role` (`role`),
+  KEY `idx_ai_session_turns_status` (`status`),
+  KEY `idx_ai_session_turns_started_at` (`started_at`),
+  KEY `idx_ai_session_turns_completed_at` (`completed_at`),
+  CONSTRAINT `fk_ai_session_turns_session` FOREIGN KEY (`session_id`) REFERENCES `ai_sessions` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

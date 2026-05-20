@@ -41,6 +41,31 @@ test('ai store uses shared header actions component', async () => {
   assert.doesNotMatch(source, /<div class="store-tabs-actions">/)
 })
 
+test('ai store runtime usage button navigates to workspace governance runtime tab', async () => {
+  const source = await readViewSource()
+
+  assert.match(source, /@click\.stop="openRuntimeProfile\(row\)"/)
+  assert.match(source, /router\.push\(\{\s*path:\s*'\/workspace-governance',\s*query:\s*\{ tab:\s*'runtime-profiles' \}\s*\}\)/)
+})
+
+test('ai store removes binding capabilities json from provider binding flow', async () => {
+  const source = await readViewSource()
+
+  assert.doesNotMatch(source, /Capabilities JSON/)
+  assert.doesNotMatch(source, /capabilities_json:/)
+  assert.doesNotMatch(source, /providerForm\.capabilitiesJSON/)
+  assert.match(source, /Binding Settings JSON/)
+  assert.match(source, /Binding Metadata JSON/)
+  assert.match(source, /const providerHeaders = providerForm\.headersJSON\.trim\(\) \? JSON\.parse\(providerForm\.headersJSON\) : \{\}/)
+  assert.match(source, /const providerSettings = providerForm\.settingsJSON\.trim\(\) \? JSON\.parse\(providerForm\.settingsJSON\) : \{\}/)
+  assert.match(source, /const bindingSettings = providerForm\.bindingSettingsJSON\.trim\(\) \? JSON\.parse\(providerForm\.bindingSettingsJSON\) : \{\}/)
+  assert.match(source, /const bindingMetadata = providerForm\.bindingMetadataJSON\.trim\(\) \? JSON\.parse\(providerForm\.bindingMetadataJSON\) : \{\}/)
+  assert.match(source, /headers_json: providerHeaders/)
+  assert.match(source, /settings_json: providerSettings/)
+  assert.match(source, /settings_json: bindingSettings/)
+  assert.match(source, /metadata_json: bindingMetadata/)
+})
+
 test('ai store imports only api functions exported by store api module', async () => {
   const [viewSource, apiSource] = await Promise.all([
     readViewSource(),
@@ -58,6 +83,19 @@ test('ai store imports only api functions exported by store api module', async (
   for (const name of importedNames) {
     assert.match(apiSource, new RegExp(`export\\s+(?:async\\s+)?function\\s+${name}\\s*\\(`), `expected ${name} to be exported from src/api/store.js`)
   }
+})
+
+test('store api reuses workspace ai api implementations instead of duplicating routes', async () => {
+  const apiSource = await readFile(join(currentDir, '../../api/store.js'), 'utf8')
+
+  assert.match(apiSource, /from '\.\/agent'/)
+  assert.match(apiSource, /export function getAIModelCatalog\(params\) \{\s*return getWorkspaceAIModelCatalog\(params\)\s*\}/)
+  assert.match(apiSource, /export function getAIAgents\(\) \{\s*return getWorkspaceAIAgents\(\)\s*\}/)
+  assert.match(apiSource, /export function createAIAgent\(data\) \{\s*return createWorkspaceAIAgent\(data\)\s*\}/)
+  assert.match(apiSource, /export function getAIRuntimeProfiles\(\) \{\s*return getWorkspaceAIRuntimeProfiles\(\)\s*\}/)
+  assert.match(apiSource, /export function createAIRuntimeProfile\(data\) \{\s*return createWorkspaceAIRuntimeProfile\(data\)\s*\}/)
+  assert.doesNotMatch(apiSource, /url:\s*'\/ai\/agents'/)
+  assert.doesNotMatch(apiSource, /url:\s*'\/ai\/runtime-profiles'/)
 })
 
 test('ai store deploy dialog wires gpu estimate section', async () => {
@@ -130,6 +168,76 @@ test('ai store wires resource refresh apis for gpu polling flow', async () => {
   assert.match(source, /refreshResourceBaseInfo/)
   assert.match(source, /refreshResourceBaseInfo\s*\(/)
   assert.match(source, /getResourceList\s*\(/)
+})
+
+test('ai store derives runtime usage rows from agents that reference a runtime profile', async () => {
+  const { buildModelRows } = await import('./aiStoreConfig.js')
+
+  const rows = buildModelRows({
+    models: [{ id: 101, name: 'Qwen 3' }],
+    providers: [],
+    runtimeProfiles: [{ id: 301, name: 'Workspace Default', model_id: 101, status: 'active', binding_priority_json: '[{"binding_id":1}]' }],
+    agents: [
+      { id: 201, name: 'Page Copilot', runtime_profile_id: 301 },
+      { id: 202, name: 'Pipeline Reviewer', runtime_profile_id: 301 }
+    ],
+    deployments: []
+  })
+
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].runtimeCount, 2)
+  assert.deepEqual(rows[0].runtimeUsage.map((item) => item.agent_name), ['Page Copilot', 'Pipeline Reviewer'])
+  assert.deepEqual(rows[0].runtimeUsage.map((item) => item.runtime_name), ['Workspace Default', 'Workspace Default'])
+})
+
+test('ai store keeps unbound runtime profiles visible under their model', async () => {
+  const { buildModelRows } = await import('./aiStoreConfig.js')
+
+  const rows = buildModelRows({
+    models: [{ id: 101, name: 'Qwen 3' }],
+    providers: [],
+    runtimeProfiles: [{ id: 302, name: 'Review Fallback', model_id: 101, status: 'draft', binding_priority_json: '[{"binding_id":2}]' }],
+    agents: [],
+    deployments: []
+  })
+
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].runtimeCount, 1)
+  assert.equal(rows[0].runtimeUsage[0].runtime_name, 'Review Fallback')
+  assert.equal(rows[0].runtimeUsage[0].agent_name, '未绑定 Agent')
+})
+
+test('ai store normalizes runtime binding priority text from object payloads', async () => {
+  const { buildModelRows } = await import('./aiStoreConfig.js')
+
+  const rows = buildModelRows({
+    models: [{ id: '101', name: 'Qwen 3' }],
+    providers: [],
+    runtimeProfiles: [{ id: '303', name: 'JSON Runtime', model_id: '101', status: 'active', binding_priority_json: [{ binding_id: 3, priority: 1 }] }],
+    agents: [{ id: '203', name: 'Page Copilot', runtime_profile_id: '303' }],
+    deployments: []
+  })
+
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].runtimeUsage[0].binding_priority_text, '[{"binding_id":3,"priority":1}]')
+  assert.equal(rows[0].runtimeUsage[0].agent_name, 'Page Copilot')
+})
+
+test('ai store links runtime profiles from nested agent runtime profile relation', async () => {
+  const { buildModelRows } = await import('./aiStoreConfig.js')
+
+  const rows = buildModelRows({
+    models: [{ id: 101, name: 'Qwen 3' }],
+    providers: [],
+    runtimeProfiles: [{ id: 304, name: 'Nested Runtime', model_id: 101, status: 'active', binding_priority_json: '[]' }],
+    agents: [{ id: 204, name: 'Nested Agent', runtime_profile: { id: 304 } }],
+    deployments: []
+  })
+
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].runtimeCount, 1)
+  assert.equal(rows[0].runtimeUsage[0].agent_name, 'Nested Agent')
+  assert.equal(rows[0].runtimeUsage[0].runtime_name, 'Nested Runtime')
 })
 
 test('ai store synchronizes selected gpu devices into deploy parameters', async () => {

@@ -13,7 +13,10 @@ import (
 
 type aiTaskPayload struct {
 	AISessionID      uint64                 `json:"ai_session_id"`
-	Scenario         string                 `json:"scenario"`
+	SceneID          uint64                 `json:"scene_id"`
+	SceneCode        string                 `json:"scene_code"`
+	SceneType        string                 `json:"scene_type"`
+	TaskType         string                 `json:"task_type"`
 	RuntimeProfileID uint64                 `json:"runtime_profile_id"`
 	ProviderID       uint64                 `json:"provider_id"`
 	ModelID          uint64                 `json:"model_id"`
@@ -37,17 +40,45 @@ func IsAITaskPayload(taskType string, params map[string]interface{}) bool {
 		if strings.TrimSpace(fmt.Sprint(params["mode"])) == "ai-task" {
 			return true
 		}
-		scenario := strings.TrimSpace(fmt.Sprint(params["scenario"]))
-		if scenario == "mr_quality_check" || scenario == "requirement_defect_assistant" {
+		if isKnownAIPipelineTaskType(strings.TrimSpace(fmt.Sprint(params["task_type"]))) {
+			return true
+		}
+		if isKnownAIPipelineSceneCode(strings.TrimSpace(fmt.Sprint(params["scene_code"]))) {
 			return true
 		}
 	}
+	return isKnownAIPipelineTaskType(taskType)
+}
+
+func isKnownAIPipelineTaskType(taskType string) bool {
 	switch strings.TrimSpace(taskType) {
-	case "mr_quality_check", "requirement_defect_assistant":
+	case "mr_quality_check", "requirement_defect_check":
 		return true
 	default:
 		return false
 	}
+}
+
+func isKnownAIPipelineSceneCode(sceneCode string) bool {
+	return extractPipelineTaskTypeFromSceneCode(sceneCode) != ""
+}
+
+func extractPipelineTaskTypeFromSceneCode(sceneCode string) string {
+	parts := strings.Split(strings.TrimSpace(sceneCode), ":")
+	if len(parts) < 2 || parts[0] != "pipeline_task" {
+		return ""
+	}
+	if isKnownAIPipelineTaskType(parts[1]) {
+		return parts[1]
+	}
+	return ""
+}
+
+func resolveAITaskSemanticKey(payload aiTaskPayload) string {
+	if taskType := extractPipelineTaskTypeFromSceneCode(payload.SceneCode); taskType != "" {
+		return taskType
+	}
+	return strings.TrimSpace(payload.TaskType)
 }
 
 func isAITaskParams(params TaskParams) bool {
@@ -57,11 +88,11 @@ func isAITaskParams(params TaskParams) bool {
 func buildAITaskPrompt(payload aiTaskPayload) string {
 	requestJSON, _ := sonic.MarshalString(payload.Request)
 	languageInstruction := buildAIOutputLanguageInstruction(payload.Request)
-	switch strings.TrimSpace(payload.Scenario) {
+	switch resolveAITaskSemanticKey(payload) {
 	case "mr_quality_check":
-		return "You are an MR quality review assistant. Analyze the provided merge request context and return JSON only with fields: summary(string), quality_score(number 0-100), issues(array of {severity,title,description,suggestion}), issues_count(number)." + languageInstruction + " Input: " + requestJSON
-	case "requirement_defect_assistant":
-		return "You are a requirement defect analysis assistant. Analyze the provided requirement context and return JSON only with fields: summary(string), defects(array of {severity,title,description,suggestion}), defect_count(number), suggestions(array of string)." + languageInstruction + " Input: " + requestJSON
+		return "You are an MR quality review agent. Analyze the provided merge request context and return JSON only with fields: summary(string), quality_score(number 0-100), issues(array of {severity,title,description,suggestion}), issues_count(number)." + languageInstruction + " Input: " + requestJSON
+	case "requirement_defect_check":
+		return "You are a requirement defect analysis agent. Analyze the provided requirement context and return JSON only with fields: summary(string), defects(array of {severity,title,description,suggestion}), defect_count(number), suggestions(array of string)." + languageInstruction + " Input: " + requestJSON
 	default:
 		return "Return JSON only for this AI task request." + languageInstruction + " Input: " + requestJSON
 	}
@@ -87,7 +118,7 @@ func fallbackAITaskStructuredResult(payload aiTaskPayload) aiTaskStructuredResul
 	if shortSummary == "" {
 		shortSummary = "No input text provided"
 	}
-	switch payload.Scenario {
+	switch resolveAITaskSemanticKey(payload) {
 	case "mr_quality_check":
 		issues := []map[string]interface{}{}
 		if strings.Contains(strings.ToLower(inputText), "todo") {
@@ -104,7 +135,7 @@ func fallbackAITaskStructuredResult(payload aiTaskPayload) aiTaskStructuredResul
 			Issues:       issues,
 			IssuesCount:  len(issues),
 		}
-	case "requirement_defect_assistant":
+	case "requirement_defect_check":
 		defects := []map[string]interface{}{}
 		if !strings.ContainsAny(inputText, "0123456789") {
 			defects = append(defects, map[string]interface{}{
@@ -140,8 +171,8 @@ func (e *Executor) executeAITask(ctx context.Context, params TaskParams, callbac
 			_ = sonic.Unmarshal(raw, &payload)
 		}
 	}
-	if strings.TrimSpace(payload.Scenario) == "" {
-		payload.Scenario = strings.TrimSpace(params.TaskType)
+	if strings.TrimSpace(payload.TaskType) == "" {
+		payload.TaskType = strings.TrimSpace(params.TaskType)
 	}
 	if payload.Request == nil {
 		payload.Request = make(map[string]interface{})
@@ -151,7 +182,7 @@ func (e *Executor) executeAITask(ctx context.Context, params TaskParams, callbac
 	}
 	prompt := buildAITaskPrompt(payload)
 	if callback != nil {
-		callback(params.TaskID, "info", fmt.Sprintf("starting ai-task scenario=%s ai_session_id=%d", payload.Scenario, payload.AISessionID), "system", 1)
+		callback(params.TaskID, "info", fmt.Sprintf("starting ai-task task_type=%s ai_session_id=%d", payload.TaskType, payload.AISessionID), "system", 1)
 	}
 
 	structured := fallbackAITaskStructuredResult(payload)

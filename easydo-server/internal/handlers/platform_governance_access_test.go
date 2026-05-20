@@ -122,8 +122,7 @@ func TestWorkspaceAgentMutationRequiresNormalWorkspaceGovernance(t *testing.T) {
 	}
 
 	c, w := newAIManagementTestContext(t, http.MethodPost, "/api/ai/agents", admin.ID, admin.Role, workspace.ID, models.WorkspaceRoleOwner, models.WorkspaceKindAdmin, map[string]any{
-		"name":     "blocked-agent",
-		"scenario": "chat",
+		"name": "blocked-agent",
 	})
 	c.Request.URL.RawQuery = "workspace_id=" + strconv.FormatUint(workspace.ID, 10)
 
@@ -158,8 +157,7 @@ func TestWorkspaceAgentMutationRevalidatesWorkspaceRoleFromDB(t *testing.T) {
 	}
 
 	c, w := newAIManagementTestContext(t, http.MethodPost, "/api/ai/agents", maintainer.ID, maintainer.Role, workspace.ID, models.WorkspaceRoleOwner, models.WorkspaceKindNormal, map[string]any{
-		"name":     "spoofed-agent",
-		"scenario": "chat",
+		"name": "spoofed-agent",
 	})
 	c.Request.URL.RawQuery = "workspace_id=" + strconv.FormatUint(workspace.ID, 10)
 
@@ -186,16 +184,11 @@ func TestRuntimeProfileMutationRequiresNormalWorkspaceGovernance(t *testing.T) {
 	if err := db.Create(&model).Error; err != nil {
 		t.Fatalf("create model failed: %v", err)
 	}
-	agent := models.AIAgent{WorkspaceID: workspace.ID, Name: "seed-agent", Scenario: "chat", ScopeType: models.AgentScopeWorkspace, Status: models.AIAgentStatusDraft, CreatedBy: admin.ID}
-	if err := db.Create(&agent).Error; err != nil {
-		t.Fatalf("create agent failed: %v", err)
-	}
 
-	c, w := newAIManagementTestContext(t, http.MethodPost, "/api/ai/agents/1/runtime-profiles", admin.ID, admin.Role, workspace.ID, models.WorkspaceRoleOwner, models.WorkspaceKindAdmin, map[string]any{
+	c, w := newAIManagementTestContext(t, http.MethodPost, "/api/ai/runtime-profiles", admin.ID, admin.Role, workspace.ID, models.WorkspaceRoleOwner, models.WorkspaceKindAdmin, map[string]any{
 		"name":     "blocked-profile",
 		"model_id": model.ID,
 	})
-	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(agent.ID, 10)}}
 	c.Request.URL.RawQuery = "workspace_id=" + strconv.FormatUint(workspace.ID, 10)
 
 	h.CreateRuntimeProfile(c)

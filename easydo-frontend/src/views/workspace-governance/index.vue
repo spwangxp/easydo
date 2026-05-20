@@ -26,15 +26,19 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import MemberManagement from './components/MemberManagement.vue'
 import InvitationManagement from './components/InvitationManagement.vue'
 import WorkspaceAgentManagement from './components/WorkspaceAgentManagement.vue'
 import RuntimeProfileManagement from './components/RuntimeProfileManagement.vue'
 
+const route = useRoute()
+const router = useRouter()
 const userStore = useUserStore()
-const activeTab = ref('members')
+const governanceTabs = ['members', 'invitations', 'agents', 'runtime-profiles']
+const activeTab = ref(normalizeGovernanceTab(route.query.tab))
 
 const roleText = (role) => {
   const map = {
@@ -44,6 +48,35 @@ const roleText = (role) => {
     owner: 'Owner'
   }
   return map[role] || role || '-'
+}
+
+watch(() => route.query.tab, (tab) => {
+  const nextTab = normalizeGovernanceTab(tab)
+  if (activeTab.value !== nextTab) {
+    activeTab.value = nextTab
+  }
+}, { immediate: true })
+
+watch(activeTab, (tab) => {
+  const nextTab = normalizeGovernanceTab(tab)
+  const currentTab = normalizeGovernanceTab(route.query.tab)
+  const hasExplicitTab = Array.isArray(route.query.tab) ? route.query.tab.length > 0 : route.query.tab != null
+  if (currentTab === nextTab && (nextTab !== 'members' || !hasExplicitTab)) {
+    return
+  }
+  const query = { ...route.query }
+  if (nextTab === 'members') {
+    delete query.tab
+  } else {
+    query.tab = nextTab
+  }
+  router.replace({ query })
+})
+
+function normalizeGovernanceTab(tab) {
+  const raw = Array.isArray(tab) ? tab[0] : tab
+  const normalized = String(raw || '').trim()
+  return governanceTabs.includes(normalized) ? normalized : 'members'
 }
 </script>
 

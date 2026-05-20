@@ -146,5 +146,5 @@ test('getTaskOutputDisplayKind infers mr quality kind from structured outputs', 
 test('getTaskOutputDisplayKind infers requirement defect kind from structured outputs', () => {
   assert.equal(getTaskOutputDisplayKind({
     outputs: { summary: 'ok', defect_count: 2, suggestions: ['补充验收标准'] }
-  }), 'requirement_defect_assistant')
+  }), 'requirement_defect_check')
 })

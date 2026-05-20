@@ -166,7 +166,7 @@ func (h *PipelineHandler) validatePipelineCredentialBindings(config *PipelineCon
 		}
 
 		for _, slot := range def.CredentialSlots {
-			var bindingRaw interface{}
+			var bindingRaw any
 			if rawBindings != nil {
 				bindingRaw = rawBindings[slot.Slot]
 			}
@@ -322,7 +322,7 @@ func normalizePipelineConfigStructure(config *PipelineConfig) {
 		config.Version = firstNonEmptyTaskValue(toString(config.Metadata["version"]), "2.0")
 	}
 	if config.Metadata == nil {
-		config.Metadata = map[string]interface{}{}
+		config.Metadata = map[string]any{}
 	}
 	if config.Metadata["version"] == nil {
 		config.Metadata["version"] = config.Version
@@ -344,7 +344,7 @@ func normalizePipelineConfigStructure(config *PipelineConfig) {
 			node.TaskVersion = 1
 		}
 		if node.Metadata == nil {
-			node.Metadata = map[string]interface{}{}
+			node.Metadata = map[string]any{}
 		}
 		if node.X == nil {
 			if x, ok := node.Metadata["x"]; ok {
@@ -432,44 +432,91 @@ func pipelineDefinitionPayload(pipeline models.Pipeline) string {
 }
 
 func buildPipelineTriggerDefinitions(trigger *models.PipelineTrigger) []map[string]interface{} {
-	triggers := []map[string]interface{}{
+	webhookEnabled := false
+	provider := "gitlab"
+	pushEnabled := false
+	tagEnabled := false
+	mergeRequestEnabled := false
+	pushBranchFilters := ""
+	tagFilters := ""
+	mergeRequestSourceBranchFilters := ""
+	mergeRequestTargetBranchFilters := ""
+	webhookRuntimeInputMappings := ""
+	webhookConfigStatus := "valid"
+	webhookConfigInvalidReason := ""
+	scheduleEnabled := false
+	cronExpression := ""
+	timezone := "UTC"
+	if trigger != nil {
+		webhookEnabled = trigger.WebhookEnabled
+		provider = defaultIfEmpty(trigger.Provider, "gitlab")
+		pushEnabled = trigger.PushEnabled
+		tagEnabled = trigger.TagEnabled
+		mergeRequestEnabled = trigger.MergeRequestEnabled
+		pushBranchFilters = trigger.PushBranchFilters
+		tagFilters = trigger.TagFilters
+		mergeRequestSourceBranchFilters = trigger.MergeRequestSourceBranchFilters
+		mergeRequestTargetBranchFilters = trigger.MergeRequestTargetBranchFilters
+		webhookRuntimeInputMappings = trigger.WebhookRuntimeInputMappings
+		webhookConfigStatus = defaultIfEmpty(trigger.WebhookConfigStatus, "valid")
+		webhookConfigInvalidReason = trigger.WebhookConfigInvalidReason
+		scheduleEnabled = trigger.ScheduleEnabled
+		cronExpression = trigger.CronExpression
+		timezone = defaultIfEmpty(trigger.Timezone, "UTC")
+	}
+	return []map[string]interface{}{
 		{"type": "manual", "enabled": true},
+		{
+			"type":                                "webhook",
+			"enabled":                             webhookEnabled,
+			"provider":                            provider,
+			"push_enabled":                        pushEnabled,
+			"tag_enabled":                         tagEnabled,
+			"merge_request_enabled":               mergeRequestEnabled,
+			"push_branch_filters":                 pushBranchFilters,
+			"tag_filters":                         tagFilters,
+			"merge_request_source_branch_filters": mergeRequestSourceBranchFilters,
+			"merge_request_target_branch_filters": mergeRequestTargetBranchFilters,
+			"webhook_enabled":                     webhookEnabled,
+			"webhook_runtime_input_mappings":      webhookRuntimeInputMappings,
+			"webhook_config_status":               webhookConfigStatus,
+			"webhook_config_invalid_reason":       webhookConfigInvalidReason,
+		},
+		{
+			"type":            "schedule",
+			"enabled":         scheduleEnabled,
+			"cron_expression": cronExpression,
+			"timezone":        timezone,
+		},
 	}
-	if trigger == nil {
-		return triggers
-	}
-	triggers = append(triggers, map[string]interface{}{
-		"type":                                "webhook",
-		"enabled":                             trigger.WebhookEnabled,
-		"provider":                            defaultIfEmpty(trigger.Provider, "gitlab"),
-		"push_enabled":                        trigger.PushEnabled,
-		"tag_enabled":                         trigger.TagEnabled,
-		"merge_request_enabled":               trigger.MergeRequestEnabled,
-		"push_branch_filters":                 trigger.PushBranchFilters,
-		"tag_filters":                         trigger.TagFilters,
-		"merge_request_source_branch_filters": trigger.MergeRequestSourceBranchFilters,
-		"merge_request_target_branch_filters": trigger.MergeRequestTargetBranchFilters,
-		"webhook_enabled":                     trigger.WebhookEnabled,
-	})
-	triggers = append(triggers, map[string]interface{}{
-		"type":            "schedule",
-		"enabled":         trigger.ScheduleEnabled,
-		"cron_expression": trigger.CronExpression,
-		"timezone":        defaultIfEmpty(trigger.Timezone, "UTC"),
-	})
-	return triggers
 }
 
 func (h *PipelineHandler) syncPipelineDefinitionTriggers(db *gorm.DB, pipelineID uint64, config *PipelineConfig) error {
-	if db == nil || pipelineID == 0 || config == nil {
+	if config == nil {
+		return nil
+	}
+	if db == nil || pipelineID == 0 {
+		config.Triggers = buildPipelineTriggerDefinitions(nil)
 		return nil
 	}
 	var trigger models.PipelineTrigger
 	if err := db.Where("pipeline_id = ?", pipelineID).First(&trigger).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			config.Triggers = buildPipelineTriggerDefinitions(nil)
 			return nil
 		}
 		return err
+	}
+	status, reason := webhookTriggerValidationStateForConfig(*config, trigger.WebhookRuntimeInputMappings)
+	if status != trigger.WebhookConfigStatus || reason != trigger.WebhookConfigInvalidReason {
+		if err := db.Model(&models.PipelineTrigger{}).Where("id = ?", trigger.ID).Updates(map[string]interface{}{
+			"webhook_config_status":         status,
+			"webhook_config_invalid_reason": reason,
+		}).Error; err != nil {
+			return err
+		}
+		trigger.WebhookConfigStatus = status
+		trigger.WebhookConfigInvalidReason = reason
 	}
 	config.Triggers = buildPipelineTriggerDefinitions(&trigger)
 	return nil
@@ -623,14 +670,14 @@ func regularPipelineRunsQuery(db *gorm.DB) *gorm.DB {
 }
 
 type pipelineStatisticsResponse struct {
-	TotalRuns      int64                              `json:"total_runs"`
-	SuccessfulRuns int64                              `json:"successful_runs"`
-	FailedRuns     int64                              `json:"failed_runs"`
-	SuccessRate    float64                            `json:"success_rate"`
-	AvgDuration    float64                            `json:"avg_duration"`
-	DailyRuns      []DailyRun                         `json:"daily_runs"`
-	Distribution   []pipelineStatisticsStatusBucket   `json:"distribution"`
-	RecentFailures []pipelineStatisticsRecentFailure  `json:"recent_failures"`
+	TotalRuns      int64                             `json:"total_runs"`
+	SuccessfulRuns int64                             `json:"successful_runs"`
+	FailedRuns     int64                             `json:"failed_runs"`
+	SuccessRate    float64                           `json:"success_rate"`
+	AvgDuration    float64                           `json:"avg_duration"`
+	DailyRuns      []DailyRun                        `json:"daily_runs"`
+	Distribution   []pipelineStatisticsStatusBucket  `json:"distribution"`
+	RecentFailures []pipelineStatisticsRecentFailure `json:"recent_failures"`
 }
 
 type pipelineStatisticsStatusBucket struct {
@@ -815,7 +862,7 @@ func (h *PipelineHandler) UpdatePipeline(c *gin.Context) {
 	}
 
 	// 逐个更新字段
-	updates := make(map[string]interface{})
+	updates := make(map[string]any)
 	if req.Name != "" {
 		updates["name"] = req.Name
 	}
@@ -893,8 +940,8 @@ func (h *PipelineHandler) RunPipeline(c *gin.Context) {
 	id := c.Param("id")
 	workspaceID := c.GetUint64("workspace_id")
 	type pipelineRunRequest struct {
-		Inputs  map[string]map[string]interface{} `json:"inputs"`
-		Options map[string]interface{}            `json:"options"`
+		Inputs  map[string]map[string]any `json:"inputs"`
+		Options map[string]any            `json:"options"`
 	}
 
 	var pipeline models.Pipeline
@@ -1074,7 +1121,7 @@ func (h *PipelineHandler) CancelPipelineRun(c *gin.Context) {
 		}
 
 		runStatus := models.PipelineRunStatusCancelled
-		runUpdates := map[string]interface{}{}
+		runUpdates := map[string]any{}
 		if len(tasksToNotify) > 0 {
 			runStatus = models.PipelineRunStatusCancelRequested
 			runUpdates["status"] = runStatus
@@ -1127,7 +1174,7 @@ func (h *PipelineHandler) CancelPipelineRun(c *gin.Context) {
 	runMessage := "流水线运行已取消"
 	if run.Status == models.PipelineRunStatusCancelRequested {
 		runMessage = "流水线取消请求已提交"
-		appendRunEvent(h.DB, runIDNum, "run_cancel_requested", map[string]interface{}{})
+		appendRunEvent(h.DB, runIDNum, "run_cancel_requested", map[string]any{})
 	}
 	syncLiveRunStateFromRun(&run)
 	syncDeploymentStateFromRun(h.DB, &run)
@@ -1194,12 +1241,12 @@ type PipelineNode struct {
 	TaskVersion        int                              `json:"task_version,omitempty"`
 	X                  *float64                         `json:"x,omitempty"`
 	Y                  *float64                         `json:"y,omitempty"`
-	Config             map[string]interface{}           `json:"config,omitempty"`
-	Params             map[string]interface{}           `json:"-"`
+	Config             map[string]any                   `json:"config,omitempty"`
+	Params             map[string]any                   `json:"-"`
 	DefinitionParams   []models.PipelineDefinitionParam `json:"-"`
 	CredentialBindings map[string]uint64                `json:"credential_bindings,omitempty"`
 	ResourceBindings   map[string]uint64                `json:"resource_bindings,omitempty"`
-	Metadata           map[string]interface{}           `json:"metadata,omitempty"`
+	Metadata           map[string]any                   `json:"metadata,omitempty"`
 	Timeout            int                              `json:"timeout"`
 	IgnoreFailure      bool                             `json:"ignore_failure"`
 }
@@ -1231,7 +1278,7 @@ func (n *PipelineNode) UnmarshalJSON(data []byte) error {
 		n.DefinitionParams = definitionParams
 		return nil
 	}
-	var legacyParams map[string]interface{}
+	var legacyParams map[string]any
 	if err := json.Unmarshal(aux.Params, &legacyParams); err == nil {
 		n.Params = legacyParams
 		return nil
@@ -1241,21 +1288,21 @@ func (n *PipelineNode) UnmarshalJSON(data []byte) error {
 
 func (n PipelineNode) MarshalJSON() ([]byte, error) {
 	aux := struct {
-		NodeID             string                 `json:"node_id"`
-		NodeName           string                 `json:"node_name,omitempty"`
-		Description        string                 `json:"description,omitempty"`
-		TaskKey            string                 `json:"task_key,omitempty"`
-		TaskVersion        int                    `json:"task_version,omitempty"`
-		Type               string                 `json:"type,omitempty"`
-		Params             interface{}            `json:"params,omitempty"`
-		Config             map[string]interface{} `json:"config,omitempty"`
-		CredentialBindings map[string]uint64      `json:"credential_bindings,omitempty"`
-		ResourceBindings   map[string]uint64      `json:"resource_bindings,omitempty"`
-		Metadata           map[string]interface{} `json:"metadata,omitempty"`
-		IgnoreFailure      bool                   `json:"ignore_failure,omitempty"`
-		Timeout            int                    `json:"timeout,omitempty"`
-		X                  *float64               `json:"x,omitempty"`
-		Y                  *float64               `json:"y,omitempty"`
+		NodeID             string            `json:"node_id"`
+		NodeName           string            `json:"node_name,omitempty"`
+		Description        string            `json:"description,omitempty"`
+		TaskKey            string            `json:"task_key,omitempty"`
+		TaskVersion        int               `json:"task_version,omitempty"`
+		Type               string            `json:"type,omitempty"`
+		Params             any               `json:"params,omitempty"`
+		Config             map[string]any    `json:"config,omitempty"`
+		CredentialBindings map[string]uint64 `json:"credential_bindings,omitempty"`
+		ResourceBindings   map[string]uint64 `json:"resource_bindings,omitempty"`
+		Metadata           map[string]any    `json:"metadata,omitempty"`
+		IgnoreFailure      bool              `json:"ignore_failure,omitempty"`
+		Timeout            int               `json:"timeout,omitempty"`
+		X                  *float64          `json:"x,omitempty"`
+		Y                  *float64          `json:"y,omitempty"`
 	}{
 		NodeID:             firstNonEmptyTaskValue(n.ID, n.NodeID),
 		NodeName:           firstNonEmptyTaskValue(n.Name, n.NodeName),
@@ -1278,7 +1325,7 @@ func (n PipelineNode) MarshalJSON() ([]byte, error) {
 		aux.Params = n.Params
 	}
 	if aux.Metadata == nil {
-		aux.Metadata = make(map[string]interface{})
+		aux.Metadata = make(map[string]any)
 	}
 	if aux.X != nil {
 		aux.Metadata["x"] = *aux.X
@@ -1290,21 +1337,21 @@ func (n PipelineNode) MarshalJSON() ([]byte, error) {
 }
 
 // getNodeConfig returns the node configuration, supporting both config and params
-func (n *PipelineNode) getNodeConfig() map[string]interface{} {
-	mergeBindings := func(cfg map[string]interface{}) map[string]interface{} {
+func (n *PipelineNode) getNodeConfig() map[string]any {
+	mergeBindings := func(cfg map[string]any) map[string]any {
 		if cfg == nil {
-			cfg = make(map[string]interface{})
+			cfg = make(map[string]any)
 		}
 		if len(n.CredentialBindings) > 0 {
-			credentials, _ := cfg["credentials"].(map[string]interface{})
+			credentials, _ := cfg["credentials"].(map[string]any)
 			if credentials == nil {
-				credentials = make(map[string]interface{}, len(n.CredentialBindings))
+				credentials = make(map[string]any, len(n.CredentialBindings))
 			}
 			for slot, credentialID := range n.CredentialBindings {
 				if credentialID == 0 {
 					continue
 				}
-				credentials[slot] = map[string]interface{}{"credential_id": credentialID}
+				credentials[slot] = map[string]any{"credential_id": credentialID}
 			}
 			if len(credentials) > 0 {
 				cfg["credentials"] = credentials
@@ -1325,7 +1372,7 @@ func (n *PipelineNode) getNodeConfig() map[string]interface{} {
 		return mergeBindings(cloneMap(n.Config))
 	}
 	if len(n.DefinitionParams) > 0 {
-		cfg := make(map[string]interface{}, len(n.DefinitionParams))
+		cfg := make(map[string]any, len(n.DefinitionParams))
 		for _, param := range n.DefinitionParams {
 			cfg[param.Key] = param.Value
 		}
@@ -1335,7 +1382,7 @@ func (n *PipelineNode) getNodeConfig() map[string]interface{} {
 	if n.Params != nil && len(n.Params) > 0 {
 		return mergeBindings(cloneMap(n.Params))
 	}
-	return mergeBindings(make(map[string]interface{}))
+	return mergeBindings(make(map[string]any))
 }
 
 // PipelineConfig represents the pipeline configuration
@@ -1343,12 +1390,12 @@ func (n *PipelineNode) getNodeConfig() map[string]interface{} {
 // - 新格式 (version: "2.0"): nodes + edges
 // - 旧格式: nodes + connections
 type PipelineConfig struct {
-	Version     string                   `json:"version"`
-	Nodes       []PipelineNode           `json:"nodes"`
-	Edges       []PipelineEdge           `json:"edges"`       // 新格式
-	Connections []PipelineConnection     `json:"connections"` // 旧格式兼容
-	Triggers    []map[string]interface{} `json:"triggers,omitempty"`
-	Metadata    map[string]interface{}   `json:"metadata,omitempty"`
+	Version     string               `json:"version"`
+	Nodes       []PipelineNode       `json:"nodes"`
+	Edges       []PipelineEdge       `json:"edges"`       // 新格式
+	Connections []PipelineConnection `json:"connections"` // 旧格式兼容
+	Triggers    []map[string]any     `json:"triggers,omitempty"`
+	Metadata    map[string]any       `json:"metadata,omitempty"`
 }
 
 // PipelineEdge represents an edge in the pipeline DAG (新格式)
@@ -1592,7 +1639,7 @@ func (h *PipelineHandler) createAllNodeTasks(pipeline models.Pipeline, run *mode
 		}
 
 		envVars := ""
-		if env, ok := nodeConfig["env"].(map[string]interface{}); ok && len(env) > 0 {
+		if env, ok := nodeConfig["env"].(map[string]any); ok && len(env) > 0 {
 			envMap := make(map[string]string)
 			for k, v := range env {
 				if s, ok := v.(string); ok {
@@ -1722,7 +1769,7 @@ func (h *PipelineHandler) selectAgentForPipeline(db *gorm.DB, workspaceID uint64
 	return selectAgentWithPipelineCapacity(db, workspaceID)
 }
 
-func resolveTaskMaxRetries(nodeConfig map[string]interface{}) int {
+func resolveTaskMaxRetries(nodeConfig map[string]any) int {
 	if nodeConfig == nil {
 		return 0
 	}
@@ -1757,7 +1804,7 @@ func createAgentTaskWithExplicitMaxRetries(db *gorm.DB, task *models.AgentTask) 
 	return nil
 }
 
-func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipeline, run *models.PipelineRun, node *PipelineNode, nodeMap map[string]*PipelineNode, resolver *VariableResolver, agentID uint64, triggerUserID uint64, triggerRole string) (bool, map[string]interface{}) {
+func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipeline, run *models.PipelineRun, node *PipelineNode, nodeMap map[string]*PipelineNode, resolver *VariableResolver, agentID uint64, triggerUserID uint64, triggerRole string) (bool, map[string]any) {
 	canonicalType, def, ok := getPipelineTaskDefinition(node.Type)
 	if !ok {
 		fmt.Printf("Unsupported task type: %s\n", node.Type)
@@ -1797,16 +1844,16 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 		if wd, ok := nodeConfig["working_dir"].(string); ok {
 			workDir = wd
 		}
-		envMap, _ := nodeConfig["env"].(map[string]interface{})
+		envMap, _ := nodeConfig["env"].(map[string]any)
 		upsertResolvedNodeSnapshot(db, run.ID, *node, models.TaskStatusRunning, resolvedInputs, buildExecutorPayload("", workDir, toString(nodeConfig["shell"]), envMap))
-		appendRunEvent(db, run.ID, "node_running", map[string]interface{}{"node_id": node.ID})
+		appendRunEvent(db, run.ID, "node_running", map[string]any{"node_id": node.ID})
 		success, errMsg := h.executeServerTask(db, run, node, canonicalType, nodeConfig, timeout)
 		if !success {
 			fmt.Printf("Server task failed: node=%s type=%s err=%s\n", node.ID, canonicalType, errMsg)
-			appendRunEvent(db, run.ID, "node_failed", map[string]interface{}{"node_id": node.ID, "error_msg": errMsg})
+			appendRunEvent(db, run.ID, "node_failed", map[string]any{"node_id": node.ID, "error_msg": errMsg})
 			return false, nil
 		}
-		appendRunEvent(db, run.ID, "node_success", map[string]interface{}{"node_id": node.ID})
+		appendRunEvent(db, run.ID, "node_success", map[string]any{"node_id": node.ID})
 		return true, nil
 	}
 
@@ -1927,7 +1974,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 		_ = db.Model(aiSession).Update("task_id", task.ID).Error
 	}
 	updateResolvedNodeAttempts(db, task)
-	appendRunEvent(db, run.ID, "node_assigned", map[string]interface{}{"node_id": node.ID, "task_id": task.ID, "agent_id": agentID})
+	appendRunEvent(db, run.ID, "node_assigned", map[string]any{"node_id": node.ID, "task_id": task.ID, "agent_id": agentID})
 
 	_ = SharedWebSocketHandler().sendTaskAssign(task)
 	return true, nil
@@ -1936,7 +1983,7 @@ func (h *PipelineHandler) executeNodeWithAgent(db *gorm.DB, pipeline models.Pipe
 // executeNode executes a single node
 // Returns (success, taskOutputs) - success indicates if execution was successful,
 // taskOutputs contains the outputs generated by the task for downstream tasks
-func (h *PipelineHandler) executeNode(db *gorm.DB, pipeline models.Pipeline, run *models.PipelineRun, node *PipelineNode, nodeMap map[string]*PipelineNode, resolver *VariableResolver) (bool, map[string]interface{}) {
+func (h *PipelineHandler) executeNode(db *gorm.DB, pipeline models.Pipeline, run *models.PipelineRun, node *PipelineNode, nodeMap map[string]*PipelineNode, resolver *VariableResolver) (bool, map[string]any) {
 	agentID := uint64(0)
 	if isAgentPipelineTaskType(node.Type) {
 		agentID = h.selectAgentForPipeline(db, pipeline.WorkspaceID)
@@ -1947,7 +1994,7 @@ func (h *PipelineHandler) executeNode(db *gorm.DB, pipeline models.Pipeline, run
 	return h.executeNodeWithAgent(db, pipeline, run, node, nodeMap, resolver, agentID, 0, "")
 }
 
-func parseCredentialID(v interface{}) (uint64, bool) {
+func parseCredentialID(v any) (uint64, bool) {
 	switch val := v.(type) {
 	case float64:
 		if val <= 0 {
@@ -1991,7 +2038,7 @@ func sanitizeEnvKey(key string) string {
 	return normalized
 }
 
-func extractCredentialIDFromBinding(raw interface{}) (uint64, bool) {
+func extractCredentialIDFromBinding(raw any) (uint64, bool) {
 	if raw == nil {
 		return 0, false
 	}
@@ -2000,7 +2047,7 @@ func extractCredentialIDFromBinding(raw interface{}) (uint64, bool) {
 		return id, true
 	}
 
-	binding, ok := raw.(map[string]interface{})
+	binding, ok := raw.(map[string]any)
 	if !ok {
 		return 0, false
 	}
@@ -2010,18 +2057,18 @@ func extractCredentialIDFromBinding(raw interface{}) (uint64, bool) {
 // expandFlatCredentialBindings converts flat keys like "credentials.registry_auth.credential_id"
 // into nested structure "credentials": {"registry_auth": {"credential_id": ...}}"
 // This is needed because some pipeline configs store credentials with flat keys.
-func expandFlatCredentialBindings(nodeConfig map[string]interface{}) map[string]interface{} {
+func expandFlatCredentialBindings(nodeConfig map[string]any) map[string]any {
 	if nodeConfig == nil {
 		return nil
 	}
 
 	// If credentials already exists as nested map, return it
-	if existing, ok := nodeConfig["credentials"].(map[string]interface{}); ok && existing != nil {
+	if existing, ok := nodeConfig["credentials"].(map[string]any); ok && existing != nil {
 		return existing
 	}
 
 	// Look for flat keys like "credentials.registry_auth.credential_id" and build nested structure
-	credentials := make(map[string]interface{})
+	credentials := make(map[string]any)
 	prefix := "credentials."
 
 	for key, value := range nodeConfig {
@@ -2045,9 +2092,9 @@ func expandFlatCredentialBindings(nodeConfig map[string]interface{}) map[string]
 		}
 
 		// Get or create the slot map
-		slotMap, ok := credentials[slotName].(map[string]interface{})
+		slotMap, ok := credentials[slotName].(map[string]any)
 		if !ok {
-			slotMap = make(map[string]interface{})
+			slotMap = make(map[string]any)
 			credentials[slotName] = slotMap
 		}
 
@@ -2070,9 +2117,9 @@ func slotEnvPrefix(slot string) string {
 	return "EASYDO_CRED_" + slotKey + "_"
 }
 
-func mergeNodeEnv(nodeConfig map[string]interface{}) map[string]interface{} {
-	envMap := make(map[string]interface{})
-	if existing, ok := nodeConfig["env"].(map[string]interface{}); ok {
+func mergeNodeEnv(nodeConfig map[string]any) map[string]any {
+	envMap := make(map[string]any)
+	if existing, ok := nodeConfig["env"].(map[string]any); ok {
 		for k, v := range existing {
 			envMap[k] = v
 		}
@@ -2080,7 +2127,7 @@ func mergeNodeEnv(nodeConfig map[string]interface{}) map[string]interface{} {
 	return envMap
 }
 
-func pickCredentialSecretValue(secrets map[string]interface{}, keys ...string) string {
+func pickCredentialSecretValue(secrets map[string]any, keys ...string) string {
 	for _, key := range keys {
 		value, exists := secrets[key]
 		if !exists || value == nil {
@@ -2093,7 +2140,7 @@ func pickCredentialSecretValue(secrets map[string]interface{}, keys ...string) s
 	return ""
 }
 
-func pickCredentialBoolValue(secrets map[string]interface{}, keys ...string) (bool, bool) {
+func pickCredentialBoolValue(secrets map[string]any, keys ...string) (bool, bool) {
 	for _, key := range keys {
 		value, exists := secrets[key]
 		if !exists || value == nil {
@@ -2120,16 +2167,16 @@ func pickCredentialBoolValue(secrets map[string]interface{}, keys ...string) (bo
 	return false, false
 }
 
-func ensureHeadersMap(config map[string]interface{}) map[string]interface{} {
-	if headers, ok := config["headers"].(map[string]interface{}); ok {
+func ensureHeadersMap(config map[string]any) map[string]any {
+	if headers, ok := config["headers"].(map[string]any); ok {
 		return headers
 	}
-	headers := make(map[string]interface{})
+	headers := make(map[string]any)
 	config["headers"] = headers
 	return headers
 }
 
-func applyServerCredentialConfig(taskType string, slot taskCredentialSlot, credential models.Credential, decrypted map[string]interface{}, nodeConfig map[string]interface{}) {
+func applyServerCredentialConfig(taskType string, slot taskCredentialSlot, credential models.Credential, decrypted map[string]any, nodeConfig map[string]any) {
 	switch taskType {
 	case "email":
 		if slot.Slot != "smtp_auth" {
@@ -2207,7 +2254,7 @@ func applyServerCredentialConfig(taskType string, slot taskCredentialSlot, crede
 	}
 }
 
-func validateTaskCredentialPayload(taskType string, slot taskCredentialSlot, credential models.Credential, decrypted map[string]interface{}) error {
+func validateTaskCredentialPayload(taskType string, slot taskCredentialSlot, credential models.Credential, decrypted map[string]any) error {
 	missing := func(fields ...string) error {
 		return fmt.Errorf("missing required payload for credential type '%s': %s", credential.Type, strings.Join(fields, ", "))
 	}
@@ -2332,7 +2379,7 @@ func validateTaskCredentialPayload(taskType string, slot taskCredentialSlot, cre
 	return nil
 }
 
-func resolveResourceBackedNodeConfig(db *gorm.DB, canonicalType string, workspaceID uint64, nodeConfig map[string]interface{}) error {
+func resolveResourceBackedNodeConfig(db *gorm.DB, canonicalType string, workspaceID uint64, nodeConfig map[string]any) error {
 	if db == nil || nodeConfig == nil || canonicalType != "docker-run" {
 		return nil
 	}
@@ -2378,16 +2425,16 @@ func resolveResourceBackedNodeConfig(db *gorm.DB, canonicalType string, workspac
 	if resourceCredentialID == 0 {
 		return nil
 	}
-	credentials, _ := nodeConfig["credentials"].(map[string]interface{})
+	credentials, _ := nodeConfig["credentials"].(map[string]any)
 	if credentials == nil {
-		credentials = make(map[string]interface{})
+		credentials = make(map[string]any)
 		nodeConfig["credentials"] = credentials
 	}
-	credentials["ssh_auth"] = map[string]interface{}{"credential_id": resourceCredentialID}
+	credentials["ssh_auth"] = map[string]any{"credential_id": resourceCredentialID}
 	return nil
 }
 
-func toUint64Value(v interface{}) uint64 {
+func toUint64Value(v any) uint64 {
 	switch val := v.(type) {
 	case uint64:
 		return val
@@ -2421,7 +2468,7 @@ func toUint64Value(v interface{}) uint64 {
 	return 0
 }
 
-func toFloat64Value(v interface{}) (float64, bool) {
+func toFloat64Value(v any) (float64, bool) {
 	switch val := v.(type) {
 	case float64:
 		return val, true
@@ -2451,20 +2498,20 @@ func toFloat64Value(v interface{}) (float64, bool) {
 	return 0, false
 }
 
-func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, canonicalType string, def pipelineTaskDefinition, nodeConfig map[string]interface{}, run *models.PipelineRun, userID uint64, role string) error {
+func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, canonicalType string, def pipelineTaskDefinition, nodeConfig map[string]any, run *models.PipelineRun, userID uint64, role string) error {
 	if nodeConfig == nil || len(def.CredentialSlots) == 0 {
 		return nil
 	}
 
 	rawBindings := expandFlatCredentialBindings(nodeConfig)
 	injectEnv := def.ExecMode == taskExecModeAgent
-	var envMap map[string]interface{}
+	var envMap map[string]any
 	if injectEnv {
 		envMap = mergeNodeEnv(nodeConfig)
 	}
 
 	for _, slot := range def.CredentialSlots {
-		var bindingRaw interface{}
+		var bindingRaw any
 		if rawBindings != nil {
 			bindingRaw = rawBindings[slot.Slot]
 		}
@@ -2524,11 +2571,11 @@ func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, canonicalType string,
 		applyServerCredentialConfig(canonicalType, slot, credential, decrypted, nodeConfig)
 
 		now := time.Now().Unix()
-		db.Model(&credential).Updates(map[string]interface{}{
+		db.Model(&credential).Updates(map[string]any{
 			"last_used_at": now,
 			"used_count":   credential.UsedCount + 1,
 		})
-		detailJSON, _ := json.Marshal(map[string]interface{}{
+		detailJSON, _ := json.Marshal(map[string]any{
 			"task_type": slot.Slot,
 			"run_id":    run.ID,
 			"node_slot": slot.Slot,
@@ -2549,7 +2596,7 @@ func (h *PipelineHandler) injectCredentialEnv(db *gorm.DB, canonicalType string,
 	return nil
 }
 
-func (h *PipelineHandler) executeServerTask(db *gorm.DB, run *models.PipelineRun, node *PipelineNode, canonicalType string, nodeConfig map[string]interface{}, timeout int) (bool, string) {
+func (h *PipelineHandler) executeServerTask(db *gorm.DB, run *models.PipelineRun, node *PipelineNode, canonicalType string, nodeConfig map[string]any, timeout int) (bool, string) {
 	start := time.Now().Unix()
 	serverTaskAgentID := h.resolveServerTaskAgentID(db, run)
 	if serverTaskAgentID == 0 {
@@ -2608,12 +2655,12 @@ func (h *PipelineHandler) executeServerTask(db *gorm.DB, run *models.PipelineRun
 
 	end := time.Now().Unix()
 	duration := int(end - start)
-	resultPayload := map[string]interface{}{
+	resultPayload := map[string]any{
 		"status":    models.TaskStatusExecuteSuccess,
 		"duration":  duration,
 		"exit_code": 0,
 	}
-	updates := map[string]interface{}{
+	updates := map[string]any{
 		"end_time":  end,
 		"duration":  duration,
 		"status":    models.TaskStatusExecuteSuccess,
@@ -2679,7 +2726,7 @@ func (h *PipelineHandler) resolveServerTaskAgentID(db *gorm.DB, run *models.Pipe
 }
 
 // executeEmailTask executes email notification task (Server side)
-func (h *PipelineHandler) executeEmailTask(logger *taskProcessLogger, config map[string]interface{}) (bool, string) {
+func (h *PipelineHandler) executeEmailTask(logger *taskProcessLogger, config map[string]any) (bool, string) {
 	toList := parseCommaSeparatedList(toString(config["to"]))
 	ccList := parseCommaSeparatedList(toString(config["cc"]))
 	recipients := append([]string{}, toList...)
@@ -2746,7 +2793,7 @@ func (h *PipelineHandler) executeEmailTask(logger *taskProcessLogger, config map
 	return true, ""
 }
 
-func (h *PipelineHandler) executeWebhookTask(logger *taskProcessLogger, config map[string]interface{}) (bool, string) {
+func (h *PipelineHandler) executeWebhookTask(logger *taskProcessLogger, config map[string]any) (bool, string) {
 	url := strings.TrimSpace(toString(config["url"]))
 	if url == "" {
 		return false, "webhook.url 不能为空"
@@ -2773,9 +2820,9 @@ func (h *PipelineHandler) executeWebhookTask(logger *taskProcessLogger, config m
 		} else if json.Valid([]byte(body)) {
 			payload = []byte(body)
 		} else {
-			payload, _ = json.Marshal(map[string]interface{}{"message": body})
+			payload, _ = json.Marshal(map[string]any{"message": body})
 		}
-	case map[string]interface{}, []interface{}:
+	case map[string]any, []any:
 		payload, _ = json.Marshal(v)
 	default:
 		payload = []byte(`{}`)
@@ -2788,7 +2835,7 @@ func (h *PipelineHandler) executeWebhookTask(logger *taskProcessLogger, config m
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	if headersMap, ok := config["headers"].(map[string]interface{}); ok {
+	if headersMap, ok := config["headers"].(map[string]any); ok {
 		for k, v := range headersMap {
 			key := strings.TrimSpace(k)
 			if key == "" {
@@ -2839,7 +2886,7 @@ func (h *PipelineHandler) executeWebhookTask(logger *taskProcessLogger, config m
 	return true, ""
 }
 
-func buildWebhookTLSConfig(config map[string]interface{}) (*tls.Config, error) {
+func buildWebhookTLSConfig(config map[string]any) (*tls.Config, error) {
 	clientCertPEM := strings.TrimSpace(toString(config["tls_client_cert"]))
 	clientKeyPEM := strings.TrimSpace(toString(config["tls_client_key"]))
 	caCertPEM := strings.TrimSpace(toString(config["tls_ca_cert"]))
@@ -2904,7 +2951,7 @@ func buildWebhookTLSConfig(config map[string]interface{}) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
-func (h *PipelineHandler) executeInAppTask(logger *taskProcessLogger, db *gorm.DB, run *models.PipelineRun, node *PipelineNode, config map[string]interface{}) (bool, string) {
+func (h *PipelineHandler) executeInAppTask(logger *taskProcessLogger, db *gorm.DB, run *models.PipelineRun, node *PipelineNode, config map[string]any) (bool, string) {
 	title := strings.TrimSpace(toString(config["title"]))
 	if title == "" {
 		title = "流水线站内信通知"
@@ -2915,13 +2962,13 @@ func (h *PipelineHandler) executeInAppTask(logger *taskProcessLogger, db *gorm.D
 	}
 	priority := toInt(config["priority"])
 
-	metadata := map[string]interface{}{
+	metadata := map[string]any{
 		"pipeline_run_id": run.ID,
 		"node_id":         node.ID,
 		"node_name":       node.Name,
 	}
 	if customMetadata := strings.TrimSpace(toString(config["metadata_json"])); customMetadata != "" {
-		var merged map[string]interface{}
+		var merged map[string]any
 		if err := json.Unmarshal([]byte(customMetadata), &merged); err == nil {
 			for k, v := range merged {
 				metadata[k] = v
@@ -2957,7 +3004,7 @@ func parseCommaSeparatedList(raw string) []string {
 	return result
 }
 
-func toString(v interface{}) string {
+func toString(v any) string {
 	switch val := v.(type) {
 	case string:
 		return val
@@ -2973,7 +3020,7 @@ func toString(v interface{}) string {
 }
 
 // buildTaskScript builds the execution script based on node type and config
-func (h *PipelineHandler) buildTaskScript(node *PipelineNode, config map[string]interface{}) string {
+func (h *PipelineHandler) buildTaskScript(node *PipelineNode, config map[string]any) string {
 	_, script, err := renderPipelineAgentScript(node.Type, config)
 	if err != nil {
 		return ""
@@ -2982,8 +3029,8 @@ func (h *PipelineHandler) buildTaskScript(node *PipelineNode, config map[string]
 }
 
 // buildTaskOutputs builds the output map for a completed task based on task type
-func (h *PipelineHandler) buildTaskOutputs(taskType string, task *models.AgentTask) map[string]interface{} {
-	outputs := map[string]interface{}{
+func (h *PipelineHandler) buildTaskOutputs(taskType string, task *models.AgentTask) map[string]any {
+	outputs := map[string]any{
 		"status":    task.Status,
 		"exit_code": task.ExitCode,
 		"duration":  task.Duration,
@@ -2991,7 +3038,7 @@ func (h *PipelineHandler) buildTaskOutputs(taskType string, task *models.AgentTa
 
 	// Parse ResultData if available
 	if task.ResultData != "" {
-		var resultData map[string]interface{}
+		var resultData map[string]any
 		if err := json.Unmarshal([]byte(task.ResultData), &resultData); err == nil {
 			for k, v := range resultData {
 				outputs[k] = v
@@ -3021,12 +3068,12 @@ func (h *PipelineHandler) buildTaskOutputs(taskType string, task *models.AgentTa
 	return outputs
 }
 
-func parsePipelineRunJSONField(raw string, emptyDefault interface{}) interface{} {
+func parsePipelineRunJSONField(raw string, emptyDefault any) any {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return emptyDefault
 	}
-	var parsed interface{}
+	var parsed any
 	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
 		return raw
 	}
@@ -3036,9 +3083,55 @@ func parsePipelineRunJSONField(raw string, emptyDefault interface{}) interface{}
 	return parsed
 }
 
-func buildAISessionRequestPayload(run *models.PipelineRun, node *PipelineNode, scenario string, nodeConfig map[string]interface{}) map[string]interface{} {
-	payload := map[string]interface{}{
-		"scenario":        scenario,
+const pipelineTaskSceneType = "pipeline_task"
+
+func buildPipelineTaskSceneCode(taskType string, agentID uint64) string {
+	segments := []string{pipelineTaskSceneType, taskType}
+	if agentID > 0 {
+		segments = append(segments, "agent", strconv.FormatUint(agentID, 10))
+	}
+	return strings.Join(segments, ":")
+}
+
+func ensurePipelineTaskScene(db *gorm.DB, workspaceID uint64, taskType string, agentID uint64, createdBy uint64) (*models.AIScene, error) {
+	if db == nil || workspaceID == 0 {
+		return nil, fmt.Errorf("invalid ai scene context")
+	}
+	sceneCode := buildPipelineTaskSceneCode(taskType, agentID)
+	var scene models.AIScene
+	if err := db.Where("workspace_id = ? AND code = ?", workspaceID, sceneCode).First(&scene).Error; err == nil {
+		return &scene, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	name := taskType
+	description := ""
+	if def, ok := getTaskDefinition(taskType); ok {
+		name = firstNonEmptyTaskValue(def.Name, taskType)
+		description = def.Description
+	}
+	scene = models.AIScene{
+		WorkspaceID:     workspaceID,
+		SceneType:       pipelineTaskSceneType,
+		Code:            sceneCode,
+		Name:            name,
+		Description:     description,
+		ContextProvider: "pipeline_task_payload",
+		Enabled:         true,
+		CreatedBy:       createdBy,
+	}
+	if agentID > 0 {
+		scene.MainAgentID = &agentID
+	}
+	if err := db.Create(&scene).Error; err != nil {
+		return nil, err
+	}
+	return &scene, nil
+}
+
+func buildAISessionRequestPayload(run *models.PipelineRun, node *PipelineNode, taskType string, nodeConfig map[string]any, scene *models.AIScene) map[string]any {
+	payload := map[string]any{
+		"task_type":       taskType,
 		"input_text":      toString(nodeConfig["input_text"]),
 		"output_language": firstNonEmptyTaskValue(toString(nodeConfig["output_language"]), "zh-CN"),
 	}
@@ -3050,6 +3143,11 @@ func buildAISessionRequestPayload(run *models.PipelineRun, node *PipelineNode, s
 		payload["node_id"] = node.ID
 		payload["node_name"] = node.Name
 	}
+	if scene != nil {
+		payload["scene_id"] = scene.ID
+		payload["scene_code"] = scene.Code
+		payload["scene_type"] = scene.SceneType
+	}
 	for _, key := range []string{"mr_url", "mr_title", "source_branch", "target_branch", "requirement_title", "requirement_id"} {
 		if value := strings.TrimSpace(toString(nodeConfig[key])); value != "" {
 			payload[key] = value
@@ -3058,40 +3156,48 @@ func buildAISessionRequestPayload(run *models.PipelineRun, node *PipelineNode, s
 	return payload
 }
 
-func buildAIExecutorPayload(session models.AISession) map[string]interface{} {
-	payload := map[string]interface{}{
+func buildAIExecutorPayload(session models.AISession, scene *models.AIScene) map[string]any {
+	payload := map[string]any{
 		"mode":               "ai-task",
 		"ai_session_id":      session.ID,
-		"scenario":           session.Scenario,
+		"task_type":          session.TaskType,
 		"runtime_profile_id": session.RuntimeProfileID,
 		"provider_id":        session.ProviderID,
 		"model_id":           session.ModelID,
 		"binding_id":         session.BindingID,
 		"agent_id":           session.AgentID,
 	}
-	if parsed := parsePipelineRunJSONField(session.RequestJSON, map[string]interface{}{}); parsed != nil {
+	if session.SceneID != nil && *session.SceneID > 0 {
+		payload["scene_id"] = *session.SceneID
+	}
+	if scene != nil {
+		payload["scene_id"] = scene.ID
+		payload["scene_code"] = scene.Code
+		payload["scene_type"] = scene.SceneType
+	}
+	if parsed := parsePipelineRunJSONField(session.RequestJSON, map[string]any{}); parsed != nil {
 		payload["request"] = parsed
 	}
 	return payload
 }
 
-func (h *PipelineHandler) prepareAIExecutorPayload(db *gorm.DB, run *models.PipelineRun, node *PipelineNode, canonicalType string, nodeConfig map[string]interface{}, createdBy uint64, envMap map[string]interface{}, executorPayload map[string]interface{}) (*models.AISession, map[string]interface{}, error) {
+func (h *PipelineHandler) prepareAIExecutorPayload(db *gorm.DB, run *models.PipelineRun, node *PipelineNode, canonicalType string, nodeConfig map[string]any, createdBy uint64, envMap map[string]any, executorPayload map[string]any) (*models.AISession, map[string]any, error) {
 	def, ok := getTaskDefinition(canonicalType)
 	if !ok || def.ExecutionSpec.Mode != "ai-task" {
 		return nil, executorPayload, nil
 	}
-	aiSession, err := h.createAISessionForNode(db, run, node, canonicalType, nodeConfig, createdBy)
+	aiSession, scene, err := h.createAISessionForNode(db, run, node, canonicalType, nodeConfig, createdBy)
 	if err != nil {
 		return nil, executorPayload, err
 	}
-	payload := buildAIExecutorPayload(*aiSession)
+	payload := buildAIExecutorPayload(*aiSession, scene)
 	if err := injectAIProviderRuntimeEnv(db, run.WorkspaceID, aiSession, envMap); err != nil {
 		return nil, executorPayload, err
 	}
 	return aiSession, payload, nil
 }
 
-func buildAgentTaskParams(nodeConfig map[string]interface{}, executorPayload map[string]interface{}) map[string]interface{} {
+func buildAgentTaskParams(nodeConfig map[string]any, executorPayload map[string]any) map[string]any {
 	if len(executorPayload) > 0 && strings.TrimSpace(toString(executorPayload["mode"])) == "ai-task" {
 		return executorPayload
 	}
@@ -3102,7 +3208,7 @@ func resolveRuntimeProfileBinding(db *gorm.DB, workspaceID uint64, profile *mode
 	if db == nil || profile == nil || profile.ID == 0 {
 		return nil, nil
 	}
-	var bindingPriority []map[string]interface{}
+	var bindingPriority []map[string]any
 	if strings.TrimSpace(profile.BindingPriorityJSON) != "" {
 		if err := json.Unmarshal([]byte(profile.BindingPriorityJSON), &bindingPriority); err != nil {
 			return nil, fmt.Errorf("invalid binding priority")
@@ -3148,7 +3254,7 @@ func resolveRuntimeProfileBinding(db *gorm.DB, workspaceID uint64, profile *mode
 	return nil, nil
 }
 
-func injectAIProviderRuntimeEnv(db *gorm.DB, workspaceID uint64, session *models.AISession, envMap map[string]interface{}) error {
+func injectAIProviderRuntimeEnv(db *gorm.DB, workspaceID uint64, session *models.AISession, envMap map[string]any) error {
 	if db == nil || session == nil {
 		return nil
 	}
@@ -3218,29 +3324,38 @@ func injectAIProviderRuntimeEnv(db *gorm.DB, workspaceID uint64, session *models
 	return nil
 }
 
-func (h *PipelineHandler) createAISessionForNode(db *gorm.DB, run *models.PipelineRun, node *PipelineNode, scenario string, nodeConfig map[string]interface{}, createdBy uint64) (*models.AISession, error) {
+func (h *PipelineHandler) createAISessionForNode(db *gorm.DB, run *models.PipelineRun, node *PipelineNode, taskType string, nodeConfig map[string]any, createdBy uint64) (*models.AISession, *models.AIScene, error) {
 	if db == nil || run == nil || node == nil {
-		return nil, fmt.Errorf("invalid ai session context")
+		return nil, nil, fmt.Errorf("invalid ai session context")
 	}
 	runtimeProfileID := toUint64Value(nodeConfig["runtime_profile_id"])
+	agentID := toUint64Value(nodeConfig["agent_id"])
+	if runtimeProfileID == 0 && agentID > 0 {
+		var agent models.AIAgent
+		if err := db.Where("id = ? AND workspace_id = ?", agentID, run.WorkspaceID).First(&agent).Error; err == nil {
+			if agent.RuntimeProfileID != nil {
+				runtimeProfileID = *agent.RuntimeProfileID
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, err
+		}
+	}
 	var runtimeProfile models.AIRuntimeProfile
 	if runtimeProfileID > 0 {
 		if err := db.Where("id = ? AND workspace_id = ?", runtimeProfileID, run.WorkspaceID).First(&runtimeProfile).Error; err != nil {
-			return nil, fmt.Errorf("runtime profile not found")
+			return nil, nil, fmt.Errorf("runtime profile not found")
 		}
 		if runtimeProfile.Status == models.AIRuntimeProfileStatusDisabled {
-			return nil, fmt.Errorf("runtime profile disabled")
+			return nil, nil, fmt.Errorf("runtime profile disabled")
 		}
 	}
 	bindingID := uint64(0)
 	providerID := uint64(0)
 	modelID := toUint64Value(nodeConfig["model_id"])
-	agentID := toUint64Value(nodeConfig["agent_id"])
 	if runtimeProfileID > 0 {
 		modelID = runtimeProfile.ModelID
-		agentID = runtimeProfile.AgentID
 		if binding, err := resolveRuntimeProfileBinding(db, run.WorkspaceID, &runtimeProfile); err != nil {
-			return nil, err
+			return nil, nil, err
 		} else if binding != nil {
 			bindingID = binding.ID
 		}
@@ -3251,7 +3366,7 @@ func (h *PipelineHandler) createAISessionForNode(db *gorm.DB, run *models.Pipeli
 	if bindingID > 0 {
 		var binding models.AIModelBinding
 		if err := db.Where("id = ? AND workspace_id = ?", bindingID, run.WorkspaceID).First(&binding).Error; err != nil {
-			return nil, fmt.Errorf("binding not found")
+			return nil, nil, fmt.Errorf("binding not found")
 		}
 		providerID = binding.ProviderID
 		if modelID == 0 {
@@ -3261,24 +3376,34 @@ func (h *PipelineHandler) createAISessionForNode(db *gorm.DB, run *models.Pipeli
 	if providerID == 0 {
 		providerID = toUint64Value(nodeConfig["provider_id"])
 	}
+	if providerID == 0 || modelID == 0 {
+		return nil, nil, fmt.Errorf("ai runtime not resolved")
+	}
+	scene, err := ensurePipelineTaskScene(db, run.WorkspaceID, taskType, agentID, createdBy)
+	if err != nil {
+		return nil, nil, err
+	}
 	session := &models.AISession{
 		WorkspaceID:      run.WorkspaceID,
 		PipelineRunID:    run.ID,
 		NodeID:           node.ID,
-		Scenario:         scenario,
+		TaskType:         taskType,
 		Status:           models.AISessionStatusQueued,
 		RuntimeProfileID: runtimeProfileID,
 		ProviderID:       providerID,
 		ModelID:          modelID,
 		BindingID:        bindingID,
 		AgentID:          agentID,
-		RequestJSON:      h.jsonEncode(buildAISessionRequestPayload(run, node, scenario, nodeConfig)),
+		RequestJSON:      h.jsonEncode(buildAISessionRequestPayload(run, node, taskType, nodeConfig, scene)),
 		CreatedBy:        createdBy,
 	}
-	if err := db.Create(session).Error; err != nil {
-		return nil, err
+	if scene != nil && scene.ID > 0 {
+		session.SceneID = &scene.ID
 	}
-	return session, nil
+	if err := db.Create(session).Error; err != nil {
+		return nil, nil, err
+	}
+	return session, scene, nil
 }
 
 type historicalRunTriggerSummary struct {
@@ -3288,17 +3413,17 @@ type historicalRunTriggerSummary struct {
 }
 
 type historicalRuntimeParamView struct {
-	Key    string      `json:"key"`
-	Label  string      `json:"label"`
-	Value  interface{} `json:"value"`
-	Source string      `json:"source"`
+	Key    string `json:"key"`
+	Label  string `json:"label"`
+	Value  any    `json:"value"`
+	Source string `json:"source"`
 }
 
 type historicalDefaultParamView struct {
-	Key        string      `json:"key"`
-	Label      string      `json:"label"`
-	Value      interface{} `json:"value"`
-	Overridden bool        `json:"overridden"`
+	Key        string `json:"key"`
+	Label      string `json:"label"`
+	Value      any    `json:"value"`
+	Overridden bool   `json:"overridden"`
 }
 
 type historicalRunNodeParamView struct {
@@ -3330,28 +3455,28 @@ func shouldExposeHistoricalLegacyDefaultKey(key string) bool {
 	return true
 }
 
-func buildHistoricalRuntimeInputsFromResolvedNodes(raw string) map[string]map[string]interface{} {
+func buildHistoricalRuntimeInputsFromResolvedNodes(raw string) map[string]map[string]any {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return nil
 	}
 
-	var resolvedNodes []map[string]interface{}
+	var resolvedNodes []map[string]any
 	if err := json.Unmarshal([]byte(trimmed), &resolvedNodes); err != nil {
 		return nil
 	}
 
-	runtimeInputs := make(map[string]map[string]interface{})
+	runtimeInputs := make(map[string]map[string]any)
 	for _, node := range resolvedNodes {
 		nodeID := strings.TrimSpace(toString(node["node_id"]))
 		if nodeID == "" {
 			continue
 		}
-		resolvedInputs, ok := node["resolved_inputs"].(map[string]interface{})
+		resolvedInputs, ok := node["resolved_inputs"].(map[string]any)
 		if !ok || len(resolvedInputs) == 0 {
 			continue
 		}
-		copiedInputs := make(map[string]interface{}, len(resolvedInputs))
+		copiedInputs := make(map[string]any, len(resolvedInputs))
 		for key, value := range resolvedInputs {
 			paramKey := strings.TrimSpace(key)
 			if paramKey == "" {
@@ -3384,7 +3509,7 @@ func buildHistoricalRunParameterView(run models.PipelineRun) historicalRunParame
 	}
 
 	var runSnapshot models.PipelineRunConfigSnapshot
-	runtimeInputs := map[string]map[string]interface{}{}
+	runtimeInputs := map[string]map[string]any{}
 	if trimmed := strings.TrimSpace(run.RunConfig); trimmed != "" {
 		if err := json.Unmarshal([]byte(trimmed), &runSnapshot); err == nil {
 			runtimeInputs = runSnapshot.Inputs
@@ -3552,12 +3677,12 @@ func pipelineRunDetailPayload(run models.PipelineRun) gin.H {
 		"duration":               run.Duration,
 		"error_msg":              run.ErrorMsg,
 		"config":                 run.Config,
-		"run_config_json":        parsePipelineRunJSONField(run.RunConfig, map[string]interface{}{}),
-		"pipeline_snapshot_json": parsePipelineRunJSONField(run.PipelineSnapshot, map[string]interface{}{}),
-		"resolved_nodes_json":    parsePipelineRunJSONField(run.ResolvedNodes, []interface{}{}),
-		"outputs_json":           parsePipelineRunJSONField(run.Outputs, map[string]interface{}{}),
-		"bindings_snapshot_json": parsePipelineRunJSONField(run.BindingsSnapshot, map[string]interface{}{}),
-		"events_json":            parsePipelineRunJSONField(run.Events, []interface{}{}),
+		"run_config_json":        parsePipelineRunJSONField(run.RunConfig, map[string]any{}),
+		"pipeline_snapshot_json": parsePipelineRunJSONField(run.PipelineSnapshot, map[string]any{}),
+		"resolved_nodes_json":    parsePipelineRunJSONField(run.ResolvedNodes, []any{}),
+		"outputs_json":           parsePipelineRunJSONField(run.Outputs, map[string]any{}),
+		"bindings_snapshot_json": parsePipelineRunJSONField(run.BindingsSnapshot, map[string]any{}),
+		"events_json":            parsePipelineRunJSONField(run.Events, []any{}),
 		"historical_params":      buildHistoricalRunParameterView(run),
 		"agent_id":               run.AgentID,
 		"pipeline":               run.Pipeline,
@@ -3610,7 +3735,7 @@ func nodeResourceBindingMap(node PipelineNode) map[string]uint64 {
 	return bindings
 }
 
-func buildRunBindingsSnapshot(db *gorm.DB, workspaceID uint64, config PipelineConfig) map[string]interface{} {
+func buildRunBindingsSnapshot(db *gorm.DB, workspaceID uint64, config PipelineConfig) map[string]any {
 	credentialIDs := make(map[uint64]struct{})
 	resourceIDs := make(map[uint64]struct{})
 	for _, node := range config.Nodes {
@@ -3654,12 +3779,12 @@ func buildRunBindingsSnapshot(db *gorm.DB, workspaceID uint64, config PipelineCo
 		}
 	}
 
-	credentialsPayload := make(map[string]map[string]interface{})
-	resourcesPayload := make(map[string]map[string]interface{})
+	credentialsPayload := make(map[string]map[string]any)
+	resourcesPayload := make(map[string]map[string]any)
 	for _, node := range config.Nodes {
-		nodeCredentials := make(map[string]interface{})
+		nodeCredentials := make(map[string]any)
 		for slot, credentialID := range nodeCredentialBindingMap(node) {
-			item := map[string]interface{}{"credential_id": credentialID}
+			item := map[string]any{"credential_id": credentialID}
 			if credential, ok := credentialMap[credentialID]; ok {
 				item["credential_type"] = credential.Type
 				item["credential_name"] = credential.Name
@@ -3670,9 +3795,9 @@ func buildRunBindingsSnapshot(db *gorm.DB, workspaceID uint64, config PipelineCo
 			credentialsPayload[node.ID] = nodeCredentials
 		}
 
-		nodeResources := make(map[string]interface{})
+		nodeResources := make(map[string]any)
 		for key, resourceID := range nodeResourceBindingMap(node) {
-			item := map[string]interface{}{"resource_id": resourceID}
+			item := map[string]any{"resource_id": resourceID}
 			if resource, ok := resourceMap[resourceID]; ok {
 				item["resource_type"] = resource.Type
 				item["resource_name"] = resource.Name
@@ -3688,7 +3813,7 @@ func buildRunBindingsSnapshot(db *gorm.DB, workspaceID uint64, config PipelineCo
 		}
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"credentials": credentialsPayload,
 		"resources":   resourcesPayload,
 	}
@@ -3705,24 +3830,24 @@ func defaultResolvedNodeStatus(runStatus string) string {
 	}
 }
 
-func buildInitialResolvedNodeSnapshots(config PipelineConfig, runStatus string) []map[string]interface{} {
-	resolvedNodes := make([]map[string]interface{}, 0, len(config.Nodes))
+func buildInitialResolvedNodeSnapshots(config PipelineConfig, runStatus string) []map[string]any {
+	resolvedNodes := make([]map[string]any, 0, len(config.Nodes))
 	defaultStatus := defaultResolvedNodeStatus(runStatus)
 	for _, node := range config.Nodes {
-		resolvedNodes = append(resolvedNodes, map[string]interface{}{
+		resolvedNodes = append(resolvedNodes, map[string]any{
 			"node_id":          node.ID,
 			"task_key":         firstNonEmptyTaskValue(node.TaskKey, node.Type),
 			"task_version":     node.TaskVersion,
 			"status":           defaultStatus,
-			"resolved_inputs":  map[string]interface{}{},
-			"executor_payload": map[string]interface{}{},
-			"attempts":         []map[string]interface{}{},
+			"resolved_inputs":  map[string]any{},
+			"executor_payload": map[string]any{},
+			"attempts":         []map[string]any{},
 		})
 	}
 	return resolvedNodes
 }
 
-func appendRunEvent(db *gorm.DB, runID uint64, eventType string, payload map[string]interface{}) {
+func appendRunEvent(db *gorm.DB, runID uint64, eventType string, payload map[string]any) {
 	if db == nil || runID == 0 || strings.TrimSpace(eventType) == "" {
 		return
 	}
@@ -3730,11 +3855,11 @@ func appendRunEvent(db *gorm.DB, runID uint64, eventType string, payload map[str
 	if err := db.Select("id", "events_json").First(&run, runID).Error; err != nil {
 		return
 	}
-	events := make([]map[string]interface{}, 0)
+	events := make([]map[string]any, 0)
 	if strings.TrimSpace(run.Events) != "" {
 		_ = json.Unmarshal([]byte(run.Events), &events)
 	}
-	events = append(events, map[string]interface{}{
+	events = append(events, map[string]any{
 		"event_type": eventType,
 		"time":       time.Now().Unix(),
 		"payload":    payload,
@@ -3744,8 +3869,8 @@ func appendRunEvent(db *gorm.DB, runID uint64, eventType string, payload map[str
 	}
 }
 
-func buildExecutorPayload(script, workDir, shell string, env map[string]interface{}) map[string]interface{} {
-	payload := map[string]interface{}{}
+func buildExecutorPayload(script, workDir, shell string, env map[string]any) map[string]any {
+	payload := map[string]any{}
 	if strings.TrimSpace(script) != "" {
 		payload["script"] = script
 	}
@@ -3755,7 +3880,7 @@ func buildExecutorPayload(script, workDir, shell string, env map[string]interfac
 	if strings.TrimSpace(shell) != "" {
 		payload["shell"] = normalizeTaskShellValue(shell)
 	}
-	safeEnv := make(map[string]interface{})
+	safeEnv := make(map[string]any)
 	for key, value := range env {
 		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(key)), "EASYDO_CRED_") {
 			continue
@@ -3768,7 +3893,7 @@ func buildExecutorPayload(script, workDir, shell string, env map[string]interfac
 	return payload
 }
 
-func upsertResolvedNodeSnapshot(db *gorm.DB, runID uint64, node PipelineNode, status string, resolvedInputs map[string]interface{}, executorPayload map[string]interface{}) {
+func upsertResolvedNodeSnapshot(db *gorm.DB, runID uint64, node PipelineNode, status string, resolvedInputs map[string]any, executorPayload map[string]any) {
 	if db == nil || runID == 0 || strings.TrimSpace(node.ID) == "" {
 		return
 	}
@@ -3776,18 +3901,18 @@ func upsertResolvedNodeSnapshot(db *gorm.DB, runID uint64, node PipelineNode, st
 	if err := db.Select("id", "resolved_nodes_json").First(&run, runID).Error; err != nil {
 		return
 	}
-	resolvedNodes := make([]map[string]interface{}, 0)
+	resolvedNodes := make([]map[string]any, 0)
 	if strings.TrimSpace(run.ResolvedNodes) != "" {
 		_ = json.Unmarshal([]byte(run.ResolvedNodes), &resolvedNodes)
 	}
-	entry := map[string]interface{}{
+	entry := map[string]any{
 		"node_id":          node.ID,
 		"task_key":         firstNonEmptyTaskValue(node.TaskKey, node.Type),
 		"task_version":     node.TaskVersion,
 		"status":           status,
 		"resolved_inputs":  cloneMap(resolvedInputs),
 		"executor_payload": cloneMap(executorPayload),
-		"attempts":         []map[string]interface{}{},
+		"attempts":         []map[string]any{},
 	}
 	updated := false
 	for i := range resolvedNodes {
@@ -3809,14 +3934,50 @@ func upsertResolvedNodeSnapshot(db *gorm.DB, runID uint64, node PipelineNode, st
 	}
 }
 
-func buildTaskAttemptSnapshots(db *gorm.DB, task models.AgentTask) []map[string]interface{} {
-	attempts := make([]map[string]interface{}, 0)
+func loadTaskAIRuntimeSnapshot(db *gorm.DB, task models.AgentTask) map[string]any {
+	if db == nil || task.WorkspaceID == 0 || strings.TrimSpace(task.Params) == "" {
+		return nil
+	}
+	var params map[string]any
+	if err := json.Unmarshal([]byte(task.Params), &params); err != nil {
+		return nil
+	}
+	aiSessionID := toUint64Value(params["ai_session_id"])
+	if aiSessionID == 0 {
+		return nil
+	}
+	var session models.AISession
+	if err := db.Select("id", "scene_id", "runtime_profile_id", "provider_id", "model_id").Where("id = ? AND workspace_id = ?", aiSessionID, task.WorkspaceID).First(&session).Error; err != nil {
+		return nil
+	}
+	snapshot := make(map[string]any)
+	if session.SceneID != nil && *session.SceneID > 0 {
+		snapshot["scene_id"] = *session.SceneID
+	}
+	if session.RuntimeProfileID > 0 {
+		snapshot["runtime_profile_id"] = session.RuntimeProfileID
+	}
+	if session.ProviderID > 0 {
+		snapshot["provider_id"] = session.ProviderID
+	}
+	if session.ModelID > 0 {
+		snapshot["model_id"] = session.ModelID
+	}
+	if len(snapshot) == 0 {
+		return nil
+	}
+	return snapshot
+}
+
+func buildTaskAttemptSnapshots(db *gorm.DB, task models.AgentTask) []map[string]any {
+	attempts := make([]map[string]any, 0)
+	runtimeSnapshot := loadTaskAIRuntimeSnapshot(db, task)
 	var executions []models.TaskExecution
 	if db != nil {
 		_ = db.Where("task_id = ?", task.ID).Order("attempt ASC").Find(&executions).Error
 	}
 	for _, execution := range executions {
-		attempts = append(attempts, map[string]interface{}{
+		attempt := map[string]any{
 			"attempt_no":       execution.Attempt,
 			"agent_id":         task.AgentID,
 			"agent_session_id": task.AgentSessionID,
@@ -3827,7 +3988,11 @@ func buildTaskAttemptSnapshots(db *gorm.DB, task models.AgentTask) []map[string]
 			"duration":         execution.Duration,
 			"exit_code":        execution.ExitCode,
 			"error_msg":        execution.ErrorMsg,
-		})
+		}
+		for key, value := range runtimeSnapshot {
+			attempt[key] = value
+		}
+		attempts = append(attempts, attempt)
 	}
 	currentAttempt := task.RetryCount + 1
 	hasCurrent := false
@@ -3838,7 +4003,7 @@ func buildTaskAttemptSnapshots(db *gorm.DB, task models.AgentTask) []map[string]
 		}
 	}
 	if !hasCurrent {
-		attempts = append(attempts, map[string]interface{}{
+		attempt := map[string]any{
 			"attempt_no":       currentAttempt,
 			"agent_id":         task.AgentID,
 			"agent_session_id": task.AgentSessionID,
@@ -3849,7 +4014,11 @@ func buildTaskAttemptSnapshots(db *gorm.DB, task models.AgentTask) []map[string]
 			"duration":         task.Duration,
 			"exit_code":        task.ExitCode,
 			"error_msg":        task.ErrorMsg,
-		})
+		}
+		for key, value := range runtimeSnapshot {
+			attempt[key] = value
+		}
+		attempts = append(attempts, attempt)
 	}
 	return attempts
 }
@@ -3862,7 +4031,7 @@ func updateResolvedNodeAttempts(db *gorm.DB, task models.AgentTask) {
 	if err := db.Select("id", "resolved_nodes_json").First(&run, task.PipelineRunID).Error; err != nil {
 		return
 	}
-	resolvedNodes := make([]map[string]interface{}, 0)
+	resolvedNodes := make([]map[string]any, 0)
 	if strings.TrimSpace(run.ResolvedNodes) != "" {
 		_ = json.Unmarshal([]byte(run.ResolvedNodes), &resolvedNodes)
 	}
@@ -3877,13 +4046,13 @@ func updateResolvedNodeAttempts(db *gorm.DB, task models.AgentTask) {
 		break
 	}
 	if !updated {
-		resolvedNodes = append(resolvedNodes, map[string]interface{}{
+		resolvedNodes = append(resolvedNodes, map[string]any{
 			"node_id":          task.NodeID,
 			"task_key":         task.TaskType,
 			"task_version":     1,
 			"status":           task.Status,
-			"resolved_inputs":  parsePipelineRunJSONField(task.Params, map[string]interface{}{}),
-			"executor_payload": map[string]interface{}{},
+			"resolved_inputs":  parsePipelineRunJSONField(task.Params, map[string]any{}),
+			"executor_payload": map[string]any{},
 			"attempts":         buildTaskAttemptSnapshots(db, task),
 		})
 	}
@@ -3892,8 +4061,8 @@ func updateResolvedNodeAttempts(db *gorm.DB, task models.AgentTask) {
 	}
 }
 
-func buildRunRecordOutputsFromResult(task *models.AgentTask, result map[string]interface{}) map[string]interface{} {
-	outputs := map[string]interface{}{}
+func buildRunRecordOutputsFromResult(task *models.AgentTask, result map[string]any) map[string]any {
+	outputs := map[string]any{}
 	if task != nil {
 		outputs["status"] = task.Status
 		outputs["exit_code"] = task.ExitCode
@@ -3905,7 +4074,7 @@ func buildRunRecordOutputsFromResult(task *models.AgentTask, result map[string]i
 	return outputs
 }
 
-func upsertRunOutputSnapshot(db *gorm.DB, runID uint64, nodeID string, outputs map[string]interface{}) {
+func upsertRunOutputSnapshot(db *gorm.DB, runID uint64, nodeID string, outputs map[string]any) {
 	if db == nil || runID == 0 || strings.TrimSpace(nodeID) == "" || len(outputs) == 0 {
 		return
 	}
@@ -3913,11 +4082,11 @@ func upsertRunOutputSnapshot(db *gorm.DB, runID uint64, nodeID string, outputs m
 	if err := db.Select("id", "outputs_json").First(&run, runID).Error; err != nil {
 		return
 	}
-	outputMap := make(map[string]map[string]interface{})
+	outputMap := make(map[string]map[string]any)
 	if strings.TrimSpace(run.Outputs) != "" {
 		_ = json.Unmarshal([]byte(run.Outputs), &outputMap)
 	}
-	cloned := make(map[string]interface{}, len(outputs))
+	cloned := make(map[string]any, len(outputs))
 	for k, v := range outputs {
 		cloned[k] = v
 	}
@@ -3927,8 +4096,8 @@ func upsertRunOutputSnapshot(db *gorm.DB, runID uint64, nodeID string, outputs m
 	}
 }
 
-func loadRunOutputSnapshots(run models.PipelineRun, completedTasks []models.AgentTask) map[string]map[string]interface{} {
-	outputMap := make(map[string]map[string]interface{})
+func loadRunOutputSnapshots(run models.PipelineRun, completedTasks []models.AgentTask) map[string]map[string]any {
+	outputMap := make(map[string]map[string]any)
 	if strings.TrimSpace(run.Outputs) != "" {
 		_ = json.Unmarshal([]byte(run.Outputs), &outputMap)
 	}
@@ -3942,7 +4111,7 @@ func loadRunOutputSnapshots(run models.PipelineRun, completedTasks []models.Agen
 		if task.Status != models.TaskStatusExecuteSuccess || strings.TrimSpace(task.ResultData) == "" {
 			continue
 		}
-		resultData := make(map[string]interface{})
+		resultData := make(map[string]any)
 		if err := json.Unmarshal([]byte(task.ResultData), &resultData); err != nil {
 			continue
 		}
@@ -3952,7 +4121,7 @@ func loadRunOutputSnapshots(run models.PipelineRun, completedTasks []models.Agen
 }
 
 // jsonEncode encodes map to JSON string
-func (h *PipelineHandler) jsonEncode(v interface{}) string {
+func (h *PipelineHandler) jsonEncode(v any) string {
 	data, _ := json.Marshal(v)
 	return string(data)
 }
@@ -4003,7 +4172,7 @@ func (h *PipelineHandler) updateRunStatus(runID uint64, status, errorMsg string)
 		duration = int(now - run.StartTime)
 	}
 
-	updates := map[string]interface{}{
+	updates := map[string]any{
 		"status":   status,
 		"end_time": now,
 		"duration": duration,
@@ -4019,9 +4188,9 @@ func (h *PipelineHandler) updateRunStatus(runID uint64, status, errorMsg string)
 	run.Duration = duration
 	run.ErrorMsg = errorMsg
 	if status == models.PipelineRunStatusCancelled {
-		appendRunEvent(h.DB, runID, "run_cancelled", map[string]interface{}{"error_msg": errorMsg})
+		appendRunEvent(h.DB, runID, "run_cancelled", map[string]any{"error_msg": errorMsg})
 	} else if status == models.PipelineRunStatusSuccess || status == models.PipelineRunStatusFailed {
-		appendRunEvent(h.DB, runID, "run_finished", map[string]interface{}{"status": status, "error_msg": errorMsg})
+		appendRunEvent(h.DB, runID, "run_finished", map[string]any{"status": status, "error_msg": errorMsg})
 	}
 	syncLiveRunStateFromRun(&run)
 	syncDeploymentStateFromRun(h.DB, &run)
@@ -4300,23 +4469,23 @@ func (h *PipelineHandler) GetRunDetail(c *gin.Context) {
 }
 
 type rerunPreviewMatchItem struct {
-	NodeID          string      `json:"node_id"`
-	ParamKey        string      `json:"param_key"`
-	MatchKey        string      `json:"match_key"`
-	NodeName        string      `json:"node_name,omitempty"`
-	ParamLabel      string      `json:"param_label,omitempty"`
-	HistoricalValue interface{} `json:"historical_value"`
-	CurrentValue    interface{} `json:"current_value,omitempty"`
+	NodeID          string `json:"node_id"`
+	ParamKey        string `json:"param_key"`
+	MatchKey        string `json:"match_key"`
+	NodeName        string `json:"node_name,omitempty"`
+	ParamLabel      string `json:"param_label,omitempty"`
+	HistoricalValue any    `json:"historical_value"`
+	CurrentValue    any    `json:"current_value,omitempty"`
 }
 
 type rerunPreviewMismatchItem struct {
-	NodeID          string      `json:"node_id"`
-	ParamKey        string      `json:"param_key"`
-	MatchKey        string      `json:"match_key"`
-	Reason          string      `json:"reason"`
-	NodeName        string      `json:"node_name,omitempty"`
-	ParamLabel      string      `json:"param_label,omitempty"`
-	HistoricalValue interface{} `json:"historical_value"`
+	NodeID          string `json:"node_id"`
+	ParamKey        string `json:"param_key"`
+	MatchKey        string `json:"match_key"`
+	Reason          string `json:"reason"`
+	NodeName        string `json:"node_name,omitempty"`
+	ParamLabel      string `json:"param_label,omitempty"`
+	HistoricalValue any    `json:"historical_value"`
 }
 
 type rerunPreviewFailure struct {
@@ -4325,18 +4494,18 @@ type rerunPreviewFailure struct {
 }
 
 type rerunPreviewResponse struct {
-	CanEnterRunDialog bool                              `json:"can_enter_run_dialog"`
-	MatchKey          string                            `json:"match_key"`
-	Matched           []rerunPreviewMatchItem           `json:"matched"`
-	Mismatched        []rerunPreviewMismatchItem        `json:"mismatched"`
-	PrefillInputs     map[string]map[string]interface{} `json:"prefill_inputs"`
-	Failure           *rerunPreviewFailure              `json:"failure,omitempty"`
+	CanEnterRunDialog bool                       `json:"can_enter_run_dialog"`
+	MatchKey          string                     `json:"match_key"`
+	Matched           []rerunPreviewMatchItem    `json:"matched"`
+	Mismatched        []rerunPreviewMismatchItem `json:"mismatched"`
+	PrefillInputs     map[string]map[string]any  `json:"prefill_inputs"`
+	Failure           *rerunPreviewFailure       `json:"failure,omitempty"`
 }
 
 type rerunPreviewHistoricalParam struct {
 	NodeID   string
 	ParamKey string
-	Value    interface{}
+	Value    any
 }
 
 func buildRerunPreviewFailure(code, message string) rerunPreviewResponse {
@@ -4345,7 +4514,7 @@ func buildRerunPreviewFailure(code, message string) rerunPreviewResponse {
 		MatchKey:          "node_id+param_key",
 		Matched:           []rerunPreviewMatchItem{},
 		Mismatched:        []rerunPreviewMismatchItem{},
-		PrefillInputs:     map[string]map[string]interface{}{},
+		PrefillInputs:     map[string]map[string]any{},
 		Failure: &rerunPreviewFailure{
 			Code:    code,
 			Message: message,
@@ -4368,7 +4537,7 @@ func loadPipelineRunForRead(db *gorm.DB, workspaceID uint64, pipelineIDParam, ru
 	return run, true, nil
 }
 
-func appendHistoricalPreviewParam(params []rerunPreviewHistoricalParam, seen map[string]struct{}, nodeID, paramKey string, value interface{}) ([]rerunPreviewHistoricalParam, error) {
+func appendHistoricalPreviewParam(params []rerunPreviewHistoricalParam, seen map[string]struct{}, nodeID, paramKey string, value any) ([]rerunPreviewHistoricalParam, error) {
 	nodeID = strings.TrimSpace(nodeID)
 	paramKey = strings.TrimSpace(paramKey)
 	if nodeID == "" || paramKey == "" {
@@ -4399,7 +4568,7 @@ func parseHistoricalResolvedInputs(raw string, allowedKeys map[string]models.Pip
 	if trimmed == "" {
 		return nil, fmt.Errorf("resolved_nodes_json missing")
 	}
-	var resolvedNodes []map[string]interface{}
+	var resolvedNodes []map[string]any
 	if err := json.Unmarshal([]byte(trimmed), &resolvedNodes); err != nil {
 		return nil, err
 	}
@@ -4410,7 +4579,7 @@ func parseHistoricalResolvedInputs(raw string, allowedKeys map[string]models.Pip
 		if nodeID == "" {
 			continue
 		}
-		resolvedInputs, ok := node["resolved_inputs"].(map[string]interface{})
+		resolvedInputs, ok := node["resolved_inputs"].(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("resolved_inputs missing for node %s", nodeID)
 		}
@@ -4509,7 +4678,7 @@ func buildRunRerunPreview(run models.PipelineRun, currentConfig PipelineConfig) 
 		MatchKey:          "node_id+param_key",
 		Matched:           []rerunPreviewMatchItem{},
 		Mismatched:        []rerunPreviewMismatchItem{},
-		PrefillInputs:     map[string]map[string]interface{}{},
+		PrefillInputs:     map[string]map[string]any{},
 	}
 
 	for _, historical := range historicalParams {
@@ -4561,7 +4730,7 @@ func buildRunRerunPreview(run models.PipelineRun, currentConfig PipelineConfig) 
 		}
 
 		if response.PrefillInputs[historical.NodeID] == nil {
-			response.PrefillInputs[historical.NodeID] = map[string]interface{}{}
+			response.PrefillInputs[historical.NodeID] = map[string]any{}
 		}
 		response.PrefillInputs[historical.NodeID][historical.ParamKey] = historical.Value
 		response.Matched = append(response.Matched, rerunPreviewMatchItem{

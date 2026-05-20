@@ -23,6 +23,16 @@ test('renders member, invitation, agent, runtime profile tabs', () => {
   assert.match(indexSource, /<RuntimeProfileManagement\s*\/>/)
 })
 
+test('syncs workspace governance ai tabs with route query', () => {
+  const indexSource = readSource('index.vue')
+
+  assert.match(indexSource, /import \{ useRoute, useRouter \} from 'vue-router'/)
+  assert.match(indexSource, /const governanceTabs = \['members', 'invitations', 'agents', 'runtime-profiles'\]/)
+  assert.match(indexSource, /const activeTab = ref\(normalizeGovernanceTab\(route\.query\.tab\)\)/)
+  assert.match(indexSource, /watch\(\(\) => route\.query\.tab/)
+  assert.match(indexSource, /router\.replace\(\{ query \}\)/)
+})
+
 test('asks for confirmation before destructive workspace governance actions', () => {
   const memberSource = readSource('components/MemberManagement.vue')
   const invitationSource = readSource('components/InvitationManagement.vue')
