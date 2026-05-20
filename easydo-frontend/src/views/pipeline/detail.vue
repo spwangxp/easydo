@@ -3161,6 +3161,7 @@ onMounted(() => {
   })
   window.addEventListener('resize', updateDetailContainerWidth)
   fetchPipelineDetail()
+  fetchPipelineTaskDefinitions()
   fetchTriggerSettings()
   fetchRunHistory({ rehydrateExecution: true })
   setupRealtimeUpdates()

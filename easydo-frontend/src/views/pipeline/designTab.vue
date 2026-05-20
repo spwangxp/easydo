@@ -389,7 +389,7 @@
                     @update:model-value="setNodeParamFlexible(selectedNode, param.key, $event, param.label)"
                     @change="updateNode(selectedNode)"
                   >
-                    手动运行可覆盖
+                    允许运行时覆盖
                   </el-checkbox>
                 </div>
               </el-form-item>

@@ -39,7 +39,9 @@ ALTER TABLE `ai_sessions`
   ADD UNIQUE KEY `uk_ai_sessions_id_workspace` (`id`,`workspace_id`),
   ADD KEY `idx_ai_sessions_scene_workspace` (`scene_id`,`workspace_id`),
   ADD KEY `idx_ai_sessions_parent_workspace` (`parent_session_id`,`workspace_id`),
-  ADD KEY `idx_ai_sessions_root_workspace` (`root_session_id`,`workspace_id`),
+  ADD KEY `idx_ai_sessions_root_workspace` (`root_session_id`,`workspace_id`);
+
+ALTER TABLE `ai_sessions`
   ADD CONSTRAINT `fk_ai_sessions_scene_workspace` FOREIGN KEY (`scene_id`,`workspace_id`) REFERENCES `ai_scenes` (`id`,`workspace_id`),
   ADD CONSTRAINT `fk_ai_sessions_parent_session_workspace` FOREIGN KEY (`parent_session_id`,`workspace_id`) REFERENCES `ai_sessions` (`id`,`workspace_id`),
   ADD CONSTRAINT `fk_ai_sessions_root_session_workspace` FOREIGN KEY (`root_session_id`,`workspace_id`) REFERENCES `ai_sessions` (`id`,`workspace_id`);

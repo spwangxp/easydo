@@ -835,6 +835,48 @@ test('extractWebhookRuntimeInputTargets falls back to saved flexible params when
   ])
 })
 
+test('extractWebhookRuntimeInputTargets keeps string schema fields as webhook-mappable targets', () => {
+  const targets = extractWebhookRuntimeInputTargets({
+    nodes: [
+      {
+        node_id: 'node_1',
+        node_name: 'Build',
+        task_key: 'git_clone',
+        params: [
+          { key: 'git_ref', value: 'main', is_flexible: true },
+          { key: 'checkout_path', value: './app', is_flexible: false }
+        ]
+      }
+    ]
+  }, [
+    {
+      task_key: 'git_clone',
+      fields_schema: [
+        { key: 'git_ref', label: 'Git 引用', type: 'string', ui_component: 'input' },
+        { key: 'checkout_path', label: '检出目录', type: 'string', ui_component: 'input' }
+      ]
+    }
+  ])
+
+  assert.deepEqual(targets, [
+    {
+      target_key: 'node_1.git_ref',
+      node_id: 'node_1',
+      node_index: 1,
+      node_name: 'Build',
+      param_key: 'git_ref',
+      param_label: 'Git 引用',
+      default_value: 'main',
+      field_type: 'string',
+      input_type: 'text',
+      runtime_value_type: 'string',
+      is_string_like: true,
+      placeholder: '',
+      options: []
+    }
+  ])
+})
+
 test('normalizeWebhookRuntimeInputMappings parses raw backend mapping rows into stable objects', () => {
   const mappings = normalizeWebhookRuntimeInputMappings(`[
     {"id":"rule-1","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"node-1","param_key":"script"},"missing_policy":"ignore"},

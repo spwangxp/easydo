@@ -28,3 +28,9 @@ test('buildDisplayedWebhookURL trims trailing slashes from origin', () => {
     'https://example.com/api/pipeline/run/webhook/token-123'
   )
 })
+
+test('detail view loads task definitions during initial mount so trigger settings can render runtime mappings', async () => {
+  const source = await readFile(join(currentDir, 'detail.vue'), 'utf8')
+
+  assert.match(source, /onMounted\(\(\) => \{[\s\S]*fetchPipelineDetail\(\)[\s\S]*fetchPipelineTaskDefinitions\(\)[\s\S]*fetchTriggerSettings\(\)/)
+})

@@ -46,7 +46,7 @@ const inferFieldInputType = (field = {}) => {
 
   if (fieldType === 'boolean') return 'boolean'
   if (fieldType === 'number') return 'number'
-  if (fieldType === 'text') return uiComponent === 'textarea' ? 'textarea' : 'text'
+  if (fieldType === 'text' || fieldType === 'string') return uiComponent === 'textarea' ? 'textarea' : 'text'
   if (fieldType === 'select' || uiComponent === 'select') return 'select'
   if (fieldType === 'multiselect' || fieldType === 'checkbox_group' || uiComponent === 'checkbox_group') return 'checkbox_group'
   if (fieldType === 'json' || fieldType === 'object' || fieldType === 'array') return 'textarea'
@@ -120,7 +120,7 @@ const buildFieldDefinitionMap = (fieldsSchema = []) => {
   return fieldMap
 }
 
-const isStringLikeFieldType = (fieldType = '') => fieldType === 'text' || fieldType === 'select'
+const isStringLikeFieldType = (fieldType = '') => fieldType === 'text' || fieldType === 'string' || fieldType === 'select'
 
 const inferRuntimeValueType = (fieldDefinition = null, inputType = 'text') => {
   const fieldType = String(fieldDefinition?.type || '').toLowerCase()
