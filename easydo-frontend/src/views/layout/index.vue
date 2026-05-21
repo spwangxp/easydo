@@ -179,7 +179,8 @@ const menuItems = [
   { name: '流水线', path: '/pipeline', icon: Connection, permission: 'pipeline.read', scope: 'workspace-business' },
   { name: '项目', path: '/project', icon: Box, permission: 'project.read', scope: 'workspace-business' },
   { name: '商店', path: '/store', icon: Shop, permission: 'store.template.read', scope: 'workspace-business' },
-  { name: '执行器', path: '/agent', icon: Monitor, permission: 'agent.read', scope: 'workspace-business' },
+  { name: '执行器', path: '/agent', icon: Monitor, permission: 'agent.read', scope: 'workspace-business', allowInAdminWorkspace: true },
+  { name: '待接纳执行器', path: '/agent/pending', icon: Monitor, permission: 'agent.approve', scope: 'platform-governance' },
   { name: '资源管理', path: '/resources', icon: Collection, permission: 'resource.read', scope: 'workspace-business' },
   { name: '发布', path: '/deploy', icon: Promotion, permission: 'resource.use', scope: 'workspace-business' },
   { name: '凭据管理', path: '/credentials', icon: Key, permission: 'credential.read', scope: 'workspace-business' },
@@ -210,6 +211,7 @@ const filteredMenuItems = computed(() => filterGovernanceMenuItems(menuItems, {
   isAdminWorkspace: userStore.isAdminWorkspace,
   canAccessWorkspaceGovernance: userStore.canAccessWorkspaceGovernance,
   canAccessPlatformGovernance: userStore.canAccessPlatformGovernance,
+  canAccessAdminWorkspaceExecutors: userStore.canAccessAdminWorkspaceExecutors,
   hasPermission: permission => userStore.hasPermission(permission)
 }))
 
@@ -252,10 +254,11 @@ const handleUserInfoClick = () => {
 const handleWorkspaceChange = async (workspaceId) => {
   userStore.setCurrentWorkspaceById(workspaceId)
   await userStore.getUserInfoAction()
-  if (route.meta.scope && !canAccessRouteScope(route.meta.scope, {
+  if (route.meta.scope && !canAccessRouteScope(route.meta, {
     isAdminWorkspace: userStore.isAdminWorkspace,
     canAccessWorkspaceGovernance: userStore.canAccessWorkspaceGovernance,
-    canAccessPlatformGovernance: userStore.canAccessPlatformGovernance
+    canAccessPlatformGovernance: userStore.canAccessPlatformGovernance,
+    canAccessAdminWorkspaceExecutors: userStore.canAccessAdminWorkspaceExecutors
   })) {
     router.push(resolveGovernanceFallback(route.meta.scope, {
       canAccessWorkspaceGovernance: userStore.canAccessWorkspaceGovernance,

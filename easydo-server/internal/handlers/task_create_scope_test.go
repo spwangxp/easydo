@@ -11,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func performCreateTaskRequest(t *testing.T, h *TaskHandler, workspaceID uint64, role string, payload map[string]interface{}) *httptest.ResponseRecorder {
+func performCreateTaskRequestWithKind(t *testing.T, h *TaskHandler, workspaceID uint64, workspaceKind, role string, payload map[string]interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	body, err := json.Marshal(payload)
@@ -26,8 +26,16 @@ func performCreateTaskRequest(t *testing.T, h *TaskHandler, workspaceID uint64, 
 	c.Set("user_id", uint64(1))
 	c.Set("role", role)
 	c.Set("workspace_id", workspaceID)
+	if workspaceKind != "" {
+		c.Set("workspace_kind", workspaceKind)
+	}
 	h.CreateTask(c)
 	return w
+}
+
+func performCreateTaskRequest(t *testing.T, h *TaskHandler, workspaceID uint64, role string, payload map[string]interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	return performCreateTaskRequestWithKind(t, h, workspaceID, "", role, payload)
 }
 
 func TestCreateTask_RejectsCrossWorkspacePrivateAgent(t *testing.T) {
@@ -102,5 +110,40 @@ func TestCreateTask_AllowsPlatformAgentInWorkspace(t *testing.T) {
 	}
 	if task.AgentID != agent.ID {
 		t.Fatalf("task agent_id=%d, want=%d", task.AgentID, agent.ID)
+	}
+}
+
+func TestCreateTask_AdminWorkspaceRejectsAgentUsage(t *testing.T) {
+	db := openHandlerTestDB(t)
+	h := &TaskHandler{DB: db}
+
+	agent := models.Agent{
+		Name:               "platform-agent",
+		Host:               "host-platform",
+		Port:               9002,
+		Token:              "agent-token-platform",
+		Status:             models.AgentStatusOnline,
+		RegistrationStatus: models.AgentRegistrationStatusApproved,
+		ScopeType:          models.AgentScopePlatform,
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+
+	w := performCreateTaskRequestWithKind(t, h, 99, models.WorkspaceKindAdmin, "admin", map[string]interface{}{
+		"agent_id":  agent.ID,
+		"task_type": "shell",
+		"name":      "blocked-admin-workspace-task",
+	})
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for admin workspace task creation, got %d body=%s", w.Code, w.Body.String())
+	}
+	var taskCount int64
+	if err := db.Model(&models.AgentTask{}).Count(&taskCount).Error; err != nil {
+		t.Fatalf("count tasks failed: %v", err)
+	}
+	if taskCount != 0 {
+		t.Fatalf("taskCount=%d, want=0", taskCount)
 	}
 }

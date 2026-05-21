@@ -27,6 +27,7 @@ export function deriveGovernanceMode({ currentWorkspace = null, userInfo = {} } 
   const isPlatformAdmin = currentSystemRole === 'admin'
   const canAccessPlatformGovernance = isPlatformAdmin && isAdminWorkspace
   const canAccessWorkspaceGovernance = isNormalWorkspace && (isPlatformAdmin || currentWorkspaceRole === 'owner')
+  const canAccessAdminWorkspaceExecutors = isPlatformAdmin && isAdminWorkspace
 
   return {
     currentWorkspaceKind,
@@ -36,6 +37,7 @@ export function deriveGovernanceMode({ currentWorkspace = null, userInfo = {} } 
     isNormalWorkspace,
     isPlatformAdmin,
     canAccessPlatformGovernance,
-    canAccessWorkspaceGovernance
+    canAccessWorkspaceGovernance,
+    canAccessAdminWorkspaceExecutors
   }
 }

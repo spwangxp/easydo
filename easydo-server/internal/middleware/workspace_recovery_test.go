@@ -83,6 +83,57 @@ func TestResolveUserWorkspace_SkipsInactiveWorkspaceMembership(t *testing.T) {
 	}
 }
 
+func TestResolveUserWorkspace_HidesAdminWorkspaceFromNonAdmin(t *testing.T) {
+	setupWorkspaceTestRedis(t)
+	db := openMiddlewareTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = originalDB
+	})
+
+	user := models.User{Username: "member-user-admin-hidden", Role: "user", Status: "active"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	adminWorkspace := models.Workspace{Name: "admin-space", Slug: "admin-space", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindAdmin, CreatedBy: 1}
+	normalWorkspace := models.Workspace{Name: "normal-space", Slug: "normal-space", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: user.ID}
+	if err := db.Create(&adminWorkspace).Error; err != nil {
+		t.Fatalf("create admin workspace failed: %v", err)
+	}
+	if err := db.Create(&normalWorkspace).Error; err != nil {
+		t.Fatalf("create normal workspace failed: %v", err)
+	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: adminWorkspace.ID, UserID: user.ID, Role: models.WorkspaceRoleViewer, Status: models.WorkspaceMemberStatusActive}).Error; err != nil {
+		t.Fatalf("create admin membership failed: %v", err)
+	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: normalWorkspace.ID, UserID: user.ID, Role: models.WorkspaceRoleDeveloper, Status: models.WorkspaceMemberStatusActive}).Error; err != nil {
+		t.Fatalf("create normal membership failed: %v", err)
+	}
+
+	workspace, member, err := ResolveUserWorkspace(user.ID, 0)
+	if err != nil {
+		t.Fatalf("ResolveUserWorkspace returned error: %v", err)
+	}
+	if workspace == nil || member == nil {
+		t.Fatalf("expected normal workspace membership, got workspace=%v member=%v", workspace, member)
+	}
+	if workspace.ID != normalWorkspace.ID {
+		t.Fatalf("workspace_id=%d, want=%d", workspace.ID, normalWorkspace.ID)
+	}
+	if member.WorkspaceID != normalWorkspace.ID {
+		t.Fatalf("member.workspace_id=%d, want=%d", member.WorkspaceID, normalWorkspace.ID)
+	}
+
+	workspace, member, err = ResolveUserWorkspace(user.ID, adminWorkspace.ID)
+	if err != nil {
+		t.Fatalf("ResolveUserWorkspace admin lookup returned error: %v", err)
+	}
+	if workspace != nil || member != nil {
+		t.Fatalf("expected admin workspace to be hidden, got workspace=%v member=%v", workspace, member)
+	}
+}
+
 func TestResolveUserWorkspace_RefreshesWhenWorkspaceAuthVersionChanges(t *testing.T) {
 	setupWorkspaceTestRedis(t)
 	db := openMiddlewareTestDB(t)

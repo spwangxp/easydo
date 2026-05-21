@@ -108,8 +108,16 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 	}
 
 	workspaceID := c.GetUint64("workspace_id")
+	workspaceKind := c.GetString("workspace_kind")
 	role := c.GetString("role")
-	if !agentVisibleInWorkspace(&agent, workspaceID, role) {
+	if isAdminWorkspaceContext(workspaceKind, role) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "admin workspace 不支持直接创建业务执行任务",
+		})
+		return
+	}
+	if !agentVisibleInWorkspace(&agent, workspaceID, workspaceKind, role) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"code":    403,
 			"message": "无权使用该执行器",

@@ -97,7 +97,11 @@ func TestUpdateAgent_AdminCanMoveAgentAcrossScopes(t *testing.T) {
 	db := openHandlerTestDB(t)
 	h := &AgentHandler{DB: db}
 
-	workspace := models.Workspace{Name: "workspace-scope", Slug: "workspace-scope", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, CreatedBy: 77}
+	adminWorkspace := models.Workspace{Name: "platform-governance", Slug: "platform-governance", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindAdmin, CreatedBy: 77}
+	workspace := models.Workspace{Name: "workspace-scope", Slug: "workspace-scope", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: 77}
+	if err := db.Create(&adminWorkspace).Error; err != nil {
+		t.Fatalf("create admin workspace failed: %v", err)
+	}
 	if err := db.Create(&workspace).Error; err != nil {
 		t.Fatalf("create workspace failed: %v", err)
 	}
@@ -114,7 +118,7 @@ func TestUpdateAgent_AdminCanMoveAgentAcrossScopes(t *testing.T) {
 		t.Fatalf("create agent failed: %v", err)
 	}
 
-	w := performScopedUpdateAgentRequest(t, h, agent.ID, "admin", 0, map[string]interface{}{
+	w := performScopedUpdateAgentRequestWithKind(t, h, agent.ID, "admin", adminWorkspace.ID, models.WorkspaceKindAdmin, map[string]interface{}{
 		"scope_type":   models.AgentScopeWorkspace,
 		"workspace_id": workspace.ID,
 	})
@@ -129,7 +133,7 @@ func TestUpdateAgent_AdminCanMoveAgentAcrossScopes(t *testing.T) {
 		t.Fatalf("agent not moved to workspace scope: %+v", got)
 	}
 
-	w = performScopedUpdateAgentRequest(t, h, agent.ID, "admin", 0, map[string]interface{}{
+	w = performScopedUpdateAgentRequestWithKind(t, h, agent.ID, "admin", adminWorkspace.ID, models.WorkspaceKindAdmin, map[string]interface{}{
 		"scope_type": models.AgentScopePlatform,
 		"name":       "platform-again",
 	})
@@ -141,6 +145,86 @@ func TestUpdateAgent_AdminCanMoveAgentAcrossScopes(t *testing.T) {
 	}
 	if got.ScopeType != models.AgentScopePlatform || got.WorkspaceID != 0 {
 		t.Fatalf("agent not moved back to platform scope: %+v", got)
+	}
+}
+
+func TestUpdateAgent_AdminInNormalWorkspaceCannotChangeScopeAcrossWorkspaces(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &AgentHandler{DB: db}
+
+	workspaceA := models.Workspace{Name: "workspace-a", Slug: "workspace-a-admin-normal", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: 77}
+	workspaceB := models.Workspace{Name: "workspace-b", Slug: "workspace-b-admin-normal", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: 77}
+	if err := db.Create(&workspaceA).Error; err != nil {
+		t.Fatalf("create workspace A failed: %v", err)
+	}
+	if err := db.Create(&workspaceB).Error; err != nil {
+		t.Fatalf("create workspace B failed: %v", err)
+	}
+	agent := models.Agent{
+		Name:               "workspace-agent",
+		Host:               "host",
+		Port:               8080,
+		Token:              "token",
+		Status:             models.AgentStatusOnline,
+		RegistrationStatus: models.AgentRegistrationStatusApproved,
+		ScopeType:          models.AgentScopeWorkspace,
+		WorkspaceID:        workspaceA.ID,
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+
+	w := performScopedUpdateAgentRequestWithKind(t, h, agent.ID, "admin", workspaceA.ID, models.WorkspaceKindNormal, map[string]interface{}{
+		"scope_type":   models.AgentScopeWorkspace,
+		"workspace_id": workspaceB.ID,
+	})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got status=%d body=%s", w.Code, w.Body.String())
+	}
+	var got models.Agent
+	if err := db.First(&got, agent.ID).Error; err != nil {
+		t.Fatalf("reload agent failed: %v", err)
+	}
+	if got.WorkspaceID != workspaceA.ID || got.ScopeType != models.AgentScopeWorkspace {
+		t.Fatalf("admin in normal workspace unexpectedly changed agent scope: %+v", got)
+	}
+}
+
+func TestUpdateAgent_AdminInNormalWorkspaceCannotManagePlatformAgent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &AgentHandler{DB: db}
+
+	workspace := models.Workspace{Name: "workspace-a", Slug: "workspace-a-admin-platform", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: 77}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	agent := models.Agent{
+		Name:               "platform-agent",
+		Host:               "host",
+		Port:               8080,
+		Token:              "token",
+		Status:             models.AgentStatusOnline,
+		RegistrationStatus: models.AgentRegistrationStatusApproved,
+		ScopeType:          models.AgentScopePlatform,
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+
+	w := performScopedUpdateAgentRequestWithKind(t, h, agent.ID, "admin", workspace.ID, models.WorkspaceKindNormal, map[string]interface{}{
+		"name": "platform-agent-updated",
+	})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got status=%d body=%s", w.Code, w.Body.String())
+	}
+	var got models.Agent
+	if err := db.First(&got, agent.ID).Error; err != nil {
+		t.Fatalf("reload agent failed: %v", err)
+	}
+	if got.Name != "platform-agent" {
+		t.Fatalf("admin in normal workspace unexpectedly updated platform agent: %+v", got)
 	}
 }
 

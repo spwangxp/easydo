@@ -71,12 +71,16 @@ func ensurePersonalWorkspaceWithDB(db *gorm.DB, user *models.User) (*models.Work
 	}
 
 	var member models.WorkspaceMember
-	if err := db.Model(&models.WorkspaceMember{}).
+	memberQuery := db.Model(&models.WorkspaceMember{}).
 		Joins("JOIN workspaces ON workspaces.id = workspace_members.workspace_id").
 		Where("workspace_members.user_id = ? AND workspace_members.status = ?", user.ID, models.WorkspaceMemberStatusActive).
 		Where("workspaces.status = ?", models.WorkspaceStatusActive).
-		Order("workspace_members.created_at ASC").
-		First(&member).Error; err == nil {
+		Order("workspace_members.created_at ASC")
+	if !isAdminRole(user.Role) {
+		visibilityClause, visibilityArgs := middleware.NonAdminVisibleWorkspaceCondition("workspaces")
+		memberQuery = memberQuery.Where(visibilityClause, visibilityArgs...)
+	}
+	if err := memberQuery.First(&member).Error; err == nil {
 		var workspace models.Workspace
 		if err := db.Where("id = ? AND status = ?", member.WorkspaceID, models.WorkspaceStatusActive).First(&workspace).Error; err == nil {
 			return &workspace, nil
@@ -396,7 +400,10 @@ func ensureAdminWorkspaceWithDB(db *gorm.DB, user *models.User) error {
 		}
 		return err
 	}
-	return db.Model(&workspace).Update("kind", models.WorkspaceKindAdmin).Error
+	if err := db.Model(&workspace).Update("kind", models.WorkspaceKindAdmin).Error; err != nil {
+		return err
+	}
+	return middleware.BumpWorkspaceAuthVersion(context.Background(), workspace.ID)
 }
 
 func (h *UserHandler) GetUserInfo(c *gin.Context) {
@@ -477,11 +484,13 @@ func (h *UserHandler) GetUserInfo(c *gin.Context) {
 			}
 		}
 	} else {
-		if err := h.DB.Preload("Workspace", "status = ?", models.WorkspaceStatusActive).Where(
+		query := h.DB.Preload("Workspace", "status = ?", models.WorkspaceStatusActive).Where(
 			"workspace_members.user_id = ? AND workspace_members.status = ?",
 			user.ID,
 			models.WorkspaceMemberStatusActive,
-		).Joins("JOIN workspaces ON workspaces.id = workspace_members.workspace_id").Where("workspaces.status = ?", models.WorkspaceStatusActive).Order("workspace_members.created_at ASC").Find(&memberships).Error; err != nil {
+		).Joins("JOIN workspaces ON workspaces.id = workspace_members.workspace_id").Where("workspaces.status = ?", models.WorkspaceStatusActive).Order("workspace_members.created_at ASC")
+		visibilityClause, visibilityArgs := middleware.NonAdminVisibleWorkspaceCondition("workspaces")
+		if err := query.Where(visibilityClause, visibilityArgs...).Find(&memberships).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"code":    500,
 				"message": "加载工作空间失败",

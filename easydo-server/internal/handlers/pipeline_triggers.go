@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"net/http"
 	"path"
 	"strings"
@@ -351,7 +352,8 @@ func (h *PipelineHandler) HandleGitLabWebhook(c *gin.Context) {
 	}
 	runConfigSnapshot := models.PipelineRunConfigSnapshot{Inputs: inputs}
 
-	idempotencyKeyValue := buildWebhookIdempotencyKey(trigger.ID, eventType, refName, commitSHA)
+	configRevision := buildWebhookConfigRevision(pipeline, trigger)
+	idempotencyKeyValue := buildWebhookIdempotencyKey(trigger.ID, eventType, refName, commitSHA, configRevision)
 	run, buildNumber, err := h.launchPipelineRun(pipeline, config, pipelineRunTriggerContext{
 		TriggerType:     pipelineRunTriggerTypeWebhook,
 		TriggerUser:     triggerUser,
@@ -758,8 +760,47 @@ func trimGitRefPrefix(ref string, prefix string) string {
 	return value
 }
 
-func buildWebhookIdempotencyKey(triggerID uint64, eventType string, refName string, commitSHA string) string {
-	return fmt.Sprintf("webhook:%d:%s:%s:%s", triggerID, eventType, refName, commitSHA)
+func buildWebhookConfigRevision(pipeline models.Pipeline, trigger models.PipelineTrigger) string {
+	snapshot, _ := json.Marshal(struct {
+		PipelineUpdatedAt                int64  `json:"pipeline_updated_at"`
+		Provider                         string `json:"provider"`
+		WebhookEnabled                   bool   `json:"webhook_enabled"`
+		PushEnabled                      bool   `json:"push_enabled"`
+		TagEnabled                       bool   `json:"tag_enabled"`
+		MergeRequestEnabled              bool   `json:"merge_request_enabled"`
+		ScheduleEnabled                  bool   `json:"schedule_enabled"`
+		CronExpression                   string `json:"cron_expression"`
+		Timezone                         string `json:"timezone"`
+		PushBranchFilters                string `json:"push_branch_filters"`
+		TagFilters                       string `json:"tag_filters"`
+		MergeRequestSourceBranchFilters  string `json:"merge_request_source_branch_filters"`
+		MergeRequestTargetBranchFilters  string `json:"merge_request_target_branch_filters"`
+		WebhookRuntimeInputMappings      string `json:"webhook_runtime_input_mappings"`
+		WebhookConfigStatus              string `json:"webhook_config_status"`
+		WebhookConfigInvalidReason       string `json:"webhook_config_invalid_reason"`
+	}{
+		PipelineUpdatedAt:               pipeline.UpdatedAt.UTC().UnixMilli(),
+		Provider:                        strings.TrimSpace(trigger.Provider),
+		WebhookEnabled:                  trigger.WebhookEnabled,
+		PushEnabled:                     trigger.PushEnabled,
+		TagEnabled:                      trigger.TagEnabled,
+		MergeRequestEnabled:             trigger.MergeRequestEnabled,
+		ScheduleEnabled:                 trigger.ScheduleEnabled,
+		CronExpression:                  strings.TrimSpace(trigger.CronExpression),
+		Timezone:                        strings.TrimSpace(trigger.Timezone),
+		PushBranchFilters:               strings.TrimSpace(trigger.PushBranchFilters),
+		TagFilters:                      strings.TrimSpace(trigger.TagFilters),
+		MergeRequestSourceBranchFilters: strings.TrimSpace(trigger.MergeRequestSourceBranchFilters),
+		MergeRequestTargetBranchFilters: strings.TrimSpace(trigger.MergeRequestTargetBranchFilters),
+		WebhookRuntimeInputMappings:     strings.TrimSpace(trigger.WebhookRuntimeInputMappings),
+		WebhookConfigStatus:             strings.TrimSpace(trigger.WebhookConfigStatus),
+		WebhookConfigInvalidReason:      strings.TrimSpace(trigger.WebhookConfigInvalidReason),
+	})
+	return fmt.Sprintf("%08x", crc32.ChecksumIEEE(snapshot))
+}
+
+func buildWebhookIdempotencyKey(triggerID uint64, eventType string, refName string, commitSHA string, configRevision string) string {
+	return fmt.Sprintf("webhook:%d:%s:%s:%s:%s", triggerID, eventType, refName, commitSHA, configRevision)
 }
 
 func buildScheduleIdempotencyKey(triggerID uint64, dueAt time.Time) string {

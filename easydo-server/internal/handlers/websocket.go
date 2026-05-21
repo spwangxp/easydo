@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -1209,13 +1210,19 @@ func updateAISessionStateForTask(db *gorm.DB, task *models.AgentTask, update tas
 		return
 	}
 
+	var session models.AISession
+	if err := db.Select("id", "task_type", "request_json", "started_at").First(&session, aiSessionID).Error; err != nil {
+		return
+	}
+
 	updates := map[string]interface{}{}
+	responseJSON := ""
 	switch update.Status {
 	case models.TaskStatusRunning:
 		updates["status"] = models.AISessionStatusRunning
-		var session models.AISession
-		if err := db.Select("started_at").First(&session, aiSessionID).Error; err == nil && session.StartedAt == 0 {
+		if session.StartedAt == 0 {
 			updates["started_at"] = now
+			session.StartedAt = now
 		}
 	case models.TaskStatusExecuteSuccess:
 		updates["status"] = models.AISessionStatusCompleted
@@ -1223,7 +1230,8 @@ func updateAISessionStateForTask(db *gorm.DB, task *models.AgentTask, update tas
 		updates["error_msg"] = ""
 		if update.Result != nil {
 			if data, err := json.Marshal(update.Result); err == nil {
-				updates["response_json"] = string(data)
+				responseJSON = string(data)
+				updates["response_json"] = responseJSON
 			}
 		}
 	case models.TaskStatusExecuteFailed, models.TaskStatusScheduleFailed:
@@ -1232,7 +1240,8 @@ func updateAISessionStateForTask(db *gorm.DB, task *models.AgentTask, update tas
 		updates["error_msg"] = strings.TrimSpace(update.ErrorMsg)
 		if update.Result != nil {
 			if data, err := json.Marshal(update.Result); err == nil {
-				updates["response_json"] = string(data)
+				responseJSON = string(data)
+				updates["response_json"] = responseJSON
 			}
 		}
 	case models.TaskStatusCancelled:
@@ -1241,7 +1250,8 @@ func updateAISessionStateForTask(db *gorm.DB, task *models.AgentTask, update tas
 		updates["error_msg"] = strings.TrimSpace(update.ErrorMsg)
 		if update.Result != nil {
 			if data, err := json.Marshal(update.Result); err == nil {
-				updates["response_json"] = string(data)
+				responseJSON = string(data)
+				updates["response_json"] = responseJSON
 			}
 		}
 	default:
@@ -1251,7 +1261,106 @@ func updateAISessionStateForTask(db *gorm.DB, task *models.AgentTask, update tas
 	if len(updates) == 0 {
 		return
 	}
-	_ = db.Model(&models.AISession{}).Where("id = ?", aiSessionID).Updates(updates).Error
+	if err := db.Model(&models.AISession{}).Where("id = ?", aiSessionID).Updates(updates).Error; err != nil {
+		return
+	}
+	if err := upsertAISessionTurnForTaskUpdate(db, session, task, update, now, responseJSON); err != nil {
+		fmt.Printf("Failed to persist ai session turn for session %d attempt %d: %v\n", aiSessionID, update.Attempt, err)
+	}
+}
+
+func upsertAISessionTurnForTaskUpdate(tx *gorm.DB, session models.AISession, task *models.AgentTask, update taskUpdatePayloadV2, now int64, responseJSON string) error {
+	if tx == nil || session.ID == 0 {
+		return nil
+	}
+
+	turnSeq := update.Attempt
+	if turnSeq <= 0 {
+		turnSeq = 1
+	}
+
+	var turn models.AISessionTurn
+	if err := tx.Where("session_id = ? AND turn_seq = ?", session.ID, turnSeq).First(&turn).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		turn = models.AISessionTurn{
+			SessionID: session.ID,
+			TurnSeq:   turnSeq,
+			TurnType:  firstNonEmptyTaskValue(session.TaskType, task.TaskType, "ai_task"),
+			Role:      "assistant",
+			InputJSON: session.RequestJSON,
+		}
+		if err := tx.Create(&turn).Error; err != nil {
+			return err
+		}
+	}
+
+	updates := buildAISessionTurnTaskUpdates(turn, session, task, update, now, responseJSON)
+	if len(updates) == 0 {
+		return nil
+	}
+	return tx.Model(&models.AISessionTurn{}).Where("id = ?", turn.ID).Updates(updates).Error
+}
+
+func buildAISessionTurnTaskUpdates(turn models.AISessionTurn, session models.AISession, task *models.AgentTask, update taskUpdatePayloadV2, now int64, responseJSON string) map[string]interface{} {
+	updates := map[string]interface{}{
+		"turn_type": firstNonEmptyTaskValue(turn.TurnType, session.TaskType, task.TaskType, "ai_task"),
+		"role":      "assistant",
+	}
+	if turn.InputJSON == "" && strings.TrimSpace(session.RequestJSON) != "" {
+		updates["input_json"] = session.RequestJSON
+	}
+
+	setStartedAt := func() {
+		if turn.StartedAt != nil && *turn.StartedAt > 0 {
+			return
+		}
+		if session.StartedAt > 0 {
+			updates["started_at"] = session.StartedAt
+			return
+		}
+		updates["started_at"] = now
+	}
+
+	switch update.Status {
+	case models.TaskStatusRunning:
+		updates["status"] = string(models.AISessionStatusRunning)
+		setStartedAt()
+	case models.TaskStatusExecuteSuccess:
+		updates["status"] = string(models.AISessionStatusCompleted)
+		updates["error_msg"] = ""
+		updates["completed_at"] = now
+		setStartedAt()
+		if responseJSON != "" {
+			updates["output_json"] = responseJSON
+		}
+	case models.TaskStatusExecuteFailed:
+		updates["status"] = string(models.AISessionStatusFailed)
+		updates["error_msg"] = strings.TrimSpace(update.ErrorMsg)
+		updates["completed_at"] = now
+		setStartedAt()
+		if responseJSON != "" {
+			updates["output_json"] = responseJSON
+		}
+	case models.TaskStatusScheduleFailed:
+		updates["status"] = string(models.AISessionStatusFailed)
+		updates["error_msg"] = strings.TrimSpace(update.ErrorMsg)
+		updates["completed_at"] = now
+		if responseJSON != "" {
+			updates["output_json"] = responseJSON
+		}
+	case models.TaskStatusCancelled:
+		updates["status"] = string(models.AISessionStatusCancelled)
+		updates["error_msg"] = strings.TrimSpace(update.ErrorMsg)
+		updates["completed_at"] = now
+		if responseJSON != "" {
+			updates["output_json"] = responseJSON
+		}
+	default:
+		return nil
+	}
+	return updates
 }
 
 func extractAISessionIDFromTask(task *models.AgentTask) uint64 {

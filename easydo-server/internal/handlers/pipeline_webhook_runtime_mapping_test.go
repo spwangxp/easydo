@@ -3,6 +3,7 @@ package handlers
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"easydo-server/internal/models"
 )
@@ -249,6 +250,30 @@ func TestValidateWebhookRuntimeMappings_RejectsEmptyID(t *testing.T) {
 	}
 	if errs[0].Code != webhookRuntimeMappingStatusInvalidID {
 		t.Fatalf("expected invalid_id code, got %#v", errs[0])
+	}
+}
+
+func TestBuildWebhookIdempotencyKey_ChangesWhenConfigRevisionChanges(t *testing.T) {
+	pipeline := models.Pipeline{BaseModel: models.BaseModel{UpdatedAt: time.Unix(1710000000, 0)}}
+	trigger := models.PipelineTrigger{
+		Provider:                    "gitlab",
+		WebhookEnabled:              true,
+		PushEnabled:                 true,
+		WebhookRuntimeInputMappings: `[{"id":"rule-1","source_type":"jsonpath","source_expr":"$.ref"}]`,
+	}
+
+	initial := buildWebhookIdempotencyKey(trigger.ID, "push", "master", "commit-sha", buildWebhookConfigRevision(pipeline, trigger))
+
+	pipeline.UpdatedAt = pipeline.UpdatedAt.Add(time.Minute)
+	withPipelineChange := buildWebhookIdempotencyKey(trigger.ID, "push", "master", "commit-sha", buildWebhookConfigRevision(pipeline, trigger))
+	if initial == withPipelineChange {
+		t.Fatalf("expected pipeline config change to produce a new webhook idempotency key")
+	}
+
+	trigger.WebhookRuntimeInputMappings = `[{"id":"rule-1","source_type":"jsonpath","source_expr":"$.checkout_sha"}]`
+	withTriggerConfigChange := buildWebhookIdempotencyKey(trigger.ID, "push", "master", "commit-sha", buildWebhookConfigRevision(pipeline, trigger))
+	if withPipelineChange == withTriggerConfigChange {
+		t.Fatalf("expected trigger config change to produce a new webhook idempotency key")
 	}
 }
 

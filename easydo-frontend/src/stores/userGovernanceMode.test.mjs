@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { deriveGovernanceMode } from './userGovernance.js'
+
+const currentDir = dirname(fileURLToPath(import.meta.url))
+const userStoreSource = readFileSync(resolve(currentDir, './user.js'), 'utf8')
 
 assert.deepEqual(
   deriveGovernanceMode({
@@ -14,7 +20,8 @@ assert.deepEqual(
     isNormalWorkspace: true,
     isPlatformAdmin: true,
     canAccessPlatformGovernance: false,
-    canAccessWorkspaceGovernance: true
+    canAccessWorkspaceGovernance: true,
+    canAccessAdminWorkspaceExecutors: false
   }
 )
 
@@ -31,7 +38,8 @@ assert.deepEqual(
     isNormalWorkspace: false,
     isPlatformAdmin: true,
     canAccessPlatformGovernance: true,
-    canAccessWorkspaceGovernance: false
+    canAccessWorkspaceGovernance: false,
+    canAccessAdminWorkspaceExecutors: true
   }
 )
 
@@ -48,7 +56,8 @@ assert.deepEqual(
     isNormalWorkspace: true,
     isPlatformAdmin: false,
     canAccessPlatformGovernance: false,
-    canAccessWorkspaceGovernance: true
+    canAccessWorkspaceGovernance: true,
+    canAccessAdminWorkspaceExecutors: false
   }
 )
 
@@ -65,7 +74,8 @@ assert.deepEqual(
     isNormalWorkspace: true,
     isPlatformAdmin: false,
     canAccessPlatformGovernance: false,
-    canAccessWorkspaceGovernance: false
+    canAccessWorkspaceGovernance: false,
+    canAccessAdminWorkspaceExecutors: false
   }
 )
 
@@ -82,7 +92,8 @@ assert.deepEqual(
     isNormalWorkspace: false,
     isPlatformAdmin: false,
     canAccessPlatformGovernance: false,
-    canAccessWorkspaceGovernance: false
+    canAccessWorkspaceGovernance: false,
+    canAccessAdminWorkspaceExecutors: false
   }
 )
 
@@ -99,8 +110,12 @@ assert.deepEqual(
     isNormalWorkspace: false,
     isPlatformAdmin: false,
     canAccessPlatformGovernance: false,
-    canAccessWorkspaceGovernance: false
+    canAccessWorkspaceGovernance: false,
+    canAccessAdminWorkspaceExecutors: false
   }
 )
+
+assert.match(userStoreSource, /canAccessAdminWorkspaceExecutors = computed\(\(\) => governanceMode\.value\.canAccessAdminWorkspaceExecutors\)/)
+assert.match(userStoreSource, /return \{[\s\S]*canAccessAdminWorkspaceExecutors[\s\S]*\}/)
 
 console.log('user governance mode tests passed')

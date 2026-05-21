@@ -128,6 +128,9 @@ func (h *WorkspaceHandler) getWorkspaceForUser(c *gin.Context, workspaceID uint6
 	if err := h.DB.Where("id = ? AND status = ?", workspaceID, models.WorkspaceStatusActive).First(&workspace).Error; err != nil {
 		return nil, "", false
 	}
+	if !middleware.WorkspaceVisibleToSystemRole(role, workspace.Kind) {
+		return nil, "", false
+	}
 	return &workspace, workspaceRole, true
 }
 
@@ -139,7 +142,8 @@ func (h *WorkspaceHandler) GetWorkspaceList(c *gin.Context) {
 		workspaceSubQuery := h.DB.Model(&models.WorkspaceMember{}).
 			Select("workspace_id").
 			Where("user_id = ? AND status = ?", userID, models.WorkspaceMemberStatusActive)
-		query = query.Where("id IN (?)", workspaceSubQuery)
+		visibilityClause, visibilityArgs := middleware.NonAdminVisibleWorkspaceCondition("workspaces")
+		query = query.Where("id IN (?)", workspaceSubQuery).Where(visibilityClause, visibilityArgs...)
 	}
 
 	var workspaces []models.Workspace
@@ -154,12 +158,17 @@ func (h *WorkspaceHandler) GetWorkspaceList(c *gin.Context) {
 		if !isAdminRole(role) {
 			workspaceRole, _ = userWorkspaceRole(h.DB, workspace.ID, userID)
 		}
+		workspaceKind := normalizeWorkspaceKind(workspace.Kind)
+		if workspaceKind == "" {
+			workspaceKind = models.WorkspaceKindNormal
+		}
 		result = append(result, gin.H{
 			"id":           workspace.ID,
 			"name":         workspace.Name,
 			"description":  workspace.Description,
 			"status":       workspace.Status,
 			"visibility":   workspace.Visibility,
+			"kind":         workspaceKind,
 			"role":         workspaceRole,
 			"capabilities": middleware.ExpandWorkspaceCapabilities(workspaceRole),
 		})
@@ -230,12 +239,17 @@ func (h *WorkspaceHandler) GetWorkspace(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权访问该工作空间"})
 		return
 	}
+	workspaceKind := normalizeWorkspaceKind(workspace.Kind)
+	if workspaceKind == "" {
+		workspaceKind = models.WorkspaceKindNormal
+	}
 	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
 		"id":           workspace.ID,
 		"name":         workspace.Name,
 		"description":  workspace.Description,
 		"status":       workspace.Status,
 		"visibility":   workspace.Visibility,
+		"kind":         workspaceKind,
 		"role":         workspaceRole,
 		"capabilities": middleware.ExpandWorkspaceCapabilities(workspaceRole),
 	}})

@@ -40,6 +40,28 @@ func WorkspaceRoleAtLeast(role string, expected string) bool {
 	return WorkspaceRoleRank(role) >= WorkspaceRoleRank(expected)
 }
 
+func normalizeWorkspaceKindForAccess(kind string) string {
+	if strings.EqualFold(strings.TrimSpace(kind), models.WorkspaceKindAdmin) {
+		return models.WorkspaceKindAdmin
+	}
+	return models.WorkspaceKindNormal
+}
+
+func WorkspaceVisibleToSystemRole(systemRole string, workspaceKind string) bool {
+	if strings.EqualFold(strings.TrimSpace(systemRole), "admin") {
+		return true
+	}
+	return normalizeWorkspaceKindForAccess(workspaceKind) != models.WorkspaceKindAdmin
+}
+
+func NonAdminVisibleWorkspaceCondition(alias string) (string, []any) {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		alias = "workspaces"
+	}
+	return fmt.Sprintf("COALESCE(NULLIF(TRIM(%s.kind), ''), ?) <> ?", alias), []any{models.WorkspaceKindNormal, models.WorkspaceKindAdmin}
+}
+
 func ExpandWorkspaceCapabilities(role string) []string {
 	role = models.NormalizeWorkspaceRole(role)
 	capSet := map[string]struct{}{
@@ -112,6 +134,8 @@ func ResolveUserWorkspace(userID uint64, requestedWorkspaceID uint64) (*models.W
 		Where("workspace_members.user_id = ? AND workspace_members.status = ?", userID, models.WorkspaceMemberStatusActive).
 		Where("workspaces.status = ?", models.WorkspaceStatusActive).
 		Order("workspace_members.created_at ASC")
+	visibilityClause, visibilityArgs := NonAdminVisibleWorkspaceCondition("workspaces")
+	query = query.Where(visibilityClause, visibilityArgs...)
 	if requestedWorkspaceID > 0 {
 		query = query.Where("workspace_members.workspace_id = ?", requestedWorkspaceID)
 	}

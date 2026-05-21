@@ -65,3 +65,88 @@ func TestSelectAgent_RejectsForgedWorkspaceScopeForNonAdmin(t *testing.T) {
 		t.Fatalf("expected 403 for forged workspace scope, got %d body=%s", w.Code, w.Body.String())
 	}
 }
+
+func TestSelectAgent_AdminWorkspaceRejectsBusinessSelection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &AgentHandler{DB: db}
+
+	workspaceAgent := models.Agent{
+		Name:                   "workspace-b-agent",
+		Host:                   "workspace-host",
+		Port:                   9101,
+		Token:                  "workspace-token",
+		Status:                 models.AgentStatusOnline,
+		RegistrationStatus:     models.AgentRegistrationStatusApproved,
+		MaxConcurrentPipelines: 2,
+		ScopeType:              models.AgentScopeWorkspace,
+		WorkspaceID:            22,
+	}
+	if err := db.Create(&workspaceAgent).Error; err != nil {
+		t.Fatalf("create workspace agent failed: %v", err)
+	}
+
+	body, err := json.Marshal(map[string]interface{}{
+		"workspace_id": 22,
+	})
+	if err != nil {
+		t.Fatalf("marshal request failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/agents/select", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user_id", uint64(1001))
+	c.Set("role", "admin")
+	c.Set("workspace_id", uint64(99))
+	c.Set("workspace_kind", models.WorkspaceKindAdmin)
+
+	h.SelectAgent(c)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for admin workspace business selection, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSelectAgent_AdminWithoutWorkspaceContextRejectsBusinessSelection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &AgentHandler{DB: db}
+
+	workspaceAgent := models.Agent{
+		Name:                   "workspace-b-agent",
+		Host:                   "workspace-host",
+		Port:                   9101,
+		Token:                  "workspace-token",
+		Status:                 models.AgentStatusOnline,
+		RegistrationStatus:     models.AgentRegistrationStatusApproved,
+		MaxConcurrentPipelines: 2,
+		ScopeType:              models.AgentScopeWorkspace,
+		WorkspaceID:            22,
+	}
+	if err := db.Create(&workspaceAgent).Error; err != nil {
+		t.Fatalf("create workspace agent failed: %v", err)
+	}
+
+	body, err := json.Marshal(map[string]interface{}{
+		"workspace_id": 22,
+	})
+	if err != nil {
+		t.Fatalf("marshal request failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/agents/select", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user_id", uint64(1001))
+	c.Set("role", "admin")
+	c.Set("workspace_id", uint64(0))
+
+	h.SelectAgent(c)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 without workspace context, got %d body=%s", w.Code, w.Body.String())
+	}
+}

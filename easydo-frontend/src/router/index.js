@@ -121,13 +121,13 @@ const routes = [
         path: 'agent',
         name: 'Agent',
         component: () => import('@/views/agent/index.vue'),
-        meta: { permission: 'agent.read', scope: 'workspace-business' }
+        meta: { permission: 'agent.read', scope: 'workspace-business', allowInAdminWorkspace: true }
       },
       {
         path: 'agent/pending',
         name: 'AgentPending',
         component: () => import('@/views/agent/pending.vue'),
-        meta: { permission: 'agent.approve', scope: 'workspace-business' }
+        meta: { permission: 'agent.approve', scope: 'platform-governance' }
       },
       {
         path: 'credentials',
@@ -161,10 +161,11 @@ router.beforeEach((to, _from, next) => {
       next({ name: 'Login', query: { redirect: to.fullPath } })
     } else if (to.name === 'Login' && userStore.isLoggedIn) {
       next({ name: 'Dashboard' })
-    } else if (to.meta.scope && !canAccessRouteScope(to.meta.scope, {
+    } else if (to.meta.scope && !canAccessRouteScope(to.meta, {
       isAdminWorkspace: userStore.isAdminWorkspace,
       canAccessWorkspaceGovernance: userStore.canAccessWorkspaceGovernance,
-      canAccessPlatformGovernance: userStore.canAccessPlatformGovernance
+      canAccessPlatformGovernance: userStore.canAccessPlatformGovernance,
+      canAccessAdminWorkspaceExecutors: userStore.canAccessAdminWorkspaceExecutors
     })) {
       next(resolveGovernanceFallback(to.meta.scope, {
         canAccessWorkspaceGovernance: userStore.canAccessWorkspaceGovernance,

@@ -45,6 +45,9 @@ func (h *UserHandler) resolveCreateUserActorContext(c *gin.Context, actorID uint
 	if isAdminRole(actorSystemRole) {
 		return ctx, http.StatusOK, ""
 	}
+	if !middleware.WorkspaceVisibleToSystemRole(actorSystemRole, workspaceKind) {
+		return GovernanceContext{}, http.StatusForbidden, "无权访问该工作空间"
+	}
 
 	workspaceRole, ok := userWorkspaceRole(h.DB, workspaceID, actorID)
 	if !ok {

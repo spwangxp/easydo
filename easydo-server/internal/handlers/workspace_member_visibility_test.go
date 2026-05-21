@@ -214,7 +214,8 @@ func TestGetWorkspaceList_HidesArchivedWorkspacesFromMembers(t *testing.T) {
 		Code int `json:"code"`
 		Data struct {
 			List []struct {
-				ID uint64 `json:"id"`
+				ID   uint64 `json:"id"`
+				Kind string `json:"kind"`
 			} `json:"list"`
 			CurrentWorkspaceID uint64 `json:"current_workspace_id"`
 		} `json:"data"`
@@ -230,6 +231,145 @@ func TestGetWorkspaceList_HidesArchivedWorkspacesFromMembers(t *testing.T) {
 	}
 	if resp.Data.CurrentWorkspaceID != activeWorkspace.ID {
 		t.Fatalf("current_workspace_id=%d, want=%d body=%s", resp.Data.CurrentWorkspaceID, activeWorkspace.ID, w.Body.String())
+	}
+}
+
+func TestGetWorkspaceList_HidesAdminWorkspacesFromNonAdmins(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &WorkspaceHandler{DB: db}
+
+	user := models.User{Username: "workspace-admin-hidden-user", Role: "user", Status: "active"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	normalWorkspace := models.Workspace{Name: "visibleSpace", Slug: "visibleSpace", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: user.ID}
+	adminWorkspace := models.Workspace{Name: "platformSpace", Slug: "platformSpace", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindAdmin, CreatedBy: 999}
+	for _, workspace := range []*models.Workspace{&adminWorkspace, &normalWorkspace} {
+		if err := db.Create(workspace).Error; err != nil {
+			t.Fatalf("create workspace failed: %v", err)
+		}
+	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: adminWorkspace.ID, UserID: user.ID, Role: models.WorkspaceRoleViewer, Status: models.WorkspaceMemberStatusActive, InvitedBy: user.ID}).Error; err != nil {
+		t.Fatalf("create admin membership failed: %v", err)
+	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: normalWorkspace.ID, UserID: user.ID, Role: models.WorkspaceRoleDeveloper, Status: models.WorkspaceMemberStatusActive, InvitedBy: user.ID}).Error; err != nil {
+		t.Fatalf("create normal membership failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/workspaces", nil)
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+
+	h.GetWorkspaceList(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			List []struct {
+				ID   uint64 `json:"id"`
+				Kind string `json:"kind"`
+			} `json:"list"`
+			CurrentWorkspaceID uint64 `json:"current_workspace_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Data.List) != 1 {
+		t.Fatalf("visible workspaces=%d, want=1 body=%s", len(resp.Data.List), w.Body.String())
+	}
+	if resp.Data.List[0].ID != normalWorkspace.ID {
+		t.Fatalf("visible workspace id=%d, want=%d body=%s", resp.Data.List[0].ID, normalWorkspace.ID, w.Body.String())
+	}
+	if resp.Data.List[0].Kind != models.WorkspaceKindNormal {
+		t.Fatalf("visible workspace kind=%s, want=%s body=%s", resp.Data.List[0].Kind, models.WorkspaceKindNormal, w.Body.String())
+	}
+	if resp.Data.CurrentWorkspaceID != normalWorkspace.ID {
+		t.Fatalf("current_workspace_id=%d, want=%d body=%s", resp.Data.CurrentWorkspaceID, normalWorkspace.ID, w.Body.String())
+	}
+}
+
+func TestGetWorkspace_RejectsAdminWorkspaceAccessForNonAdmin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &WorkspaceHandler{DB: db}
+
+	user := models.User{Username: "workspace-admin-reject-user", Role: "user", Status: "active"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	workspace := models.Workspace{Name: "adminDetailSpace", Slug: "adminDetailSpace", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindAdmin, CreatedBy: 999}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: user.ID, Role: models.WorkspaceRoleDeveloper, Status: models.WorkspaceMemberStatusActive, InvitedBy: user.ID}).Error; err != nil {
+		t.Fatalf("create membership failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/workspaces/1", nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(workspace.ID, 10)}}
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+
+	h.GetWorkspace(c)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetWorkspace_ReturnsWorkspaceKind(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &WorkspaceHandler{DB: db}
+
+	user := models.User{Username: "workspace-kind-detail-user", Role: "user", Status: "active"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	workspace := models.Workspace{Name: "detailSpace", Slug: "detailSpace", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: user.ID}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: user.ID, Role: models.WorkspaceRoleDeveloper, Status: models.WorkspaceMemberStatusActive, InvitedBy: user.ID}).Error; err != nil {
+		t.Fatalf("create membership failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/workspaces/1", nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(workspace.ID, 10)}}
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+
+	h.GetWorkspace(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			ID   uint64 `json:"id"`
+			Kind string `json:"kind"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v body=%s", err, w.Body.String())
+	}
+	if resp.Data.ID != workspace.ID {
+		t.Fatalf("workspace id=%d, want=%d body=%s", resp.Data.ID, workspace.ID, w.Body.String())
+	}
+	if resp.Data.Kind != models.WorkspaceKindNormal {
+		t.Fatalf("workspace kind=%s, want=%s body=%s", resp.Data.Kind, models.WorkspaceKindNormal, w.Body.String())
 	}
 }
 

@@ -3950,7 +3950,7 @@ func loadTaskAIRuntimeSnapshot(db *gorm.DB, task models.AgentTask) map[string]an
 	if err := db.Select("id", "scene_id", "runtime_profile_id", "provider_id", "model_id").Where("id = ? AND workspace_id = ?", aiSessionID, task.WorkspaceID).First(&session).Error; err != nil {
 		return nil
 	}
-	snapshot := make(map[string]any)
+	snapshot := map[string]any{"ai_session_id": session.ID}
 	if session.SceneID != nil && *session.SceneID > 0 {
 		snapshot["scene_id"] = *session.SceneID
 	}
@@ -3963,15 +3963,51 @@ func loadTaskAIRuntimeSnapshot(db *gorm.DB, task models.AgentTask) map[string]an
 	if session.ModelID > 0 {
 		snapshot["model_id"] = session.ModelID
 	}
-	if len(snapshot) == 0 {
+	return snapshot
+}
+
+func loadTaskAISessionTurnSnapshots(db *gorm.DB, task models.AgentTask) map[int]map[string]any {
+	if db == nil || task.WorkspaceID == 0 || strings.TrimSpace(task.Params) == "" {
 		return nil
 	}
-	return snapshot
+	var params map[string]any
+	if err := json.Unmarshal([]byte(task.Params), &params); err != nil {
+		return nil
+	}
+	aiSessionID := toUint64Value(params["ai_session_id"])
+	if aiSessionID == 0 {
+		return nil
+	}
+	var session models.AISession
+	if err := db.Select("id").Where("id = ? AND workspace_id = ?", aiSessionID, task.WorkspaceID).First(&session).Error; err != nil {
+		return nil
+	}
+	var turns []models.AISessionTurn
+	if err := db.Where("session_id = ?", session.ID).Order("turn_seq ASC").Find(&turns).Error; err != nil || len(turns) == 0 {
+		return nil
+	}
+	snapshots := make(map[int]map[string]any, len(turns))
+	for _, turn := range turns {
+		snapshots[turn.TurnSeq] = map[string]any{
+			"id":           turn.ID,
+			"turn_seq":     turn.TurnSeq,
+			"turn_type":    turn.TurnType,
+			"role":         turn.Role,
+			"status":       turn.Status,
+			"input_json":   parsePipelineRunJSONField(turn.InputJSON, nil),
+			"output_json":  parsePipelineRunJSONField(turn.OutputJSON, nil),
+			"error_msg":    turn.ErrorMsg,
+			"started_at":   turn.StartedAt,
+			"completed_at": turn.CompletedAt,
+		}
+	}
+	return snapshots
 }
 
 func buildTaskAttemptSnapshots(db *gorm.DB, task models.AgentTask) []map[string]any {
 	attempts := make([]map[string]any, 0)
 	runtimeSnapshot := loadTaskAIRuntimeSnapshot(db, task)
+	turnSnapshots := loadTaskAISessionTurnSnapshots(db, task)
 	var executions []models.TaskExecution
 	if db != nil {
 		_ = db.Where("task_id = ?", task.ID).Order("attempt ASC").Find(&executions).Error
@@ -3991,6 +4027,9 @@ func buildTaskAttemptSnapshots(db *gorm.DB, task models.AgentTask) []map[string]
 		}
 		for key, value := range runtimeSnapshot {
 			attempt[key] = value
+		}
+		if turnSnapshot, ok := turnSnapshots[execution.Attempt]; ok {
+			attempt["ai_session_turn"] = turnSnapshot
 		}
 		attempts = append(attempts, attempt)
 	}
@@ -4017,6 +4056,9 @@ func buildTaskAttemptSnapshots(db *gorm.DB, task models.AgentTask) []map[string]
 		}
 		for key, value := range runtimeSnapshot {
 			attempt[key] = value
+		}
+		if turnSnapshot, ok := turnSnapshots[currentAttempt]; ok {
+			attempt["ai_session_turn"] = turnSnapshot
 		}
 		attempts = append(attempts, attempt)
 	}

@@ -32,6 +32,7 @@ export const useUserStore = defineStore('user', () => {
   const isPlatformAdmin = computed(() => governanceMode.value.isPlatformAdmin)
   const canAccessPlatformGovernance = computed(() => governanceMode.value.canAccessPlatformGovernance)
   const canAccessWorkspaceGovernance = computed(() => governanceMode.value.canAccessWorkspaceGovernance)
+  const canAccessAdminWorkspaceExecutors = computed(() => governanceMode.value.canAccessAdminWorkspaceExecutors)
 
   function clearRefreshTimer() {
     if (refreshTimer) {
@@ -250,6 +251,7 @@ export const useUserStore = defineStore('user', () => {
     isPlatformAdmin,
     canAccessPlatformGovernance,
     canAccessWorkspaceGovernance,
+    canAccessAdminWorkspaceExecutors,
     doLogin,
     getUserInfoAction,
     setToken,

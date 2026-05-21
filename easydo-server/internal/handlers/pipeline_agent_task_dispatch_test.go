@@ -251,14 +251,20 @@ func TestBuildTaskAttemptSnapshotsIncludesAIRuntimeIdentifiers(t *testing.T) {
 	originalDB := models.DB
 	models.DB = db
 	t.Cleanup(func() { models.DB = originalDB })
-	if err := db.AutoMigrate(&models.AgentTask{}, &models.AISession{}); err != nil {
+	if err := db.AutoMigrate(&models.AgentTask{}, &models.AISession{}, &models.AISessionTurn{}); err != nil {
 		t.Fatalf("migrate runtime snapshot tables failed: %v", err)
 	}
 
 	sceneID := uint64(51)
+	startedAt := int64(171)
+	completedAt := int64(181)
 	session := models.AISession{WorkspaceID: 11, SceneID: &sceneID, RuntimeProfileID: 21, ProviderID: 31, ModelID: 41, TaskType: "mr_quality_check", Status: models.AISessionStatusQueued, CreatedBy: 1}
 	if err := db.Create(&session).Error; err != nil {
 		t.Fatalf("create ai session failed: %v", err)
+	}
+	turn := models.AISessionTurn{SessionID: session.ID, TurnSeq: 1, TurnType: "mr_quality_check", Role: "assistant", Status: string(models.AISessionStatusCompleted), InputJSON: `{"input_text":"review this MR"}`, OutputJSON: `{"summary":"ok"}`, StartedAt: &startedAt, CompletedAt: &completedAt}
+	if err := db.Create(&turn).Error; err != nil {
+		t.Fatalf("create ai session turn failed: %v", err)
 	}
 	task := models.AgentTask{WorkspaceID: 11, AgentID: 7, PipelineRunID: 19, NodeID: "mr-review", Params: `{"ai_session_id":` + fmt.Sprint(session.ID) + `}`, Status: models.TaskStatusRunning}
 	if err := db.Create(&task).Error; err != nil {
@@ -268,6 +274,9 @@ func TestBuildTaskAttemptSnapshotsIncludesAIRuntimeIdentifiers(t *testing.T) {
 	attempts := buildTaskAttemptSnapshots(db, task)
 	if len(attempts) != 1 {
 		t.Fatalf("attempt count=%d, want 1", len(attempts))
+	}
+	if toUint64Value(attempts[0]["ai_session_id"]) != session.ID {
+		t.Fatalf("ai_session_id=%v, want %d", attempts[0]["ai_session_id"], session.ID)
 	}
 	if toUint64Value(attempts[0]["scene_id"]) != sceneID {
 		t.Fatalf("scene_id=%v, want %d", attempts[0]["scene_id"], sceneID)
@@ -280,6 +289,95 @@ func TestBuildTaskAttemptSnapshotsIncludesAIRuntimeIdentifiers(t *testing.T) {
 	}
 	if toUint64Value(attempts[0]["model_id"]) != session.ModelID {
 		t.Fatalf("model_id=%v, want %d", attempts[0]["model_id"], session.ModelID)
+	}
+	turnSnapshot, ok := attempts[0]["ai_session_turn"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected ai_session_turn snapshot, got %#v", attempts[0]["ai_session_turn"])
+	}
+	if toUint64Value(turnSnapshot["id"]) != turn.ID {
+		t.Fatalf("turn id=%v, want %d", turnSnapshot["id"], turn.ID)
+	}
+	if toInt(turnSnapshot["turn_seq"]) != 1 {
+		t.Fatalf("turn_seq=%v, want 1", turnSnapshot["turn_seq"])
+	}
+	if turnSnapshot["turn_type"] != "mr_quality_check" {
+		t.Fatalf("turn_type=%v, want mr_quality_check", turnSnapshot["turn_type"])
+	}
+	if turnSnapshot["status"] != string(models.AISessionStatusCompleted) {
+		t.Fatalf("turn status=%v, want %s", turnSnapshot["status"], models.AISessionStatusCompleted)
+	}
+	inputJSON, ok := turnSnapshot["input_json"].(map[string]any)
+	if !ok || inputJSON["input_text"] != "review this MR" {
+		t.Fatalf("input_json=%#v, want parsed input_text", turnSnapshot["input_json"])
+	}
+	outputJSON, ok := turnSnapshot["output_json"].(map[string]any)
+	if !ok || outputJSON["summary"] != "ok" {
+		t.Fatalf("output_json=%#v, want parsed summary", turnSnapshot["output_json"])
+	}
+}
+
+func TestBuildTaskAttemptSnapshotsOmitsTurnWhenAttemptDoesNotMatch(t *testing.T) {
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+	if err := db.AutoMigrate(&models.AgentTask{}, &models.AISession{}, &models.AISessionTurn{}); err != nil {
+		t.Fatalf("migrate runtime snapshot tables failed: %v", err)
+	}
+
+	session := models.AISession{WorkspaceID: 11, TaskType: "mr_quality_check", Status: models.AISessionStatusQueued, CreatedBy: 1}
+	if err := db.Create(&session).Error; err != nil {
+		t.Fatalf("create ai session failed: %v", err)
+	}
+	turn := models.AISessionTurn{SessionID: session.ID, TurnSeq: 2, TurnType: "mr_quality_check", Role: "assistant", Status: string(models.AISessionStatusCompleted)}
+	if err := db.Create(&turn).Error; err != nil {
+		t.Fatalf("create ai session turn failed: %v", err)
+	}
+	task := models.AgentTask{WorkspaceID: 11, AgentID: 7, PipelineRunID: 20, NodeID: "mr-review", Params: `{"ai_session_id":` + fmt.Sprint(session.ID) + `}`, Status: models.TaskStatusRunning}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create agent task failed: %v", err)
+	}
+
+	attempts := buildTaskAttemptSnapshots(db, task)
+	if len(attempts) != 1 {
+		t.Fatalf("attempt count=%d, want 1", len(attempts))
+	}
+	if _, exists := attempts[0]["ai_session_turn"]; exists {
+		t.Fatalf("expected unmatched turn to be omitted, got %#v", attempts[0]["ai_session_turn"])
+	}
+}
+
+func TestBuildTaskAttemptSnapshotsDoesNotLeakCrossWorkspaceTurnData(t *testing.T) {
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+	if err := db.AutoMigrate(&models.AgentTask{}, &models.AISession{}, &models.AISessionTurn{}); err != nil {
+		t.Fatalf("migrate runtime snapshot tables failed: %v", err)
+	}
+
+	session := models.AISession{WorkspaceID: 22, TaskType: "mr_quality_check", Status: models.AISessionStatusQueued, CreatedBy: 1}
+	if err := db.Create(&session).Error; err != nil {
+		t.Fatalf("create ai session failed: %v", err)
+	}
+	turn := models.AISessionTurn{SessionID: session.ID, TurnSeq: 1, TurnType: "mr_quality_check", Role: "assistant", Status: string(models.AISessionStatusCompleted)}
+	if err := db.Create(&turn).Error; err != nil {
+		t.Fatalf("create ai session turn failed: %v", err)
+	}
+	task := models.AgentTask{WorkspaceID: 11, AgentID: 7, PipelineRunID: 21, NodeID: "mr-review", Params: `{"ai_session_id":` + fmt.Sprint(session.ID) + `}`, Status: models.TaskStatusRunning}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create agent task failed: %v", err)
+	}
+
+	attempts := buildTaskAttemptSnapshots(db, task)
+	if len(attempts) != 1 {
+		t.Fatalf("attempt count=%d, want 1", len(attempts))
+	}
+	if _, exists := attempts[0]["ai_session_turn"]; exists {
+		t.Fatalf("expected cross-workspace turn to be omitted, got %#v", attempts[0]["ai_session_turn"])
+	}
+	if _, exists := attempts[0]["ai_session_id"]; exists {
+		t.Fatalf("expected cross-workspace session snapshot to be omitted, got %#v", attempts[0]["ai_session_id"])
 	}
 }
 

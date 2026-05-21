@@ -87,11 +87,20 @@ func NewAgentHandler() *AgentHandler {
 	}
 }
 
-func applyAgentWorkspaceScope(query *gorm.DB, workspaceID uint64, systemRole string) *gorm.DB {
+func isAdminWorkspaceContext(workspaceKind, systemRole string) bool {
+	return isAdminRole(systemRole) && normalizeWorkspaceKind(workspaceKind) == models.WorkspaceKindAdmin
+}
+
+func hasAgentFullScope(workspaceID uint64, workspaceKind, systemRole string) bool {
+	_ = workspaceID
+	return isAdminWorkspaceContext(workspaceKind, systemRole)
+}
+
+func applyAgentWorkspaceScope(query *gorm.DB, workspaceID uint64, workspaceKind, systemRole string) *gorm.DB {
 	if query == nil {
 		return query
 	}
-	if isAdminRole(systemRole) && workspaceID == 0 {
+	if hasAgentFullScope(workspaceID, workspaceKind, systemRole) {
 		return query
 	}
 	if workspaceID == 0 {
@@ -100,11 +109,11 @@ func applyAgentWorkspaceScope(query *gorm.DB, workspaceID uint64, systemRole str
 	return query.Where("scope_type = ? OR (scope_type = ? AND workspace_id = ?)", models.AgentScopePlatform, models.AgentScopeWorkspace, workspaceID)
 }
 
-func agentVisibleInWorkspace(agent *models.Agent, workspaceID uint64, systemRole string) bool {
+func agentVisibleInWorkspace(agent *models.Agent, workspaceID uint64, workspaceKind, systemRole string) bool {
 	if agent == nil {
 		return false
 	}
-	if isAdminRole(systemRole) && workspaceID == 0 {
+	if hasAgentFullScope(workspaceID, workspaceKind, systemRole) {
 		return true
 	}
 	if agent.ScopeType == models.AgentScopePlatform {
@@ -113,14 +122,14 @@ func agentVisibleInWorkspace(agent *models.Agent, workspaceID uint64, systemRole
 	return workspaceID > 0 && agent.WorkspaceID == workspaceID
 }
 
-func agentManageAllowed(agent *models.Agent, workspaceID uint64, systemRole string) bool {
+func agentManageAllowed(agent *models.Agent, workspaceID uint64, workspaceKind, systemRole string) bool {
 	if agent == nil {
 		return false
 	}
 	if agent.ScopeType == models.AgentScopePlatform {
-		return isAdminRole(systemRole)
+		return isAdminWorkspaceContext(workspaceKind, systemRole)
 	}
-	if isAdminRole(systemRole) && workspaceID == 0 {
+	if hasAgentFullScope(workspaceID, workspaceKind, systemRole) {
 		return true
 	}
 	return workspaceID > 0 && agent.WorkspaceID == workspaceID
@@ -174,18 +183,15 @@ func loadSystemDockerHubMirrors(db *gorm.DB) []string {
 	return mirrors
 }
 
-func applyPendingAgentScope(query *gorm.DB, workspaceID uint64, systemRole string) *gorm.DB {
+func applyPendingAgentScope(query *gorm.DB, workspaceID uint64, workspaceKind, systemRole string) *gorm.DB {
 	if query == nil {
 		return query
 	}
-	if isAdminRole(systemRole) && workspaceID == 0 {
+	if hasAgentFullScope(workspaceID, workspaceKind, systemRole) {
 		return query
 	}
-	if isAdminRole(systemRole) && workspaceID > 0 {
-		return query.Where("scope_type = ? OR (scope_type = ? AND workspace_id = ?)", models.AgentScopePlatform, models.AgentScopeWorkspace, workspaceID)
-	}
 	if workspaceID == 0 {
-		return query.Where("scope_type = ?", models.AgentScopeWorkspace)
+		return query.Where("1 = 0")
 	}
 	return query.Where("scope_type = ? AND workspace_id = ?", models.AgentScopeWorkspace, workspaceID)
 }
@@ -359,9 +365,10 @@ func (h *AgentHandler) GetAgentList(c *gin.Context) {
 	var agents []models.Agent
 	var total int64
 	workspaceID := c.GetUint64("workspace_id")
+	workspaceKind := c.GetString("workspace_kind")
 	systemRole := c.GetString("role")
 
-	query := applyAgentWorkspaceScope(h.DB.Model(&models.Agent{}), workspaceID, systemRole)
+	query := applyAgentWorkspaceScope(h.DB.Model(&models.Agent{}), workspaceID, workspaceKind, systemRole)
 
 	if status != "" {
 		if status == models.AgentStatusOnline {
@@ -395,6 +402,7 @@ func (h *AgentHandler) GetAgentList(c *gin.Context) {
 func (h *AgentHandler) GetAgentDetail(c *gin.Context) {
 	id := c.Param("id")
 	workspaceID := c.GetUint64("workspace_id")
+	workspaceKind := c.GetString("workspace_kind")
 	systemRole := c.GetString("role")
 
 	var agent models.Agent
@@ -405,7 +413,7 @@ func (h *AgentHandler) GetAgentDetail(c *gin.Context) {
 		})
 		return
 	}
-	if !agentVisibleInWorkspace(&agent, workspaceID, systemRole) {
+	if !agentVisibleInWorkspace(&agent, workspaceID, workspaceKind, systemRole) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权访问该Agent"})
 		return
 	}
@@ -455,6 +463,7 @@ func (h *AgentHandler) GetAgentDetail(c *gin.Context) {
 func (h *AgentHandler) UpdateAgent(c *gin.Context) {
 	id := c.Param("id")
 	workspaceID := c.GetUint64("workspace_id")
+	workspaceKind := c.GetString("workspace_kind")
 	systemRole := c.GetString("role")
 
 	var req struct {
@@ -487,15 +496,15 @@ func (h *AgentHandler) UpdateAgent(c *gin.Context) {
 		})
 		return
 	}
-	if !agentManageAllowed(&agent, workspaceID, systemRole) {
+	if !agentManageAllowed(&agent, workspaceID, workspaceKind, systemRole) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权修改该Agent"})
 		return
 	}
 
 	updates := make(map[string]interface{})
 	scopeChangeRequested := req.ScopeType != "" || req.WorkspaceID != nil
-	if scopeChangeRequested && !isAdminRole(systemRole) {
-		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "仅平台管理员可调整执行器归属范围"})
+	if scopeChangeRequested && !isAdminWorkspaceContext(workspaceKind, systemRole) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "仅 admin workspace 可调整执行器归属范围"})
 		return
 	}
 	if req.Name != "" {
@@ -571,13 +580,14 @@ func (h *AgentHandler) UpdateAgent(c *gin.Context) {
 func (h *AgentHandler) DeleteAgent(c *gin.Context) {
 	id := c.Param("id")
 	workspaceID := c.GetUint64("workspace_id")
+	workspaceKind := c.GetString("workspace_kind")
 	systemRole := c.GetString("role")
 	var agent models.Agent
 	if err := h.DB.First(&agent, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "Agent不存在"})
 		return
 	}
-	if !agentManageAllowed(&agent, workspaceID, systemRole) {
+	if !agentManageAllowed(&agent, workspaceID, workspaceKind, systemRole) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权删除该Agent"})
 		return
 	}
@@ -779,6 +789,7 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 func (h *AgentHandler) GetAgentHeartbeats(c *gin.Context) {
 	id := c.Param("id")
 	workspaceID := c.GetUint64("workspace_id")
+	workspaceKind := c.GetString("workspace_kind")
 	systemRole := c.GetString("role")
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "100"))
@@ -800,7 +811,7 @@ func (h *AgentHandler) GetAgentHeartbeats(c *gin.Context) {
 
 	var agent models.Agent
 	if err := h.DB.First(&agent, agentID).Error; err == nil {
-		if !agentVisibleInWorkspace(&agent, workspaceID, systemRole) {
+		if !agentVisibleInWorkspace(&agent, workspaceID, workspaceKind, systemRole) {
 			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权查看该Agent心跳"})
 			return
 		}
@@ -858,8 +869,23 @@ func (h *AgentHandler) SelectAgent(c *gin.Context) {
 	}
 
 	effectiveWorkspaceID := c.GetUint64("workspace_id")
+	workspaceKind := c.GetString("workspace_kind")
 	systemRole := c.GetString("role")
-	if isAdminRole(systemRole) && effectiveWorkspaceID == 0 {
+	if isAdminWorkspaceContext(workspaceKind, systemRole) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "admin workspace 不支持业务执行器选择",
+		})
+		return
+	}
+	if effectiveWorkspaceID == 0 {
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"message": "当前上下文不支持业务执行器选择",
+		})
+		return
+	}
+	if hasAgentFullScope(effectiveWorkspaceID, workspaceKind, systemRole) {
 		effectiveWorkspaceID = req.WorkspaceID
 	} else if req.WorkspaceID > 0 && effectiveWorkspaceID > 0 && req.WorkspaceID != effectiveWorkspaceID {
 		c.JSON(http.StatusForbidden, gin.H{
@@ -1054,9 +1080,10 @@ func (h *AgentHandler) GetPendingAgents(c *gin.Context) {
 	var agents []models.Agent
 	var total int64
 	workspaceID := c.GetUint64("workspace_id")
+	workspaceKind := c.GetString("workspace_kind")
 	systemRole := c.GetString("role")
 
-	query := applyPendingAgentScope(h.DB.Model(&models.Agent{}), workspaceID, systemRole).Where("registration_status = ?", models.AgentRegistrationStatusPending)
+	query := applyPendingAgentScope(h.DB.Model(&models.Agent{}), workspaceID, workspaceKind, systemRole).Where("registration_status = ?", models.AgentRegistrationStatusPending)
 	query.Count(&total)
 
 	offset := (page - 1) * pageSize
@@ -1077,6 +1104,7 @@ func (h *AgentHandler) GetPendingAgents(c *gin.Context) {
 func (h *AgentHandler) ApproveAgent(c *gin.Context) {
 	id := c.Param("id")
 	workspaceID := c.GetUint64("workspace_id")
+	workspaceKind := c.GetString("workspace_kind")
 	systemRole := c.GetString("role")
 
 	var req struct {
@@ -1092,7 +1120,7 @@ func (h *AgentHandler) ApproveAgent(c *gin.Context) {
 		})
 		return
 	}
-	if !agentManageAllowed(&agent, workspaceID, systemRole) {
+	if !agentManageAllowed(&agent, workspaceID, workspaceKind, systemRole) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权审批该Agent"})
 		return
 	}
@@ -1152,6 +1180,7 @@ func (h *AgentHandler) ApproveAgent(c *gin.Context) {
 func (h *AgentHandler) RejectAgent(c *gin.Context) {
 	id := c.Param("id")
 	workspaceID := c.GetUint64("workspace_id")
+	workspaceKind := c.GetString("workspace_kind")
 	systemRole := c.GetString("role")
 
 	var req struct {
@@ -1167,7 +1196,7 @@ func (h *AgentHandler) RejectAgent(c *gin.Context) {
 		})
 		return
 	}
-	if !agentManageAllowed(&agent, workspaceID, systemRole) {
+	if !agentManageAllowed(&agent, workspaceID, workspaceKind, systemRole) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权拒绝该Agent"})
 		return
 	}
@@ -1202,6 +1231,7 @@ func (h *AgentHandler) RejectAgent(c *gin.Context) {
 func (h *AgentHandler) RefreshAgentToken(c *gin.Context) {
 	id := c.Param("id")
 	workspaceID := c.GetUint64("workspace_id")
+	workspaceKind := c.GetString("workspace_kind")
 	systemRole := c.GetString("role")
 
 	var agent models.Agent
@@ -1212,7 +1242,7 @@ func (h *AgentHandler) RefreshAgentToken(c *gin.Context) {
 		})
 		return
 	}
-	if !agentManageAllowed(&agent, workspaceID, systemRole) {
+	if !agentManageAllowed(&agent, workspaceID, workspaceKind, systemRole) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权刷新该Agent令牌"})
 		return
 	}
@@ -1253,6 +1283,7 @@ func (h *AgentHandler) RefreshAgentToken(c *gin.Context) {
 func (h *AgentHandler) RemoveAgent(c *gin.Context) {
 	id := c.Param("id")
 	workspaceID := c.GetUint64("workspace_id")
+	workspaceKind := c.GetString("workspace_kind")
 	systemRole := c.GetString("role")
 
 	var agent models.Agent
@@ -1263,7 +1294,7 @@ func (h *AgentHandler) RemoveAgent(c *gin.Context) {
 		})
 		return
 	}
-	if !agentManageAllowed(&agent, workspaceID, systemRole) {
+	if !agentManageAllowed(&agent, workspaceID, workspaceKind, systemRole) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权移除该Agent"})
 		return
 	}

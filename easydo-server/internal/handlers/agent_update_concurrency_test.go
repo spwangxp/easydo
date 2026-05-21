@@ -27,6 +27,8 @@ func performUpdateAgentRequest(t *testing.T, h *AgentHandler, agentID uint64, pa
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(agentID, 10)}}
 	c.Set("role", "admin")
+	c.Set("workspace_id", uint64(1))
+	c.Set("workspace_kind", models.WorkspaceKindAdmin)
 
 	h.UpdateAgent(c)
 	return w
