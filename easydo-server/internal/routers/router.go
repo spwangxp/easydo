@@ -236,6 +236,7 @@ func InitRouter() *gin.Engine {
 			resources.GET("/:id/credentials", resourceHandler.ListResourceCredentialBindings)
 			resources.POST("/:id/credentials/bind", resourceHandler.BindResourceCredential)
 			resources.DELETE("/:id/credentials/:binding_id", resourceHandler.UnbindResourceCredential)
+			resources.PUT("/:id/labels", resourceHandler.UpdateResourceLabels)
 			resources.PUT("/:id", resourceHandler.UpdateResource)
 			resources.DELETE("/:id", resourceHandler.DeleteResource)
 		}

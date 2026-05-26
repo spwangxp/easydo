@@ -24,7 +24,7 @@ export function canCopyDisplayValue(value) {
   return String(value || '').trim() !== PLACEHOLDER_VALUE
 }
 
-export async function copyDisplayedValue({ value, canCopy, writeText, onSuccess, onError } = {}) {
+export async function copyDisplayedValue({ value, canCopy, writeText, fallbackWriteText, onSuccess, onError } = {}) {
   if (!canCopy(value)) {
     return false
   }
@@ -34,6 +34,14 @@ export async function copyDisplayedValue({ value, canCopy, writeText, onSuccess,
     onSuccess('复制成功')
     return true
   } catch {
+    if (fallbackWriteText) {
+      try {
+        await fallbackWriteText(value)
+        onSuccess('复制成功')
+        return true
+      } catch {
+      }
+    }
     onError('复制失败')
     return false
   }

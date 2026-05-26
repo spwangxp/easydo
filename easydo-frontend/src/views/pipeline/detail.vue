@@ -2866,11 +2866,26 @@ const handlePreviewWebhookRuntimeMappings = async () => {
   }
 }
 
+const fallbackCopyTriggerField = async (text) => {
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  const copied = document.execCommand('copy')
+  document.body.removeChild(textarea)
+  if (!copied) {
+    throw new Error('copy failed')
+  }
+}
+
 const copyTriggerField = async (value) => {
   await copyDisplayedValue({
     value,
     canCopy: canCopyDisplayValue,
     writeText: (text) => navigator.clipboard.writeText(text),
+    fallbackWriteText: fallbackCopyTriggerField,
     onSuccess: (message) => ElMessage.success(message),
     onError: (message) => ElMessage.error(message)
   })

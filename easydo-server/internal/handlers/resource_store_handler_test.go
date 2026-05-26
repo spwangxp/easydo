@@ -80,6 +80,173 @@ func TestResourceHandler_CreateListAndPermission(t *testing.T) {
 	}
 }
 
+func TestResourceHandler_UpdateResourceLabelsStrictly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	maintainer, workspace := seedResourceStoreUserAndWorkspace(t, db, "resource-label-maintainer", models.WorkspaceRoleMaintainer)
+	viewer := seedResourceStoreMember(t, db, workspace.ID, "resource-label-viewer", models.WorkspaceRoleViewer)
+	developer := seedResourceStoreMember(t, db, workspace.ID, "resource-label-developer", models.WorkspaceRoleDeveloper)
+
+	h := NewResourceHandler()
+	resource := models.Resource{
+		WorkspaceID: workspace.ID,
+		Name:        "label-vm",
+		Type:        models.ResourceTypeVM,
+		Environment: "development",
+		Status:      models.ResourceStatusOnline,
+		Endpoint:    "10.0.0.9:22",
+		Labels:      `{"old":"value"}`,
+		Metadata:    `{"keep":"metadata"}`,
+		CreatedBy:   maintainer.ID,
+	}
+	if err := db.Create(&resource).Error; err != nil {
+		t.Fatalf("create resource failed: %v", err)
+	}
+
+	updateBody := func(labels string) []byte {
+		return mustJSON(t, map[string]any{
+			"name":        "label-vm-updated",
+			"type":        string(models.ResourceTypeVM),
+			"environment": "production",
+			"endpoint":    "10.0.0.9:22",
+			"labels":      labels,
+			"metadata":    `{"keep":"metadata"}`,
+		})
+	}
+
+	viewerResp := performResourceStoreRequest(t, h.UpdateResource, viewer.ID, "user", workspace.ID, models.WorkspaceRoleViewer, http.MethodPut, "/api/resources/1", updateBody(`{"team":"infra"}`), pathResourceStoreID(resource.ID))
+	if viewerResp.Code != http.StatusForbidden {
+		t.Fatalf("expected viewer update labels forbidden, got=%d body=%s", viewerResp.Code, viewerResp.Body.String())
+	}
+
+	developerResp := performResourceStoreRequest(t, h.UpdateResource, developer.ID, "user", workspace.ID, models.WorkspaceRoleDeveloper, http.MethodPut, "/api/resources/1", updateBody(`{"team":"infra"}`), pathResourceStoreID(resource.ID))
+	if developerResp.Code != http.StatusForbidden {
+		t.Fatalf("expected developer update labels forbidden, got=%d body=%s", developerResp.Code, developerResp.Body.String())
+	}
+
+	invalidCases := []struct {
+		name   string
+		labels string
+	}{
+		{name: "array", labels: `["bad"]`},
+		{name: "non string value", labels: `{"team":123}`},
+		{name: "empty key", labels: `{"":"infra"}`},
+		{name: "empty value", labels: `{"team":""}`},
+		{name: "duplicate trimmed key", labels: `{" team":"infra","team":"platform"}`},
+		{name: "duplicate raw key", labels: `{"team":"infra","team":"platform"}`},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := performResourceStoreRequest(t, h.UpdateResource, maintainer.ID, "user", workspace.ID, models.WorkspaceRoleMaintainer, http.MethodPut, "/api/resources/1", updateBody(tc.labels), pathResourceStoreID(resource.ID))
+			if resp.Code != http.StatusBadRequest {
+				t.Fatalf("expected invalid labels to return 400, got=%d body=%s", resp.Code, resp.Body.String())
+			}
+		})
+	}
+
+	resp := performResourceStoreRequest(t, h.UpdateResource, maintainer.ID, "user", workspace.ID, models.WorkspaceRoleMaintainer, http.MethodPut, "/api/resources/1", updateBody(`{" team ":" infra ","tier":"prod"}`), pathResourceStoreID(resource.ID))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected maintainer update labels success, got=%d body=%s", resp.Code, resp.Body.String())
+	}
+
+	getResp := performResourceStoreRequest(t, h.GetResource, maintainer.ID, "user", workspace.ID, models.WorkspaceRoleMaintainer, http.MethodGet, "/api/resources/1", nil, pathResourceStoreID(resource.ID))
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("expected get resource success, got=%d body=%s", getResp.Code, getResp.Body.String())
+	}
+	var getPayload struct {
+		Data struct {
+			Labels map[string]string `json:"labels"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(getResp.Body.Bytes(), &getPayload); err != nil {
+		t.Fatalf("unmarshal get resource response failed: %v body=%s", err, getResp.Body.String())
+	}
+	if getPayload.Data.Labels["team"] != "infra" || getPayload.Data.Labels["tier"] != "prod" {
+		t.Fatalf("expected labels in object form with trimmed entries, got=%v body=%s", getPayload.Data.Labels, getResp.Body.String())
+	}
+
+	var stored models.Resource
+	if err := db.First(&stored, resource.ID).Error; err != nil {
+		t.Fatalf("load updated resource failed: %v", err)
+	}
+	if stored.Metadata != `{"keep":"metadata"}` {
+		t.Fatalf("expected metadata unchanged, got=%s", stored.Metadata)
+	}
+}
+
+func TestResourceHandler_UpdateResourceLabelsOnlyPreservesResourceFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	maintainer, workspace := seedResourceStoreUserAndWorkspace(t, db, "resource-label-only-maintainer", models.WorkspaceRoleMaintainer)
+	viewer := seedResourceStoreMember(t, db, workspace.ID, "resource-label-only-viewer", models.WorkspaceRoleViewer)
+	project := models.Project{Name: "label-project", WorkspaceID: workspace.ID, OwnerID: maintainer.ID}
+	if err := db.Create(&project).Error; err != nil {
+		t.Fatalf("create project failed: %v", err)
+	}
+	projectID := project.ID
+	resource := models.Resource{
+		WorkspaceID: workspace.ID,
+		ProjectID:   &projectID,
+		Name:        "label-only-vm",
+		Description: "keep description",
+		Type:        models.ResourceTypeVM,
+		Environment: "production",
+		Status:      models.ResourceStatusOnline,
+		Endpoint:    "10.0.0.10:22",
+		Labels:      `{"old":"value"}`,
+		Metadata:    `{"keep":"metadata"}`,
+		BaseInfo:    `{"schemaVersion":1}`,
+		LastCheckAt: 1710000000,
+		CreatedBy:   maintainer.ID,
+	}
+	if err := db.Create(&resource).Error; err != nil {
+		t.Fatalf("create resource failed: %v", err)
+	}
+
+	h := NewResourceHandler()
+	body := mustJSON(t, map[string]any{"labels": `{" team ":" platform "}`})
+	viewerResp := performResourceStoreRequest(t, h.UpdateResourceLabels, viewer.ID, "user", workspace.ID, models.WorkspaceRoleViewer, http.MethodPut, fmt.Sprintf("/api/resources/%d/labels", resource.ID), body, pathResourceStoreID(resource.ID))
+	if viewerResp.Code != http.StatusForbidden {
+		t.Fatalf("expected viewer update labels forbidden, got=%d body=%s", viewerResp.Code, viewerResp.Body.String())
+	}
+
+	invalidBody := mustJSON(t, map[string]any{"labels": `{"team":"infra","team":"platform"}`})
+	invalidResp := performResourceStoreRequest(t, h.UpdateResourceLabels, maintainer.ID, "user", workspace.ID, models.WorkspaceRoleMaintainer, http.MethodPut, fmt.Sprintf("/api/resources/%d/labels", resource.ID), invalidBody, pathResourceStoreID(resource.ID))
+	if invalidResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected duplicate labels rejected, got=%d body=%s", invalidResp.Code, invalidResp.Body.String())
+	}
+
+	resp := performResourceStoreRequest(t, h.UpdateResourceLabels, maintainer.ID, "user", workspace.ID, models.WorkspaceRoleMaintainer, http.MethodPut, fmt.Sprintf("/api/resources/%d/labels", resource.ID), body, pathResourceStoreID(resource.ID))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected label-only update success, got=%d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var stored models.Resource
+	if err := db.First(&stored, resource.ID).Error; err != nil {
+		t.Fatalf("load label-only resource failed: %v", err)
+	}
+	if stored.ProjectID == nil || *stored.ProjectID != project.ID {
+		t.Fatalf("expected project_id preserved, got=%v", stored.ProjectID)
+	}
+	if stored.Name != resource.Name || stored.Description != resource.Description || stored.Endpoint != resource.Endpoint {
+		t.Fatalf("expected non-label fields preserved, got=%+v", stored)
+	}
+	if stored.Metadata != resource.Metadata || stored.BaseInfo != resource.BaseInfo || stored.LastCheckAt != resource.LastCheckAt {
+		t.Fatalf("expected metadata/base info fields preserved, got metadata=%s base_info=%s last_check_at=%d", stored.Metadata, stored.BaseInfo, stored.LastCheckAt)
+	}
+	if stored.Labels != `{"team":"platform"}` {
+		t.Fatalf("expected normalized labels only, got=%s", stored.Labels)
+	}
+}
+
 func TestResourceHandler_VerifyResourceConnectionCreatesAgentTask(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)

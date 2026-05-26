@@ -77,6 +77,10 @@ type createResourceRequest struct {
 	Metadata           string              `json:"metadata"`
 }
 
+type updateResourceLabelsRequest struct {
+	Labels string `json:"labels"`
+}
+
 type verifyResourceConnectionRequest struct {
 	Type         models.ResourceType `json:"type"`
 	Endpoint     string              `json:"endpoint"`
@@ -91,7 +95,7 @@ type bindResourceCredentialRequest struct {
 type resourceValidationTaskPayload struct {
 	Verification resourceValidationSnapshot `json:"verification"`
 	TaskType     string                     `json:"task_type"`
-	NodeConfig   map[string]interface{}     `json:"node_config,omitempty"`
+	NodeConfig   map[string]any             `json:"node_config,omitempty"`
 }
 
 type resourceValidationSnapshot struct {
@@ -114,7 +118,7 @@ type resourceValidationConsumeResult struct {
 type resourceBaseInfoTaskPayload struct {
 	Collection resourceBaseInfoCollectionSnapshot `json:"collection"`
 	TaskType   string                             `json:"task_type"`
-	NodeConfig map[string]interface{}             `json:"node_config,omitempty"`
+	NodeConfig map[string]any                     `json:"node_config,omitempty"`
 }
 
 type resourceBaseInfoCollectionSnapshot struct {
@@ -176,6 +180,11 @@ func (h *ResourceHandler) CreateResource(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "新建资源前必须先完成连接验证"})
 		return
 	}
+	labelsJSON, err := normalizeResourceLabelsJSON(req.Labels)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
+		return
+	}
 
 	var resource models.Resource
 	if err := h.DB.Transaction(func(tx *gorm.DB) error {
@@ -193,7 +202,7 @@ func (h *ResourceHandler) CreateResource(c *gin.Context) {
 			Environment:     defaultIfEmpty(strings.TrimSpace(req.Environment), "development"),
 			Status:          models.ResourceStatusOnline,
 			Endpoint:        defaultIfEmpty(strings.TrimSpace(req.Endpoint), validation.Verification.EffectiveEndpoint),
-			Labels:          req.Labels,
+			Labels:          labelsJSON,
 			Metadata:        req.Metadata,
 			LastCheckAt:     time.Now().Unix(),
 			LastCheckResult: fmt.Sprintf("验证通过：执行器任务 #%d 已确认资源可连通", verificationTask.ID),
@@ -417,19 +426,57 @@ func (h *ResourceHandler) UpdateResource(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "资源类型无效"})
 		return
 	}
+	labelsJSON, err := normalizeResourceLabelsJSON(req.Labels)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
+		return
+	}
 	resource.ProjectID = optionalUint64(req.ProjectID)
 	resource.Name = strings.TrimSpace(req.Name)
 	resource.Description = strings.TrimSpace(req.Description)
 	resource.Type = req.Type
 	resource.Environment = defaultIfEmpty(strings.TrimSpace(req.Environment), resource.Environment)
 	resource.Endpoint = strings.TrimSpace(req.Endpoint)
-	resource.Labels = req.Labels
+	resource.Labels = labelsJSON
 	resource.Metadata = req.Metadata
 	if err := h.DB.Save(&resource).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "修改资源失败"})
 		return
 	}
 
+	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": buildResourceBaseInfoResponse(resource, h.DB)})
+}
+
+func (h *ResourceHandler) UpdateResourceLabels(c *gin.Context) {
+	workspaceID, _ := getRequestWorkspace(c)
+	userID, role := getRequestUser(c)
+	if workspaceID == 0 || !userCanManageWorkspace(h.DB, workspaceID, userID, role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "无权修改资源标签"})
+		return
+	}
+
+	var resource models.Resource
+	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&resource, c.Param("id")).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "资源不存在"})
+		return
+	}
+
+	var req updateResourceLabelsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
+		return
+	}
+	labelsJSON, err := normalizeResourceLabelsJSON(req.Labels)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
+		return
+	}
+
+	if err := h.DB.Model(&resource).Update("labels", labelsJSON).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "修改资源标签失败"})
+		return
+	}
+	resource.Labels = labelsJSON
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": buildResourceBaseInfoResponse(resource, h.DB)})
 }
 
@@ -3728,6 +3775,13 @@ func buildResourceListResponse(resources []models.Resource) []gin.H {
 	return items
 }
 
+const (
+	maxResourceLabels          = 50
+	maxResourceLabelsJSONBytes = 8 * 1024
+	maxResourceLabelKeyRunes   = 64
+	maxResourceLabelValueRunes = 256
+)
+
 func decodeJSONObjectField(raw string, fallback interface{}) interface{} {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -3738,6 +3792,84 @@ func decodeJSONObjectField(raw string, fallback interface{}) interface{} {
 		return fallback
 	}
 	return value
+}
+
+func normalizeResourceLabelsJSON(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "{}", nil
+	}
+	if len([]byte(trimmed)) > maxResourceLabelsJSONBytes {
+		return "", fmt.Errorf("资源标签过大")
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader([]byte(trimmed)))
+	decoder.UseNumber()
+	openingToken, err := decoder.Token()
+	if err != nil {
+		return "", fmt.Errorf("资源标签必须是 JSON 对象")
+	}
+	openingDelimiter, ok := openingToken.(json.Delim)
+	if !ok || openingDelimiter != '{' {
+		return "", fmt.Errorf("资源标签必须是 JSON 对象")
+	}
+
+	normalized := make(map[string]string)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return "", fmt.Errorf("资源标签必须是 JSON 对象")
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return "", fmt.Errorf("资源标签必须是 JSON 对象")
+		}
+		if len(normalized) >= maxResourceLabels {
+			return "", fmt.Errorf("资源标签最多 50 个")
+		}
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" {
+			return "", fmt.Errorf("资源标签键不能为空")
+		}
+		if len([]rune(trimmedKey)) > maxResourceLabelKeyRunes {
+			return "", fmt.Errorf("资源标签键最多 64 个字符")
+		}
+		if _, exists := normalized[trimmedKey]; exists {
+			return "", fmt.Errorf("资源标签键不能重复")
+		}
+
+		var value string
+		if err := decoder.Decode(&value); err != nil {
+			return "", fmt.Errorf("资源标签值必须是字符串")
+		}
+		trimmedValue := strings.TrimSpace(value)
+		if trimmedValue == "" {
+			return "", fmt.Errorf("资源标签值不能为空")
+		}
+		if len([]rune(trimmedValue)) > maxResourceLabelValueRunes {
+			return "", fmt.Errorf("资源标签值最多 256 个字符")
+		}
+		normalized[trimmedKey] = trimmedValue
+	}
+	closingToken, err := decoder.Token()
+	if err != nil {
+		return "", fmt.Errorf("资源标签必须是 JSON 对象")
+	}
+	closingDelimiter, ok := closingToken.(json.Delim)
+	if !ok || closingDelimiter != '}' {
+		return "", fmt.Errorf("资源标签必须是 JSON 对象")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("资源标签必须是 JSON 对象")
+	}
+	if len(normalized) == 0 {
+		return "{}", nil
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return "", fmt.Errorf("资源标签无效")
+	}
+	return string(encoded), nil
 }
 
 func buildResourceBaseInfoTaskPayload(resource *models.Resource, credential models.Credential, effectiveEndpoint, collectorSource string) resourceBaseInfoTaskPayload {

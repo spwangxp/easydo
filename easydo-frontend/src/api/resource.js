@@ -46,6 +46,14 @@ export function updateResource(id, data) {
   })
 }
 
+export function updateResourceLabels(id, data) {
+  return request({
+    url: `/resources/${id}/labels`,
+    method: 'put',
+    data
+  })
+}
+
 export function deleteResource(id) {
   return request({
     url: `/resources/${id}`,

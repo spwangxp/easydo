@@ -87,6 +87,22 @@ test('copyDisplayedValue writes displayed secret token and reports success', asy
   ])
 })
 
+test('copyDisplayedValue falls back when clipboard api is unavailable', async () => {
+  const calls = []
+  await copyDisplayedValue({
+    value: 'secret-token',
+    canCopy: () => true,
+    writeText: async () => {
+      throw new Error('unavailable')
+    },
+    fallbackWriteText: async (text) => calls.push(`fallback:${text}`),
+    onSuccess: (msg) => calls.push(msg),
+    onError: (msg) => calls.push(`error:${msg}`)
+  })
+
+  assert.deepEqual(calls, ['fallback:secret-token', '复制成功'])
+})
+
 test('copyDisplayedValue reports failure when clipboard write throws', async () => {
   const calls = []
   await copyDisplayedValue({

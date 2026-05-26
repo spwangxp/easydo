@@ -12,6 +12,12 @@
           <el-option label="测试环境" value="testing" />
           <el-option label="生产环境" value="production" />
         </el-select>
+        <el-select v-model="filters.labelKey" clearable filterable allow-create placeholder="标签键" class="filter-select label-filter-select">
+          <el-option v-for="option in labelKeyOptions" :key="option" :label="option" :value="option" />
+        </el-select>
+        <el-select v-model="filters.labelValue" clearable filterable allow-create placeholder="标签值" class="filter-select label-filter-select">
+          <el-option v-for="option in labelValueOptions" :key="option" :label="option" :value="option" />
+        </el-select>
       </div>
       <div class="content-toolbar__actions">
         <el-button @click="fetchResources">刷新</el-button>
@@ -35,7 +41,7 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="资源" min-width="220">
+      <el-table-column label="资源" min-width="190">
         <template #default="{ row }">
           <div class="resource-identity-cell">
             <span class="resource-name">{{ row.name || '-' }}</span>
@@ -46,7 +52,28 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="接入信息" min-width="220">
+      <el-table-column label="标签" min-width="170">
+        <template #default="{ row }">
+          <div class="resource-label-cell">
+            <div v-if="displayResourceLabels(row).length" class="resource-label-tags">
+              <el-tag
+                v-for="label in displayResourceLabels(row).slice(0, 3)"
+                :key="label.key"
+                size="small"
+                effect="plain"
+                class="resource-label-tag"
+              >
+                {{ label.text }}
+              </el-tag>
+              <el-tag v-if="displayResourceLabels(row).length > 3" size="small" effect="plain" class="resource-label-tag">
+                +{{ displayResourceLabels(row).length - 3 }}
+              </el-tag>
+            </div>
+            <span v-else class="resource-label-empty">-</span>
+          </div>
+        </template>
+      </el-table-column>
+      <el-table-column label="接入信息" min-width="200">
         <template #default="{ row }">
           <div class="access-info-cell">
             <span class="binding-name">{{ getCredentialBindingName(row) }}</span>
@@ -54,7 +81,7 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="基础资源" min-width="220">
+      <el-table-column label="基础资源" min-width="200">
         <template #default="{ row }">
           <div class="base-summary-cell">
             <span class="binding-name">{{ getBaseInfoSummary(row) }}</span>
@@ -67,10 +94,10 @@
           <el-tag :type="statusType(row.status)">{{ row.status || '-' }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="updated_at" label="更新时间" min-width="150" class-name="optional-time-column">
+      <el-table-column prop="updated_at" label="更新时间" min-width="140" class-name="optional-time-column">
         <template #default="{ row }">{{ formatDateTime(row.updated_at) }}</template>
       </el-table-column>
-      <el-table-column v-if="canManage || canOpenWebTerminal || canBrowseCluster" label="操作" min-width="220" align="right">
+      <el-table-column v-if="canManage || canOpenWebTerminal || canBrowseCluster" label="操作" min-width="210" align="right">
         <template #default="{ row }">
           <div class="resource-actions">
             <div class="action-line action-line--primary">
@@ -79,6 +106,7 @@
             </div>
             <div class="action-line action-line--secondary">
               <el-button v-if="row.type === 'vm'" link size="small" type="primary" @click.stop="toggleGpuMatrixRow(row)">{{ isGpuMatrixExpanded(row) ? '收起GPU' : 'GPU视图' }}</el-button>
+              <el-button v-if="canManage" link size="small" type="primary" @click="openLabelDialog(row)">编辑标签</el-button>
               <el-button v-if="canBrowseCluster && row.type === 'k8s'" link size="small" type="primary" @click="openK8sBrowser(row)">Browse</el-button>
               <el-button v-if="canOpenWebTerminal && row.type === 'vm'" link size="small" type="primary" @click="openWebTerminal(row)">Terminal</el-button>
               <el-dropdown v-if="canManage" class="more-actions" trigger="click" @command="command => handleMoreAction(command, row)">
@@ -104,6 +132,14 @@
         @submit="handleFormSubmit"
         @cancel="dialogVisible = false"
       />
+    </el-dialog>
+
+    <el-dialog v-model="labelDialogVisible" :title="`编辑标签：${labelEditingResource?.name || ''}`" width="560px" destroy-on-close>
+      <ResourceLabelEditor ref="labelEditorRef" v-model="labelEditorValue" />
+      <template #footer>
+        <el-button @click="labelDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="labelSaving" @click="saveLabelDialog">保存标签</el-button>
+      </template>
     </el-dialog>
 
     <el-dialog v-model="baseInfoDialogVisible" title="基础资源详情" width="720px" destroy-on-close>
@@ -154,12 +190,20 @@ import {
   getResourceDetail,
   getResourceList,
   refreshResourceBaseInfo,
-  updateResource
+  updateResource,
+  updateResourceLabels
 } from '@/api/resource'
 import { getTaskDetail } from '@/api/task'
 import ResourceForm from './components/ResourceForm.vue'
 import ResourceGpuMatrixPanel from './components/ResourceGpuMatrixPanel.vue'
+import ResourceLabelEditor from './components/ResourceLabelEditor.vue'
 import { normalizeRuntimeBaseInfo } from './runtimeBaseInfo'
+import {
+  formatResourceLabel,
+  getResourceLabelOptions,
+  normalizeResourceLabels,
+  resourceMatchesLabelFilters
+} from './resourceLabels'
 import { createTerminalLaunchPath } from './terminal/terminalPageState'
 
 const router = useRouter()
@@ -170,8 +214,13 @@ const dialogVisible = ref(false)
 const editingId = ref(0)
 const resources = ref([])
 const currentResource = ref(null)
-const filters = reactive({ keyword: '', type: '', environment: '' })
+const filters = reactive({ keyword: '', type: '', environment: '', labelKey: '', labelValue: '' })
 const refreshingId = ref(0)
+const labelDialogVisible = ref(false)
+const labelSaving = ref(false)
+const labelEditingResource = ref(null)
+const labelEditorValue = ref({})
+const labelEditorRef = ref(null)
 const baseInfoDialogVisible = ref(false)
 const baseInfoDialogResource = ref(null)
 const expandedGpuRowKeys = ref([])
@@ -180,11 +229,15 @@ const canManage = computed(() => userStore.hasPermission('resource.write'))
 const canBrowseCluster = computed(() => userStore.hasPermission('resource.read'))
 const canOpenWebTerminal = computed(() => userStore.hasPermission('resource.use'))
 const isEdit = computed(() => editingId.value > 0)
+const labelOptions = computed(() => getResourceLabelOptions(resources.value, filters.labelKey))
+const labelKeyOptions = computed(() => labelOptions.value.keys)
+const labelValueOptions = computed(() => labelOptions.value.values)
 
 const filteredResources = computed(() => resources.value.filter(item => {
   if (filters.type && item.type !== filters.type) return false
   if (filters.environment && item.environment !== filters.environment) return false
   if (filters.keyword && !String(item.name || '').toLowerCase().includes(filters.keyword.toLowerCase())) return false
+  if (!resourceMatchesLabelFilters(item, filters)) return false
   return true
 }))
 const canShowGpuMatrix = (row) => row?.type === 'vm'
@@ -327,6 +380,42 @@ const openBaseInfoDialog = async (row) => {
   baseInfoDialogVisible.value = true
 }
 
+const openLabelDialog = async (row) => {
+  let resourceData = normalizeResource(row)
+  try {
+    const detailRes = await getResourceDetail(row.id)
+    resourceData = normalizeResource(detailRes?.data || row)
+  } catch {
+    ElMessage.warning('资源详情刷新失败，已使用列表中的标签信息')
+  }
+  labelEditingResource.value = resourceData
+  labelEditorValue.value = normalizeResourceLabels(resourceData.labels)
+  labelDialogVisible.value = true
+}
+
+const saveLabelDialog = async () => {
+  const labelValidation = labelEditorRef.value?.validate?.()
+  if (!labelValidation?.ok) {
+    ElMessage.warning(labelValidation?.errors?.[0]?.message || '资源标签填写有误')
+    return
+  }
+
+  const resource = labelEditingResource.value
+  if (!resource?.id) return
+
+  labelSaving.value = true
+  try {
+    await updateResourceLabels(resource.id, {
+      labels: JSON.stringify(labelValidation.labels)
+    })
+    ElMessage.success('资源标签已更新')
+    labelDialogVisible.value = false
+    await fetchResources()
+  } finally {
+    labelSaving.value = false
+  }
+}
+
 const openWebTerminal = (row) => {
   if (!row?.id || row.type !== 'vm') return
   const target = router.resolve(createTerminalLaunchPath(row.id))
@@ -464,6 +553,11 @@ const runtimeBaseInfoCache = new Map()
 
 const environmentText = (value) => ({ development: '开发环境', testing: '测试环境', production: '生产环境' }[value] || value || '-')
 const statusType = (value) => ({ online: 'success', offline: 'info', error: 'danger', archived: 'warning' }[value] || 'info')
+const displayResourceLabels = (row) => Object.entries(normalizeResourceLabels(row?.labels)).map(([key, value]) => ({
+  key,
+  value,
+  text: formatResourceLabel(key, value)
+}))
 const formatDateTime = (value) => value ? new Date(typeof value === 'number' ? value * 1000 : value).toLocaleString('zh-CN') : '-'
 const formatBytes = (value) => {
   const size = Number(value || 0)
@@ -591,6 +685,10 @@ onMounted(fetchResources)
   width: 160px;
 }
 
+.label-filter-select {
+  width: 160px;
+}
+
 .resource-identity-cell,
 .access-info-cell,
 .base-summary-cell {
@@ -618,6 +716,31 @@ onMounted(fetchResources)
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-label-cell {
+  min-width: 0;
+}
+
+.resource-label-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.resource-label-empty {
+  color: var(--text-muted);
+}
+
+.resource-label-tag {
+  max-width: 140px;
+}
+
+.resource-label-tag :deep(.el-tag__content) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -676,6 +799,7 @@ onMounted(fetchResources)
 
 :deep(.compact-table .cell) {
   min-width: 0;
+  padding: 0 6px;
   line-height: 1.35;
 }
 

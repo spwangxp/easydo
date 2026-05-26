@@ -79,6 +79,9 @@
         </div>
       </template>
 
+      <el-divider content-position="left">资源标签</el-divider>
+      <ResourceLabelEditor ref="labelEditorRef" v-model="form.labels" />
+
       <el-form-item label="描述" prop="description">
         <el-input v-model="form.description" type="textarea" :rows="3" placeholder="可选：补充资源用途、维护人或访问约束" />
       </el-form-item>
@@ -109,6 +112,7 @@ import { getCredentialList } from '@/api/credential'
 import { verifyResourceConnection } from '@/api/resource'
 import { getTaskDetail } from '@/api/task'
 import CredentialSelector from '@/views/pipeline/components/CredentialSelector.vue'
+import ResourceLabelEditor from './ResourceLabelEditor.vue'
 
 const props = defineProps({
   initialData: {
@@ -124,6 +128,7 @@ const props = defineProps({
 const emit = defineEmits(['submit', 'cancel'])
 
 const formRef = ref(null)
+const labelEditorRef = ref(null)
 const credentialOptions = ref([])
 const verifying = ref(false)
 const validationState = reactive({
@@ -476,6 +481,12 @@ const handleSubmit = async () => {
     }
   }
 
+  const labelValidation = labelEditorRef.value?.validate?.() || { ok: true, labels: normalizeObjectField(form.labels), errors: [] }
+  if (!labelValidation.ok) {
+    ElMessage.warning(labelValidation.errors[0]?.message || labelValidation.errors[0] || '资源标签填写有误')
+    return
+  }
+
   emit('submit', {
     name: form.name,
     type: form.type,
@@ -484,7 +495,7 @@ const handleSubmit = async () => {
     description: form.description,
     credentialId: form.credentialId,
     verificationTaskId: isEdit.value ? 0 : validationState.taskId,
-    labels: normalizeObjectField(form.labels),
+    labels: labelValidation.labels,
     metadata: normalizeObjectField(form.metadata),
   })
 }
