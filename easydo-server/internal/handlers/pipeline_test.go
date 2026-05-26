@@ -1877,58 +1877,58 @@ func TestGetRunRerunPreview(t *testing.T) {
 	})
 
 	t.Run("run_config manual inputs take precedence and resolved non flexible defaults do not block rerun", func(t *testing.T) {
-			db := openHandlerTestDB(t)
-			h := &PipelineHandler{DB: db}
-			user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-run-config-priority", models.WorkspaceRoleDeveloper)
-			pipeline := models.Pipeline{
-				Name:        "rerun-preview-run-config-priority",
-				WorkspaceID: workspace.ID,
-				OwnerID:     user.ID,
-				Definition:  `{"version":"2.0","nodes":[{"node_id":"node_1","node_name":"Build","type":"shell","task_key":"shell","params":[{"key":"script","label":"脚本","value":"echo current","is_flexible":false},{"key":"image_tag","label":"镜像标签","value":"latest","is_flexible":true},{"key":"architectures","label":"目标架构","value":["linux/amd64","linux/arm64"],"is_flexible":true}]},{"node_id":"node_2","node_name":"Deploy","type":"shell","task_key":"shell","params":[{"key":"script","label":"部署脚本","value":"echo deploy","is_flexible":false}]}],"edges":[{"from":"node_1","to":"node_2"}]}`,
-			}
-			if err := db.Create(&pipeline).Error; err != nil {
-				t.Fatalf("create pipeline failed: %v", err)
-			}
-			run := models.PipelineRun{
-				WorkspaceID: workspace.ID,
-				PipelineID:  pipeline.ID,
-				BuildNumber: 1,
-				RunConfig:   `{"inputs":{"node_1":{"image_tag":"release-2026.05","architectures":["linux/amd64"]}}}`,
-				ResolvedNodes: `[
+		db := openHandlerTestDB(t)
+		h := &PipelineHandler{DB: db}
+		user, workspace := seedCredentialTestUserAndWorkspace(t, db, "rerun-preview-run-config-priority", models.WorkspaceRoleDeveloper)
+		pipeline := models.Pipeline{
+			Name:        "rerun-preview-run-config-priority",
+			WorkspaceID: workspace.ID,
+			OwnerID:     user.ID,
+			Definition:  `{"version":"2.0","nodes":[{"node_id":"node_1","node_name":"Build","type":"shell","task_key":"shell","params":[{"key":"script","label":"脚本","value":"echo current","is_flexible":false},{"key":"image_tag","label":"镜像标签","value":"latest","is_flexible":true},{"key":"architectures","label":"目标架构","value":["linux/amd64","linux/arm64"],"is_flexible":true}]},{"node_id":"node_2","node_name":"Deploy","type":"shell","task_key":"shell","params":[{"key":"script","label":"部署脚本","value":"echo deploy","is_flexible":false}]}],"edges":[{"from":"node_1","to":"node_2"}]}`,
+		}
+		if err := db.Create(&pipeline).Error; err != nil {
+			t.Fatalf("create pipeline failed: %v", err)
+		}
+		run := models.PipelineRun{
+			WorkspaceID: workspace.ID,
+			PipelineID:  pipeline.ID,
+			BuildNumber: 1,
+			RunConfig:   `{"inputs":{"node_1":{"image_tag":"release-2026.05","architectures":["linux/amd64"]}}}`,
+			ResolvedNodes: `[
 					{"node_id":"node_1","resolved_inputs":{"script":"echo historical default","image_tag":"release-2026.05","architectures":["linux/amd64"],"context":"./app","push":true}},
 					{"node_id":"node_2","resolved_inputs":{"script":"echo deploy","region":"cn"}}
 				]`,
-			}
-			if err := db.Create(&run).Error; err != nil {
-				t.Fatalf("create run failed: %v", err)
-			}
+		}
+		if err := db.Create(&run).Error; err != nil {
+			t.Fatalf("create run failed: %v", err)
+		}
 
-			resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
-			if !resp.Data.CanEnterRunDialog {
-				t.Fatalf("expected rerun dialog available, got %#v", resp.Data)
-			}
-			if resp.Data.Failure != nil {
-				t.Fatalf("unexpected failure: %#v", resp.Data.Failure)
-			}
-			if len(resp.Data.Mismatched) != 0 {
-				t.Fatalf("expected no mismatches, got %#v", resp.Data.Mismatched)
-			}
-			if got := resp.Data.PrefillInputs["node_1"]["image_tag"]; got != "release-2026.05" {
-				t.Fatalf("prefill node_1.image_tag=%#v", got)
-			}
-			architectures, ok := resp.Data.PrefillInputs["node_1"]["architectures"].([]interface{})
-			if !ok || len(architectures) != 1 || architectures[0] != "linux/amd64" {
-				t.Fatalf("prefill node_1.architectures=%#v", resp.Data.PrefillInputs["node_1"]["architectures"])
-			}
-			if _, exists := resp.Data.PrefillInputs["node_1"]["script"]; exists {
-				t.Fatalf("unexpected non-flexible script prefill: %#v", resp.Data.PrefillInputs["node_1"])
-			}
-			if _, exists := resp.Data.PrefillInputs["node_2"]; exists {
-				t.Fatalf("unexpected node_2 prefill: %#v", resp.Data.PrefillInputs["node_2"])
-			}
-		})
+		resp := makeRequest(t, h, workspace.ID, pipeline.ID, run.ID)
+		if !resp.Data.CanEnterRunDialog {
+			t.Fatalf("expected rerun dialog available, got %#v", resp.Data)
+		}
+		if resp.Data.Failure != nil {
+			t.Fatalf("unexpected failure: %#v", resp.Data.Failure)
+		}
+		if len(resp.Data.Mismatched) != 0 {
+			t.Fatalf("expected no mismatches, got %#v", resp.Data.Mismatched)
+		}
+		if got := resp.Data.PrefillInputs["node_1"]["image_tag"]; got != "release-2026.05" {
+			t.Fatalf("prefill node_1.image_tag=%#v", got)
+		}
+		architectures, ok := resp.Data.PrefillInputs["node_1"]["architectures"].([]interface{})
+		if !ok || len(architectures) != 1 || architectures[0] != "linux/amd64" {
+			t.Fatalf("prefill node_1.architectures=%#v", resp.Data.PrefillInputs["node_1"]["architectures"])
+		}
+		if _, exists := resp.Data.PrefillInputs["node_1"]["script"]; exists {
+			t.Fatalf("unexpected non-flexible script prefill: %#v", resp.Data.PrefillInputs["node_1"])
+		}
+		if _, exists := resp.Data.PrefillInputs["node_2"]; exists {
+			t.Fatalf("unexpected node_2 prefill: %#v", resp.Data.PrefillInputs["node_2"])
+		}
+	})
 
-		t.Run("malformed or missing resolved nodes returns explicit preview failure and no runnable prefill payload", func(t *testing.T) {
+	t.Run("malformed or missing resolved nodes returns explicit preview failure and no runnable prefill payload", func(t *testing.T) {
 		for _, raw := range []string{"", `{"bad":true}`, `[{"node_id":"node_1"}]`, `[{"node_id":"node_1","resolved_inputs":{"script":"echo one"}},{"node_id":"node_1","resolved_inputs":{"script":"echo two"}}]`} {
 			db := openHandlerTestDB(t)
 			h := &PipelineHandler{DB: db}
@@ -2940,15 +2940,15 @@ type pipelineMappingStructuredError struct {
 }
 
 type pipelineWebhookPreviewResponseEnvelope struct {
-	Code    int                            `json:"code"`
-	Message string                         `json:"message"`
-	Data    webhookRuntimePreviewResult    `json:"data"`
+	Code    int                              `json:"code"`
+	Message string                           `json:"message"`
+	Data    webhookRuntimePreviewResult      `json:"data"`
 	Errors  []pipelineMappingStructuredError `json:"errors"`
 }
 
 type pipelineMappingErrorResponseEnvelope struct {
-	Code    int                            `json:"code"`
-	Message string                         `json:"message"`
+	Code    int                              `json:"code"`
+	Message string                           `json:"message"`
 	Errors  []pipelineMappingStructuredError `json:"errors"`
 }
 
@@ -3028,7 +3028,7 @@ func TestPreviewWebhookRuntimeMappings_ReturnsMatchedInputs(t *testing.T) {
 	}
 
 	body := bytes.NewBuffer(mustJSON(t, map[string]interface{}{
-		"payload": map[string]interface{}{"ref": "refs/heads/main"},
+		"payload":                        map[string]interface{}{"ref": "refs/heads/main"},
 		"webhook_runtime_input_mappings": `[{"id":"rule-1","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"node-1","param_key":"working_dir"},"missing_policy":"ignore"}]`,
 	}))
 	w := httptest.NewRecorder()
@@ -3178,9 +3178,9 @@ func TestUpdatePipelineTriggers_RejectsInvalidWebhookMappingsWithStructuredError
 	}
 
 	body := bytes.NewBuffer(mustJSON(t, map[string]interface{}{
-		"provider": "gitlab",
-		"webhook_enabled": true,
-		"push_enabled": true,
+		"provider":                       "gitlab",
+		"webhook_enabled":                true,
+		"push_enabled":                   true,
 		"webhook_runtime_input_mappings": `[{"id":"bad-target","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"node-1","param_key":"unknown"},"missing_policy":"ignore"}]`,
 	}))
 	w := httptest.NewRecorder()
@@ -3206,7 +3206,7 @@ func TestUpdatePipelineTriggers_RejectsInvalidWebhookMappingsWithStructuredError
 	}
 }
 
-func TestHandleGitLabWebhook_UsesRuntimeMappingsInsteadOfBuiltInGitRefInjection(t *testing.T) {
+func TestHandleGitLabWebhook_ParsedGitRefOverridesGitCloneInputs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
 	h := &PipelineHandler{DB: db}
@@ -3247,26 +3247,26 @@ func TestHandleGitLabWebhook_UsesRuntimeMappingsInsteadOfBuiltInGitRefInjection(
 		t.Fatalf("create pipeline failed: %v", err)
 	}
 	trigger := models.PipelineTrigger{
-		WorkspaceID:                  workspace.ID,
-		PipelineID:                   pipeline.ID,
-		Provider:                     "gitlab",
-		WebhookEnabled:               true,
-		PushEnabled:                  true,
-		SecretToken:                  "gitlab-secret",
-		WebhookToken:                 "public-trigger-token",
-		Timezone:                     "UTC",
-		PushBranchFilters:            "main\nrelease/*",
-		WebhookRuntimeInputMappings:  `[{"id":"map-script","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"shell-node","param_key":"script"},"missing_policy":"ignore"}]`,
-		WebhookConfigStatus:          "valid",
+		WorkspaceID:                 workspace.ID,
+		PipelineID:                  pipeline.ID,
+		Provider:                    "gitlab",
+		WebhookEnabled:              true,
+		PushEnabled:                 true,
+		SecretToken:                 "gitlab-secret",
+		WebhookToken:                "public-trigger-token",
+		Timezone:                    "UTC",
+		PushBranchFilters:           "main\nrelease/*",
+		WebhookRuntimeInputMappings: `[{"id":"map-script","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"shell-node","param_key":"script"},"missing_policy":"ignore"}]`,
+		WebhookConfigStatus:         "valid",
 	}
 	if err := db.Create(&trigger).Error; err != nil {
 		t.Fatalf("create trigger failed: %v", err)
 	}
 
 	payload := mustJSON(t, map[string]interface{}{
-		"object_kind": "push",
-		"ref":         "refs/heads/main",
-		"project": map[string]interface{}{"path_with_namespace": "group/project"},
+		"object_kind":   "push",
+		"ref":           "refs/heads/main",
+		"project":       map[string]interface{}{"path_with_namespace": "group/project"},
 		"user_username": "gitlab-user",
 		"checkout_sha":  "abc123def456",
 	})
@@ -3290,11 +3290,190 @@ func TestHandleGitLabWebhook_UsesRuntimeMappingsInsteadOfBuiltInGitRefInjection(
 	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
 		t.Fatalf("unmarshal run config failed: %v", err)
 	}
+	if got := runConfig.Inputs["clone-node"]["git_ref"]; got != "main" {
+		t.Fatalf("expected parsed git_ref for clone node, got %#v", runConfig.Inputs)
+	}
+	if got := runConfig.Inputs["clone-node"]["git_commit"]; got != "abc123def456" {
+		t.Fatalf("expected parsed git_commit for clone node, got %#v", runConfig.Inputs)
+	}
 	if got := runConfig.Inputs["shell-node"]["script"]; got != "refs/heads/main" {
 		t.Fatalf("expected mapped shell runtime input, got %#v", runConfig.Inputs)
 	}
-	if _, exists := runConfig.Inputs["clone-node"]; exists {
-		t.Fatalf("expected no built-in git ref injection, got %#v", runConfig.Inputs)
+}
+
+func TestHandleGitLabWebhook_ParsedGitRefAppliesToAllGitCloneNodes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "webhook-multi-clone-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{
+		Name:        "webhook-multi-clone-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Environment: "development",
+		Definition: webhookRuntimeTestDefinitionJSON(t,
+			PipelineNode{
+				ID:      "clone-a",
+				TaskKey: "git_clone",
+				Type:    "git_clone",
+				Name:    "Clone A",
+				DefinitionParams: []models.PipelineDefinitionParam{
+					{Key: "git_repo_url", Label: "仓库地址", Value: "https://example.com/repo-a.git", IsFlexible: false},
+					{Key: "git_ref", Label: "分支", Value: "main", IsFlexible: true},
+					{Key: "git_commit", Label: "提交", Value: "", IsFlexible: true},
+				},
+			},
+			PipelineNode{
+				ID:      "clone-b",
+				TaskKey: "git_clone",
+				Type:    "git_clone",
+				Name:    "Clone B",
+				DefinitionParams: []models.PipelineDefinitionParam{
+					{Key: "git_repo_url", Label: "仓库地址", Value: "https://example.com/repo-b.git", IsFlexible: false},
+					{Key: "git_ref", Label: "分支", Value: "main", IsFlexible: true},
+					{Key: "git_commit", Label: "提交", Value: "", IsFlexible: true},
+				},
+			},
+		),
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+	trigger := models.PipelineTrigger{
+		WorkspaceID:       workspace.ID,
+		PipelineID:        pipeline.ID,
+		Provider:          "gitlab",
+		WebhookEnabled:    true,
+		PushEnabled:       true,
+		SecretToken:       "gitlab-secret",
+		WebhookToken:      "public-trigger-token",
+		Timezone:          "UTC",
+		PushBranchFilters: "main",
+	}
+	if err := db.Create(&trigger).Error; err != nil {
+		t.Fatalf("create trigger failed: %v", err)
+	}
+
+	payload := mustJSON(t, map[string]interface{}{
+		"object_kind":   "push",
+		"ref":           "refs/heads/main",
+		"project":       map[string]interface{}{"path_with_namespace": "group/project"},
+		"user_username": "gitlab-user",
+		"checkout_sha":  "abc123def456",
+	})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/pipeline/run/webhook/public-trigger-token", bytes.NewReader(payload))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Gitlab-Token", "gitlab-secret")
+	c.Params = gin.Params{{Key: "token", Value: "public-trigger-token"}}
+
+	h.HandleGitLabWebhook(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var run models.PipelineRun
+	if err := db.Where("pipeline_id = ?", pipeline.ID).First(&run).Error; err != nil {
+		t.Fatalf("load pipeline run failed: %v", err)
+	}
+	var runConfig models.PipelineRunConfigSnapshot
+	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
+		t.Fatalf("unmarshal run config failed: %v", err)
+	}
+	if got := runConfig.Inputs["clone-a"]["git_ref"]; got != "main" {
+		t.Fatalf("expected parsed git_ref for clone-a, got %#v", runConfig.Inputs)
+	}
+	if got := runConfig.Inputs["clone-a"]["git_commit"]; got != "abc123def456" {
+		t.Fatalf("expected parsed git_commit for clone-a, got %#v", runConfig.Inputs)
+	}
+	if got := runConfig.Inputs["clone-b"]["git_ref"]; got != "main" {
+		t.Fatalf("expected parsed git_ref for clone-b, got %#v", runConfig.Inputs)
+	}
+	if got := runConfig.Inputs["clone-b"]["git_commit"]; got != "abc123def456" {
+		t.Fatalf("expected parsed git_commit for clone-b, got %#v", runConfig.Inputs)
+	}
+}
+
+func TestHandleGitLabWebhook_MergeRequestUsesParsedSourceBranchForGitClone(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "webhook-merge-request-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{
+		Name:        "webhook-merge-request-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Environment: "development",
+		Definition: webhookRuntimeTestDefinitionJSON(t,
+			PipelineNode{
+				ID:      "clone-node",
+				TaskKey: "git_clone",
+				Type:    "git_clone",
+				Name:    "Clone",
+				DefinitionParams: []models.PipelineDefinitionParam{
+					{Key: "git_repo_url", Label: "仓库地址", Value: "https://example.com/repo.git", IsFlexible: false},
+					{Key: "git_ref", Label: "分支", Value: "main", IsFlexible: true},
+					{Key: "git_commit", Label: "提交", Value: "", IsFlexible: true},
+				},
+			},
+		),
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+	trigger := models.PipelineTrigger{
+		WorkspaceID:                     workspace.ID,
+		PipelineID:                      pipeline.ID,
+		Provider:                        "gitlab",
+		WebhookEnabled:                  true,
+		MergeRequestEnabled:             true,
+		SecretToken:                     "gitlab-secret",
+		WebhookToken:                    "public-trigger-token",
+		Timezone:                        "UTC",
+		MergeRequestSourceBranchFilters: "feature/*",
+		MergeRequestTargetBranchFilters: "main",
+	}
+	if err := db.Create(&trigger).Error; err != nil {
+		t.Fatalf("create trigger failed: %v", err)
+	}
+
+	payload := mustJSON(t, map[string]interface{}{
+		"object_kind":   "merge_request",
+		"project":       map[string]interface{}{"path_with_namespace": "group/project"},
+		"user_username": "gitlab-user",
+		"object_attributes": map[string]interface{}{
+			"action":        "open",
+			"source_branch": "feature/demo",
+			"target_branch": "main",
+			"last_commit":   map[string]interface{}{"id": "mrsha123"},
+		},
+	})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/pipeline/run/webhook/public-trigger-token", bytes.NewReader(payload))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Gitlab-Token", "gitlab-secret")
+	c.Params = gin.Params{{Key: "token", Value: "public-trigger-token"}}
+
+	h.HandleGitLabWebhook(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var run models.PipelineRun
+	if err := db.Where("pipeline_id = ?", pipeline.ID).First(&run).Error; err != nil {
+		t.Fatalf("load pipeline run failed: %v", err)
+	}
+	var runConfig models.PipelineRunConfigSnapshot
+	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
+		t.Fatalf("unmarshal run config failed: %v", err)
+	}
+	if got := runConfig.Inputs["clone-node"]["git_ref"]; got != "feature/demo" {
+		t.Fatalf("expected parsed merge request source branch, got %#v", runConfig.Inputs)
+	}
+	if got := runConfig.Inputs["clone-node"]["git_commit"]; got != "mrsha123" {
+		t.Fatalf("expected parsed merge request commit, got %#v", runConfig.Inputs)
 	}
 }
 
@@ -3314,25 +3493,25 @@ func TestHandleGitLabWebhook_MappingFailReturnsBusiness422WithoutPipelineRun(t *
 		t.Fatalf("create pipeline failed: %v", err)
 	}
 	trigger := models.PipelineTrigger{
-		WorkspaceID:                  workspace.ID,
-		PipelineID:                   pipeline.ID,
-		Provider:                     "gitlab",
-		WebhookEnabled:               true,
-		PushEnabled:                  true,
-		SecretToken:                  "gitlab-secret",
-		WebhookToken:                 "public-trigger-token",
-		Timezone:                     "UTC",
-		WebhookRuntimeInputMappings:  `[{"id":"required","source_type":"jsonpath","source_expr":"$.missing","target":{"node_id":"node-1","param_key":"working_dir"},"missing_policy":"fail"}]`,
-		WebhookConfigStatus:          "valid",
+		WorkspaceID:                 workspace.ID,
+		PipelineID:                  pipeline.ID,
+		Provider:                    "gitlab",
+		WebhookEnabled:              true,
+		PushEnabled:                 true,
+		SecretToken:                 "gitlab-secret",
+		WebhookToken:                "public-trigger-token",
+		Timezone:                    "UTC",
+		WebhookRuntimeInputMappings: `[{"id":"required","source_type":"jsonpath","source_expr":"$.missing","target":{"node_id":"node-1","param_key":"working_dir"},"missing_policy":"fail"}]`,
+		WebhookConfigStatus:         "valid",
 	}
 	if err := db.Create(&trigger).Error; err != nil {
 		t.Fatalf("create trigger failed: %v", err)
 	}
 
 	payload := mustJSON(t, map[string]interface{}{
-		"object_kind": "push",
-		"ref":         "refs/heads/main",
-		"project": map[string]interface{}{"path_with_namespace": "group/project"},
+		"object_kind":   "push",
+		"ref":           "refs/heads/main",
+		"project":       map[string]interface{}{"path_with_namespace": "group/project"},
 		"user_username": "gitlab-user",
 	})
 	w := httptest.NewRecorder()
@@ -3376,16 +3555,16 @@ func TestHandleGitLabWebhook_MappingFailReturnsStructuredErrors(t *testing.T) {
 		t.Fatalf("create pipeline failed: %v", err)
 	}
 	trigger := models.PipelineTrigger{
-		WorkspaceID:                  workspace.ID,
-		PipelineID:                   pipeline.ID,
-		Provider:                     "gitlab",
-		WebhookEnabled:               true,
-		PushEnabled:                  true,
-		SecretToken:                  "gitlab-secret",
-		WebhookToken:                 "public-trigger-token",
-		Timezone:                     "UTC",
-		WebhookRuntimeInputMappings:  `[{"id":"multi","source_type":"jsonpath","source_expr":"$.refs[*]","target":{"node_id":"node-1","param_key":"working_dir"},"missing_policy":"fail"}]`,
-		WebhookConfigStatus:          "valid",
+		WorkspaceID:                 workspace.ID,
+		PipelineID:                  pipeline.ID,
+		Provider:                    "gitlab",
+		WebhookEnabled:              true,
+		PushEnabled:                 true,
+		SecretToken:                 "gitlab-secret",
+		WebhookToken:                "public-trigger-token",
+		Timezone:                    "UTC",
+		WebhookRuntimeInputMappings: `[{"id":"multi","source_type":"jsonpath","source_expr":"$.refs[*]","target":{"node_id":"node-1","param_key":"working_dir"},"missing_policy":"fail"}]`,
+		WebhookConfigStatus:         "valid",
 	}
 	if err := db.Create(&trigger).Error; err != nil {
 		t.Fatalf("create trigger failed: %v", err)
@@ -3395,7 +3574,7 @@ func TestHandleGitLabWebhook_MappingFailReturnsStructuredErrors(t *testing.T) {
 		"object_kind": "push",
 		"ref":         "refs/heads/main",
 		"refs":        []interface{}{"main", "release"},
-		"project": map[string]interface{}{"path_with_namespace": "group/project"},
+		"project":     map[string]interface{}{"path_with_namespace": "group/project"},
 	})
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -3434,17 +3613,17 @@ func TestHandleGitLabWebhook_InvalidTriggerConfigRejected(t *testing.T) {
 		t.Fatalf("create pipeline failed: %v", err)
 	}
 	trigger := models.PipelineTrigger{
-		WorkspaceID:                  workspace.ID,
-		PipelineID:                   pipeline.ID,
-		Provider:                     "gitlab",
-		WebhookEnabled:               true,
-		PushEnabled:                  true,
-		SecretToken:                  "gitlab-secret",
-		WebhookToken:                 "public-trigger-token",
-		Timezone:                     "UTC",
-		WebhookRuntimeInputMappings:  `[{"id":"bad-target","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"node-1","param_key":"unknown"},"missing_policy":"ignore"}]`,
-		WebhookConfigStatus:          "invalid",
-		WebhookConfigInvalidReason:   "stale target",
+		WorkspaceID:                 workspace.ID,
+		PipelineID:                  pipeline.ID,
+		Provider:                    "gitlab",
+		WebhookEnabled:              true,
+		PushEnabled:                 true,
+		SecretToken:                 "gitlab-secret",
+		WebhookToken:                "public-trigger-token",
+		Timezone:                    "UTC",
+		WebhookRuntimeInputMappings: `[{"id":"bad-target","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"node-1","param_key":"unknown"},"missing_policy":"ignore"}]`,
+		WebhookConfigStatus:         "invalid",
+		WebhookConfigInvalidReason:  "stale target",
 	}
 	if err := db.Create(&trigger).Error; err != nil {
 		t.Fatalf("create trigger failed: %v", err)
@@ -3453,7 +3632,7 @@ func TestHandleGitLabWebhook_InvalidTriggerConfigRejected(t *testing.T) {
 	payload := mustJSON(t, map[string]interface{}{
 		"object_kind": "push",
 		"ref":         "refs/heads/main",
-		"project": map[string]interface{}{"path_with_namespace": "group/project"},
+		"project":     map[string]interface{}{"path_with_namespace": "group/project"},
 	})
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -3492,16 +3671,16 @@ func TestUpdatePipelineDefinition_InvalidatesWebhookTriggerWhenTargetRemoved(t *
 		t.Fatalf("create pipeline failed: %v", err)
 	}
 	trigger := models.PipelineTrigger{
-		WorkspaceID:                  workspace.ID,
-		PipelineID:                   pipeline.ID,
-		Provider:                     "gitlab",
-		WebhookEnabled:               true,
-		PushEnabled:                  true,
-		SecretToken:                  "gitlab-secret",
-		WebhookToken:                 "public-trigger-token",
-		Timezone:                     "UTC",
-		WebhookRuntimeInputMappings:  `[{"id":"rule-1","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"node-1","param_key":"working_dir"},"missing_policy":"ignore"}]`,
-		WebhookConfigStatus:          "valid",
+		WorkspaceID:                 workspace.ID,
+		PipelineID:                  pipeline.ID,
+		Provider:                    "gitlab",
+		WebhookEnabled:              true,
+		PushEnabled:                 true,
+		SecretToken:                 "gitlab-secret",
+		WebhookToken:                "public-trigger-token",
+		Timezone:                    "UTC",
+		WebhookRuntimeInputMappings: `[{"id":"rule-1","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"node-1","param_key":"working_dir"},"missing_policy":"ignore"}]`,
+		WebhookConfigStatus:         "valid",
 	}
 	if err := db.Create(&trigger).Error; err != nil {
 		t.Fatalf("create trigger failed: %v", err)
@@ -3569,9 +3748,9 @@ func TestUpdatePipelineTriggers_RepairMappingsRestoresValidStatus(t *testing.T) 
 	}
 
 	body := bytes.NewBuffer(mustJSON(t, map[string]interface{}{
-		"provider": "gitlab",
-		"webhook_enabled": true,
-		"push_enabled": true,
+		"provider":                       "gitlab",
+		"webhook_enabled":                true,
+		"push_enabled":                   true,
 		"webhook_runtime_input_mappings": `[{"id":"rule-1","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"node-1","param_key":"working_dir"},"missing_policy":"ignore"}]`,
 	}))
 	w := httptest.NewRecorder()
@@ -3613,16 +3792,16 @@ func TestHandleGitLabWebhook_RuntimeRevalidationRejectsStaleTarget(t *testing.T)
 		t.Fatalf("create pipeline failed: %v", err)
 	}
 	trigger := models.PipelineTrigger{
-		WorkspaceID:                  workspace.ID,
-		PipelineID:                   pipeline.ID,
-		Provider:                     "gitlab",
-		WebhookEnabled:               true,
-		PushEnabled:                  true,
-		SecretToken:                  "gitlab-secret",
-		WebhookToken:                 "public-trigger-token",
-		Timezone:                     "UTC",
-		WebhookRuntimeInputMappings:  `[{"id":"rule-1","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"node-1","param_key":"working_dir"},"missing_policy":"ignore"}]`,
-		WebhookConfigStatus:          "valid",
+		WorkspaceID:                 workspace.ID,
+		PipelineID:                  pipeline.ID,
+		Provider:                    "gitlab",
+		WebhookEnabled:              true,
+		PushEnabled:                 true,
+		SecretToken:                 "gitlab-secret",
+		WebhookToken:                "public-trigger-token",
+		Timezone:                    "UTC",
+		WebhookRuntimeInputMappings: `[{"id":"rule-1","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"node-1","param_key":"working_dir"},"missing_policy":"ignore"}]`,
+		WebhookConfigStatus:         "valid",
 	}
 	if err := db.Create(&trigger).Error; err != nil {
 		t.Fatalf("create trigger failed: %v", err)
@@ -3634,7 +3813,7 @@ func TestHandleGitLabWebhook_RuntimeRevalidationRejectsStaleTarget(t *testing.T)
 	payload := mustJSON(t, map[string]interface{}{
 		"object_kind": "push",
 		"ref":         "refs/heads/main",
-		"project": map[string]interface{}{"path_with_namespace": "group/project"},
+		"project":     map[string]interface{}{"path_with_namespace": "group/project"},
 	})
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -3687,10 +3866,10 @@ func TestHandleGitLabWebhook_RuntimeRevalidationRepairsStaleInvalidStatus(t *tes
 	}
 
 	payload := mustJSON(t, map[string]interface{}{
-		"object_kind": "push",
-		"ref":         "refs/heads/main",
+		"object_kind":  "push",
+		"ref":          "refs/heads/main",
 		"checkout_sha": "abc123def456",
-		"project": map[string]interface{}{"path_with_namespace": "group/project"},
+		"project":      map[string]interface{}{"path_with_namespace": "group/project"},
 	})
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -3730,19 +3909,19 @@ func TestCopyPipeline_NewPipelineDoesNotInheritWebhookConfig(t *testing.T) {
 	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "copy-webhook-user", models.WorkspaceRoleDeveloper)
 	sourceDefinition := string(mustJSON(t, map[string]interface{}{
 		"version": "2.0",
-		"nodes": []map[string]interface{}{ {
-			"node_id": "node-1",
-			"node_name": "Build",
-			"task_key": "shell",
+		"nodes": []map[string]interface{}{{
+			"node_id":      "node-1",
+			"node_name":    "Build",
+			"task_key":     "shell",
 			"task_version": 1,
-			"timeout": 300,
-			"type": "shell",
+			"timeout":      300,
+			"type":         "shell",
 			"params": []map[string]interface{}{
 				{"key": "working_dir", "label": "工作目录", "value": ".", "is_flexible": true},
 				{"key": "shell", "label": "执行 Shell", "value": taskShellSH, "is_flexible": false},
 				{"key": "script", "label": "脚本", "value": "echo source", "is_flexible": false},
 			},
-		} },
+		}},
 		"edges": []map[string]interface{}{},
 		"triggers": []map[string]interface{}{
 			{"type": "manual", "enabled": true},
@@ -3750,8 +3929,8 @@ func TestCopyPipeline_NewPipelineDoesNotInheritWebhookConfig(t *testing.T) {
 		},
 	}))
 	body := bytes.NewBuffer(mustJSON(t, map[string]interface{}{
-		"name": "copied-pipeline",
-		"environment": "development",
+		"name":            "copied-pipeline",
+		"environment":     "development",
 		"definition_json": sourceDefinition,
 	}))
 	w := httptest.NewRecorder()
@@ -3814,26 +3993,26 @@ func TestHandleGitLabWebhook_PushCreatesQueuedWebhookRun(t *testing.T) {
 		t.Fatalf("create pipeline failed: %v", err)
 	}
 	trigger := models.PipelineTrigger{
-		WorkspaceID:                  workspace.ID,
-		PipelineID:                   pipeline.ID,
-		Provider:                     "gitlab",
-		WebhookEnabled:               true,
-		PushEnabled:                  true,
-		SecretToken:                  "gitlab-secret",
-		WebhookToken:                 "public-trigger-token",
-		Timezone:                     "UTC",
-		PushBranchFilters:            "main\nrelease/*",
-		WebhookRuntimeInputMappings:  `[{"id":"rule-1","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"node-1","param_key":"working_dir"},"missing_policy":"ignore"}]`,
-		WebhookConfigStatus:          "valid",
+		WorkspaceID:                 workspace.ID,
+		PipelineID:                  pipeline.ID,
+		Provider:                    "gitlab",
+		WebhookEnabled:              true,
+		PushEnabled:                 true,
+		SecretToken:                 "gitlab-secret",
+		WebhookToken:                "public-trigger-token",
+		Timezone:                    "UTC",
+		PushBranchFilters:           "main\nrelease/*",
+		WebhookRuntimeInputMappings: `[{"id":"rule-1","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"node-1","param_key":"working_dir"},"missing_policy":"ignore"}]`,
+		WebhookConfigStatus:         "valid",
 	}
 	if err := db.Create(&trigger).Error; err != nil {
 		t.Fatalf("create trigger failed: %v", err)
 	}
 
 	payload := mustJSON(t, map[string]interface{}{
-		"object_kind": "push",
-		"ref":         "refs/heads/main",
-		"project": map[string]interface{}{"path_with_namespace": "group/project"},
+		"object_kind":   "push",
+		"ref":           "refs/heads/main",
+		"project":       map[string]interface{}{"path_with_namespace": "group/project"},
 		"user_username": "gitlab-user",
 		"checkout_sha":  "abc123def456",
 	})
@@ -3900,9 +4079,9 @@ func TestHandleGitLabWebhook_PushBranchFilterMissReturnsIgnored(t *testing.T) {
 	}
 
 	payload := mustJSON(t, map[string]interface{}{
-		"object_kind": "push",
-		"ref":         "refs/heads/main",
-		"project": map[string]interface{}{"path_with_namespace": "group/project"},
+		"object_kind":   "push",
+		"ref":           "refs/heads/main",
+		"project":       map[string]interface{}{"path_with_namespace": "group/project"},
 		"user_username": "gitlab-user",
 		"checkout_sha":  "abc123def456",
 	})

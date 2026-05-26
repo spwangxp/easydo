@@ -350,6 +350,7 @@ func (h *PipelineHandler) HandleGitLabWebhook(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": 422, "message": "Webhook runtime 映射执行失败", "errors": buildStructuredMappingErrors(runtimeErrs)})
 		return
 	}
+	inputs = mergeWebhookGitReferenceInputs(inputs, config, refName, commitSHA)
 	runConfigSnapshot := models.PipelineRunConfigSnapshot{Inputs: inputs}
 
 	configRevision := buildWebhookConfigRevision(pipeline, trigger)
@@ -762,22 +763,22 @@ func trimGitRefPrefix(ref string, prefix string) string {
 
 func buildWebhookConfigRevision(pipeline models.Pipeline, trigger models.PipelineTrigger) string {
 	snapshot, _ := json.Marshal(struct {
-		PipelineUpdatedAt                int64  `json:"pipeline_updated_at"`
-		Provider                         string `json:"provider"`
-		WebhookEnabled                   bool   `json:"webhook_enabled"`
-		PushEnabled                      bool   `json:"push_enabled"`
-		TagEnabled                       bool   `json:"tag_enabled"`
-		MergeRequestEnabled              bool   `json:"merge_request_enabled"`
-		ScheduleEnabled                  bool   `json:"schedule_enabled"`
-		CronExpression                   string `json:"cron_expression"`
-		Timezone                         string `json:"timezone"`
-		PushBranchFilters                string `json:"push_branch_filters"`
-		TagFilters                       string `json:"tag_filters"`
-		MergeRequestSourceBranchFilters  string `json:"merge_request_source_branch_filters"`
-		MergeRequestTargetBranchFilters  string `json:"merge_request_target_branch_filters"`
-		WebhookRuntimeInputMappings      string `json:"webhook_runtime_input_mappings"`
-		WebhookConfigStatus              string `json:"webhook_config_status"`
-		WebhookConfigInvalidReason       string `json:"webhook_config_invalid_reason"`
+		PipelineUpdatedAt               int64  `json:"pipeline_updated_at"`
+		Provider                        string `json:"provider"`
+		WebhookEnabled                  bool   `json:"webhook_enabled"`
+		PushEnabled                     bool   `json:"push_enabled"`
+		TagEnabled                      bool   `json:"tag_enabled"`
+		MergeRequestEnabled             bool   `json:"merge_request_enabled"`
+		ScheduleEnabled                 bool   `json:"schedule_enabled"`
+		CronExpression                  string `json:"cron_expression"`
+		Timezone                        string `json:"timezone"`
+		PushBranchFilters               string `json:"push_branch_filters"`
+		TagFilters                      string `json:"tag_filters"`
+		MergeRequestSourceBranchFilters string `json:"merge_request_source_branch_filters"`
+		MergeRequestTargetBranchFilters string `json:"merge_request_target_branch_filters"`
+		WebhookRuntimeInputMappings     string `json:"webhook_runtime_input_mappings"`
+		WebhookConfigStatus             string `json:"webhook_config_status"`
+		WebhookConfigInvalidReason      string `json:"webhook_config_invalid_reason"`
 	}{
 		PipelineUpdatedAt:               pipeline.UpdatedAt.UTC().UnixMilli(),
 		Provider:                        strings.TrimSpace(trigger.Provider),
@@ -896,6 +897,27 @@ func buildGitReferenceRuntimeInputs(config PipelineConfig, refName string, commi
 	}
 	if len(inputs) == 0 {
 		return nil
+	}
+	return inputs
+}
+
+func mergeWebhookGitReferenceInputs(inputs map[string]map[string]interface{}, config PipelineConfig, refName string, commitSHA string) map[string]map[string]interface{} {
+	gitInputs := buildGitReferenceRuntimeInputs(config, refName, commitSHA)
+	if len(gitInputs) == 0 {
+		return inputs
+	}
+	if inputs == nil {
+		inputs = make(map[string]map[string]interface{}, len(gitInputs))
+	}
+	for nodeID, nodeInputs := range gitInputs {
+		existing := inputs[nodeID]
+		if existing == nil {
+			existing = make(map[string]interface{}, len(nodeInputs))
+		}
+		for key, value := range nodeInputs {
+			existing[key] = value
+		}
+		inputs[nodeID] = existing
 	}
 	return inputs
 }
