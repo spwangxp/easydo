@@ -3011,6 +3011,57 @@ func decodePipelineMappingErrorResponse(t *testing.T, body []byte) pipelineMappi
 	return resp
 }
 
+func TestEvaluateWebhookRuntimeMappingsWithContext_NormalizesGitLabRefVariants(t *testing.T) {
+	targets := map[string]runtimeSettableTarget{
+		runtimeSettableTargetKey("node-1", "script"): {
+			NodeID:    "node-1",
+			ParamKey:  "script",
+			FieldType: webhookRuntimeScalarTypeString,
+		},
+	}
+	cases := []struct {
+		name       string
+		sourceExpr string
+		ref        string
+		want       string
+	}{
+		{name: "dot path branch", sourceExpr: "$.ref", ref: "refs/heads/main", want: "main"},
+		{name: "single quoted bracket tag", sourceExpr: "$['ref']", ref: "refs/tags/v1.2.3", want: "v1.2.3"},
+		{name: "double quoted bracket branch", sourceExpr: "$[\"ref\"]", ref: "refs/heads/release/mvp", want: "release/mvp"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mappings := []webhookRuntimeInputMapping{{
+				ID:         "map-ref",
+				SourceType: webhookRuntimeInputSourceTypeJSONPath,
+				SourceExpr: tc.sourceExpr,
+				Target: webhookRuntimeInputTarget{
+					NodeID:   "node-1",
+					ParamKey: "script",
+				},
+				MissingPolicy: webhookRuntimeInputMissingPolicyIgnore,
+			}}
+			values, summary, errs := evaluateWebhookRuntimeMappingsWithContext(
+				map[string]interface{}{"ref": tc.ref},
+				mappings,
+				targets,
+				webhookRuntimeEvaluationContext{Provider: "gitlab"},
+			)
+
+			if len(errs) > 0 {
+				t.Fatalf("expected no mapping errors, got %#v", errs)
+			}
+			if summary.Matched != 1 || summary.Failed != 0 {
+				t.Fatalf("expected matched summary, got %#v", summary)
+			}
+			if got := values["node-1"]["script"]; got != tc.want {
+				t.Fatalf("expected normalized ref %q, got %#v", tc.want, values)
+			}
+		})
+	}
+}
+
 func TestPreviewWebhookRuntimeMappings_ReturnsMatchedInputs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
@@ -3052,7 +3103,7 @@ func TestPreviewWebhookRuntimeMappings_ReturnsMatchedInputs(t *testing.T) {
 	if resp.Data.RuleResults["rule-1"].Code != webhookRuntimeMappingStatusMatched {
 		t.Fatalf("expected matched rule status, got %#v", resp.Data.RuleResults)
 	}
-	if got := resp.Data.Values["node-1"]["working_dir"]; got != "refs/heads/main" {
+	if got := resp.Data.Values["node-1"]["working_dir"]; got != "main" {
 		t.Fatalf("expected mapped preview value, got %#v", resp.Data.Values)
 	}
 }
@@ -3296,8 +3347,87 @@ func TestHandleGitLabWebhook_ParsedGitRefOverridesGitCloneInputs(t *testing.T) {
 	if got := runConfig.Inputs["clone-node"]["git_commit"]; got != "abc123def456" {
 		t.Fatalf("expected parsed git_commit for clone node, got %#v", runConfig.Inputs)
 	}
-	if got := runConfig.Inputs["shell-node"]["script"]; got != "refs/heads/main" {
+	if got := runConfig.Inputs["shell-node"]["script"]; got != "main" {
 		t.Fatalf("expected mapped shell runtime input, got %#v", runConfig.Inputs)
+	}
+}
+
+func TestHandleGitLabWebhook_MapsGitLabRefToNaturalBranchNameForRuntimeInputs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "webhook-ref-runtime-user", models.WorkspaceRoleDeveloper)
+	pipeline := models.Pipeline{
+		Name:        "webhook-ref-runtime-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Environment: "development",
+		Definition: webhookRuntimeTestDefinitionJSON(t, PipelineNode{
+			ID:          "docker-node",
+			TaskKey:     "docker",
+			Type:        "docker",
+			Name:        "Docker",
+			TaskVersion: 1,
+			Timeout:     300,
+			DefinitionParams: []models.PipelineDefinitionParam{
+				{Key: "image_name", Label: "镜像名称", Value: "example/app", IsFlexible: false},
+				{Key: "image_tag", Label: "镜像标签", Value: "latest", IsFlexible: true},
+				{Key: "dockerfile", Label: "Dockerfile 路径", Value: "Dockerfile", IsFlexible: false},
+				{Key: "context", Label: "构建上下文", Value: ".", IsFlexible: false},
+				{Key: "registry", Label: "镜像仓库", Value: "", IsFlexible: false},
+				{Key: "push", Label: "推送镜像", Value: false, IsFlexible: false},
+			},
+		}),
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+	trigger := models.PipelineTrigger{
+		WorkspaceID:                 workspace.ID,
+		PipelineID:                  pipeline.ID,
+		Provider:                    "gitlab",
+		WebhookEnabled:              true,
+		PushEnabled:                 true,
+		SecretToken:                 "gitlab-secret",
+		WebhookToken:                "public-trigger-token",
+		Timezone:                    "UTC",
+		PushBranchFilters:           "main",
+		WebhookRuntimeInputMappings: `[{"id":"map-image-tag","source_type":"jsonpath","source_expr":"$.ref","target":{"node_id":"docker-node","param_key":"image_tag"},"missing_policy":"ignore"}]`,
+		WebhookConfigStatus:         "valid",
+	}
+	if err := db.Create(&trigger).Error; err != nil {
+		t.Fatalf("create trigger failed: %v", err)
+	}
+
+	payload := mustJSON(t, map[string]interface{}{
+		"object_kind":   "push",
+		"ref":           "refs/heads/main",
+		"project":       map[string]interface{}{"path_with_namespace": "group/project"},
+		"user_username": "gitlab-user",
+		"checkout_sha":  "abc123def456",
+	})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/pipeline/run/webhook/public-trigger-token", bytes.NewReader(payload))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Gitlab-Token", "gitlab-secret")
+	c.Params = gin.Params{{Key: "token", Value: "public-trigger-token"}}
+
+	h.HandleGitLabWebhook(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var run models.PipelineRun
+	if err := db.Where("pipeline_id = ?", pipeline.ID).First(&run).Error; err != nil {
+		t.Fatalf("load pipeline run failed: %v", err)
+	}
+	var runConfig models.PipelineRunConfigSnapshot
+	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
+		t.Fatalf("unmarshal run config failed: %v", err)
+	}
+	if got := runConfig.Inputs["docker-node"]["image_tag"]; got != "main" {
+		t.Fatalf("expected natural branch name for image_tag, got %#v", runConfig.Inputs)
 	}
 }
 
@@ -4043,7 +4173,7 @@ func TestHandleGitLabWebhook_PushCreatesQueuedWebhookRun(t *testing.T) {
 	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
 		t.Fatalf("unmarshal run config failed: %v", err)
 	}
-	if runConfig.Inputs["node-1"]["working_dir"] != "refs/heads/main" {
+	if runConfig.Inputs["node-1"]["working_dir"] != "main" {
 		t.Fatalf("expected webhook mapped runtime input, got %#v", runConfig.Inputs)
 	}
 }

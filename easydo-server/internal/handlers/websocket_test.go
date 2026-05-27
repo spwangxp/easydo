@@ -996,6 +996,119 @@ func TestTriggerDownstreamTasks_PreservesDockerTaskType(t *testing.T) {
 	}
 }
 
+func TestTriggerDownstreamTasks_UsesLatestPersistedTaskStateForFanIn(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	pipelineSnapshot, err := json.Marshal(PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{ID: "node_1", Type: "shell", Name: "Build A", Config: map[string]interface{}{"script": "echo a"}},
+			{ID: "node_2", Type: "shell", Name: "Build B", Config: map[string]interface{}{"script": "echo b"}},
+			{ID: "node_3", Type: "shell", Name: "Deploy", Config: map[string]interface{}{"script": "echo deploy"}},
+		},
+		Edges: []PipelineEdge{{From: "node_1", To: "node_3"}, {From: "node_2", To: "node_3"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal pipeline snapshot failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		PipelineSnapshot: string(pipelineSnapshot),
+		AgentID:          1,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	node1Task := models.AgentTask{WorkspaceID: 1, PipelineRunID: run.ID, NodeID: "node_1", TaskType: "shell", Status: models.TaskStatusExecuteSuccess}
+	node2Task := models.AgentTask{WorkspaceID: 1, PipelineRunID: run.ID, NodeID: "node_2", TaskType: "shell", Status: models.TaskStatusExecuteSuccess}
+	if err := db.Create(&node1Task).Error; err != nil {
+		t.Fatalf("create node_1 task failed: %v", err)
+	}
+	if err := db.Create(&node2Task).Error; err != nil {
+		t.Fatalf("create node_2 task failed: %v", err)
+	}
+
+	handler := NewWebSocketHandler()
+	handler.triggerDownstreamTasks(run.ID, []models.AgentTask{node1Task})
+
+	var downstream models.AgentTask
+	if err := db.Where("pipeline_run_id = ? AND node_id = ?", run.ID, "node_3").First(&downstream).Error; err != nil {
+		t.Fatalf("expected fan-in downstream task to be created from latest persisted state: %v", err)
+	}
+}
+
+func TestCheckAndUpdatePipelineStatus_WaitsForUnmaterializedPipelineNode(t *testing.T) {
+	db := openHandlerTestDB(t)
+	previousDB := models.DB
+	previousRedis := utils.RedisClient
+	models.DB = db
+	utils.RedisClient = nil
+	t.Cleanup(func() {
+		models.DB = previousDB
+		utils.RedisClient = previousRedis
+	})
+
+	pipelineSnapshot, err := json.Marshal(PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{ID: "node_1", Type: "shell", Name: "Build A", Config: map[string]interface{}{"script": "echo a"}},
+			{ID: "node_2", Type: "shell", Name: "Build B", Config: map[string]interface{}{"script": "echo b"}},
+			{ID: "node_3", Type: "shell", Name: "Deploy", Config: map[string]interface{}{"script": "echo deploy"}},
+		},
+		Edges: []PipelineEdge{{From: "node_1", To: "node_3"}, {From: "node_2", To: "node_3"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal pipeline snapshot failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		PipelineSnapshot: string(pipelineSnapshot),
+		ResolvedNodes:    `[{"node_id":"node_1","status":"execute_success"},{"node_id":"node_2","status":"execute_success"},{"node_id":"node_3","status":"queued","attempts":[]}]`,
+		AgentID:          1,
+		StartTime:        time.Now().Add(-5 * time.Second).Unix(),
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create pipeline run failed: %v", err)
+	}
+
+	for _, task := range []models.AgentTask{
+		{WorkspaceID: 1, PipelineRunID: run.ID, NodeID: "node_1", TaskType: "shell", Status: models.TaskStatusExecuteSuccess},
+		{WorkspaceID: 1, PipelineRunID: run.ID, NodeID: "node_2", TaskType: "shell", Status: models.TaskStatusExecuteSuccess},
+	} {
+		if err := db.Create(&task).Error; err != nil {
+			t.Fatalf("create completed task failed: %v", err)
+		}
+	}
+
+	handler := NewWebSocketHandler()
+	handler.checkAndUpdatePipelineStatus(run.ID)
+
+	var reloaded models.PipelineRun
+	if err := db.First(&reloaded, run.ID).Error; err != nil {
+		t.Fatalf("reload pipeline run failed: %v", err)
+	}
+	if reloaded.Status != models.PipelineRunStatusRunning {
+		t.Fatalf("pipeline status=%s, want %s while node_3 is still queued", reloaded.Status, models.PipelineRunStatusRunning)
+	}
+}
+
 func TestHeartbeatPayload(t *testing.T) {
 	payload := map[string]interface{}{
 		"timestamp":     float64(time.Now().Unix()),
@@ -2709,7 +2822,9 @@ func TestFrontendWebSocket_DoesNotSetReadDeadlineForReceiveOnlyClients(t *testin
 	}
 	var loginResp struct {
 		Code int `json:"code"`
-		Data struct{ Token string `json:"token"` } `json:"data"`
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal(loginW.Body.Bytes(), &loginResp); err != nil {
 		t.Fatalf("parse login response failed: %v", err)

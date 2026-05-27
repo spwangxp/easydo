@@ -385,7 +385,7 @@ export const buildWebhookRuntimeMappingEditorRows = (targets = [], mappings = []
         node_id: targetMeta.node_id,
         param_key: targetMeta.param_key
       },
-      deleted: matchedRow ? false : true
+      deleted: matchedRow ? matchedRow.deleted === true : true
     }, targetMeta)
   })
 }

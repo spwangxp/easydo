@@ -245,8 +245,9 @@ func (h *PipelineHandler) PreviewWebhookRuntimeMappings(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "Webhook runtime 映射配置无效", "errors": buildStructuredMappingErrors(mappingErrs)})
 		return
 	}
-	preview, previewErrs := previewWebhookRuntimeMappings(req.Payload, mappings, targets)
-	_, _, runtimeErrs := evaluateWebhookRuntimeMappings(req.Payload, mappings, targets)
+	evaluationContext := h.webhookRuntimeEvaluationContextForPipeline(pipeline.ID)
+	preview, previewErrs := previewWebhookRuntimeMappingsWithContext(req.Payload, mappings, targets, evaluationContext)
+	_, _, runtimeErrs := evaluateWebhookRuntimeMappingsWithContext(req.Payload, mappings, targets, evaluationContext)
 	allErrs := append([]mappingError{}, previewErrs...)
 	allErrs = append(allErrs, runtimeErrs...)
 	c.JSON(http.StatusOK, gin.H{"code": 200, "data": preview, "errors": buildStructuredMappingErrors(allErrs)})
@@ -345,7 +346,8 @@ func (h *PipelineHandler) HandleGitLabWebhook(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": 422, "message": "Webhook 触发配置无效", "errors": []apiMappingError{{Field: "webhook_runtime_input_mappings", Code: "invalid_trigger_config", Message: reason}}})
 		return
 	}
-	inputs, _, runtimeErrs := evaluateWebhookRuntimeMappings(payloadValue, mappings, targets)
+	evaluationContext := webhookRuntimeEvaluationContext{Provider: defaultIfEmpty(trigger.Provider, "gitlab")}
+	inputs, _, runtimeErrs := evaluateWebhookRuntimeMappingsWithContext(payloadValue, mappings, targets, evaluationContext)
 	if len(runtimeErrs) > 0 {
 		c.JSON(http.StatusOK, gin.H{"code": 422, "message": "Webhook runtime 映射执行失败", "errors": buildStructuredMappingErrors(runtimeErrs)})
 		return
@@ -602,6 +604,18 @@ func (h *PipelineHandler) loadPipelineWebhookRuntimeTargets(pipeline models.Pipe
 		return PipelineConfig{}, nil, err
 	}
 	return config, buildRuntimeSettableTargets(config), nil
+}
+
+func (h *PipelineHandler) webhookRuntimeEvaluationContextForPipeline(pipelineID uint64) webhookRuntimeEvaluationContext {
+	context := webhookRuntimeEvaluationContext{Provider: "gitlab"}
+	if h == nil || h.DB == nil || pipelineID == 0 {
+		return context
+	}
+	var trigger models.PipelineTrigger
+	if err := h.DB.Where("pipeline_id = ?", pipelineID).First(&trigger).Error; err == nil {
+		context.Provider = defaultIfEmpty(trigger.Provider, "gitlab")
+	}
+	return context
 }
 
 func parseWebhookRuntimeMappings(raw string) ([]webhookRuntimeInputMapping, error) {

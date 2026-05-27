@@ -1097,6 +1097,37 @@ test('buildWebhookRuntimeMappingEditorRows overlays saved mappings onto full tar
   ])
 })
 
+test('buildWebhookRuntimeMappingEditorRows keeps deleted draft row over saved mapping', () => {
+  const targets = [
+    {
+      target_key: 'docker.image_tag',
+      node_id: 'docker',
+      node_index: 1,
+      node_name: 'Docker',
+      param_key: 'image_tag',
+      param_label: '镜像标签',
+      runtime_value_type: 'string'
+    }
+  ]
+  const savedRow = {
+    id: 'saved-rule',
+    source_type: 'jsonpath',
+    source_expr: '$.ref',
+    target: { node_id: 'docker', param_key: 'image_tag' },
+    missing_policy: 'ignore',
+    deleted: false
+  }
+  const deletedDraftRow = {
+    ...savedRow,
+    deleted: true
+  }
+
+  const rows = buildWebhookRuntimeMappingEditorRows(targets, [savedRow, deletedDraftRow])
+
+  assert.equal(rows[0].deleted, true)
+  assert.equal(serializeWebhookRuntimeInputMappings(rows), '[]')
+})
+
 test('createWebhookRuntimeInputMappingRow fills defaults and trims target fields', () => {
   const row = createWebhookRuntimeInputMappingRow({
     source_expr: ' $.ref ',

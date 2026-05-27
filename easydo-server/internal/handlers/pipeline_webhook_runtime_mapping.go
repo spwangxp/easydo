@@ -56,6 +56,10 @@ type runtimeSettableTarget struct {
 	FieldType  string `json:"field_type"`
 }
 
+type webhookRuntimeEvaluationContext struct {
+	Provider string
+}
+
 type mappingSummary struct {
 	Total   int `json:"total"`
 	Matched int `json:"matched"`
@@ -156,6 +160,10 @@ func validateWebhookRuntimeMappings(mappings []webhookRuntimeInputMapping, targe
 }
 
 func evaluateWebhookRuntimeMappings(payload any, mappings []webhookRuntimeInputMapping, targets map[string]runtimeSettableTarget) (map[string]map[string]interface{}, mappingSummary, []mappingError) {
+	return evaluateWebhookRuntimeMappingsWithContext(payload, mappings, targets, webhookRuntimeEvaluationContext{})
+}
+
+func evaluateWebhookRuntimeMappingsWithContext(payload any, mappings []webhookRuntimeInputMapping, targets map[string]runtimeSettableTarget, context webhookRuntimeEvaluationContext) (map[string]map[string]interface{}, mappingSummary, []mappingError) {
 	mappings = normalizeWebhookRuntimeMappings(mappings)
 	summary := mappingSummary{Total: len(mappings)}
 	values := make(map[string]map[string]interface{})
@@ -167,7 +175,7 @@ func evaluateWebhookRuntimeMappings(payload any, mappings []webhookRuntimeInputM
 			errs = append(errs, mappingError{ID: mapping.ID, Code: webhookRuntimeMappingStatusInvalidTarget, Message: "target is not runtime settable", Target: mapping.Target})
 			continue
 		}
-		code, value, shouldAssign := evaluateWebhookRuntimeMapping(payload, mapping, target)
+		code, value, shouldAssign := evaluateWebhookRuntimeMappingWithContext(payload, mapping, target, context)
 		switch code {
 		case webhookRuntimeMappingStatusMatched:
 			summary.Matched++
@@ -194,6 +202,10 @@ func evaluateWebhookRuntimeMappings(payload any, mappings []webhookRuntimeInputM
 }
 
 func previewWebhookRuntimeMappings(payload any, mappings []webhookRuntimeInputMapping, targets map[string]runtimeSettableTarget) (webhookRuntimePreviewResult, []mappingError) {
+	return previewWebhookRuntimeMappingsWithContext(payload, mappings, targets, webhookRuntimeEvaluationContext{})
+}
+
+func previewWebhookRuntimeMappingsWithContext(payload any, mappings []webhookRuntimeInputMapping, targets map[string]runtimeSettableTarget, context webhookRuntimeEvaluationContext) (webhookRuntimePreviewResult, []mappingError) {
 	result := webhookRuntimePreviewResult{
 		Values:      make(map[string]map[string]interface{}),
 		RuleResults: make(map[string]webhookRuntimePreviewRuleResult),
@@ -205,7 +217,7 @@ func previewWebhookRuntimeMappings(payload any, mappings []webhookRuntimeInputMa
 	if len(validationErrs) > 0 {
 		return result, validationErrs
 	}
-	values, summary, runtimeErrs := evaluateWebhookRuntimeMappings(payload, mappings, targets)
+	values, summary, runtimeErrs := evaluateWebhookRuntimeMappingsWithContext(payload, mappings, targets, context)
 	result.Values = values
 	result.Summary = summary
 	for _, mapping := range normalizeWebhookRuntimeMappings(mappings) {
@@ -214,7 +226,7 @@ func previewWebhookRuntimeMappings(payload any, mappings []webhookRuntimeInputMa
 			result.RuleResults[mapping.ID] = webhookRuntimePreviewRuleResult{Code: webhookRuntimeMappingStatusInvalidTarget}
 			continue
 		}
-		code, value, shouldAssign := evaluateWebhookRuntimeMapping(payload, mapping, target)
+		code, value, shouldAssign := evaluateWebhookRuntimeMappingWithContext(payload, mapping, target, context)
 		ruleResult := webhookRuntimePreviewRuleResult{Code: code}
 		if code == webhookRuntimeMappingStatusMatched && shouldAssign {
 			ruleResult.Value = value
@@ -244,6 +256,10 @@ func validatePreviewPayloadSize(payload any) error {
 }
 
 func evaluateWebhookRuntimeMapping(payload any, mapping webhookRuntimeInputMapping, target runtimeSettableTarget) (string, interface{}, bool) {
+	return evaluateWebhookRuntimeMappingWithContext(payload, mapping, target, webhookRuntimeEvaluationContext{})
+}
+
+func evaluateWebhookRuntimeMappingWithContext(payload any, mapping webhookRuntimeInputMapping, target runtimeSettableTarget, context webhookRuntimeEvaluationContext) (string, interface{}, bool) {
 	path, err := compileWebhookRuntimeJSONPath(mapping.SourceType, mapping.SourceExpr)
 	if err != nil {
 		return webhookRuntimeMappingStatusInvalidExpression, nil, false
@@ -259,6 +275,7 @@ func evaluateWebhookRuntimeMapping(payload any, mapping webhookRuntimeInputMappi
 	if value == nil {
 		return webhookRuntimeMappingStatusMissing, nil, false
 	}
+	value = normalizeWebhookRuntimeMappedValue(value, mapping, context)
 	scalarType, ok := detectRuntimeScalarType(value)
 	if !ok {
 		return webhookRuntimeMappingStatusTypeUnsupported, nil, false
@@ -278,6 +295,29 @@ func compileWebhookRuntimeJSONPath(sourceType, expr string) (*jsonpath.Path, err
 		return nil, err
 	}
 	return path, nil
+}
+
+func normalizeWebhookRuntimeMappedValue(value interface{}, mapping webhookRuntimeInputMapping, context webhookRuntimeEvaluationContext) interface{} {
+	if !strings.EqualFold(strings.TrimSpace(context.Provider), "gitlab") || !isGitLabRefRuntimeMapping(mapping) {
+		return value
+	}
+	ref, ok := value.(string)
+	if !ok {
+		return value
+	}
+	return trimGitRefPrefix(trimGitRefPrefix(ref, "refs/heads/"), "refs/tags/")
+}
+
+func isGitLabRefRuntimeMapping(mapping webhookRuntimeInputMapping) bool {
+	if strings.TrimSpace(mapping.SourceType) != webhookRuntimeInputSourceTypeJSONPath {
+		return false
+	}
+	switch strings.TrimSpace(mapping.SourceExpr) {
+	case "$.ref", "$['ref']", "$[\"ref\"]":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeRuntimeFieldType(fieldType string) (string, bool) {

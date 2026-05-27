@@ -2335,12 +2335,25 @@ func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
 	}
 
 	nodeIgnoreFailure := map[string]bool{}
+	expectedNodeIDs := map[string]struct{}{}
 	if run.PipelineSnapshot != "" {
 		var config PipelineConfig
 		if err := json.Unmarshal([]byte(run.PipelineSnapshot), &config); err == nil {
 			for i := range config.Nodes {
 				nodeIgnoreFailure[config.Nodes[i].ID] = config.Nodes[i].IgnoreFailure
+				expectedNodeIDs[config.Nodes[i].ID] = struct{}{}
 			}
+		}
+	}
+	taskNodeIDs := make(map[string]struct{}, len(tasks))
+	for i := range tasks {
+		taskNodeIDs[tasks[i].NodeID] = struct{}{}
+	}
+	allPipelineNodesMaterialized := true
+	for nodeID := range expectedNodeIDs {
+		if _, exists := taskNodeIDs[nodeID]; !exists {
+			allPipelineNodesMaterialized = false
+			break
 		}
 	}
 
@@ -2424,6 +2437,10 @@ func (h *WebSocketHandler) checkAndUpdatePipelineStatus(runID uint64) {
 		return
 	}
 
+	if allTerminal && !hasCancelled && !allPipelineNodesMaterialized {
+		return
+	}
+
 	if allTerminal {
 		now := time.Now().Unix()
 		duration := 0
@@ -2473,6 +2490,12 @@ func (h *WebSocketHandler) triggerDownstreamTasks(runID uint64, completedTasks [
 	if run.Status != models.PipelineRunStatusRunning {
 		fmt.Printf("[DEBUG] PipelineRun %d status is %s, not running, skipping\n", runID, run.Status)
 		return
+	}
+
+	var persistedTasks []models.AgentTask
+	if err := models.DB.Where("pipeline_run_id = ?", runID).Find(&persistedTasks).Error; err == nil && len(persistedTasks) > 0 {
+		completedTasks = persistedTasks
+		fmt.Printf("[DEBUG] Refreshed completed tasks from DB: %d\n", len(completedTasks))
 	}
 
 	var config PipelineConfig
