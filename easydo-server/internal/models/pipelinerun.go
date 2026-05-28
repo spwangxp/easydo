@@ -5,8 +5,8 @@ type PipelineRun struct {
 	WorkspaceID     uint64  `gorm:"not null;index" json:"workspace_id"`
 	PipelineID      uint64  `gorm:"index;not null;uniqueIndex:idx_pipeline_build_number" json:"pipeline_id"`
 	BuildNumber     int     `gorm:"not null;uniqueIndex:idx_pipeline_build_number" json:"build_number"`
-	Status          string  `gorm:"size:32;not null" json:"status"` // queued/pending/running/cancel_requested/success/failed/cancelled
-	TriggerType     string  `gorm:"size:32" json:"trigger_type"`    // manual/webhook/schedule
+	Status          string  `gorm:"size:32;not null;index:idx_pipeline_runs_timeout_deadline,priority:1" json:"status"` // queued/pending/running/cancel_requested/success/failed/cancelled
+	TriggerType     string  `gorm:"size:32" json:"trigger_type"`                                                        // manual/webhook/schedule
 	TriggerUser     string  `gorm:"size:64" json:"trigger_user"`
 	TriggerUserID   uint64  `gorm:"index;default:0" json:"trigger_user_id"`
 	TriggerUserRole string  `gorm:"size:32" json:"trigger_user_role"`
@@ -15,6 +15,8 @@ type PipelineRun struct {
 	StartTime       int64   `json:"start_time"`
 	EndTime         int64   `json:"end_time"`
 	Duration        int     `json:"duration"`
+	TimeoutSeconds  int64   `gorm:"not null;default:0" json:"timeout_seconds"`
+	TimeoutDeadline int64   `gorm:"not null;default:0;index:idx_pipeline_runs_timeout_deadline,priority:2" json:"timeout_deadline"`
 	ErrorMsg        string  `gorm:"type:text" json:"error_msg"` // 失败时的错误信息
 
 	// 关键设计：保存执行时的配置快照（因为流水线可能被编辑）

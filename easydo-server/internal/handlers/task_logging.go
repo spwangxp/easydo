@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"easydo-server/internal/models"
 )
@@ -36,9 +37,20 @@ func sanitizeTaskLogPreview(input string, maxLen int) string {
 		return ""
 	}
 	if maxLen > 0 && len(masked) > maxLen {
-		return masked[:maxLen] + "...<truncated>"
+		return truncateUTF8ByBytes(masked, maxLen) + "...<truncated>"
 	}
 	return masked
+}
+
+func truncateUTF8ByBytes(input string, maxLen int) string {
+	if maxLen <= 0 || len(input) <= maxLen {
+		return input
+	}
+	cut := maxLen
+	for cut > 0 && cut < len(input) && !utf8.RuneStart(input[cut]) {
+		cut--
+	}
+	return input[:cut]
 }
 
 type taskProcessLogger struct {

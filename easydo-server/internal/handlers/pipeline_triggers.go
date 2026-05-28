@@ -1014,6 +1014,8 @@ func (h *PipelineHandler) createPipelineRunRecordWithSnapshot(db *gorm.DB, pipel
 		runStatus = models.PipelineRunStatusQueued
 		startTime = 0
 	}
+	timeoutSeconds := pipelineOverallTimeoutSeconds(config)
+	timeoutDeadline := pipelineTimeoutDeadline(startTime, timeoutSeconds)
 	resolvedNodesJSON, err := json.Marshal(buildInitialResolvedNodeSnapshots(config, runStatus))
 	if err != nil {
 		return nil, 0, err
@@ -1061,6 +1063,8 @@ func (h *PipelineHandler) createPipelineRunRecordWithSnapshot(db *gorm.DB, pipel
 		TriggerSource:    trigger.TriggerSource,
 		IdempotencyKey:   trigger.IdempotencyKey,
 		StartTime:        startTime,
+		TimeoutSeconds:   timeoutSeconds,
+		TimeoutDeadline:  timeoutDeadline,
 		Config:           string(executionConfigJSON),
 		RunConfig:        string(runConfigJSON),
 		PipelineSnapshot: string(pipelineSnapshotJSON),
@@ -1159,6 +1163,22 @@ func (h *PipelineHandler) startPipelineRunExecution(pipeline models.Pipeline, ru
 		return
 	}
 	go h.executePipelineTasks(pipeline, run, config, triggerUserID, triggerRole)
+}
+
+const pipelineNodeTimeoutSeconds int64 = 30 * 60
+
+func pipelineOverallTimeoutSeconds(config PipelineConfig) int64 {
+	if len(config.Nodes) == 0 {
+		return 0
+	}
+	return int64(len(config.Nodes)) * pipelineNodeTimeoutSeconds
+}
+
+func pipelineTimeoutDeadline(startTime int64, timeoutSeconds int64) int64 {
+	if startTime <= 0 || timeoutSeconds <= 0 {
+		return 0
+	}
+	return startTime + timeoutSeconds
 }
 
 func pipelineConfigHasAgentNode(config PipelineConfig) bool {

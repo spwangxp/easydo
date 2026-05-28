@@ -132,6 +132,156 @@ func TestAssignOneQueuedRun_AssignsOldestQueuedRun(t *testing.T) {
 	}
 }
 
+func TestAssignOneQueuedRun_SetsOverallTimeoutDeadlineFromStartTime(t *testing.T) {
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+
+	agent := models.Agent{
+		Name:                   "scheduler-agent",
+		Host:                   "host",
+		Port:                   1,
+		Token:                  "token",
+		Status:                 models.AgentStatusOnline,
+		RegistrationStatus:     models.AgentRegistrationStatusApproved,
+		MaxConcurrentPipelines: 1,
+	}
+	if err := db.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent failed: %v", err)
+	}
+
+	run := models.PipelineRun{
+		PipelineID:      1,
+		BuildNumber:     1,
+		Status:          models.PipelineRunStatusQueued,
+		Config:          `{"version":"2.0","nodes":[],"edges":[]}`,
+		TimeoutSeconds:  2 * 30 * 60,
+		TimeoutDeadline: 0,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create queued run failed: %v", err)
+	}
+
+	runID, ok := h.assignOneQueuedRun(db)
+	if !ok {
+		t.Fatalf("assignOneQueuedRun returned not ok")
+	}
+	if runID != run.ID {
+		t.Fatalf("assigned run=%d, want %d", runID, run.ID)
+	}
+
+	var got models.PipelineRun
+	if err := db.First(&got, run.ID).Error; err != nil {
+		t.Fatalf("reload run failed: %v", err)
+	}
+	if got.StartTime == 0 {
+		t.Fatalf("start_time should be set")
+	}
+	if got.TimeoutDeadline != got.StartTime+got.TimeoutSeconds {
+		t.Fatalf("timeout_deadline=%d, want start_time+timeout_seconds=%d", got.TimeoutDeadline, got.StartTime+got.TimeoutSeconds)
+	}
+}
+
+func TestReconcileExpiredPipelineRuns_FailsRunAndCancelsNonTerminalTasks(t *testing.T) {
+	db := openHandlerTestDB(t)
+	now := time.Now().Unix()
+	run := models.PipelineRun{
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		AgentID:          1,
+		StartTime:        now - 4000,
+		TimeoutSeconds:   30 * 60,
+		TimeoutDeadline:  now - 1,
+		PipelineSnapshot: `{"version":"2.0","nodes":[{"id":"node_1"},{"id":"node_2"},{"id":"node_3"}],"edges":[]}`,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create running run failed: %v", err)
+	}
+
+	tasks := []models.AgentTask{
+		{WorkspaceID: 1, AgentID: 1, PipelineRunID: run.ID, NodeID: "node_1", TaskType: "shell", Status: models.TaskStatusRunning, StartTime: now - 100},
+		{WorkspaceID: 1, AgentID: 1, PipelineRunID: run.ID, NodeID: "node_2", TaskType: "shell", Status: models.TaskStatusQueued},
+		{WorkspaceID: 1, AgentID: 1, PipelineRunID: run.ID, NodeID: "node_3", TaskType: "shell", Status: models.TaskStatusExecuteSuccess, EndTime: now - 10},
+	}
+	for i := range tasks {
+		if err := db.Create(&tasks[i]).Error; err != nil {
+			t.Fatalf("create task failed: %v", err)
+		}
+	}
+
+	reconciled := reconcileExpiredPipelineRuns(db, now, 64)
+	if reconciled != 1 {
+		t.Fatalf("reconciled=%d, want 1", reconciled)
+	}
+
+	var gotRun models.PipelineRun
+	if err := db.First(&gotRun, run.ID).Error; err != nil {
+		t.Fatalf("reload run failed: %v", err)
+	}
+	if gotRun.Status != models.PipelineRunStatusFailed {
+		t.Fatalf("run status=%s, want %s", gotRun.Status, models.PipelineRunStatusFailed)
+	}
+	if gotRun.EndTime != now {
+		t.Fatalf("run end_time=%d, want %d", gotRun.EndTime, now)
+	}
+	if gotRun.Duration != int(now-run.StartTime) {
+		t.Fatalf("run duration=%d, want %d", gotRun.Duration, int(now-run.StartTime))
+	}
+	if gotRun.ErrorMsg == "" {
+		t.Fatalf("expected timeout error message")
+	}
+
+	var gotTasks []models.AgentTask
+	if err := db.Where("pipeline_run_id = ?", run.ID).Order("node_id ASC").Find(&gotTasks).Error; err != nil {
+		t.Fatalf("reload tasks failed: %v", err)
+	}
+	if gotTasks[0].Status != models.TaskStatusCancelRequested {
+		t.Fatalf("running task status=%s, want %s", gotTasks[0].Status, models.TaskStatusCancelRequested)
+	}
+	if gotTasks[1].Status != models.TaskStatusCancelled {
+		t.Fatalf("queued task status=%s, want %s", gotTasks[1].Status, models.TaskStatusCancelled)
+	}
+	if gotTasks[2].Status != models.TaskStatusExecuteSuccess {
+		t.Fatalf("terminal task status=%s, want %s", gotTasks[2].Status, models.TaskStatusExecuteSuccess)
+	}
+}
+
+func TestReconcileExpiredPipelineRuns_SkipsRunsWithoutStoredDeadline(t *testing.T) {
+	db := openHandlerTestDB(t)
+	now := time.Now().Unix()
+	run := models.PipelineRun{
+		WorkspaceID:      1,
+		PipelineID:       1,
+		BuildNumber:      1,
+		Status:           models.PipelineRunStatusRunning,
+		AgentID:          1,
+		StartTime:        now - 24*60*60,
+		TimeoutSeconds:   0,
+		TimeoutDeadline:  0,
+		PipelineSnapshot: `{"version":"2.0","nodes":[{"id":"node_1"}],"edges":[]}`,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create historical run failed: %v", err)
+	}
+	if err := db.Create(&models.AgentTask{WorkspaceID: 1, AgentID: 1, PipelineRunID: run.ID, NodeID: "node_1", TaskType: "shell", Status: models.TaskStatusRunning}).Error; err != nil {
+		t.Fatalf("create running task failed: %v", err)
+	}
+
+	reconciled := reconcileExpiredPipelineRuns(db, now, 64)
+	if reconciled != 0 {
+		t.Fatalf("reconciled=%d, want 0", reconciled)
+	}
+
+	var got models.PipelineRun
+	if err := db.First(&got, run.ID).Error; err != nil {
+		t.Fatalf("reload run failed: %v", err)
+	}
+	if got.Status != models.PipelineRunStatusRunning {
+		t.Fatalf("run status=%s, want %s", got.Status, models.PipelineRunStatusRunning)
+	}
+}
+
 func TestAssignOneQueuedRun_NoCapacityKeepsQueued(t *testing.T) {
 	db := openHandlerTestDB(t)
 	h := &PipelineHandler{DB: db}

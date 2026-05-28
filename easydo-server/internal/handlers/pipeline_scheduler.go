@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -78,7 +79,9 @@ func runQueuedPipelineSchedulerTick(db *gorm.DB) int {
 	if db == nil {
 		db = models.DB
 	}
-	_, _ = reconcileCancelRequestedTasks(db, time.Now().Unix())
+	now := time.Now().Unix()
+	_, _ = reconcileCancelRequestedTasks(db, now)
+	reconcileExpiredPipelineRunsIfLeader(db, now, defaultRunningRunReconcileLimit)
 	reconcileRunningPipelineTasksIfLeader(db, defaultRunningRunReconcileLimit)
 	return NewPipelineHandler().scheduleQueuedPipelineRuns(db)
 }
@@ -87,12 +90,160 @@ func schedulerLeaderTTL() time.Duration {
 	return 30 * time.Second
 }
 
+func reconcileExpiredPipelineRunsIfLeader(db *gorm.DB, now int64, limit int) int {
+	ok, err := tryAcquireSchedulerLock(context.Background(), runningRunReconcileLeaderLockKey)
+	if err != nil || !ok {
+		return 0
+	}
+	return reconcileExpiredPipelineRuns(db, now, limit)
+}
+
 func reconcileRunningPipelineTasksIfLeader(db *gorm.DB, limit int) int {
 	ok, err := tryAcquireSchedulerLock(context.Background(), runningRunReconcileLeaderLockKey)
 	if err != nil || !ok {
 		return 0
 	}
 	return reconcileRunningPipelineTasks(db, limit)
+}
+
+func reconcileExpiredPipelineRuns(db *gorm.DB, now int64, limit int) int {
+	if db == nil {
+		db = models.DB
+	}
+	if db == nil {
+		return 0
+	}
+	if now <= 0 {
+		now = time.Now().Unix()
+	}
+	if limit <= 0 {
+		limit = defaultRunningRunReconcileLimit
+	}
+
+	var runs []models.PipelineRun
+	if err := db.Where("status = ? AND timeout_deadline > 0 AND timeout_deadline <= ?", models.PipelineRunStatusRunning, now).
+		Order("timeout_deadline ASC, id ASC").
+		Limit(limit).
+		Find(&runs).Error; err != nil {
+		return 0
+	}
+
+	reconciled := 0
+	for i := range runs {
+		if expirePipelineRun(db, runs[i], now) {
+			reconciled++
+		}
+	}
+	return reconciled
+}
+
+func expirePipelineRun(db *gorm.DB, run models.PipelineRun, now int64) bool {
+	duration := 0
+	if run.StartTime > 0 {
+		duration = int(now - run.StartTime)
+	}
+	errorMsg := pipelineTimeoutErrorMessage(run.TimeoutSeconds)
+	cancelledTasks := make([]models.AgentTask, 0)
+	tasksToNotify := make([]models.AgentTask, 0)
+	expired := false
+
+	err := db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&models.PipelineRun{}).
+			Where("id = ? AND status = ? AND timeout_deadline > 0 AND timeout_deadline <= ?", run.ID, models.PipelineRunStatusRunning, now).
+			Updates(map[string]interface{}{
+				"status":    models.PipelineRunStatusFailed,
+				"end_time":  now,
+				"duration":  duration,
+				"error_msg": errorMsg,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
+
+		var tasks []models.AgentTask
+		if err := tx.Where("pipeline_run_id = ? AND status IN ?", run.ID, []string{
+			models.TaskStatusQueued,
+			models.TaskStatusAssigned,
+			models.TaskStatusDispatching,
+			models.TaskStatusPulling,
+			models.TaskStatusAcked,
+			models.TaskStatusRunning,
+		}).Find(&tasks).Error; err != nil {
+			return err
+		}
+
+		for i := range tasks {
+			task := &tasks[i]
+			if !isTaskCancelable(task.Status) {
+				continue
+			}
+			shouldNotifyAgent := isExecutionOwnedTaskStatus(task.Status)
+			updates := buildTaskCancelUpdates(task, now)
+			result := tx.Model(&models.AgentTask{}).
+				Where("id = ? AND status = ?", task.ID, task.Status).
+				Updates(updates)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				continue
+			}
+			if status, ok := updates["status"].(string); ok {
+				task.Status = status
+			}
+			if endTime, ok := updates["end_time"].(int64); ok {
+				task.EndTime = endTime
+			}
+			if taskDuration, ok := updates["duration"].(int); ok {
+				task.Duration = taskDuration
+			}
+			cancelledTasks = append(cancelledTasks, *task)
+			if shouldNotifyAgent {
+				tasksToNotify = append(tasksToNotify, *task)
+			}
+		}
+
+		appendRunEvent(tx, run.ID, "run_finished", map[string]interface{}{"status": models.PipelineRunStatusFailed, "error_msg": errorMsg})
+		expired = true
+		return nil
+	})
+	if err != nil || !expired {
+		return false
+	}
+
+	run.Status = models.PipelineRunStatusFailed
+	run.EndTime = now
+	run.Duration = duration
+	run.ErrorMsg = errorMsg
+	syncLiveRunStateFromRun(&run)
+	syncDeploymentStateFromRun(db, &run)
+	emitPipelineRunTerminalNotification(db, &run, NotificationEventTypePipelineRunFailed)
+	handler := SharedWebSocketHandler()
+	for _, task := range tasksToNotify {
+		_ = handler.sendTaskCancel(task)
+	}
+	for _, task := range cancelledTasks {
+		message := "流水线整体超时，任务被取消"
+		if task.Status == models.TaskStatusCancelRequested {
+			message = "流水线整体超时，任务取消请求已提交，等待 agent 确认"
+		}
+		syncLiveTaskStateFromTask(&task, "")
+		handler.BroadcastTaskStatus(run.ID, task.ID, task.NodeID, task.Status, 0, message, "")
+	}
+	handler.BroadcastRunStatus(run.ID, models.PipelineRunStatusFailed, errorMsg, duration)
+	updateAgentStatusByPipelineConcurrency(db, run.AgentID)
+	go NewPipelineHandler().scheduleQueuedPipelineRuns(db)
+	return true
+}
+
+func pipelineTimeoutErrorMessage(timeoutSeconds int64) string {
+	if timeoutSeconds <= 0 {
+		return "流水线整体执行超时"
+	}
+	return fmt.Sprintf("流水线整体执行超时（限制 %d 分钟）", timeoutSeconds/60)
 }
 
 func reconcileRunningPipelineTasks(db *gorm.DB, limit int) int {
@@ -253,15 +404,17 @@ func (h *PipelineHandler) assignOneQueuedRun(db *gorm.DB) (uint64, bool) {
 			}
 
 			now := time.Now().Unix()
+			timeoutDeadline := pipelineTimeoutDeadline(now, run.TimeoutSeconds)
 			result := tx.Model(&models.PipelineRun{}).
 				Where("id = ? AND status = ?", run.ID, models.PipelineRunStatusQueued).
 				Updates(map[string]interface{}{
-					"status":     models.PipelineRunStatusRunning,
-					"agent_id":   agentID,
-					"start_time": now,
-					"end_time":   int64(0),
-					"duration":   0,
-					"error_msg":  "",
+					"status":           models.PipelineRunStatusRunning,
+					"agent_id":         agentID,
+					"start_time":       now,
+					"end_time":         int64(0),
+					"duration":         0,
+					"timeout_deadline": timeoutDeadline,
+					"error_msg":        "",
 				})
 			if result.Error != nil || result.RowsAffected == 0 {
 				continue

@@ -219,6 +219,8 @@ func managedSchemaColumnSyncs() []columnSync {
 		{model: &PipelineTrigger{}, field: "MergeRequestSourceBranchFilters"},
 		{model: &PipelineTrigger{}, field: "MergeRequestTargetBranchFilters"},
 		{model: &PipelineRun{}, field: "IdempotencyKey"},
+		{model: &PipelineRun{}, field: "TimeoutSeconds"},
+		{model: &PipelineRun{}, field: "TimeoutDeadline"},
 		{model: &PipelineRun{}, field: "RunConfig"},
 		{model: &PipelineRun{}, field: "PipelineSnapshot"},
 		{model: &PipelineRun{}, field: "ResolvedNodes"},

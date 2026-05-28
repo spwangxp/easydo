@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"easydo-server/internal/models"
 )
@@ -867,5 +868,21 @@ func TestRenderPipelineAgentScript_CustomShellLogsSanitizedPreview(t *testing.T)
 	}
 	if !strings.Contains(script, "password=***") {
 		t.Fatalf("expected password assignment to be masked in script preview")
+	}
+}
+
+func TestRenderPipelineAgentScript_CustomShellLogPreviewKeepsUTF8Valid(t *testing.T) {
+	userScript := strings.Repeat("a", 2399) + "中文脚本保持原样"
+	_, script, err := renderPipelineAgentScript("shell", map[string]any{
+		"script": userScript,
+	})
+	if err != nil {
+		t.Fatalf("expected shell script render success, got err: %v", err)
+	}
+	if !utf8.ValidString(script) {
+		t.Fatalf("rendered shell script must remain valid utf8")
+	}
+	if !strings.Contains(script, userScript) {
+		t.Fatalf("expected user script content to be preserved")
 	}
 }

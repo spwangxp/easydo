@@ -1108,6 +1108,46 @@ func TestCreatePipelineRunRecordWithSnapshot_StoresNewRunContractSnapshots(t *te
 	}
 }
 
+func TestCreatePipelineRunRecordWithSnapshot_StoresOverallTimeoutForNewRuns(t *testing.T) {
+	db := openHandlerTestDB(t)
+	handler := &PipelineHandler{DB: db}
+	pipeline := models.Pipeline{Name: "timeout-pipeline", WorkspaceID: 99, OwnerID: 7}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	config := PipelineConfig{
+		Version: "2.0",
+		Nodes: []PipelineNode{
+			{ID: "node_1", Type: "shell", Name: "Shell 1", Config: map[string]interface{}{"script": "echo 1"}},
+			{ID: "node_2", Type: "shell", Name: "Shell 2", Config: map[string]interface{}{"script": "echo 2"}},
+			{ID: "node_3", Type: "shell", Name: "Shell 3", Config: map[string]interface{}{"script": "echo 3"}},
+		},
+	}
+
+	run, _, err := handler.createPipelineRunRecordWithSnapshot(db, pipeline, config, pipelineRunTriggerContext{
+		TriggerType:     "manual",
+		TriggerUser:     "admin",
+		TriggerUserID:   7,
+		TriggerUserRole: "admin",
+	})
+	if err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	var timeoutSeconds int64
+	var timeoutDeadline int64
+	if err := db.Raw("SELECT timeout_seconds, timeout_deadline FROM pipeline_runs WHERE id = ?", run.ID).Row().Scan(&timeoutSeconds, &timeoutDeadline); err != nil {
+		t.Fatalf("read timeout fields failed: %v", err)
+	}
+	if timeoutSeconds != 3*30*60 {
+		t.Fatalf("timeout_seconds=%d, want %d", timeoutSeconds, 3*30*60)
+	}
+	if timeoutDeadline != 0 {
+		t.Fatalf("queued run timeout_deadline=%d, want 0 until running", timeoutDeadline)
+	}
+}
+
 func TestCreatePipelineRunRecordWithSnapshot_DeploymentExecutionConfigDoesNotMutateAuthoredSnapshot(t *testing.T) {
 	db := openHandlerTestDB(t)
 	handler := &PipelineHandler{DB: db}
