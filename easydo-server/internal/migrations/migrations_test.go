@@ -250,20 +250,20 @@ func TestRunRejectsFailedPriorMigration(t *testing.T) {
 	}
 }
 
-func TestDiscoverEmbeddedMigrationsIncludesAIAgentFoundationMigration(t *testing.T) {
+func TestDiscoverEmbeddedMigrationsIncludesUTF8MB4DefaultsMigration(t *testing.T) {
 	migrations, err := discoverMigrations(dbmigrations.Files)
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 11 {
-		t.Fatalf("embedded migration count=%d, want 11", len(migrations))
+	if len(migrations) != 12 {
+		t.Fatalf("embedded migration count=%d, want 12", len(migrations))
 	}
 	latest := migrations[len(migrations)-1]
-	if latest.Version != 11 {
-		t.Fatalf("latest migration version=%d, want 11", latest.Version)
+	if latest.Version != 12 {
+		t.Fatalf("latest migration version=%d, want 12", latest.Version)
 	}
-	if latest.Script != "V11__ai_scene_and_session_turn_foundation.sql" {
-		t.Fatalf("latest migration script=%s, want V11__ai_scene_and_session_turn_foundation.sql", latest.Script)
+	if latest.Script != "V12__database_utf8mb4_defaults.sql" {
+		t.Fatalf("latest migration script=%s, want V12__database_utf8mb4_defaults.sql", latest.Script)
 	}
 }
 
@@ -288,22 +288,27 @@ func TestEmbeddedResourceRuntimeLabelsMigrationDeclaresDurableLabelTable(t *test
 	}
 }
 
-func TestEmbeddedSchemaSetsUTF8MB4ConnectionCharset(t *testing.T) {
-	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
+func TestEmbeddedUTF8MB4DefaultsMigrationSetsConnectionCharset(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V12__database_utf8mb4_defaults.sql")
 	if err != nil {
-		t.Fatalf("read V1 schema failed: %v", err)
+		t.Fatalf("read V12 migration failed: %v", err)
 	}
 	text := string(content)
-	if !strings.Contains(text, "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;") {
-		t.Fatalf("expected V1 schema to set utf8mb4 connection charset")
+	for _, expected := range []string{
+		"SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;",
+		"ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected V12 migration to contain %q", expected)
+		}
 	}
 
 	statements, err := splitStatements(text)
 	if err != nil {
-		t.Fatalf("split V1 schema failed: %v", err)
+		t.Fatalf("split V12 migration failed: %v", err)
 	}
 	if len(statements) == 0 || statements[0] != "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;" {
-		t.Fatalf("expected first V1 statement to set utf8mb4 charset, got %q", statements[0])
+		t.Fatalf("expected first V12 statement to set utf8mb4 charset, got %q", statements[0])
 	}
 }
 
@@ -326,8 +331,8 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 11 {
-		t.Fatalf("embedded migration count=%d, want 11", len(migrations))
+	if len(migrations) != 12 {
+		t.Fatalf("embedded migration count=%d, want 12", len(migrations))
 	}
 	if migrations[0].VersionText != "1" || migrations[0].Script != "V1__schema.sql" {
 		t.Fatalf("unexpected first embedded migration: %+v", migrations[0])
@@ -362,8 +367,13 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if migrations[10].VersionText != "11" || migrations[10].Script != "V11__ai_scene_and_session_turn_foundation.sql" {
 		t.Fatalf("unexpected eleventh embedded migration: %+v", migrations[10])
 	}
-	if len(migrations[0].Statements) == 0 || len(migrations[1].Statements) == 0 || len(migrations[2].Statements) == 0 || len(migrations[3].Statements) == 0 || len(migrations[4].Statements) == 0 || len(migrations[5].Statements) == 0 || len(migrations[6].Statements) == 0 || len(migrations[7].Statements) == 0 || len(migrations[8].Statements) == 0 || len(migrations[9].Statements) == 0 || len(migrations[10].Statements) == 0 {
-		t.Fatalf("expected parsed statements for embedded migrations, got %+v", migrations)
+	if migrations[11].VersionText != "12" || migrations[11].Script != "V12__database_utf8mb4_defaults.sql" {
+		t.Fatalf("unexpected twelfth embedded migration: %+v", migrations[11])
+	}
+	for _, migration := range migrations {
+		if len(migration.Statements) == 0 {
+			t.Fatalf("expected parsed statements for embedded migration, got %+v", migration)
+		}
 	}
 }
 

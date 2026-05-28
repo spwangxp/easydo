@@ -1,7 +1,5 @@
 -- Flyway schema baseline for EasyDo
 
-SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
-
 CREATE TABLE `agent_log_chunks` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `created_at` datetime(3) DEFAULT NULL,
