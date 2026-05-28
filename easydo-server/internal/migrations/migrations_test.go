@@ -288,6 +288,25 @@ func TestEmbeddedResourceRuntimeLabelsMigrationDeclaresDurableLabelTable(t *test
 	}
 }
 
+func TestEmbeddedSchemaSetsUTF8MB4ConnectionCharset(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
+	if err != nil {
+		t.Fatalf("read V1 schema failed: %v", err)
+	}
+	text := string(content)
+	if !strings.Contains(text, "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;") {
+		t.Fatalf("expected V1 schema to set utf8mb4 connection charset")
+	}
+
+	statements, err := splitStatements(text)
+	if err != nil {
+		t.Fatalf("split V1 schema failed: %v", err)
+	}
+	if len(statements) == 0 || statements[0] != "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;" {
+		t.Fatalf("expected first V1 statement to set utf8mb4 charset, got %q", statements[0])
+	}
+}
+
 func TestDiscoverMigrationsRejectsUnexpectedNames(t *testing.T) {
 	_, err := discoverMigrations(fstest.MapFS{
 		"bad_name.sql":         {Data: []byte("SELECT 1;")},

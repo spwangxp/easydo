@@ -18,7 +18,9 @@ import (
 var pipelineScheduleMu sync.Mutex
 
 const schedulerLeaderLockKey = "easydo:scheduler:leader"
+const runningRunReconcileLeaderLockKey = "easydo:scheduler:running-reconcile:leader"
 const defaultQueuedRunSchedulerInterval = 5 * time.Second
+const defaultRunningRunReconcileLimit = 64
 
 type QueuedRunScheduler struct {
 	db       *gorm.DB
@@ -77,11 +79,91 @@ func runQueuedPipelineSchedulerTick(db *gorm.DB) int {
 		db = models.DB
 	}
 	_, _ = reconcileCancelRequestedTasks(db, time.Now().Unix())
+	reconcileRunningPipelineTasksIfLeader(db, defaultRunningRunReconcileLimit)
 	return NewPipelineHandler().scheduleQueuedPipelineRuns(db)
 }
 
 func schedulerLeaderTTL() time.Duration {
 	return 30 * time.Second
+}
+
+func reconcileRunningPipelineTasksIfLeader(db *gorm.DB, limit int) int {
+	ok, err := tryAcquireSchedulerLock(context.Background(), runningRunReconcileLeaderLockKey)
+	if err != nil || !ok {
+		return 0
+	}
+	return reconcileRunningPipelineTasks(db, limit)
+}
+
+func reconcileRunningPipelineTasks(db *gorm.DB, limit int) int {
+	if db == nil {
+		db = models.DB
+	}
+	if db == nil {
+		return 0
+	}
+	if limit <= 0 {
+		limit = defaultRunningRunReconcileLimit
+	}
+
+	var runs []models.PipelineRun
+	if err := db.Where("status = ?", models.PipelineRunStatusRunning).
+		Order("updated_at ASC, id ASC").
+		Limit(limit).
+		Find(&runs).Error; err != nil {
+		return 0
+	}
+
+	handler := SharedWebSocketHandler()
+	reconciled := 0
+	for i := range runs {
+		run := runs[i]
+		var tasks []models.AgentTask
+		if err := db.Where("pipeline_run_id = ?", run.ID).Find(&tasks).Error; err != nil || len(tasks) == 0 {
+			continue
+		}
+		if !runningRunNeedsTaskReconciliation(run, tasks) {
+			continue
+		}
+		handler.triggerDownstreamTasks(run.ID, tasks)
+		handler.checkAndUpdatePipelineStatus(run.ID)
+		reconciled++
+	}
+	return reconciled
+}
+
+func runningRunNeedsTaskReconciliation(run models.PipelineRun, tasks []models.AgentTask) bool {
+	if len(tasks) == 0 {
+		return false
+	}
+
+	hasTerminal := false
+	allTerminal := true
+	taskNodeIDs := make(map[string]struct{}, len(tasks))
+	for i := range tasks {
+		taskNodeIDs[tasks[i].NodeID] = struct{}{}
+		if models.IsTerminalTaskStatus(tasks[i].Status) {
+			hasTerminal = true
+		} else {
+			allTerminal = false
+		}
+	}
+	if !hasTerminal {
+		return false
+	}
+
+	if strings.TrimSpace(run.PipelineSnapshot) != "" {
+		var config PipelineConfig
+		if err := json.Unmarshal([]byte(run.PipelineSnapshot), &config); err == nil {
+			for i := range config.Nodes {
+				if _, exists := taskNodeIDs[config.Nodes[i].ID]; !exists {
+					return true
+				}
+			}
+		}
+	}
+
+	return allTerminal
 }
 
 func (h *PipelineHandler) scheduleQueuedPipelineRuns(db *gorm.DB) int {
@@ -112,22 +194,26 @@ func (h *PipelineHandler) scheduleQueuedPipelineRuns(db *gorm.DB) int {
 }
 
 func (h *PipelineHandler) tryAcquireSchedulerLeadership(ctx context.Context) (bool, error) {
+	return tryAcquireSchedulerLock(ctx, schedulerLeaderLockKey)
+}
+
+func tryAcquireSchedulerLock(ctx context.Context, lockKey string) (bool, error) {
 	if utils.RedisClient == nil {
 		return false, nil
 	}
 	owner := config.Config.GetString("server.id")
-	if owner == "" {
+	if owner == "" || strings.TrimSpace(lockKey) == "" {
 		return false, nil
 	}
 	ttl := schedulerLeaderTTL()
-	ok, err := utils.RedisClient.SetNX(ctx, schedulerLeaderLockKey, owner, ttl).Result()
+	ok, err := utils.RedisClient.SetNX(ctx, lockKey, owner, ttl).Result()
 	if err != nil {
 		return false, err
 	}
 	if ok {
 		return true, nil
 	}
-	currentOwner, err := utils.RedisClient.Get(ctx, schedulerLeaderLockKey).Result()
+	currentOwner, err := utils.RedisClient.Get(ctx, lockKey).Result()
 	if err == redis.Nil {
 		return false, nil
 	}
@@ -137,7 +223,7 @@ func (h *PipelineHandler) tryAcquireSchedulerLeadership(ctx context.Context) (bo
 	if currentOwner != owner {
 		return false, nil
 	}
-	if err := utils.RedisClient.Expire(ctx, schedulerLeaderLockKey, ttl).Err(); err != nil {
+	if err := utils.RedisClient.Expire(ctx, lockKey, ttl).Err(); err != nil {
 		return false, err
 	}
 	return true, nil

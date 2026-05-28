@@ -142,7 +142,7 @@ func GetDSN() string {
 	password := Config.GetString("database.password")
 	name := Config.GetString("database.name")
 
-	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&parseTime=True&loc=Local",
 		username, password, host, port, name)
 }
 

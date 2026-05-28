@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +40,25 @@ func TestBootstrapDockerHubMirrors_EmptyEnvReturnsBuiltInDefaults(t *testing.T) 
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("mirrors=%v, want=%v", got, want)
+	}
+}
+
+func TestGetDSNForcesUTF8MB4ConnectionCollation(t *testing.T) {
+	Init()
+	Config.Set("database.host", "db")
+	Config.Set("database.port", 3306)
+	Config.Set("database.username", "user")
+	Config.Set("database.password", "pass")
+	Config.Set("database.name", "easydo")
+
+	dsn := GetDSN()
+	for _, expected := range []string{
+		"charset=utf8mb4",
+		"collation=utf8mb4_unicode_ci",
+	} {
+		if !strings.Contains(dsn, expected) {
+			t.Fatalf("expected DSN to contain %s, got %s", expected, dsn)
+		}
 	}
 }
 

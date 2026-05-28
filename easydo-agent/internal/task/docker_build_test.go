@@ -103,6 +103,56 @@ func TestDockerBuildScript_HostRuntimeRunsPreBuildScriptInSameShell(t *testing.T
 	}
 }
 
+func TestDockerBuildScript_HostRuntimePassesGitMetadataBuildArgs(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendHostRuntime, PrimaryRuntime: "docker"}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name":    "demo/app",
+		"image_tag":     "v1",
+		"dockerfile":    "./Dockerfile",
+		"context":       ".",
+		"architectures": []interface{}{"linux/amd64"},
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	for _, expected := range []string{
+		`EASYDO_GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || true)"`,
+		`--build-arg "GIT_COMMIT=$EASYDO_GIT_COMMIT"`,
+		`--build-arg "GIT_COMMIT_SHORT=$EASYDO_GIT_COMMIT_SHORT"`,
+		`--build-arg "GIT_DATE=$EASYDO_GIT_DATE"`,
+		`"$RUNTIME_BIN" build --platform "$PLATFORMS" "$@"`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("expected host runtime script to include %s, got:\n%s", expected, script)
+		}
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitPassesGitMetadataBuildArgs(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{TaskID: 321, Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./Dockerfile",
+		"context":    ".",
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	for _, expected := range []string{
+		`EASYDO_GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || true)"`,
+		`--opt "build-arg:GIT_COMMIT=$EASYDO_GIT_COMMIT"`,
+		`--opt "build-arg:GIT_COMMIT_SHORT=$EASYDO_GIT_COMMIT_SHORT"`,
+		`--opt "build-arg:GIT_DATE=$EASYDO_GIT_DATE"`,
+		`buildctl --addr "unix://$SOCKET_PATH" build`,
+		`  "$@"`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("expected embedded buildkit script to include %s, got:\n%s", expected, script)
+		}
+	}
+}
+
 func TestDockerBuildScript_HostRuntimeMultiArchUsesBuildx(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendHostRuntime, PrimaryRuntime: "docker"}}
 	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
@@ -448,10 +498,10 @@ func TestDockerBuildScript_EmbeddedBuildkitUsesConfiguredSocketPaths(t *testing.
 func TestDockerBuildScript_EmbeddedBuildkitDoesNotMutateSharedConfigFromTaskParams(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
 	script, err := executor.dockerBuildScript(TaskParams{TaskID: 777, Params: map[string]interface{}{
-		"image_name":         "demo/app",
-		"image_tag":          "v1",
-		"dockerfile":         "./build/Dockerfile",
-		"context":            ".",
+		"image_name":        "demo/app",
+		"image_tag":         "v1",
+		"dockerfile":        "./build/Dockerfile",
+		"context":           ".",
 		"dockerhub_mirrors": []interface{}{"https://mirror-a.example", "https://mirror-b.example"},
 	}}, "/workspace/app")
 	if err != nil {

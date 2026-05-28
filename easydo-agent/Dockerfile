@@ -29,9 +29,6 @@ RUN set -eu; \
   if [ -z "${resolved_commit}" ] || [ "${resolved_commit}" = "unknown" ]; then \
     resolved_commit="$(git rev-parse HEAD 2>/dev/null || true)"; \
   fi; \
-  if [ -z "${resolved_commit}" ] || [ "${resolved_commit}" = "unknown" ]; then \
-    resolved_commit="$(find . -type f -not -path './.git/*' -print | LC_ALL=C sort | xargs sha256sum | sha256sum | awk '{print $1}')"; \
-  fi; \
   resolved_short="${GIT_COMMIT_SHORT}"; \
   if [ -z "${resolved_short}" ] || [ "${resolved_short}" = "unknown" ]; then \
     resolved_short="$(printf '%.12s' "${resolved_commit}")"; \

@@ -64,7 +64,7 @@ REGISTRY_PASSWORD="${EASYDO_CRED_REGISTRY_AUTH_PASSWORD:-${EASYDO_CRED_REGISTRY_
 if [ -n "$REGISTRY" ] && [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then
   printf '%%s\n' "$REGISTRY_PASSWORD" | "$RUNTIME_BIN" login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
 fi
-%s
+%s%s
 if [ -n "$PLATFORMS" ]; then
   case "$PLATFORMS" in
     *,*)
@@ -73,21 +73,21 @@ if [ -n "$PLATFORMS" ]; then
         exit 1
       fi
       if [ "$PUSH_ENABLED" = "true" ] && [ -n "$REGISTRY" ]; then
-        "$RUNTIME_BIN" buildx build --platform "$PLATFORMS" -t "$IMAGE_REF" -f "$DOCKERFILE" "$CONTEXT" --push
+        "$RUNTIME_BIN" buildx build --platform "$PLATFORMS" "$@" -t "$IMAGE_REF" -f "$DOCKERFILE" "$CONTEXT" --push
       else
         mkdir -p .easydo-artifacts/images
-        "$RUNTIME_BIN" buildx build --platform "$PLATFORMS" -f "$DOCKERFILE" "$CONTEXT" --output "type=oci,dest=.easydo-artifacts/images/%s.tar"
+        "$RUNTIME_BIN" buildx build --platform "$PLATFORMS" "$@" -f "$DOCKERFILE" "$CONTEXT" --output "type=oci,dest=.easydo-artifacts/images/%s.tar"
       fi
       exit 0
       ;;
     *)
-      "$RUNTIME_BIN" build --platform "$PLATFORMS" -t "$IMAGE_NAME:$IMAGE_TAG" -f "$DOCKERFILE" "$CONTEXT"
+      "$RUNTIME_BIN" build --platform "$PLATFORMS" "$@" -t "$IMAGE_NAME:$IMAGE_TAG" -f "$DOCKERFILE" "$CONTEXT"
       ;;
   esac
 else
-  "$RUNTIME_BIN" build -t "$IMAGE_NAME:$IMAGE_TAG" -f "$DOCKERFILE" "$CONTEXT"
+  "$RUNTIME_BIN" build "$@" -t "$IMAGE_NAME:$IMAGE_TAG" -f "$DOCKERFILE" "$CONTEXT"
 fi
-`, runtimeBin, imageName, imageTag, dockerfile, contextDir, registry, imageRef, platforms, pushValue, preBuildBlock, shellSafeFilename(imageRef))
+`, runtimeBin, imageName, imageTag, dockerfile, contextDir, registry, imageRef, platforms, pushValue, preBuildBlock, hostGitMetadataBuildArgsBlock(), shellSafeFilename(imageRef))
 	if push {
 		script += `if [ -n "$REGISTRY" ]; then
   case "$IMAGE_NAME" in
@@ -166,15 +166,43 @@ mkdir -p "$DOCKER_CONFIG" .easydo-artifacts/images
 %s
 %s
 %s
+%s
 export DOCKER_CONFIG
 buildctl --addr "unix://$SOCKET_PATH" build \
+  "$@" \
   --frontend dockerfile.v0 \
   --local context=%q \
   --local dockerfile=%q \
   --opt platform=%q \
   --opt filename=%q \
   --output "$OUTPUT_SPEC"
-`, socketPath, stateDir, configPath, dockerConfigDir, registry, platforms, qemuCheckBlock, preBuildBlock, outputLine, contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
+`, socketPath, stateDir, configPath, dockerConfigDir, registry, platforms, qemuCheckBlock, preBuildBlock, outputLine, buildkitGitMetadataBuildArgsBlock(), contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
+}
+
+func hostGitMetadataBuildArgsBlock() string {
+	return `set --
+EASYDO_GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || true)"
+if [ -n "$EASYDO_GIT_COMMIT" ]; then
+  EASYDO_GIT_COMMIT_SHORT="$(git rev-parse --short=12 HEAD 2>/dev/null || printf '%.12s' "$EASYDO_GIT_COMMIT")"
+  EASYDO_GIT_DATE="$(git show -s --format=%cI HEAD 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  set -- "$@" --build-arg "GIT_COMMIT=$EASYDO_GIT_COMMIT"
+  set -- "$@" --build-arg "GIT_COMMIT_SHORT=$EASYDO_GIT_COMMIT_SHORT"
+  set -- "$@" --build-arg "GIT_DATE=$EASYDO_GIT_DATE"
+fi
+`
+}
+
+func buildkitGitMetadataBuildArgsBlock() string {
+	return `set --
+EASYDO_GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || true)"
+if [ -n "$EASYDO_GIT_COMMIT" ]; then
+  EASYDO_GIT_COMMIT_SHORT="$(git rev-parse --short=12 HEAD 2>/dev/null || printf '%.12s' "$EASYDO_GIT_COMMIT")"
+  EASYDO_GIT_DATE="$(git show -s --format=%cI HEAD 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  set -- "$@" --opt "build-arg:GIT_COMMIT=$EASYDO_GIT_COMMIT"
+  set -- "$@" --opt "build-arg:GIT_COMMIT_SHORT=$EASYDO_GIT_COMMIT_SHORT"
+  set -- "$@" --opt "build-arg:GIT_DATE=$EASYDO_GIT_DATE"
+fi
+`
 }
 
 func NormalizeDockerHubMirrors(value any) []string {
