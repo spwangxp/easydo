@@ -22,7 +22,9 @@ logs/
 
 .claude
 .sisyphus
-tests
+/tests
+easydo-server/tests/
+scripts/tests/
 .git
 test-results
 

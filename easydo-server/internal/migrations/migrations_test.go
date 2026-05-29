@@ -250,20 +250,20 @@ func TestRunRejectsFailedPriorMigration(t *testing.T) {
 	}
 }
 
-func TestDiscoverEmbeddedMigrationsIncludesPipelineRunTimeoutMigration(t *testing.T) {
+func TestDiscoverEmbeddedMigrationsIncludesMCPCallAuditMigration(t *testing.T) {
 	migrations, err := discoverMigrations(dbmigrations.Files)
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 13 {
-		t.Fatalf("embedded migration count=%d, want 13", len(migrations))
+	if len(migrations) != 14 {
+		t.Fatalf("embedded migration count=%d, want 14", len(migrations))
 	}
 	latest := migrations[len(migrations)-1]
-	if latest.Version != 13 {
-		t.Fatalf("latest migration version=%d, want 13", latest.Version)
+	if latest.Version != 14 {
+		t.Fatalf("latest migration version=%d, want 14", latest.Version)
 	}
-	if latest.Script != "V13__pipeline_run_overall_timeout.sql" {
-		t.Fatalf("latest migration script=%s, want V13__pipeline_run_overall_timeout.sql", latest.Script)
+	if latest.Script != "V14__mcp_call_audits.sql" {
+		t.Fatalf("latest migration script=%s, want V14__mcp_call_audits.sql", latest.Script)
 	}
 }
 
@@ -330,6 +330,26 @@ func TestEmbeddedPipelineRunTimeoutMigrationDeclaresDeadlineColumns(t *testing.T
 	}
 }
 
+func TestEmbeddedMCPCallAuditMigrationDeclaresAuditTable(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V14__mcp_call_audits.sql")
+	if err != nil {
+		t.Fatalf("read V14 migration failed: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{
+		"CREATE TABLE `mcp_call_audits`",
+		"`request_id` varchar(191) NOT NULL",
+		"`workspace_id` bigint unsigned NOT NULL",
+		"`tool_name` varchar(128) NOT NULL",
+		"`protocol` varchar(32) NOT NULL",
+		"KEY `idx_mcp_call_audits_workspace_id` (`workspace_id`)",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected V14 migration to contain %q", expected)
+		}
+	}
+}
+
 func TestDiscoverMigrationsRejectsUnexpectedNames(t *testing.T) {
 	_, err := discoverMigrations(fstest.MapFS{
 		"bad_name.sql":         {Data: []byte("SELECT 1;")},
@@ -349,8 +369,8 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 13 {
-		t.Fatalf("embedded migration count=%d, want 13", len(migrations))
+	if len(migrations) != 14 {
+		t.Fatalf("embedded migration count=%d, want 14", len(migrations))
 	}
 	if migrations[0].VersionText != "1" || migrations[0].Script != "V1__schema.sql" {
 		t.Fatalf("unexpected first embedded migration: %+v", migrations[0])
@@ -390,6 +410,9 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	}
 	if migrations[12].VersionText != "13" || migrations[12].Script != "V13__pipeline_run_overall_timeout.sql" {
 		t.Fatalf("unexpected thirteenth embedded migration: %+v", migrations[12])
+	}
+	if migrations[13].VersionText != "14" || migrations[13].Script != "V14__mcp_call_audits.sql" {
+		t.Fatalf("unexpected fourteenth embedded migration: %+v", migrations[13])
 	}
 	for _, migration := range migrations {
 		if len(migration.Statements) == 0 {

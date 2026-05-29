@@ -582,6 +582,10 @@ func TestEvaluateOneScheduledPipelineTrigger_StoresScheduleRuntimeInputsWithoutM
 	if err := db.Where("pipeline_id = ? AND trigger_type = ?", pipeline.ID, pipelineRunTriggerTypeSchedule).First(&run).Error; err != nil {
 		t.Fatalf("load scheduled run failed: %v", err)
 	}
+	wantScheduleSource := fmt.Sprintf("schedule:%d", trigger.ID)
+	if run.TriggerSource != wantScheduleSource {
+		t.Fatalf("trigger_source=%s, want=%s", run.TriggerSource, wantScheduleSource)
+	}
 
 	var runConfig models.PipelineRunConfigSnapshot
 	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
@@ -589,6 +593,9 @@ func TestEvaluateOneScheduledPipelineTrigger_StoresScheduleRuntimeInputsWithoutM
 	}
 	if runConfig.Trigger.Type != pipelineRunTriggerTypeSchedule {
 		t.Fatalf("trigger type=%s, want=%s", runConfig.Trigger.Type, pipelineRunTriggerTypeSchedule)
+	}
+	if runConfig.Trigger.Source != wantScheduleSource || runConfig.Trigger.Operator != "schedule" {
+		t.Fatalf("run config trigger=%+v, want source=%s operator=schedule", runConfig.Trigger, wantScheduleSource)
 	}
 	if runConfig.Options["scheduled_at"] == nil {
 		t.Fatalf("expected scheduled_at option in run config, got %#v", runConfig.Options)

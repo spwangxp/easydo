@@ -576,6 +576,64 @@ test('extractManualRunNodes only keeps flexible params that exist in the task fi
   ])
 })
 
+test('extractManualRunNodes exposes Docker cache controls as boolean runtime inputs when flexible', () => {
+  const manualRunNodes = extractManualRunNodes({
+    nodes: [
+      {
+        node_id: 'docker_build',
+        node_name: 'Docker Build',
+        task_key: 'docker',
+        params: [
+          { key: 'use_cache', value: false, is_flexible: true },
+          { key: 'pull_base_image', value: true, is_flexible: true }
+        ]
+      }
+    ]
+  }, [
+    {
+      task_key: 'docker',
+      fields_schema: [
+        { key: 'use_cache', label: '使用构建缓存', type: 'boolean', ui_component: 'switch' },
+        { key: 'pull_base_image', label: '拉取最新基础镜像', type: 'boolean', ui_component: 'switch' }
+      ]
+    }
+  ])
+
+  assert.deepEqual(manualRunNodes, [
+    {
+      node_id: 'docker_build',
+      node_index: 1,
+      node_name: 'Docker Build',
+      params: [
+        {
+          key: 'use_cache',
+          label: '使用构建缓存',
+          value: false,
+          default_value: false,
+          field_type: 'boolean',
+          input_type: 'boolean',
+          runtime_value_type: 'boolean',
+          is_string_like: false,
+          placeholder: '',
+          options: []
+        },
+        {
+          key: 'pull_base_image',
+          label: '拉取最新基础镜像',
+          value: true,
+          default_value: true,
+          field_type: 'boolean',
+          input_type: 'boolean',
+          runtime_value_type: 'boolean',
+          is_string_like: false,
+          placeholder: '',
+          options: []
+        }
+      ]
+    }
+  ])
+})
+
 test('extractManualRunNodes falls back to saved flexible params when task definitions are unavailable', () => {
   const manualRunNodes = extractManualRunNodes({
     nodes: [

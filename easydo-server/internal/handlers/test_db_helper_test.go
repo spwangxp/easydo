@@ -96,6 +96,7 @@ func openHandlerTestDB(t *testing.T) *gorm.DB {
 		&models.AIModelCatalog{},
 		&models.DeploymentRequest{},
 		&models.DeploymentRecord{},
+		&models.MCPCallAudit{},
 		&models.MasterKey{},
 		&models.SystemSetting{},
 	); err != nil {

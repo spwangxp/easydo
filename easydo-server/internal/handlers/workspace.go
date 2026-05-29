@@ -12,6 +12,7 @@ import (
 
 	"easydo-server/internal/middleware"
 	"easydo-server/internal/models"
+	"easydo-server/internal/services"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -135,51 +136,47 @@ func (h *WorkspaceHandler) getWorkspaceForUser(c *gin.Context, workspaceID uint6
 }
 
 func (h *WorkspaceHandler) GetWorkspaceList(c *gin.Context) {
-	userID := c.GetUint64("user_id")
-	role := c.GetString("role")
-	query := h.DB.Model(&models.Workspace{}).Where("status = ?", models.WorkspaceStatusActive).Order("created_at ASC")
-	if !isAdminRole(role) {
-		workspaceSubQuery := h.DB.Model(&models.WorkspaceMember{}).
-			Select("workspace_id").
-			Where("user_id = ? AND status = ?", userID, models.WorkspaceMemberStatusActive)
-		visibilityClause, visibilityArgs := middleware.NonAdminVisibleWorkspaceCondition("workspaces")
-		query = query.Where("id IN (?)", workspaceSubQuery).Where(visibilityClause, visibilityArgs...)
+	pageRaw := strings.TrimSpace(c.Query("page"))
+	limitRaw := strings.TrimSpace(c.Query("limit"))
+	page := 0
+	limit := 0
+	if pageRaw != "" {
+		parsedPage, err := strconv.Atoi(pageRaw)
+		if err != nil || parsedPage < 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的分页参数"})
+			return
+		}
+		page = parsedPage
 	}
-
-	var workspaces []models.Workspace
-	if err := query.Find(&workspaces).Error; err != nil {
+	if limitRaw != "" {
+		parsedLimit, err := strconv.Atoi(limitRaw)
+		if err != nil || parsedLimit < 1 || parsedLimit > services.MaxWorkspacePageLimit {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的分页参数"})
+			return
+		}
+		limit = parsedLimit
+	}
+	result, err := (&services.WorkspaceUseCase{DB: h.DB}).ListWorkspaces(c.Request.Context(), services.ListWorkspacesRequest{
+		Actor: services.ActorContext{
+			UserID:             c.GetUint64("user_id"),
+			SystemRole:         c.GetString("role"),
+			CurrentWorkspaceID: c.GetUint64("workspace_id"),
+		},
+		Page:     page,
+		Limit:    limit,
+		Query:    c.Query("query"),
+		Paginate: pageRaw != "" || limitRaw != "",
+	})
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "获取工作空间失败"})
 		return
 	}
 
-	result := make([]gin.H, 0, len(workspaces))
-	for _, workspace := range workspaces {
-		workspaceRole := models.WorkspaceRoleOwner
-		if !isAdminRole(role) {
-			workspaceRole, _ = userWorkspaceRole(h.DB, workspace.ID, userID)
-		}
-		workspaceKind := normalizeWorkspaceKind(workspace.Kind)
-		if workspaceKind == "" {
-			workspaceKind = models.WorkspaceKindNormal
-		}
-		result = append(result, gin.H{
-			"id":           workspace.ID,
-			"name":         workspace.Name,
-			"description":  workspace.Description,
-			"status":       workspace.Status,
-			"visibility":   workspace.Visibility,
-			"kind":         workspaceKind,
-			"role":         workspaceRole,
-			"capabilities": middleware.ExpandWorkspaceCapabilities(workspaceRole),
-		})
+	list := make([]gin.H, 0, len(result.List))
+	for _, workspace := range result.List {
+		list = append(list, workspaceSummaryResponse(workspace))
 	}
-
-	currentWorkspaceID := c.GetUint64("workspace_id")
-	if currentWorkspaceID == 0 && len(result) > 0 {
-		currentWorkspaceID = result[0]["id"].(uint64)
-	}
-
-	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"list": result, "current_workspace_id": currentWorkspaceID}})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"list": list, "current_workspace_id": result.CurrentWorkspaceID}})
 }
 
 func (h *WorkspaceHandler) CreateWorkspace(c *gin.Context) {
@@ -233,26 +230,53 @@ func (h *WorkspaceHandler) CreateWorkspace(c *gin.Context) {
 }
 
 func (h *WorkspaceHandler) GetWorkspace(c *gin.Context) {
-	workspaceID, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-	workspace, workspaceRole, ok := h.getWorkspaceForUser(c, workspaceID)
-	if !ok {
-		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权访问该工作空间"})
+	workspaceID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || workspaceID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误"})
 		return
 	}
-	workspaceKind := normalizeWorkspaceKind(workspace.Kind)
-	if workspaceKind == "" {
-		workspaceKind = models.WorkspaceKindNormal
+	workspace, err := (&services.WorkspaceUseCase{DB: h.DB}).GetWorkspace(c.Request.Context(), services.GetWorkspaceRequest{
+		Actor: services.ActorContext{
+			UserID:             c.GetUint64("user_id"),
+			SystemRole:         c.GetString("role"),
+			CurrentWorkspaceID: c.GetUint64("workspace_id"),
+		},
+		WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		writeGetWorkspaceUseCaseError(c, err)
+		return
 	}
-	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": workspaceSummaryResponse(workspace)})
+}
+
+func writeGetWorkspaceUseCaseError(c *gin.Context, err error) {
+	var svcErr services.ServiceError
+	if errors.As(err, &svcErr) {
+		switch svcErr.Code {
+		case services.ErrorCodeForbidden:
+			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权访问该工作空间"})
+		case services.ErrorCodeInvalidArgument:
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "获取工作空间失败"})
+		}
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "获取工作空间失败"})
+}
+
+func workspaceSummaryResponse(workspace services.WorkspaceSummary) gin.H {
+	return gin.H{
 		"id":           workspace.ID,
 		"name":         workspace.Name,
 		"description":  workspace.Description,
 		"status":       workspace.Status,
 		"visibility":   workspace.Visibility,
-		"kind":         workspaceKind,
-		"role":         workspaceRole,
-		"capabilities": middleware.ExpandWorkspaceCapabilities(workspaceRole),
-	}})
+		"kind":         workspace.Kind,
+		"role":         workspace.Role,
+		"capabilities": workspace.Capabilities,
+	}
 }
 
 func (h *WorkspaceHandler) UpdateWorkspace(c *gin.Context) {

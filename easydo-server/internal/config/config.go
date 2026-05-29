@@ -21,6 +21,7 @@ func Init() {
 	Config.SetDefault("server.public_url", "")
 	Config.SetDefault("server.internal_url", "")
 	Config.SetDefault("server.internal_token", "")
+	Config.SetDefault("mcp.allowed_origins", "")
 	Config.SetDefault("database.driver", "mariadb")
 	Config.SetDefault("database.port", 3306)
 	Config.SetDefault("database.max_open_conns", 100)
@@ -79,6 +80,7 @@ func Init() {
 	Config.BindEnv("server.public_url", "SERVER_PUBLIC_URL")
 	Config.BindEnv("server.internal_url", "SERVER_INTERNAL_URL")
 	Config.BindEnv("server.internal_token", "SERVER_INTERNAL_TOKEN")
+	Config.BindEnv("mcp.allowed_origins", "MCP_ALLOWED_ORIGINS")
 
 	Config.BindEnv("database.host", "DB_HOST")
 	Config.BindEnv("database.port", "DB_PORT")
@@ -119,20 +121,24 @@ func Init() {
 }
 
 func BootstrapDockerHubMirrors() []string {
-	return splitAndNormalizeMirrorList(Config.GetString("buildkit.bootstrap_dockerhub_mirrors"))
+	return splitAndNormalizeCSV(Config.GetString("buildkit.bootstrap_dockerhub_mirrors"))
 }
 
-func splitAndNormalizeMirrorList(raw string) []string {
+func MCPAllowedOrigins() []string {
+	return splitAndNormalizeCSV(Config.GetString("mcp.allowed_origins"))
+}
+
+func splitAndNormalizeCSV(raw string) []string {
 	parts := strings.Split(raw, ",")
-	mirrors := make([]string, 0, len(parts))
+	items := make([]string, 0, len(parts))
 	for _, part := range parts {
-		mirror := strings.TrimSpace(part)
-		if mirror == "" {
+		item := strings.TrimSpace(part)
+		if item == "" {
 			continue
 		}
-		mirrors = append(mirrors, mirror)
+		items = append(items, item)
 	}
-	return mirrors
+	return items
 }
 
 func GetDSN() string {

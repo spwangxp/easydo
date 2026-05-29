@@ -332,8 +332,8 @@ func TestParseAndValidatePipelineConfig_PreservesNodeCoordinates(t *testing.T) {
 	raw := `{
 		"version":"2.0",
 		"nodes":[
-			{"id":"1","type":"shell","name":"Build","x":0,"y":0,"config":{"script":"echo build"}},
-			{"id":"2","type":"shell","name":"Test","x":520,"y":340,"config":{"script":"echo test"}}
+			{"id":"1","type":"shell","name":"Build","x":0,"y":0,"timeout":60,"config":{"script":"echo build"}},
+			{"id":"2","type":"shell","name":"Test","x":520,"y":340,"timeout":60,"config":{"script":"echo test"}}
 		],
 		"edges":[
 			{"from":"1","to":"2"}
@@ -985,7 +985,7 @@ func TestParseAndValidatePipelineConfig_NormalizesTaskType(t *testing.T) {
 	raw := `{
 		"version":"2.0",
 		"nodes":[
-			{"id":"1","type":"github","name":"Clone","task_version":1,"params":[{"key":"git_repo_url","label":"Repo","value":"https://example.com/repo.git","is_flexible":false}]}
+			{"id":"1","type":"github","name":"Clone","task_version":1,"timeout":60,"params":[{"key":"git_repo_url","label":"Repo","value":"https://example.com/repo.git","is_flexible":false}]}
 		],
 		"edges":[]
 	}`
@@ -1194,6 +1194,16 @@ func TestCreatePipelineRunRecordWithSnapshot_DeploymentExecutionConfigDoesNotMut
 	})
 	if err != nil {
 		t.Fatalf("create run failed: %v", err)
+	}
+	if run.TriggerType != pipelineRunTriggerTypeDeploymentRequest {
+		t.Fatalf("trigger_type=%s, want %s", run.TriggerType, pipelineRunTriggerTypeDeploymentRequest)
+	}
+	var runConfig models.PipelineRunConfigSnapshot
+	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
+		t.Fatalf("unmarshal run config failed: %v", err)
+	}
+	if runConfig.Trigger.Type != pipelineRunTriggerTypeDeploymentRequest {
+		t.Fatalf("run config trigger=%+v, want deployment_request", runConfig.Trigger)
 	}
 
 	var snapshot PipelineConfig
@@ -2250,7 +2260,7 @@ func TestCreatePipeline_WithoutProjectIDStoresNullProject(t *testing.T) {
 	h := &PipelineHandler{DB: db}
 	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "create-null-project", models.WorkspaceRoleDeveloper)
 
-	body := bytes.NewBufferString(`{"name":"pipeline-without-project","environment":"development","config":"{\"version\":\"2.0\",\"nodes\":[{\"id\":\"1\",\"type\":\"in_app\",\"name\":\"Notify\",\"config\":{\"title\":\"done\"}}],\"edges\":[]}"}`)
+	body := bytes.NewBufferString(`{"name":"pipeline-without-project","environment":"development","config":"{\"version\":\"2.0\",\"nodes\":[{\"id\":\"1\",\"type\":\"in_app\",\"name\":\"Notify\",\"timeout\":60,\"config\":{\"title\":\"done\"}}],\"edges\":[]}"}`)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/pipelines", body)
@@ -4206,12 +4216,18 @@ func TestHandleGitLabWebhook_PushCreatesQueuedWebhookRun(t *testing.T) {
 	if run.TriggerType != "webhook" {
 		t.Fatalf("trigger_type=%s, want webhook", run.TriggerType)
 	}
+	if run.TriggerSource != "gitlab:push:group/project" {
+		t.Fatalf("trigger_source=%s, want gitlab:push:group/project", run.TriggerSource)
+	}
 	if run.Status != models.PipelineRunStatusQueued {
 		t.Fatalf("status=%s, want queued", run.Status)
 	}
 	var runConfig models.PipelineRunConfigSnapshot
 	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
 		t.Fatalf("unmarshal run config failed: %v", err)
+	}
+	if runConfig.Trigger.Type != "webhook" || runConfig.Trigger.Source != "gitlab:push:group/project" || runConfig.Trigger.Operator != "gitlab-user" {
+		t.Fatalf("run config trigger=%+v, want webhook gitlab:push:group/project gitlab-user", runConfig.Trigger)
 	}
 	if runConfig.Inputs["node-1"]["working_dir"] != "main" {
 		t.Fatalf("expected webhook mapped runtime input, got %#v", runConfig.Inputs)
@@ -4380,6 +4396,30 @@ func TestCancelPipelineRun_CancelsRunningTasks(t *testing.T) {
 	}
 	if updatedTasks[1].EndTime != 0 {
 		t.Fatalf("expected task 2 end_time to stay 0 before terminal cancel, got %d", updatedTasks[1].EndTime)
+	}
+}
+
+func TestCancelPipelineRun_ReturnsPipelineNotFoundWhenPipelineIsMissing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "cancel-missing-pipeline-user", models.WorkspaceRoleDeveloper)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/pipelines/9999/runs/1/cancel", nil)
+	c.Params = gin.Params{{Key: "id", Value: "9999"}, {Key: "run_id", Value: "1"}}
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+	c.Set("workspace_id", workspace.ID)
+
+	h.CancelPipelineRun(c)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "流水线不存在") {
+		t.Fatalf("body=%s, want pipeline not found message", w.Body.String())
 	}
 }
 

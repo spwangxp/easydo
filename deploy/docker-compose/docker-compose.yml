@@ -41,6 +41,7 @@ services:
       - SERVER_MODE=release
       - SERVER_ID=server-1
       - SERVER_PUBLIC_URL=http://localhost:8088
+      - MCP_ALLOWED_ORIGINS=http://127.0.0.1:8088,http://localhost:8088
       - SERVER_INTERNAL_URL=http://server:8080
       - SERVER_INTERNAL_TOKEN=easydo-internal-token
       - DB_HOST=db
@@ -91,6 +92,7 @@ services:
       - SERVER_MODE=release
       - SERVER_ID=server-2
       - SERVER_PUBLIC_URL=http://localhost:8088
+      - MCP_ALLOWED_ORIGINS=http://127.0.0.1:8088,http://localhost:8088
       - SERVER_INTERNAL_URL=http://server2:8080
       - SERVER_INTERNAL_TOKEN=easydo-internal-token
       - DB_HOST=db

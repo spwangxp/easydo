@@ -100,9 +100,6 @@ func hasWorkspaceMembership(db *gorm.DB, workspaceID, userID uint64, systemRole 
 	if isAdminRole(systemRole) {
 		return true
 	}
-	if !middleware.WorkspaceVisibleToSystemRole(systemRole, workspaceKindByID(db, workspaceID)) {
-		return false
-	}
 	role, ok := userWorkspaceRole(db, workspaceID, userID)
 	if !ok {
 		return false

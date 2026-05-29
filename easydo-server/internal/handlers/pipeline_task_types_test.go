@@ -229,6 +229,8 @@ func TestDockerTaskDefinitionIncludesRequiredImageField(t *testing.T) {
 	preBuildScriptFound := false
 	pushFound := false
 	architecturesFound := false
+	useCacheFound := false
+	pullBaseImageFound := false
 	for _, field := range def.FieldsSchema {
 		if field.Key == "image_name" {
 			imageNameFound = true
@@ -266,9 +268,33 @@ func TestDockerTaskDefinitionIncludesRequiredImageField(t *testing.T) {
 				t.Fatalf("expected architectures options, got %#v", field.Options)
 			}
 		}
+		if field.Key == "use_cache" {
+			useCacheFound = true
+			if field.Type != "boolean" {
+				t.Fatalf("expected use_cache field to be boolean, got %s", field.Type)
+			}
+			if field.UIComponent != "switch" {
+				t.Fatalf("expected use_cache to render as switch, got %s", field.UIComponent)
+			}
+			if field.Default != true {
+				t.Fatalf("expected use_cache default true, got %#v", field.Default)
+			}
+		}
+		if field.Key == "pull_base_image" {
+			pullBaseImageFound = true
+			if field.Type != "boolean" {
+				t.Fatalf("expected pull_base_image field to be boolean, got %s", field.Type)
+			}
+			if field.UIComponent != "switch" {
+				t.Fatalf("expected pull_base_image to render as switch, got %s", field.UIComponent)
+			}
+			if field.Default != false {
+				t.Fatalf("expected pull_base_image default false, got %#v", field.Default)
+			}
+		}
 	}
-	if !imageNameFound || !pushFound || !preBuildScriptFound || !architecturesFound {
-		t.Fatalf("expected docker fields schema to include image_name, pre_build_script, push and architectures, got %#v", def.FieldsSchema)
+	if !imageNameFound || !pushFound || !preBuildScriptFound || !architecturesFound || !useCacheFound || !pullBaseImageFound {
+		t.Fatalf("expected docker fields schema to include image_name, pre_build_script, push, architectures, use_cache and pull_base_image, got %#v", def.FieldsSchema)
 	}
 }
 
@@ -288,6 +314,51 @@ func TestRenderPipelineAgentScript_DockerIncludesPreBuildScript(t *testing.T) {
 	}
 	if !strings.Contains(script, `cd ${outputs.clone.git_checkout_path}`) {
 		t.Fatalf("expected docker script to preserve output variable reference for runtime substitution, got: %s", script)
+	}
+}
+
+func TestRenderPipelineAgentScript_DockerCacheControls(t *testing.T) {
+	_, script, err := renderPipelineAgentScript("docker", map[string]any{
+		"image_name":      "demo/app",
+		"use_cache":       false,
+		"pull_base_image": true,
+	})
+	if err != nil {
+		t.Fatalf("expected docker script render success, got err: %v", err)
+	}
+	if !strings.Contains(script, `--no-cache`) {
+		t.Fatalf("expected docker script to include --no-cache, got: %s", script)
+	}
+	if !strings.Contains(script, `--pull`) {
+		t.Fatalf("expected docker script to include --pull, got: %s", script)
+	}
+}
+
+func TestRenderPipelineAgentScript_DockerCacheControlsDefaultToCurrentBehavior(t *testing.T) {
+	_, script, err := renderPipelineAgentScript("docker", map[string]any{
+		"image_name": "demo/app",
+	})
+	if err != nil {
+		t.Fatalf("expected docker script render success, got err: %v", err)
+	}
+	if strings.Contains(script, `--no-cache`) {
+		t.Fatalf("expected default docker script to use cache, got: %s", script)
+	}
+	if strings.Contains(script, `--pull`) {
+		t.Fatalf("expected default docker script not to force pull, got: %s", script)
+	}
+}
+
+func TestRenderPipelineAgentScript_DockerCacheControlsOnlyExplicitFalseDisablesCache(t *testing.T) {
+	_, script, err := renderPipelineAgentScript("docker", map[string]any{
+		"image_name": "demo/app",
+		"use_cache":  "unexpected",
+	})
+	if err != nil {
+		t.Fatalf("expected docker script render success, got err: %v", err)
+	}
+	if strings.Contains(script, `--no-cache`) {
+		t.Fatalf("expected unrecognized use_cache value to keep cache enabled, got: %s", script)
 	}
 }
 

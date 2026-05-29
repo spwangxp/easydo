@@ -276,6 +276,8 @@ eval "$CMD"`,
 			{Key: "image_name", Label: "镜像名称", Type: "string", Required: true, UIComponent: "input"},
 			{Key: "image_tag", Label: "镜像标签", Type: "string", UIComponent: "input", Default: "latest"},
 			{Key: "architectures", Label: "目标架构", Type: "multiselect", UIComponent: "checkbox_group", Default: []string{"linux/amd64", "linux/arm64"}, Options: []models.FieldOption{{Label: "linux/amd64", Value: "linux/amd64"}, {Label: "linux/arm64", Value: "linux/arm64"}}},
+			{Key: "use_cache", Label: "使用构建缓存", Type: "boolean", UIComponent: "switch", Default: true},
+			{Key: "pull_base_image", Label: "拉取最新基础镜像", Type: "boolean", UIComponent: "switch", Default: false},
 			{Key: "pre_build_script", Label: "构建前脚本", Type: "text", UIComponent: "textarea", UIPlaceholder: "cd ${outputs.clone_frontend.git_checkout_path}"},
 			{Key: "dockerfile", Label: "Dockerfile 路径", Type: "string", UIComponent: "input", Default: "./Dockerfile"},
 			{Key: "context", Label: "构建上下文", Type: "string", UIComponent: "input", Default: "."},
@@ -324,8 +326,11 @@ if [ -n "$PRE_BUILD_SCRIPT" ]; then
   eval "$PRE_BUILD_SCRIPT"
 fi
 
-easydo_cmd "docker build -t $IMAGE_NAME:$IMAGE_TAG -f $DOCKERFILE $CONTEXT"
-docker build -t "$IMAGE_NAME:$IMAGE_TAG" -f "$DOCKERFILE" "$CONTEXT"
+set --
+{{ if explicitFalse (dig "use_cache") }}set -- "$@" --no-cache
+{{ end }}{{ if eq (boolStr (dig "pull_base_image")) "true" }}set -- "$@" --pull
+{{ end }}easydo_cmd "docker build $* -t $IMAGE_NAME:$IMAGE_TAG -f $DOCKERFILE $CONTEXT"
+docker build "$@" -t "$IMAGE_NAME:$IMAGE_TAG" -f "$DOCKERFILE" "$CONTEXT"
 if [ "{{ boolStr (dig "push") }}" = "true" ]; then
   if [ -n "$REGISTRY" ]; then
     easydo_cmd "docker tag $IMAGE_NAME:$IMAGE_TAG $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
@@ -1261,11 +1266,12 @@ func renderTaskTemplate(shellTemplate string, params map[string]any) (string, er
 		return getNestedValue(params, path)
 	}
 	funcMap := template.FuncMap{
-		"dig":     dig,
-		"def":     templateDefault,
-		"toInt":   toInt,
-		"boolStr": boolString,
-		"shq":     shellQuote,
+		"dig":           dig,
+		"def":           templateDefault,
+		"toInt":         toInt,
+		"boolStr":       boolString,
+		"explicitFalse": explicitFalse,
+		"shq":           shellQuote,
 		"logq": func(v any) string {
 			return shellQuote(sanitizeTaskLogPreview(toString(v), 2400))
 		},
@@ -1373,6 +1379,17 @@ func boolString(v any) string {
 		}
 	}
 	return "false"
+}
+
+func explicitFalse(v any) bool {
+	switch val := v.(type) {
+	case bool:
+		return !val
+	case string:
+		return strings.EqualFold(strings.TrimSpace(val), "false")
+	default:
+		return false
+	}
 }
 
 func shellQuote(v any) string {

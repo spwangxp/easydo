@@ -23,6 +23,8 @@ func (e *Executor) dockerBuildScript(params TaskParams, workDir string) (string,
 	contextDir := defaultString(stringifyParam(params.Params["context"]), ".")
 	registry := normalizeDockerRegistry(stringifyParam(params.Params["registry"]), toBool(params.Params["push"]))
 	push := toBool(params.Params["push"])
+	useCache := boolDefault(params.Params["use_cache"], true)
+	pullBaseImage := toBool(params.Params["pull_base_image"])
 	platforms := normalizeDockerPlatforms(params.Params["architectures"])
 	platformValue := strings.Join(platforms, ",")
 
@@ -34,13 +36,13 @@ func (e *Executor) dockerBuildScript(params TaskParams, workDir string) (string,
 	switch e.runtime.PreferredBuildBackend {
 	case system.BuildBackendHostRuntime:
 		runtimeBin := defaultString(e.runtime.PrimaryRuntime, "docker")
-		return buildHostRuntimeScript(runtimeBin, imageName, imageTag, preBuildScript, dockerfile, contextDir, registry, imageRef, push, platformValue), nil
+		return buildHostRuntimeScript(runtimeBin, imageName, imageTag, preBuildScript, dockerfile, contextDir, registry, imageRef, push, platformValue, useCache, pullBaseImage), nil
 	default:
-		return buildEmbeddedBuildkitScript(e.EmbeddedBuildkitEnv(), params.TaskID, imageRef, preBuildScript, dockerfile, filepath.Dir(dockerfile), contextDir, registry, push, platformValue), nil
+		return buildEmbeddedBuildkitScript(e.EmbeddedBuildkitEnv(), params.TaskID, imageRef, preBuildScript, dockerfile, filepath.Dir(dockerfile), contextDir, registry, push, platformValue, useCache, pullBaseImage), nil
 	}
 }
 
-func buildHostRuntimeScript(runtimeBin, imageName, imageTag, preBuildScript, dockerfile, contextDir, registry, imageRef string, push bool, platforms string) string {
+func buildHostRuntimeScript(runtimeBin, imageName, imageTag, preBuildScript, dockerfile, contextDir, registry, imageRef string, push bool, platforms string, useCache bool, pullBaseImage bool) string {
 	pushValue := "false"
 	if push {
 		pushValue = "true"
@@ -59,12 +61,15 @@ REGISTRY=%q
 IMAGE_REF=%q
 PLATFORMS=%q
 PUSH_ENABLED=%q
+USE_CACHE=%q
+PULL_BASE_IMAGE=%q
 REGISTRY_USER="${EASYDO_CRED_REGISTRY_AUTH_USERNAME:-}"
 REGISTRY_PASSWORD="${EASYDO_CRED_REGISTRY_AUTH_PASSWORD:-${EASYDO_CRED_REGISTRY_AUTH_TOKEN:-}}"
 if [ -n "$REGISTRY" ] && [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then
   printf '%%s\n' "$REGISTRY_PASSWORD" | "$RUNTIME_BIN" login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
 fi
 %s%s
+echo "[easydo][info] docker build options: use_cache=$USE_CACHE pull_base_image=$PULL_BASE_IMAGE"
 if [ -n "$PLATFORMS" ]; then
   case "$PLATFORMS" in
     *,*)
@@ -73,21 +78,25 @@ if [ -n "$PLATFORMS" ]; then
         exit 1
       fi
       if [ "$PUSH_ENABLED" = "true" ] && [ -n "$REGISTRY" ]; then
+        echo "[easydo][cmd] $RUNTIME_BIN buildx build --platform $PLATFORMS $* -t $IMAGE_REF -f $DOCKERFILE $CONTEXT --push"
         "$RUNTIME_BIN" buildx build --platform "$PLATFORMS" "$@" -t "$IMAGE_REF" -f "$DOCKERFILE" "$CONTEXT" --push
       else
         mkdir -p .easydo-artifacts/images
+        echo "[easydo][cmd] $RUNTIME_BIN buildx build --platform $PLATFORMS $* -f $DOCKERFILE $CONTEXT --output type=oci,dest=.easydo-artifacts/images/%s.tar"
         "$RUNTIME_BIN" buildx build --platform "$PLATFORMS" "$@" -f "$DOCKERFILE" "$CONTEXT" --output "type=oci,dest=.easydo-artifacts/images/%s.tar"
       fi
       exit 0
       ;;
     *)
+      echo "[easydo][cmd] $RUNTIME_BIN build --platform $PLATFORMS $* -t $IMAGE_NAME:$IMAGE_TAG -f $DOCKERFILE $CONTEXT"
       "$RUNTIME_BIN" build --platform "$PLATFORMS" "$@" -t "$IMAGE_NAME:$IMAGE_TAG" -f "$DOCKERFILE" "$CONTEXT"
       ;;
   esac
 else
+  echo "[easydo][cmd] $RUNTIME_BIN build $* -t $IMAGE_NAME:$IMAGE_TAG -f $DOCKERFILE $CONTEXT"
   "$RUNTIME_BIN" build "$@" -t "$IMAGE_NAME:$IMAGE_TAG" -f "$DOCKERFILE" "$CONTEXT"
 fi
-`, runtimeBin, imageName, imageTag, dockerfile, contextDir, registry, imageRef, platforms, pushValue, preBuildBlock, hostGitMetadataBuildArgsBlock(), shellSafeFilename(imageRef))
+`, runtimeBin, imageName, imageTag, dockerfile, contextDir, registry, imageRef, platforms, pushValue, fmt.Sprintf("%t", useCache), fmt.Sprintf("%t", pullBaseImage), preBuildBlock, hostGitMetadataBuildArgsBlock()+hostCacheControlBuildArgsBlock(useCache, pullBaseImage), shellSafeFilename(imageRef), shellSafeFilename(imageRef))
 	if push {
 		script += `if [ -n "$REGISTRY" ]; then
   case "$IMAGE_NAME" in
@@ -101,7 +110,7 @@ fi
 	return script
 }
 
-func buildEmbeddedBuildkitScript(buildkitEnv map[string]string, taskID uint64, imageRef, preBuildScript, dockerfile, dockerfileDir, contextDir, registry string, push bool, platforms string) string {
+func buildEmbeddedBuildkitScript(buildkitEnv map[string]string, taskID uint64, imageRef, preBuildScript, dockerfile, dockerfileDir, contextDir, registry string, push bool, platforms string, useCache bool, pullBaseImage bool) string {
 	socketPath := defaultString(buildkitEnv["EASYDO_BUILDKIT_SOCKET_PATH"], "$(pwd)/.easydo-buildkit/shared/run/buildkitd.sock")
 	stateDir := defaultString(buildkitEnv["EASYDO_BUILDKIT_STATE_DIR"], "$(pwd)/.easydo-buildkit/shared/state")
 	configPath := defaultString(buildkitEnv["EASYDO_BUILDKIT_CONFIG_PATH"], "$(pwd)/.easydo-buildkit/shared/buildkitd.toml")
@@ -160,6 +169,11 @@ BUILDKIT_CONFIG_PATH=%q
 DOCKER_CONFIG=%q
 REGISTRY=%q
 PLATFORMS=%q
+USE_CACHE=%q
+PULL_BASE_IMAGE=%q
+CONTEXT=%q
+DOCKERFILE_DIR=%q
+DOCKERFILE_NAME=%q
 REGISTRY_USER="${EASYDO_CRED_REGISTRY_AUTH_USERNAME:-}"
 REGISTRY_PASSWORD="${EASYDO_CRED_REGISTRY_AUTH_PASSWORD:-${EASYDO_CRED_REGISTRY_AUTH_TOKEN:-}}"
 mkdir -p "$DOCKER_CONFIG" .easydo-artifacts/images
@@ -168,6 +182,8 @@ mkdir -p "$DOCKER_CONFIG" .easydo-artifacts/images
 %s
 %s
 export DOCKER_CONFIG
+echo "[easydo][info] docker build options: use_cache=$USE_CACHE pull_base_image=$PULL_BASE_IMAGE"
+echo "[easydo][cmd] buildctl --addr unix://$SOCKET_PATH build $* --frontend dockerfile.v0 --local context=$CONTEXT --local dockerfile=$DOCKERFILE_DIR --opt platform=$PLATFORMS --opt filename=$DOCKERFILE_NAME --output $OUTPUT_SPEC"
 buildctl --addr "unix://$SOCKET_PATH" build \
   "$@" \
   --frontend dockerfile.v0 \
@@ -176,7 +192,7 @@ buildctl --addr "unix://$SOCKET_PATH" build \
   --opt platform=%q \
   --opt filename=%q \
   --output "$OUTPUT_SPEC"
-`, socketPath, stateDir, configPath, dockerConfigDir, registry, platforms, qemuCheckBlock, preBuildBlock, outputLine, buildkitGitMetadataBuildArgsBlock(), contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
+`, socketPath, stateDir, configPath, dockerConfigDir, registry, platforms, fmt.Sprintf("%t", useCache), fmt.Sprintf("%t", pullBaseImage), contextDir, dockerfileDir, filepath.Base(dockerfile), qemuCheckBlock, preBuildBlock, outputLine, buildkitGitMetadataBuildArgsBlock()+buildkitCacheControlBuildArgsBlock(useCache, pullBaseImage), contextDir, dockerfileDir, platforms, filepath.Base(dockerfile))
 }
 
 func hostGitMetadataBuildArgsBlock() string {
@@ -203,6 +219,28 @@ if [ -n "$EASYDO_GIT_COMMIT" ]; then
   set -- "$@" --opt "build-arg:GIT_DATE=$EASYDO_GIT_DATE"
 fi
 `
+}
+
+func hostCacheControlBuildArgsBlock(useCache bool, pullBaseImage bool) string {
+	var builder strings.Builder
+	if !useCache {
+		builder.WriteString("set -- \"$@\" --no-cache\n")
+	}
+	if pullBaseImage {
+		builder.WriteString("set -- \"$@\" --pull\n")
+	}
+	return builder.String()
+}
+
+func buildkitCacheControlBuildArgsBlock(useCache bool, pullBaseImage bool) string {
+	var builder strings.Builder
+	if !useCache {
+		builder.WriteString("set -- \"$@\" --no-cache\n")
+	}
+	if pullBaseImage {
+		builder.WriteString("set -- \"$@\" --opt pull=true\n")
+	}
+	return builder.String()
 }
 
 func NormalizeDockerHubMirrors(value any) []string {
@@ -258,6 +296,27 @@ func toBool(value any) bool {
 		return strings.EqualFold(strings.TrimSpace(v), "true")
 	default:
 		return false
+	}
+}
+
+func boolDefault(value any, fallback bool) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return fallback
+		}
+		if strings.EqualFold(trimmed, "true") {
+			return true
+		}
+		if strings.EqualFold(trimmed, "false") {
+			return false
+		}
+		return fallback
+	default:
+		return fallback
 	}
 }
 

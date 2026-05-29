@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"easydo-server/internal/models"
+	"easydo-server/internal/services"
 	"easydo-server/pkg/utils"
 	"encoding/json"
 	"fmt"
@@ -517,69 +518,26 @@ func (h *TaskHandler) CancelTask(c *gin.Context) {
 
 // RetryTask retries a failed task
 func (h *TaskHandler) RetryTask(c *gin.Context) {
-	id := c.Param("id")
-	workspaceID := c.GetUint64("workspace_id")
-
-	var task models.AgentTask
-	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&task, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "任务不存在",
-		})
+	taskID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的任务ID"})
 		return
 	}
-
-	if task.Status != models.TaskStatusExecuteFailed && task.Status != models.TaskStatusScheduleFailed && task.Status != models.TaskStatusDispatchTimeout && task.Status != models.TaskStatusLeaseExpired {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "只能重试失败的任务",
-		})
-		return
-	}
-
-	if task.RetryCount >= task.MaxRetries {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "已达到最大重试次数",
-		})
-		return
-	}
-
-	h.DB.Model(&task).Updates(map[string]interface{}{
-		"status":           models.TaskStatusQueued,
-		"retry_count":      task.RetryCount + 1,
-		"start_time":       0,
-		"end_time":         0,
-		"duration":         0,
-		"exit_code":        0,
-		"error_msg":        "",
-		"result_data":      "",
-		"dispatch_token":   "",
-		"dispatch_attempt": 0,
-		"lease_expire_at":  0,
-		"agent_session_id": "",
-		"owner_server_id":  "",
+	result, err := (&services.PipelineOperationUseCase{DB: h.DB, Notifier: pipelineOperationWebsocketNotifier{}}).RetryPipelineTask(c.Request.Context(), services.RetryPipelineTaskRequest{
+		Actor:       pipelineOperationActorFromContext(c),
+		WorkspaceID: c.GetUint64("workspace_id"),
+		TaskID:      taskID,
 	})
-
-	task.Status = models.TaskStatusQueued
-	task.RetryCount = task.RetryCount + 1
-	task.StartTime = 0
-	task.EndTime = 0
-	task.Duration = 0
-	task.ExitCode = 0
-	task.ErrorMsg = ""
-	task.ResultData = ""
-	task.DispatchToken = ""
-	task.DispatchAttempt = 0
-	task.LeaseExpireAt = 0
-	task.AgentSessionID = ""
-	task.OwnerServerID = ""
-	_ = SharedWebSocketHandler().sendTaskAssign(task)
-
-	c.JSON(http.StatusOK, gin.H{
-		"code":    200,
-		"message": "任务已重新排队",
-	})
+	if err != nil {
+		writePipelineOperationError(c, err, map[services.ErrorCode]string{
+			services.ErrorCodeNotFound:        "任务不存在",
+			services.ErrorCodeForbidden:       "无权重试该任务",
+			services.ErrorCodeInvalidArgument: "任务重试失败",
+			services.ErrorCodeInternalError:   "任务重试失败",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 200, "message": result.Message})
 }
 
 // AgentReportTaskStatus reports task status from agent

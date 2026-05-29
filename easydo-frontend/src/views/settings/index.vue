@@ -197,7 +197,7 @@
               </div>
               <el-button type="primary">配置</el-button>
             </div>
-            
+
             <div class="integration-item">
               <div class="integration-icon wechat">
                 <el-icon :size="24"><ChatLineRound /></el-icon>
@@ -208,7 +208,7 @@
               </div>
               <el-button type="primary">配置</el-button>
             </div>
-            
+
             <div class="integration-item">
               <div class="integration-icon ldap">
                 <el-icon :size="24"><Key /></el-icon>
@@ -219,6 +219,88 @@
               </div>
               <el-button type="primary">配置</el-button>
             </div>
+          </div>
+
+          <div class="mcp-setup-block">
+            <div class="mcp-setup-header">
+              <div>
+                <h3>EasyDo MCP 接入</h3>
+                <p>使用当前登录身份认证，调用 workspace 相关工具时显式携带当前 workspace_id。</p>
+              </div>
+            </div>
+
+            <div v-if="!userStore.currentWorkspaceId" class="empty-hint">请先在顶部切换到一个工作空间</div>
+
+            <div v-else-if="!hasReadableToken" class="mcp-token-error-state">当前 token 获取失败</div>
+
+            <template v-else>
+              <div class="mcp-context-grid">
+                <div class="mcp-context-item">
+                  <span class="mcp-label">当前工作空间</span>
+                  <span class="mcp-value">{{ userStore.currentWorkspace?.name || '-' }}</span>
+                </div>
+                <div class="mcp-context-item">
+                  <span class="mcp-label">当前工作空间 ID</span>
+                  <span class="mcp-value">{{ userStore.currentWorkspaceId }}</span>
+                </div>
+                <div class="mcp-context-item">
+                  <span class="mcp-label">当前登录用户</span>
+                  <span class="mcp-value">{{ userStore.userInfo?.username || '-' }}</span>
+                </div>
+              </div>
+
+              <div class="mcp-permission-note">MCP 调用继承当前用户在当前工作空间下的权限。</div>
+
+              <div class="mcp-field-list">
+                <div class="mcp-field-item">
+                  <span class="mcp-label">MCP URL</span>
+                  <code>{{ mcpUrl }}</code>
+                  <el-button size="small" @click="copyMcpText(mcpUrl, 'MCP URL')">复制</el-button>
+                </div>
+                <div class="mcp-field-item">
+                  <span class="mcp-label">SSE URL（补充）</span>
+                  <code>{{ mcpSseUrl }}</code>
+                  <el-button size="small" @click="copyMcpText(mcpSseUrl, 'SSE URL')">复制</el-button>
+                </div>
+                <div class="mcp-field-item">
+                  <span class="mcp-label">Bearer token</span>
+                  <code>{{ mcpVisibleToken }}</code>
+                  <el-button size="small" @click="toggleMcpTokenVisible">{{ mcpTokenVisible ? '隐藏' : '显示' }}</el-button>
+                  <el-button size="small" @click="copyMcpText(userStore.token, 'Bearer token')">复制</el-button>
+                </div>
+                <div class="mcp-field-item">
+                  <span class="mcp-label">workspace_id</span>
+                  <code>{{ userStore.currentWorkspaceId }}</code>
+                  <el-button size="small" @click="copyMcpText(String(userStore.currentWorkspaceId), 'workspace_id')">复制</el-button>
+                </div>
+              </div>
+
+              <div class="mcp-snippet-tabs">
+                <button
+                  v-for="tab in mcpSnippetTabs"
+                  :key="tab.key"
+                  type="button"
+                  :class="{ active: activeMcpSnippetTab === tab.key }"
+                  @click="activeMcpSnippetTab = tab.key"
+                >
+                  {{ tab.label }}
+                </button>
+              </div>
+
+              <div class="mcp-snippet-panel">
+                <div class="mcp-snippet-header">
+                  <span>{{ activeMcpSnippetTitle }}</span>
+                  <el-button size="small" type="primary" @click="copyMcpText(activeMcpCopySnippet, '完整片段')">复制完整片段</el-button>
+                </div>
+                <pre>{{ activeMcpDisplaySnippet }}</pre>
+              </div>
+
+              <div class="mcp-setup-notes">
+                <span>客户端配置片段使用环境变量引用 token，避免把 token 写入配置文件。</span>
+                <span>OpenCode 当前使用 SSE 地址；Claude Code 和 Codex 优先使用 Streamable HTTP 地址。</span>
+                <span>workspace_id 是工具调用参数提示，不是 MCP 客户端连接配置字段。</span>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -240,6 +322,18 @@ import {
   upsertNotificationPreferenceInList
 } from '@/api/notification'
 import { getWorkspaceMembers } from '@/api/workspace'
+import {
+  buildMcpUrl,
+  buildMcpSseUrl,
+  buildMaskedToken,
+  hasReadableMcpToken,
+  buildClaudeCodeMcpSnippet,
+  buildOpenCodeMcpSnippet,
+  buildCodexMcpSnippet,
+  buildMcpEnvironmentSnippet,
+  buildDisplayMcpEnvironmentSnippet,
+  copyMcpValue
+} from './mcpSetup'
 import {
   Setting,
   Lock,
@@ -266,6 +360,63 @@ const settings = reactive({
 })
 const showPasswordDialog = ref(false)
 const showDevicesDialog = ref(false)
+const activeMcpSnippetTab = ref('claude')
+const mcpTokenVisible = ref(false)
+const mcpSnippetTabs = [
+  { key: 'claude', label: 'Claude Code' },
+  { key: 'opencode', label: 'OpenCode' },
+  { key: 'codex', label: 'Codex' },
+  { key: 'env', label: '环境变量' }
+]
+
+const browserOrigin = computed(() => typeof window === 'undefined' ? '' : window.location.origin)
+const hasReadableToken = computed(() => hasReadableMcpToken(userStore.token))
+const mcpUrl = computed(() => buildMcpUrl(browserOrigin.value))
+const mcpSseUrl = computed(() => buildMcpSseUrl(browserOrigin.value))
+const mcpVisibleToken = computed(() => {
+  return mcpTokenVisible.value ? userStore.token : buildMaskedToken(userStore.token)
+})
+const mcpClaudeCodeSnippet = computed(() => buildClaudeCodeMcpSnippet({ origin: browserOrigin.value }))
+const mcpOpenCodeSnippet = computed(() => buildOpenCodeMcpSnippet({ origin: browserOrigin.value }))
+const mcpCodexSnippet = computed(() => buildCodexMcpSnippet({ origin: browserOrigin.value }))
+const mcpEnvironmentSnippet = computed(() => buildMcpEnvironmentSnippet({
+  origin: browserOrigin.value,
+  token: userStore.token,
+  workspaceId: userStore.currentWorkspaceId
+}))
+const mcpDisplayEnvironmentSnippet = computed(() => buildDisplayMcpEnvironmentSnippet({
+  origin: browserOrigin.value,
+  token: userStore.token,
+  workspaceId: userStore.currentWorkspaceId
+}))
+const activeMcpSnippet = computed(() => {
+  const snippets = {
+    claude: {
+      title: 'Claude Code .mcp.json',
+      display: mcpClaudeCodeSnippet.value,
+      copy: mcpClaudeCodeSnippet.value
+    },
+    opencode: {
+      title: 'OpenCode opencode.json',
+      display: mcpOpenCodeSnippet.value,
+      copy: mcpOpenCodeSnippet.value
+    },
+    codex: {
+      title: 'Codex config.toml',
+      display: mcpCodexSnippet.value,
+      copy: mcpCodexSnippet.value
+    },
+    env: {
+      title: '环境变量',
+      display: mcpDisplayEnvironmentSnippet.value,
+      copy: mcpEnvironmentSnippet.value
+    }
+  }
+  return snippets[activeMcpSnippetTab.value] || snippets.claude
+})
+const activeMcpSnippetTitle = computed(() => activeMcpSnippet.value.title)
+const activeMcpCopySnippet = computed(() => activeMcpSnippet.value.copy)
+const activeMcpDisplaySnippet = computed(() => activeMcpSnippet.value.display)
 
 const notificationEventGroups = computed(() => {
   return NOTIFICATION_EVENT_GROUPS.map(group => ({
@@ -317,6 +468,34 @@ const loadWorkspaceMembers = async () => {
 
 const saveSettings = () => {
   ElMessage.success('当前阶段未实现基础设置保存')
+}
+
+const fallbackCopyText = async (value) => {
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  document.body.appendChild(textarea)
+  textarea.select()
+  document.execCommand('copy')
+  textarea.remove()
+}
+
+const toggleMcpTokenVisible = () => {
+  mcpTokenVisible.value = !mcpTokenVisible.value
+}
+
+const copyMcpText = async (value, label) => {
+  await copyMcpValue({
+    value,
+    writeText: async (text) => {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('clipboard unavailable')
+      }
+      await navigator.clipboard.writeText(text)
+    },
+    fallbackWriteText: fallbackCopyText,
+    onSuccess: () => ElMessage.success(`${label} 已复制`),
+    onError: () => ElMessage.error(`${label} 复制失败`)
+  })
 }
 
 const getPreferenceSavingKey = (workspaceId, eventType, channel) => {
@@ -464,6 +643,7 @@ watch(() => [activeMenu.value, userStore.currentWorkspaceId], async ([menu]) => 
     // ============================================
     .settings-content {
       flex: 1;
+      min-width: 0;
       background: var(--bg-card);
       border-radius: $radius-xl;
       padding: 32px;
@@ -895,6 +1075,163 @@ watch(() => [activeMenu.value, userStore.currentWorkspaceId], async ([menu]) => 
             border: none;
             box-shadow: $shadow-sm;
           }
+        }
+      }
+
+      .mcp-setup-block {
+        min-width: 0;
+        margin-top: 24px;
+        padding: 24px;
+        border: 1px solid var(--border-color);
+        border-radius: $radius-lg;
+        background: var(--bg-secondary);
+
+        .mcp-setup-header {
+          display: flex;
+          justify-content: space-between;
+          margin-bottom: 18px;
+
+          h3 {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 6px;
+          }
+
+          p {
+            font-size: 13px;
+            color: var(--text-muted);
+          }
+        }
+
+        .mcp-token-error-state {
+          color: var(--danger-color);
+          font-size: 13px;
+        }
+
+        .mcp-context-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 12px;
+          margin-bottom: 12px;
+        }
+
+        .mcp-context-item {
+          min-width: 0;
+          padding: 12px 14px;
+          border: 1px solid var(--border-color-light);
+          border-radius: $radius-md;
+          background: var(--bg-card);
+        }
+
+        .mcp-label {
+          display: block;
+          font-size: 12px;
+          color: var(--text-muted);
+          margin-bottom: 6px;
+        }
+
+        .mcp-value {
+          display: block;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-size: 13px;
+          color: var(--text-primary);
+          font-weight: 500;
+        }
+
+        .mcp-permission-note {
+          margin-bottom: 16px;
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+
+        .mcp-field-list {
+          display: grid;
+          gap: 10px;
+          margin-bottom: 18px;
+        }
+
+        .mcp-field-item {
+          display: grid;
+          min-width: 0;
+          grid-template-columns: 120px minmax(0, 1fr) auto auto;
+          align-items: center;
+          gap: 10px;
+          padding: 10px 12px;
+          border: 1px solid var(--border-color-light);
+          border-radius: $radius-md;
+          background: var(--bg-card);
+
+          .mcp-label {
+            margin-bottom: 0;
+          }
+
+          code {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 12px;
+            color: var(--text-primary);
+          }
+        }
+
+        .mcp-snippet-tabs {
+          display: inline-flex;
+          gap: 8px;
+          margin-bottom: 12px;
+
+          button {
+            border: 1px solid var(--border-color-light);
+            border-radius: $radius-md;
+            background: var(--bg-card);
+            color: var(--text-secondary);
+            padding: 7px 12px;
+            cursor: pointer;
+
+            &.active {
+              color: var(--primary-color);
+              border-color: var(--primary-color);
+              background: var(--primary-lighter);
+            }
+          }
+        }
+
+        .mcp-snippet-panel {
+          border: 1px solid var(--border-color-light);
+          border-radius: $radius-md;
+          overflow: hidden;
+          background: var(--bg-card);
+
+          .mcp-snippet-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border-color-light);
+            color: var(--text-primary);
+            font-size: 13px;
+            font-weight: 600;
+          }
+
+          pre {
+            margin: 0;
+            padding: 14px;
+            overflow-x: auto;
+            color: var(--text-primary);
+            font-size: 12px;
+            line-height: 1.6;
+            background: transparent;
+          }
+        }
+
+        .mcp-setup-notes {
+          display: grid;
+          gap: 6px;
+          margin-top: 14px;
+          color: var(--text-muted);
+          font-size: 12px;
         }
       }
     }

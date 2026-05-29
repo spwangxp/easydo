@@ -159,6 +159,7 @@ func managedModels() []any {
 		&AISessionTurn{},
 		&DeploymentRequest{},
 		&DeploymentRecord{},
+		&MCPCallAudit{},
 		&MasterKey{},
 		&SystemSetting{},
 	}

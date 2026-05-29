@@ -4,6 +4,8 @@ import (
 	"easydo-server/internal/config"
 	"easydo-server/internal/handlers"
 	"easydo-server/internal/middleware"
+	"easydo-server/internal/models"
+	"easydo-server/mcp"
 
 	"github.com/gin-gonic/gin"
 )
@@ -14,6 +16,7 @@ func InitRouter() *gin.Engine {
 
 	// 使用 CORS 中间件
 	router.Use(middleware.CORSMiddleware())
+	mcp.NewServer(mcp.ServerOptions{DB: models.DB, AllowedOrigins: config.MCPAllowedOrigins()}).RegisterRoutes(router)
 
 	// Debug middleware - log all requests
 	router.Use(func(c *gin.Context) {

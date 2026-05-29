@@ -43,6 +43,17 @@ func TestBootstrapDockerHubMirrors_EmptyEnvReturnsBuiltInDefaults(t *testing.T) 
 	}
 }
 
+func TestMCPAllowedOriginsParsesEnvList(t *testing.T) {
+	t.Setenv("MCP_ALLOWED_ORIGINS", " https://mcp-a.example ,https://mcp-b.example ,, ")
+	Init()
+
+	got := MCPAllowedOrigins()
+	want := []string{"https://mcp-a.example", "https://mcp-b.example"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("origins=%v, want=%v", got, want)
+	}
+}
+
 func TestGetDSNForcesUTF8MB4ConnectionCollation(t *testing.T) {
 	Init()
 	Config.Set("database.host", "db")

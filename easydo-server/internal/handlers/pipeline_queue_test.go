@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,18 +11,161 @@ import (
 	"testing"
 
 	"easydo-server/internal/models"
+	"easydo-server/internal/services"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
+
+func TestPipelineOperationActorFromContextDoesNotInventAdmin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	actor := pipelineOperationActorFromContext(c)
+	if actor.UserID != 0 || actor.SystemRole != "" || actor.Username != "" {
+		t.Fatalf("actor=%+v, want empty actor when auth context is missing", actor)
+	}
+}
+
+func createPipelineQueueTestWorkspace(t *testing.T, db *gorm.DB, slug string) models.Workspace {
+	t.Helper()
+	workspace := models.Workspace{Name: slug, Slug: slug, Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: 1}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	return workspace
+}
+
+func setPipelineOperationTestActor(c *gin.Context, user models.User, workspace models.Workspace) {
+	c.Set("user_id", user.ID)
+	c.Set("role", user.Role)
+	c.Set("username", user.Username)
+	c.Set("workspace_id", workspace.ID)
+}
+
+func TestRunPipelineRejectsMissingWorkspaceContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "missing-workspace-run-user", models.WorkspaceRoleDeveloper)
+
+	pipeline := models.Pipeline{Name: "missing-workspace-run", OwnerID: user.ID, WorkspaceID: workspace.ID, Environment: "testing", Config: `{"version":"2.0","nodes":[],"edges":[]}`}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/run", pipeline.ID), nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}}
+	c.Set("user_id", user.ID)
+	c.Set("role", user.Role)
+	c.Set("username", user.Username)
+
+	h.RunPipeline(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400 when workspace context is missing", w.Code, w.Body.String())
+	}
+	var runCount int64
+	if err := db.Model(&models.PipelineRun{}).Where("pipeline_id = ?", pipeline.ID).Count(&runCount).Error; err != nil {
+		t.Fatalf("count runs failed: %v", err)
+	}
+	if runCount != 0 {
+		t.Fatalf("expected no run without explicit workspace context, got=%d", runCount)
+	}
+}
+
+func TestCancelPipelineRunRejectsMissingWorkspaceContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "missing-workspace-cancel-user", models.WorkspaceRoleDeveloper)
+
+	pipeline := models.Pipeline{Name: "missing-workspace-cancel", OwnerID: user.ID, WorkspaceID: workspace.ID, Environment: "testing", Config: `{"version":"2.0","nodes":[],"edges":[]}`}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+	run := models.PipelineRun{WorkspaceID: workspace.ID, PipelineID: pipeline.ID, BuildNumber: 1, Status: models.PipelineRunStatusRunning}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/runs/%d/cancel", pipeline.ID, run.ID), nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}, {Key: "run_id", Value: strconv.FormatUint(run.ID, 10)}}
+	c.Set("user_id", user.ID)
+	c.Set("role", user.Role)
+	c.Set("username", user.Username)
+
+	h.CancelPipelineRun(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400 when workspace context is missing", w.Code, w.Body.String())
+	}
+	var updated models.PipelineRun
+	if err := db.First(&updated, run.ID).Error; err != nil {
+		t.Fatalf("reload run failed: %v", err)
+	}
+	if updated.Status != models.PipelineRunStatusRunning {
+		t.Fatalf("run status=%s, want unchanged running", updated.Status)
+	}
+}
+
+func TestRunPipelineDoesNotInventTriggerUsername(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "missing-username-run-user", models.WorkspaceRoleDeveloper)
+
+	pipeline := models.Pipeline{Name: "missing-username-run", OwnerID: user.ID, WorkspaceID: workspace.ID, Environment: "testing", Config: `{"version":"2.0","nodes":[],"edges":[]}`}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/run", pipeline.ID), nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}}
+	c.Set("user_id", user.ID)
+	c.Set("role", user.Role)
+	c.Set("workspace_id", workspace.ID)
+
+	h.RunPipeline(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			RunID uint64 `json:"run_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response failed: %v, body=%s", err, w.Body.String())
+	}
+	var run models.PipelineRun
+	if err := db.First(&run, resp.Data.RunID).Error; err != nil {
+		t.Fatalf("load run failed: %v", err)
+	}
+	if run.TriggerUser != "" {
+		t.Fatalf("trigger_user=%q, want empty when username context is missing", run.TriggerUser)
+	}
+}
 
 func TestRunPipeline_AgentNodeReturnsQueuedWithoutPrecreatedTasks(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
 	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "queued-regression-user", models.WorkspaceRoleDeveloper)
 
 	pipeline := models.Pipeline{
 		Name:        "queued-regression",
 		Description: "regression test for queued run",
-		OwnerID:     1,
+		OwnerID:     user.ID,
+		WorkspaceID: workspace.ID,
 		Environment: "testing",
 		Config: `{
 			"version":"2.0",
@@ -39,9 +183,7 @@ func TestRunPipeline_AgentNodeReturnsQueuedWithoutPrecreatedTasks(t *testing.T) 
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/run", pipeline.ID), nil)
 	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}}
-	c.Set("user_id", uint64(99))
-	c.Set("role", "admin")
-	c.Set("username", "demo-user")
+	setPipelineOperationTestActor(c, user, workspace)
 
 	h.RunPipeline(c)
 
@@ -80,11 +222,24 @@ func TestRunPipeline_AgentNodeReturnsQueuedWithoutPrecreatedTasks(t *testing.T) 
 	if run.StartTime != 0 {
 		t.Fatalf("run start_time=%d, want=0 for queued run", run.StartTime)
 	}
-	if run.TriggerUserID != 99 {
-		t.Fatalf("run trigger_user_id=%d, want=99", run.TriggerUserID)
+	if run.TriggerUserID != user.ID {
+		t.Fatalf("run trigger_user_id=%d, want=%d", run.TriggerUserID, user.ID)
 	}
-	if run.TriggerUserRole != "admin" {
-		t.Fatalf("run trigger_user_role=%s, want=admin", run.TriggerUserRole)
+	if run.TriggerUserRole != user.Role {
+		t.Fatalf("run trigger_user_role=%s, want=%s", run.TriggerUserRole, user.Role)
+	}
+	if run.TriggerType != "manual" {
+		t.Fatalf("run trigger_type=%s, want manual", run.TriggerType)
+	}
+	if run.TriggerSource != "pipeline_detail" {
+		t.Fatalf("run trigger_source=%s, want pipeline_detail", run.TriggerSource)
+	}
+	var runConfig models.PipelineRunConfigSnapshot
+	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
+		t.Fatalf("unmarshal run config failed: %v", err)
+	}
+	if runConfig.Trigger.Type != "manual" || runConfig.Trigger.Source != "pipeline_detail" || runConfig.Trigger.Operator != user.Username {
+		t.Fatalf("run config trigger=%+v, want manual pipeline_detail %s", runConfig.Trigger, user.Username)
 	}
 
 	var taskCount int64
@@ -96,15 +251,67 @@ func TestRunPipeline_AgentNodeReturnsQueuedWithoutPrecreatedTasks(t *testing.T) 
 	}
 }
 
+func TestPipelineOperationTriggerExecutorPersistsMCPTriggerSource(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "mcp-trigger-source-user", models.WorkspaceRoleDeveloper)
+
+	pipeline := models.Pipeline{
+		Name:        "mcp-trigger-source",
+		OwnerID:     user.ID,
+		WorkspaceID: workspace.ID,
+		Environment: "testing",
+		Config:      `{"version":"2.0","nodes":[],"edges":[]}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+
+	result, err := (pipelineOperationTriggerExecutor{handler: h}).TriggerPipeline(context.Background(), services.TriggerPipelineExecutionRequest{
+		Actor: services.ActorContext{
+			UserID:     user.ID,
+			Username:   user.Username,
+			SystemRole: user.Role,
+		},
+		Pipeline:      pipeline,
+		TriggerType:   "mcp",
+		TriggerSource: "streamable_http",
+	})
+	if err != nil {
+		t.Fatalf("TriggerPipeline returned error: %v", err)
+	}
+
+	var run models.PipelineRun
+	if err := db.First(&run, result.RunID).Error; err != nil {
+		t.Fatalf("load run failed: %v", err)
+	}
+	if run.TriggerType != "mcp" {
+		t.Fatalf("trigger_type=%s, want mcp", run.TriggerType)
+	}
+	if run.TriggerSource != "streamable_http" {
+		t.Fatalf("trigger_source=%s, want streamable_http", run.TriggerSource)
+	}
+	var runConfig models.PipelineRunConfigSnapshot
+	if err := json.Unmarshal([]byte(run.RunConfig), &runConfig); err != nil {
+		t.Fatalf("unmarshal run config failed: %v", err)
+	}
+	if runConfig.Trigger.Type != "mcp" || runConfig.Trigger.Source != "streamable_http" || runConfig.Trigger.Operator != user.Username {
+		t.Fatalf("run config trigger=%+v, want mcp streamable_http %s", runConfig.Trigger, user.Username)
+	}
+}
+
 func TestRunPipeline_ServerOnlyNodeStartsImmediately(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
 	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "server-only-run-user", models.WorkspaceRoleDeveloper)
 
 	pipeline := models.Pipeline{
 		Name:        "server-only-run",
 		Description: "server node should start immediately",
-		OwnerID:     1,
+		OwnerID:     user.ID,
+		WorkspaceID: workspace.ID,
 		Environment: "testing",
 		Config: `{
 			"version":"2.0",
@@ -122,9 +329,10 @@ func TestRunPipeline_ServerOnlyNodeStartsImmediately(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/run", pipeline.ID), nil)
 	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}}
-	c.Set("user_id", uint64(7))
-	c.Set("role", "user")
-	c.Set("username", "tester")
+	c.Set("user_id", user.ID)
+	c.Set("role", user.Role)
+	c.Set("username", user.Username)
+	c.Set("workspace_id", workspace.ID)
 
 	h.RunPipeline(c)
 
@@ -162,11 +370,13 @@ func TestRunPipeline_StoresManualNodeScopedInputsWithoutMutatingPipelineSnapshot
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
 	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "manual-runtime-inputs-user", models.WorkspaceRoleDeveloper)
 
 	pipeline := models.Pipeline{
 		Name:        "manual-runtime-inputs",
 		Description: "manual runtime inputs should live in run_config_json",
-		OwnerID:     1,
+		OwnerID:     user.ID,
+		WorkspaceID: workspace.ID,
 		Environment: "testing",
 		Config: `{
 			"version":"2.0",
@@ -186,9 +396,7 @@ func TestRunPipeline_StoresManualNodeScopedInputsWithoutMutatingPipelineSnapshot
 	c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/run", pipeline.ID), body)
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}}
-	c.Set("user_id", uint64(99))
-	c.Set("role", "admin")
-	c.Set("username", "demo-user")
+	setPipelineOperationTestActor(c, user, workspace)
 
 	h.RunPipeline(c)
 
@@ -240,12 +448,13 @@ func TestRunPipeline_UsesDefinitionJSONAsSourceOfTruth(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
 	h := &PipelineHandler{DB: db}
+	user, workspace := seedCredentialTestUserAndWorkspace(t, db, "definition-source-of-truth-user", models.WorkspaceRoleDeveloper)
 
 	pipeline := models.Pipeline{
 		Name:        "definition-source-of-truth",
 		Description: "run should use definition_json instead of legacy config",
-		OwnerID:     1,
-		WorkspaceID: 1,
+		OwnerID:     user.ID,
+		WorkspaceID: workspace.ID,
 		Environment: "testing",
 		Config:      "{invalid-json",
 		Definition: `{
@@ -277,10 +486,7 @@ func TestRunPipeline_UsesDefinitionJSONAsSourceOfTruth(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/pipelines/%d/run", pipeline.ID), body)
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(pipeline.ID, 10)}}
-	c.Set("user_id", uint64(99))
-	c.Set("role", "admin")
-	c.Set("username", "demo-user")
-	c.Set("workspace_id", pipeline.WorkspaceID)
+	setPipelineOperationTestActor(c, user, workspace)
 
 	h.RunPipeline(c)
 

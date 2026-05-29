@@ -295,6 +295,73 @@ func TestGetWorkspaceList_HidesAdminWorkspacesFromNonAdmins(t *testing.T) {
 	}
 }
 
+func TestGetWorkspaceListWithoutPaginationParamsReturnsAllVisibleWorkspaces(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &WorkspaceHandler{DB: db}
+
+	user := models.User{Username: "workspace-list-all-user", Role: "user", Status: "active"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	for i := 0; i < 25; i++ {
+		workspace := models.Workspace{Name: "visible-space-" + strconv.Itoa(i), Slug: "visible-space-" + strconv.Itoa(i), Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: user.ID}
+		if err := db.Create(&workspace).Error; err != nil {
+			t.Fatalf("create workspace failed: %v", err)
+		}
+		member := models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: user.ID, Role: models.WorkspaceRoleDeveloper, Status: models.WorkspaceMemberStatusActive, InvitedBy: user.ID}
+		if err := db.Create(&member).Error; err != nil {
+			t.Fatalf("create membership failed: %v", err)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/workspaces", nil)
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+
+	h.GetWorkspaceList(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			List []struct {
+				ID uint64 `json:"id"`
+			} `json:"list"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Data.List) != 25 {
+		t.Fatalf("visible workspaces=%d, want=25 body=%s", len(resp.Data.List), w.Body.String())
+	}
+}
+
+func TestGetWorkspaceListRejectsInvalidPaginationParams(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &WorkspaceHandler{DB: db}
+
+	for _, rawQuery := range []string{"page=abc", "limit=oops", "page=0", "limit=-1", "limit=101"} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/workspaces?"+rawQuery, nil)
+		c.Set("user_id", uint64(1))
+		c.Set("role", "user")
+
+		h.GetWorkspaceList(c)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("query=%s status=%d body=%s", rawQuery, w.Code, w.Body.String())
+		}
+	}
+}
+
 func TestGetWorkspace_RejectsAdminWorkspaceAccessForNonAdmin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
@@ -323,6 +390,113 @@ func TestGetWorkspace_RejectsAdminWorkspaceAccessForNonAdmin(t *testing.T) {
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkspaceGetReturnsSuccessShapeAfterUseCaseRefactor(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &WorkspaceHandler{DB: db}
+
+	user := models.User{Username: "workspace-shape-user", Role: "user", Status: "active"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	workspace := models.Workspace{Name: "shapeSpace", Slug: "shapeSpace", Description: "shape description", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: user.ID}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: user.ID, Role: models.WorkspaceRoleMaintainer, Status: models.WorkspaceMemberStatusActive, InvitedBy: user.ID}).Error; err != nil {
+		t.Fatalf("create membership failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/workspaces/1", nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(workspace.ID, 10)}}
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+
+	h.GetWorkspace(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			ID           uint64   `json:"id"`
+			Name         string   `json:"name"`
+			Description  string   `json:"description"`
+			Status       string   `json:"status"`
+			Visibility   string   `json:"visibility"`
+			Kind         string   `json:"kind"`
+			Role         string   `json:"role"`
+			Capabilities []string `json:"capabilities"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v body=%s", err, w.Body.String())
+	}
+	if resp.Code != 200 || resp.Data.ID != workspace.ID || resp.Data.Name != workspace.Name || resp.Data.Description != workspace.Description {
+		t.Fatalf("unexpected success response: %+v body=%s", resp, w.Body.String())
+	}
+	if resp.Data.Role != models.WorkspaceRoleMaintainer {
+		t.Fatalf("role=%s, want=%s body=%s", resp.Data.Role, models.WorkspaceRoleMaintainer, w.Body.String())
+	}
+	if len(resp.Data.Capabilities) == 0 {
+		t.Fatalf("expected capabilities body=%s", w.Body.String())
+	}
+}
+
+func TestWorkspaceGetMapsInternalUseCaseErrorToHTTP500(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &WorkspaceHandler{DB: db}
+
+	user := models.User{Username: "workspace-db-error-user", Role: "user", Status: "active"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	workspace := models.Workspace{Name: "dbErrorSpace", Slug: "dbErrorSpace", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: user.ID}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: user.ID, Role: models.WorkspaceRoleDeveloper, Status: models.WorkspaceMemberStatusActive, InvitedBy: user.ID}).Error; err != nil {
+		t.Fatalf("create membership failed: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql db failed: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close db failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/workspaces/1", nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(workspace.ID, 10)}}
+	c.Set("user_id", user.ID)
+	c.Set("role", "user")
+
+	h.GetWorkspace(c)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v body=%s", err, w.Body.String())
+	}
+	if resp.Code != 500 || resp.Message == "" {
+		t.Fatalf("unexpected error response: %+v", resp)
+	}
+	if strings.Contains(strings.ToLower(resp.Message), "sql") || strings.Contains(strings.ToLower(resp.Message), "database") {
+		t.Fatalf("response leaked internal detail: %s", resp.Message)
 	}
 }
 

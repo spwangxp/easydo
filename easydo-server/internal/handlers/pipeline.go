@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -937,262 +938,222 @@ func (h *PipelineHandler) DeletePipeline(c *gin.Context) {
 }
 
 func (h *PipelineHandler) RunPipeline(c *gin.Context) {
-	id := c.Param("id")
-	workspaceID := c.GetUint64("workspace_id")
-	type pipelineRunRequest struct {
+	pipelineID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的流水线ID"})
+		return
+	}
+	var req struct {
 		Inputs  map[string]map[string]any `json:"inputs"`
 		Options map[string]any            `json:"options"`
 	}
-
-	var pipeline models.Pipeline
-	if err := h.DB.Where("id = ? AND workspace_id = ?", id, workspaceID).First(&pipeline).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "流水线不存在",
-		})
-		return
-	}
-
-	// 解析流水线定义，检查是否有需要 Agent 执行的节点
-	config, err := h.loadPipelineDefinitionConfig(h.DB, pipeline)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "流水线定义解析失败: " + err.Error(),
-		})
-		return
-	}
-
-	if valid, errMsg := config.ValidateTaskTypes(); !valid {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": errMsg,
-		})
-		return
-	}
-
-	triggerUserID := c.GetUint64("user_id")
-	triggerRole := c.GetString("role")
-	triggerUsername := c.GetString("username")
-	if triggerUsername == "" {
-		triggerUsername = "system"
-	}
-
-	var req pipelineRunRequest
 	if c.Request != nil && c.Request.Body != nil {
 		if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"code":    400,
-				"message": "运行参数错误: " + err.Error(),
-			})
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "运行参数错误: " + err.Error()})
 			return
 		}
 	}
-
-	if _, err := h.validatePipelineCredentialBindings(&config, triggerUserID, triggerRole, pipeline.ID, workspaceID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "流水线凭据配置无效: " + err.Error(),
-		})
-		return
-	}
-
-	run, buildNumber, err := h.launchPipelineRun(pipeline, config, pipelineRunTriggerContext{
-		TriggerType:     "manual",
-		TriggerUser:     triggerUsername,
-		TriggerUserID:   triggerUserID,
-		TriggerUserRole: triggerRole,
-		RunConfig: models.PipelineRunConfigSnapshot{
-			Inputs:  req.Inputs,
-			Options: req.Options,
-		},
+	workspaceID := pipelineOperationWorkspaceID(c)
+	result, err := h.pipelineOperationUseCase().TriggerPipeline(c.Request.Context(), services.TriggerPipelineRequest{
+		Actor:         pipelineOperationActorFromContext(c),
+		WorkspaceID:   workspaceID,
+		PipelineID:    pipelineID,
+		Inputs:        req.Inputs,
+		Options:       req.Options,
+		TriggerType:   "manual",
+		TriggerSource: "pipeline_detail",
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code": 500,
-			"msg":  "创建运行记录失败: " + err.Error(),
+		writePipelineOperationError(c, err, map[services.ErrorCode]string{
+			services.ErrorCodeNotFound:        "流水线不存在",
+			services.ErrorCodeForbidden:       "无权运行该流水线",
+			services.ErrorCodeInvalidArgument: "运行参数无效",
+			services.ErrorCodeInternalError:   "创建运行记录失败",
 		})
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"data": gin.H{
-			"run_id":       run.ID,
-			"build_number": buildNumber,
-			"status":       run.Status,
-		},
-	})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"run_id": result.RunID, "build_number": result.BuildNumber, "status": result.Status}})
 }
 
 // CancelPipelineRun cancels an active pipeline run and marks non-terminal tasks as cancelled.
 // Only runs in active state can be cancelled.
 func (h *PipelineHandler) CancelPipelineRun(c *gin.Context) {
-	id := c.Param("id")
-	runID := c.Param("run_id")
-	workspaceID := c.GetUint64("workspace_id")
-
-	pipelineID, err := strconv.ParseUint(id, 10, 64)
+	pipelineID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "无效的流水线ID",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的流水线ID"})
 		return
 	}
-
-	if !pipelineBelongsToWorkspace(h.DB, pipelineID, workspaceID) {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "流水线不存在",
-		})
-		return
-	}
-
-	runIDNum, err := strconv.ParseUint(runID, 10, 64)
+	runID, err := strconv.ParseUint(c.Param("run_id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "无效的运行ID",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的运行ID"})
 		return
 	}
-
-	var run models.PipelineRun
-	if err := h.DB.Where("id = ? AND pipeline_id = ? AND workspace_id = ?", runIDNum, pipelineID, workspaceID).First(&run).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "运行记录不存在",
-		})
-		return
-	}
-
-	if !isRunActiveStatus(run.Status) || run.Status == models.PipelineRunStatusCancelRequested {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": fmt.Sprintf("运行状态 '%s' 不支持取消操作", run.Status),
-		})
-		return
-	}
-
-	var cancelledTasks []models.AgentTask
-	var tasksToNotify []models.AgentTask
-
-	err = h.DB.Transaction(func(tx *gorm.DB) error {
-		var tasks []models.AgentTask
-		if err := tx.Where("pipeline_run_id = ? AND status NOT IN ?",
-			runIDNum,
-			[]string{
-				models.TaskStatusExecuteSuccess,
-				models.TaskStatusExecuteFailed,
-				models.TaskStatusScheduleFailed,
-				models.TaskStatusCancelled,
-			}).Find(&tasks).Error; err != nil {
-			return fmt.Errorf("查询任务失败: %w", err)
-		}
-
-		now := time.Now().Unix()
-		for i := range tasks {
-			task := &tasks[i]
-			if !isTaskCancelable(task.Status) {
-				continue
-			}
-
-			shouldNotifyAgent := isExecutionOwnedTaskStatus(task.Status)
-			updates := buildTaskCancelUpdates(task, now)
-			if err := tx.Model(task).Updates(updates).Error; err != nil {
-				return fmt.Errorf("更新任务 %d 状态失败: %w", task.ID, err)
-			}
-
-			if status, ok := updates["status"].(string); ok {
-				task.Status = status
-			}
-			if endTime, ok := updates["end_time"].(int64); ok {
-				task.EndTime = endTime
-			}
-			if duration, ok := updates["duration"].(int); ok {
-				task.Duration = duration
-			}
-			syncLiveTaskStateFromTask(task, "")
-			cancelledTasks = append(cancelledTasks, *task)
-			if shouldNotifyAgent {
-				tasksToNotify = append(tasksToNotify, *task)
-			}
-		}
-
-		runStatus := models.PipelineRunStatusCancelled
-		runUpdates := map[string]any{}
-		if len(tasksToNotify) > 0 {
-			runStatus = models.PipelineRunStatusCancelRequested
-			runUpdates["status"] = runStatus
-		} else {
-			duration := 0
-			if run.StartTime > 0 {
-				duration = int(now - run.StartTime)
-			}
-			runUpdates["status"] = runStatus
-			runUpdates["end_time"] = now
-			runUpdates["duration"] = duration
-			run.EndTime = now
-			run.Duration = duration
-		}
-		if err := tx.Model(&run).Updates(runUpdates).Error; err != nil {
-			return fmt.Errorf("更新运行状态失败: %w", err)
-		}
-		run.Status = runStatus
-
-		return nil
+	workspaceID := pipelineOperationWorkspaceID(c)
+	result, err := h.pipelineOperationUseCase().CancelPipelineRun(c.Request.Context(), services.CancelPipelineRunRequest{
+		Actor:       pipelineOperationActorFromContext(c),
+		WorkspaceID: workspaceID,
+		PipelineID:  pipelineID,
+		RunID:       runID,
 	})
-
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "取消流水线运行失败: " + err.Error(),
+		notFoundMessage := "运行记录不存在"
+		var svcErr services.ServiceError
+		if errors.As(err, &svcErr) && svcErr.Code == services.ErrorCodeNotFound && svcErr.Message == "pipeline not found" {
+			notFoundMessage = "流水线不存在"
+		}
+		writePipelineOperationError(c, err, map[services.ErrorCode]string{
+			services.ErrorCodeNotFound:        notFoundMessage,
+			services.ErrorCodeForbidden:       "无权取消该流水线运行",
+			services.ErrorCodeInvalidArgument: "取消流水线运行失败",
+			services.ErrorCodeInternalError:   "取消流水线运行失败",
 		})
 		return
 	}
+	c.JSON(http.StatusOK, gin.H{"code": 200, "message": result.Message})
+}
 
-	for _, task := range tasksToNotify {
-		_ = SharedWebSocketHandler().sendTaskCancel(task)
-	}
-	for _, task := range cancelledTasks {
-		message := "任务已被取消"
-		if task.Status == models.TaskStatusCancelRequested {
-			message = "任务取消请求已提交，等待 agent 确认"
-		}
-		SharedWebSocketHandler().BroadcastTaskStatus(
-			runIDNum,
-			task.ID,
-			task.NodeID,
-			task.Status,
-			0,
-			message,
-			"",
-		)
-	}
+type pipelineOperationTriggerExecutor struct {
+	handler *PipelineHandler
+}
 
-	runMessage := "流水线运行已取消"
-	if run.Status == models.PipelineRunStatusCancelRequested {
-		runMessage = "流水线取消请求已提交"
-		appendRunEvent(h.DB, runIDNum, "run_cancel_requested", map[string]any{})
+func (e pipelineOperationTriggerExecutor) TriggerPipeline(ctx context.Context, req services.TriggerPipelineExecutionRequest) (services.TriggerPipelineResult, error) {
+	h := e.handler
+	config, err := h.loadPipelineDefinitionConfig(h.DB, req.Pipeline)
+	if err != nil {
+		return services.TriggerPipelineResult{}, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: "流水线定义解析失败: " + err.Error()}
 	}
+	if valid, errMsg := config.ValidateTaskTypes(); !valid {
+		return services.TriggerPipelineResult{}, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: errMsg}
+	}
+	if _, err := h.validatePipelineCredentialBindings(&config, req.Actor.UserID, req.Actor.SystemRole, req.Pipeline.ID, req.Pipeline.WorkspaceID); err != nil {
+		return services.TriggerPipelineResult{}, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: "流水线凭据配置无效: " + err.Error()}
+	}
+	triggerType := strings.TrimSpace(req.TriggerType)
+	if triggerType == "" {
+		triggerType = "manual"
+	}
+	triggerSource := strings.TrimSpace(req.TriggerSource)
+	if triggerSource == "" {
+		triggerSource = triggerType
+	}
+	run, buildNumber, err := h.launchPipelineRun(req.Pipeline, config, pipelineRunTriggerContext{
+		TriggerType:     triggerType,
+		TriggerSource:   triggerSource,
+		TriggerUser:     req.Actor.Username,
+		TriggerUserID:   req.Actor.UserID,
+		TriggerUserRole: req.Actor.SystemRole,
+		RunConfig:       req.RunConfig,
+	})
+	if err != nil {
+		return services.TriggerPipelineResult{}, services.ServiceError{Code: services.ErrorCodeInternalError, Message: "创建运行记录失败: " + err.Error()}
+	}
+	return services.TriggerPipelineResult{RunID: run.ID, BuildNumber: buildNumber, Status: run.Status}, nil
+}
+
+type pipelineOperationWebsocketNotifier struct{}
+
+func (pipelineOperationWebsocketNotifier) NotifyTaskRetry(task models.AgentTask) {
+	_ = SharedWebSocketHandler().sendTaskAssign(task)
+}
+
+func (pipelineOperationWebsocketNotifier) NotifyTaskCancel(task models.AgentTask) {
+	_ = SharedWebSocketHandler().sendTaskCancel(task)
+}
+
+func (pipelineOperationWebsocketNotifier) NotifyTaskStatus(runID uint64, task models.AgentTask, message string) {
+	syncLiveTaskStateFromTask(&task, "")
+	SharedWebSocketHandler().BroadcastTaskStatus(runID, task.ID, task.NodeID, task.Status, 0, message, "")
+}
+
+func (pipelineOperationWebsocketNotifier) NotifyRunStatus(run models.PipelineRun, message string) {
 	syncLiveRunStateFromRun(&run)
-	syncDeploymentStateFromRun(h.DB, &run)
+	SharedWebSocketHandler().BroadcastRunStatus(run.ID, run.Status, message)
+}
 
-	SharedWebSocketHandler().BroadcastRunStatus(runIDNum, run.Status, runMessage)
+type pipelineOperationHandlerHooks struct {
+	db       *gorm.DB
+	schedule func(*gorm.DB)
+}
 
-	if run.Status == models.PipelineRunStatusCancelled {
-		emitPipelineRunTerminalNotification(h.DB, &run, NotificationEventTypePipelineRunCancelled)
-		if run.AgentID > 0 {
-			updateAgentStatusByPipelineConcurrency(h.DB, run.AgentID)
-		}
-		go h.scheduleQueuedPipelineRuns(h.DB)
+func (h pipelineOperationHandlerHooks) OnRunCancelRequested(ctx context.Context, run models.PipelineRun) error {
+	appendRunEvent(h.db, run.ID, "run_cancel_requested", map[string]any{})
+	syncDeploymentStateFromRun(h.db, &run)
+	return nil
+}
+
+func (h pipelineOperationHandlerHooks) OnRunCancelled(ctx context.Context, run models.PipelineRun) error {
+	syncDeploymentStateFromRun(h.db, &run)
+	emitPipelineRunTerminalNotification(h.db, &run, NotificationEventTypePipelineRunCancelled)
+	if run.AgentID > 0 {
+		updateAgentStatusByPipelineConcurrency(h.db, run.AgentID)
 	}
+	if h.schedule != nil {
+		go h.schedule(h.db)
+	}
+	return nil
+}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":    200,
-		"message": runMessage,
-	})
+func NewPipelineOperationService(db *gorm.DB) *services.PipelineOperationUseCase {
+	h := &PipelineHandler{DB: db}
+	return h.pipelineOperationUseCase()
+}
+
+func (h *PipelineHandler) pipelineOperationUseCase() *services.PipelineOperationUseCase {
+	return &services.PipelineOperationUseCase{
+		DB:            h.DB,
+		TriggerRunner: pipelineOperationTriggerExecutor{handler: h},
+		Notifier:      pipelineOperationWebsocketNotifier{},
+		Hooks: pipelineOperationHandlerHooks{db: h.DB, schedule: func(db *gorm.DB) {
+			h.scheduleQueuedPipelineRuns(db)
+		}},
+	}
+}
+
+func pipelineOperationWorkspaceID(c *gin.Context) uint64 {
+	if c == nil {
+		return 0
+	}
+	return c.GetUint64("workspace_id")
+}
+
+func pipelineOperationActorFromContext(c *gin.Context) services.ActorContext {
+	if c == nil {
+		return services.ActorContext{}
+	}
+	return services.ActorContext{
+		UserID:     c.GetUint64("user_id"),
+		Username:   strings.TrimSpace(c.GetString("username")),
+		SystemRole: strings.TrimSpace(c.GetString("role")),
+	}
+}
+
+func writePipelineOperationError(c *gin.Context, err error, fallbackMessages map[services.ErrorCode]string) {
+	var svcErr services.ServiceError
+	if !errors.As(err, &svcErr) {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+		return
+	}
+	message := strings.TrimSpace(svcErr.Message)
+	if fallback := strings.TrimSpace(fallbackMessages[svcErr.Code]); fallback != "" {
+		if svcErr.Code == services.ErrorCodeForbidden || svcErr.Code == services.ErrorCodeNotFound || svcErr.Code == services.ErrorCodeInternalError {
+			message = fallback
+		} else if message == "" || strings.Contains(message, "workspace_id") || strings.Contains(message, "actor user id") || strings.Contains(message, "db is required") || strings.Contains(message, "runner is required") {
+			message = fallback
+		}
+	}
+	if message == "" {
+		message = string(svcErr.Code)
+	}
+	switch svcErr.Code {
+	case services.ErrorCodeNotFound:
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": message})
+	case services.ErrorCodeForbidden:
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": message})
+	case services.ErrorCodeInvalidArgument, services.ErrorCodeConflict:
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": message})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": message})
+	}
 }
 
 func (h *PipelineHandler) createPipelineRunWithUniqueBuildNumber(run *models.PipelineRun) (int, error) {

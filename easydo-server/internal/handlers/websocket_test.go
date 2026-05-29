@@ -745,6 +745,14 @@ func TestRetryTaskRejectsOldDispatchIdentity(t *testing.T) {
 	if err := db.Create(&workspace).Error; err != nil {
 		t.Fatalf("create workspace failed: %v", err)
 	}
+	user := models.User{Username: "retry-dispatch-user", Role: "user", Status: "active"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	member := models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: user.ID, Role: models.WorkspaceRoleDeveloper, Status: models.WorkspaceMemberStatusActive}
+	if err := db.Create(&member).Error; err != nil {
+		t.Fatalf("create workspace member failed: %v", err)
+	}
 	agent := models.Agent{
 		Name:               "retry-dispatch-agent",
 		Host:               "host-retry",
@@ -787,6 +795,9 @@ func TestRetryTaskRejectsOldDispatchIdentity(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/tasks/"+strconv.FormatUint(task.ID, 10)+"/retry", nil)
 	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(task.ID, 10)}}
 	c.Set("workspace_id", workspace.ID)
+	c.Set("user_id", user.ID)
+	c.Set("role", user.Role)
+	c.Set("username", user.Username)
 
 	taskHandler.RetryTask(c)
 	if w.Code != http.StatusOK {

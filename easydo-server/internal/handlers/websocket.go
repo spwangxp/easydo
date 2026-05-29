@@ -2256,11 +2256,12 @@ func (h *WebSocketHandler) dispatchTaskCancelWithRetry(task models.AgentTask, co
 }
 
 func (h *WebSocketHandler) markTaskCancelDeliveryTimeout(task models.AgentTask, timeout time.Duration, maxRetries int) {
-	if h == nil || task.ID == 0 || models.DB == nil {
+	db := models.DB
+	if h == nil || task.ID == 0 || db == nil {
 		return
 	}
 	message := fmt.Sprintf("取消请求已提交，等待 agent 确认（超时 %s，已重试 %d 次）", timeout, maxRetries)
-	if err := models.DB.Model(&models.AgentTask{}).
+	if err := db.Model(&models.AgentTask{}).
 		Where("id = ? AND status = ?", task.ID, models.TaskStatusCancelRequested).
 		Update("error_msg", message).Error; err != nil {
 		return
@@ -2268,9 +2269,9 @@ func (h *WebSocketHandler) markTaskCancelDeliveryTimeout(task models.AgentTask, 
 	SharedWebSocketHandler().BroadcastTaskStatus(task.PipelineRunID, task.ID, task.NodeID, models.TaskStatusCancelRequested, 0, message, "")
 
 	var run models.PipelineRun
-	if err := models.DB.Select("id", "status", "error_msg").First(&run, task.PipelineRunID).Error; err == nil && run.Status == models.PipelineRunStatusCancelRequested {
+	if err := db.Select("id", "status", "error_msg").First(&run, task.PipelineRunID).Error; err == nil && run.Status == models.PipelineRunStatusCancelRequested {
 		if strings.TrimSpace(run.ErrorMsg) == "" {
-			_ = models.DB.Model(&models.PipelineRun{}).Where("id = ? AND status = ?", run.ID, models.PipelineRunStatusCancelRequested).Update("error_msg", message).Error
+			_ = db.Model(&models.PipelineRun{}).Where("id = ? AND status = ?", run.ID, models.PipelineRunStatusCancelRequested).Update("error_msg", message).Error
 			SharedWebSocketHandler().BroadcastRunStatus(run.ID, models.PipelineRunStatusCancelRequested, message)
 		}
 	}

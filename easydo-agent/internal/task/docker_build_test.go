@@ -128,6 +128,118 @@ func TestDockerBuildScript_HostRuntimePassesGitMetadataBuildArgs(t *testing.T) {
 	}
 }
 
+func TestDockerBuildScript_HostRuntimeCacheControlsDefaultToCurrentBehavior(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendHostRuntime, PrimaryRuntime: "docker"}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./Dockerfile",
+		"context":    ".",
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if strings.Contains(script, `--no-cache`) {
+		t.Fatalf("expected default host runtime build to use cache, got:\n%s", script)
+	}
+	if strings.Contains(script, `--pull`) {
+		t.Fatalf("expected default host runtime build not to force pull, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_HostRuntimeExplicitUseCacheKeepsCache(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendHostRuntime, PrimaryRuntime: "docker"}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./Dockerfile",
+		"context":    ".",
+		"use_cache":  true,
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if strings.Contains(script, `--no-cache`) {
+		t.Fatalf("expected explicit use_cache=true host runtime build to use cache, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_HostRuntimeOnlyExplicitFalseDisablesCache(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendHostRuntime, PrimaryRuntime: "docker"}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./Dockerfile",
+		"context":    ".",
+		"use_cache":  "unexpected",
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if strings.Contains(script, `--no-cache`) {
+		t.Fatalf("expected unrecognized use_cache host runtime value to keep cache enabled, got:\n%s", script)
+	}
+
+	script, err = executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./Dockerfile",
+		"context":    ".",
+		"use_cache":  false,
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if !strings.Contains(script, `set -- "$@" --no-cache`) {
+		t.Fatalf("expected use_cache=false host runtime build to add --no-cache, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_HostRuntimePullBaseImageAddsPullFlag(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendHostRuntime, PrimaryRuntime: "docker"}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name":      "demo/app",
+		"image_tag":       "v1",
+		"dockerfile":      "./Dockerfile",
+		"context":         ".",
+		"pull_base_image": true,
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if !strings.Contains(script, `set -- "$@" --pull`) {
+		t.Fatalf("expected pull_base_image=true host runtime build to add --pull, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_HostRuntimeLogsCachePolicyAndCommand(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendHostRuntime, PrimaryRuntime: "docker"}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name":      "demo/app",
+		"image_tag":       "v1",
+		"dockerfile":      "./Dockerfile",
+		"context":         ".",
+		"push":            true,
+		"registry":        "registry.example.com",
+		"architectures":   []interface{}{"linux/amd64", "linux/arm64"},
+		"use_cache":       false,
+		"pull_base_image": true,
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	for _, expected := range []string{
+		`USE_CACHE="false"`,
+		`PULL_BASE_IMAGE="true"`,
+		`[easydo][info] docker build options: use_cache=$USE_CACHE pull_base_image=$PULL_BASE_IMAGE`,
+		`[easydo][cmd] $RUNTIME_BIN buildx build --platform $PLATFORMS $* -t $IMAGE_REF -f $DOCKERFILE $CONTEXT --push`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("expected host runtime script to include %s, got:\n%s", expected, script)
+		}
+	}
+}
+
 func TestDockerBuildScript_EmbeddedBuildkitPassesGitMetadataBuildArgs(t *testing.T) {
 	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
 	script, err := executor.dockerBuildScript(TaskParams{TaskID: 321, Params: map[string]interface{}{
@@ -146,6 +258,118 @@ func TestDockerBuildScript_EmbeddedBuildkitPassesGitMetadataBuildArgs(t *testing
 		`--opt "build-arg:GIT_DATE=$EASYDO_GIT_DATE"`,
 		`buildctl --addr "unix://$SOCKET_PATH" build`,
 		`  "$@"`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("expected embedded buildkit script to include %s, got:\n%s", expected, script)
+		}
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitCacheControlsDefaultToCurrentBehavior(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./Dockerfile",
+		"context":    ".",
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if strings.Contains(script, `--no-cache`) {
+		t.Fatalf("expected default embedded buildkit build to use cache, got:\n%s", script)
+	}
+	if strings.Contains(script, `--opt pull=true`) {
+		t.Fatalf("expected default embedded buildkit build not to force pull, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitExplicitUseCacheKeepsCache(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./Dockerfile",
+		"context":    ".",
+		"use_cache":  true,
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if strings.Contains(script, `--no-cache`) {
+		t.Fatalf("expected explicit use_cache=true embedded buildkit build to use cache, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitOnlyExplicitFalseDisablesCache(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./Dockerfile",
+		"context":    ".",
+		"use_cache":  "unexpected",
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if strings.Contains(script, `--no-cache`) {
+		t.Fatalf("expected unrecognized use_cache embedded buildkit value to keep cache enabled, got:\n%s", script)
+	}
+
+	script, err = executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name": "demo/app",
+		"image_tag":  "v1",
+		"dockerfile": "./Dockerfile",
+		"context":    ".",
+		"use_cache":  false,
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if !strings.Contains(script, `set -- "$@" --no-cache`) {
+		t.Fatalf("expected use_cache=false embedded buildkit build to add --no-cache, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitPullBaseImageAddsPullOpt(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{Params: map[string]interface{}{
+		"image_name":      "demo/app",
+		"image_tag":       "v1",
+		"dockerfile":      "./Dockerfile",
+		"context":         ".",
+		"pull_base_image": true,
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	if !strings.Contains(script, `set -- "$@" --opt pull=true`) {
+		t.Fatalf("expected pull_base_image=true embedded buildkit build to add pull opt, got:\n%s", script)
+	}
+}
+
+func TestDockerBuildScript_EmbeddedBuildkitLogsCachePolicyAndCommand(t *testing.T) {
+	executor := &Executor{log: logrus.New(), runtime: system.RuntimeCapabilities{PreferredBuildBackend: system.BuildBackendEmbeddedBuildkit}}
+	script, err := executor.dockerBuildScript(TaskParams{TaskID: 321, Params: map[string]interface{}{
+		"image_name":      "demo/app",
+		"image_tag":       "v1",
+		"dockerfile":      "./Dockerfile",
+		"context":         ".",
+		"push":            true,
+		"registry":        "registry.example.com",
+		"architectures":   []interface{}{"linux/amd64", "linux/arm64"},
+		"use_cache":       false,
+		"pull_base_image": true,
+	}}, "/workspace")
+	if err != nil {
+		t.Fatalf("dockerBuildScript returned error: %v", err)
+	}
+	for _, expected := range []string{
+		`USE_CACHE="false"`,
+		`PULL_BASE_IMAGE="true"`,
+		`[easydo][info] docker build options: use_cache=$USE_CACHE pull_base_image=$PULL_BASE_IMAGE`,
+		`[easydo][cmd] buildctl --addr unix://$SOCKET_PATH build $* --frontend dockerfile.v0 --local context=$CONTEXT --local dockerfile=$DOCKERFILE_DIR --opt platform=$PLATFORMS --opt filename=$DOCKERFILE_NAME --output $OUTPUT_SPEC`,
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("expected embedded buildkit script to include %s, got:\n%s", expected, script)
