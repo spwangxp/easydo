@@ -13,6 +13,20 @@ import (
 	"gorm.io/gorm"
 )
 
+type fakeResourceRefreshService struct {
+	lastRequest services.RefreshResourceBaseInfoRequest
+	result      services.RefreshResourceBaseInfoResult
+	err         error
+}
+
+func (f *fakeResourceRefreshService) RequestResourceBaseInfoRefresh(ctx context.Context, req services.RefreshResourceBaseInfoRequest) (services.RefreshResourceBaseInfoResult, error) {
+	f.lastRequest = req
+	if f.err != nil {
+		return services.RefreshResourceBaseInfoResult{}, f.err
+	}
+	return f.result, nil
+}
+
 func openResourceToolTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := openAuditTestDB(t)
@@ -170,6 +184,113 @@ func TestResourceStatusToolRequiresExplicitWorkspaceID(t *testing.T) {
 	_, err := registry.Invoke(context.Background(), "easydo_resource_status", Invocation{Actor: services.ActorContext{UserID: user.ID, Username: user.Username, SystemRole: user.Role}, Arguments: map[string]any{"resource_id": 1}})
 	if err == nil {
 		t.Fatal("expected workspace_id invalid argument error")
+	}
+	var svcErr services.ServiceError
+	if !errors.As(err, &svcErr) || svcErr.Code != services.ErrorCodeInvalidArgument {
+		t.Fatalf("error=%v, want invalid argument ServiceError", err)
+	}
+}
+
+func TestResourceGPUUsageToolReturnsStructuredGPUUsage(t *testing.T) {
+	db := openResourceToolTestDB(t)
+	usecase := &services.ResourceUseCase{DB: db}
+	registry := NewRegistry()
+	if err := RegisterResourceTools(registry, usecase); err != nil {
+		t.Fatalf("RegisterResourceTools returned error: %v", err)
+	}
+	user, workspace := seedResourceToolWorkspaceMember(t, db, "resource-tool-gpu-user", models.WorkspaceRoleViewer)
+	resource := models.Resource{
+		WorkspaceID:         workspace.ID,
+		Name:                "tool-gpu-resource",
+		Type:                models.ResourceTypeVM,
+		Status:              models.ResourceStatusOnline,
+		BaseInfoStatus:      "success",
+		BaseInfoSource:      "remote_task",
+		BaseInfoCollectedAt: 1780298244,
+		BaseInfo: `{
+			"schemaVersion":3,
+			"source":"remote_task",
+			"resourceInstances":[{
+				"id":"raw-gpu-instance-0",
+				"resourceTypeId":"gpu",
+				"identity":[{"name":"index","value":0},{"name":"uuid","value":"GPU-tool"}],
+				"spec":[{"name":"vendor","value":"NVIDIA"},{"name":"model","value":"A100"}],
+				"capacity":[{"name":"memoryBytes","capacity":85899345920}],
+				"metrics":[{"name":"memoryBytesUsed","value":10737418240}]
+			}],
+			"services":[{"id":"raw-service-1","name":"trainer","fields":[{"name":"pid","value":4321},{"name":"runtime","value":"docker"},{"name":"containerName","value":"tool-container"}]}],
+			"allocations":[{"id":"raw-allocation-1","claims":[{"serviceId":"raw-service-1","resourceInstanceId":"raw-gpu-instance-0","dimensions":[{"name":"pid","value":4321},{"name":"memoryUsedBytes","value":10737418240}]}]}]
+		}`,
+		CreatedBy: user.ID,
+	}
+	if err := db.Create(&resource).Error; err != nil {
+		t.Fatalf("create resource failed: %v", err)
+	}
+
+	result, err := registry.Invoke(context.Background(), "easydo_resource_gpu_usage", Invocation{
+		Actor:     services.ActorContext{UserID: user.ID, Username: user.Username, SystemRole: user.Role},
+		Arguments: map[string]any{"workspace_id": workspace.ID, "resource_id": resource.ID},
+	})
+	if err != nil {
+		t.Fatalf("gpu usage invoke returned error: %v", err)
+	}
+	content, ok := result.StructuredContent.(services.ResourceGPUUsageResult)
+	if !ok {
+		t.Fatalf("structured content type=%T, want services.ResourceGPUUsageResult", result.StructuredContent)
+	}
+	if content.Summary.TotalGPUs != 1 || len(content.GPUs) != 1 || content.GPUs[0].UUID != "GPU-tool" {
+		t.Fatalf("content=%+v, want one GPU", content)
+	}
+	if content.Summary.MemoryUsedPercent == nil || *content.Summary.MemoryUsedPercent <= 0 || content.GPUs[0].MemoryUsedPercent == nil || *content.GPUs[0].MemoryUsedPercent <= 0 {
+		t.Fatalf("content=%+v, want summary and per-gpu memory percentages", content)
+	}
+	if content.GPUs[0].Occupancy == nil || len(content.GPUs[0].Services) != 1 || content.GPUs[0].Services[0].DisplayName != "tool-container" {
+		t.Fatalf("gpu detail=%+v, want embedded service occupancy", content.GPUs[0])
+	}
+	if content.GPUs[0].Occupancy.MemoryUsedPercent == nil || *content.GPUs[0].Occupancy.MemoryUsedPercent <= 0 || content.GPUs[0].Services[0].GPUMemoryPercent == nil || *content.GPUs[0].Services[0].GPUMemoryPercent <= 0 || content.GPUs[0].Services[0].OccupancyMemoryPercent == nil || *content.GPUs[0].Services[0].OccupancyMemoryPercent != 100 {
+		t.Fatalf("gpu detail=%+v, want occupancy and service percentage fields", content.GPUs[0])
+	}
+}
+
+func TestResourceBaseInfoRefreshToolPassesRequestToService(t *testing.T) {
+	fake := &fakeResourceRefreshService{result: services.RefreshResourceBaseInfoResult{TaskID: 77, Status: models.TaskStatusQueued, AgentID: 9}}
+	registry := NewRegistry()
+	if err := RegisterResourceOperationTools(registry, fake); err != nil {
+		t.Fatalf("RegisterResourceOperationTools returned error: %v", err)
+	}
+	actor := services.ActorContext{UserID: 12, Username: "refresh-user", SystemRole: "user"}
+
+	result, err := registry.Invoke(context.Background(), "easydo_resource_base_info_refresh", Invocation{
+		Actor:     actor,
+		Arguments: map[string]any{"workspace_id": 34, "resource_id": 56},
+		Protocol:  streamableHTTPProtocol,
+	})
+	if err != nil {
+		t.Fatalf("refresh invoke returned error: %v", err)
+	}
+	content, ok := result.StructuredContent.(services.RefreshResourceBaseInfoResult)
+	if !ok {
+		t.Fatalf("structured content type=%T, want services.RefreshResourceBaseInfoResult", result.StructuredContent)
+	}
+	if content.TaskID != 77 || content.Status != models.TaskStatusQueued || content.AgentID != 9 {
+		t.Fatalf("content=%+v, want fake result", content)
+	}
+	if fake.lastRequest.WorkspaceID != 34 || fake.lastRequest.ResourceID != 56 || fake.lastRequest.Actor.UserID != actor.UserID {
+		t.Fatalf("last request=%+v, want parsed actor and ids", fake.lastRequest)
+	}
+}
+
+func TestResourceBaseInfoRefreshToolRequiresIDs(t *testing.T) {
+	registry := NewRegistry()
+	if err := RegisterResourceOperationTools(registry, &fakeResourceRefreshService{}); err != nil {
+		t.Fatalf("RegisterResourceOperationTools returned error: %v", err)
+	}
+	_, err := registry.Invoke(context.Background(), "easydo_resource_base_info_refresh", Invocation{
+		Actor:     services.ActorContext{UserID: 12, Username: "refresh-user", SystemRole: "user"},
+		Arguments: map[string]any{"workspace_id": 34},
+	})
+	if err == nil {
+		t.Fatal("expected resource_id invalid argument error")
 	}
 	var svcErr services.ServiceError
 	if !errors.As(err, &svcErr) || svcErr.Code != services.ErrorCodeInvalidArgument {

@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -501,6 +502,37 @@ func (h *ResourceHandler) RefreshResourceBaseInfo(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": gin.H{"task_id": task.ID, "status": task.Status, "agent_id": task.AgentID}})
+}
+
+func (h *ResourceHandler) RequestResourceBaseInfoRefresh(ctx context.Context, req services.RefreshResourceBaseInfoRequest) (services.RefreshResourceBaseInfoResult, error) {
+	if req.Actor.UserID == 0 {
+		return services.RefreshResourceBaseInfoResult{}, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: "actor user id is required"}
+	}
+	if h == nil || h.DB == nil {
+		return services.RefreshResourceBaseInfoResult{}, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: "db is required"}
+	}
+	if req.WorkspaceID == 0 {
+		return services.RefreshResourceBaseInfoResult{}, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: "workspace_id is required"}
+	}
+	if req.ResourceID == 0 {
+		return services.RefreshResourceBaseInfoResult{}, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: "resource_id is required"}
+	}
+	if !userCanManageWorkspace(h.DB.WithContext(ctx), req.WorkspaceID, req.Actor.UserID, req.Actor.SystemRole) {
+		return services.RefreshResourceBaseInfoResult{}, services.ServiceError{Code: services.ErrorCodeForbidden, Message: "workspace manage access required"}
+	}
+
+	var resource models.Resource
+	if err := h.DB.WithContext(ctx).Preload("Bindings").Where("workspace_id = ?", req.WorkspaceID).First(&resource, req.ResourceID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return services.RefreshResourceBaseInfoResult{}, services.ServiceError{Code: services.ErrorCodeNotFound, Message: "resource not found"}
+		}
+		return services.RefreshResourceBaseInfoResult{}, services.ServiceError{Code: services.ErrorCodeInternalError, Message: "failed to load resource"}
+	}
+	task, err := h.createResourceBaseInfoTask(req.WorkspaceID, req.Actor.UserID, req.Actor.SystemRole, &resource)
+	if err != nil {
+		return services.RefreshResourceBaseInfoResult{}, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: err.Error()}
+	}
+	return services.RefreshResourceBaseInfoResult{TaskID: task.ID, Status: task.Status, AgentID: task.AgentID}, nil
 }
 
 func (h *ResourceHandler) DeleteResource(c *gin.Context) {

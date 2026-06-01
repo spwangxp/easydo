@@ -39,10 +39,10 @@ test('buildClaudeCodeMcpSnippet emits .mcp.json server config', () => {
   )
 })
 
-test('buildOpenCodeMcpSnippet emits remote server config with SSE endpoint', () => {
+test('buildOpenCodeMcpSnippet emits remote server config with streamable HTTP endpoint', () => {
   assert.equal(
     buildOpenCodeMcpSnippet({ origin: 'https://easydo.example.com' }),
-    '{\n  "mcp": {\n    "easydo": {\n      "enabled": true,\n      "type": "remote",\n      "url": "https://easydo.example.com/mcp/sse",\n      "oauth": false,\n      "headers": {\n        "Authorization": "Bearer {env:EASYDO_MCP_TOKEN}"\n      }\n    }\n  }\n}'
+    '{\n  "mcp": {\n    "easydo": {\n      "enabled": true,\n      "type": "remote",\n      "url": "https://easydo.example.com/mcp",\n      "oauth": false,\n      "headers": {\n        "Authorization": "Bearer {env:EASYDO_MCP_TOKEN}"\n      }\n    }\n  }\n}'
   )
 })
 

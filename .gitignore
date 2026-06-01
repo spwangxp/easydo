@@ -41,3 +41,5 @@ Thumbs.db
 docs/*
 .superpowers/
 .worktrees/
+.codegraph/
+.learnings/

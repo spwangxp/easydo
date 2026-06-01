@@ -175,6 +175,118 @@ func RegisterPipelineTools(registry *Registry, usecase *services.PipelineQueryUs
 			},
 		},
 		{
+			Name:          "easydo_pipeline_parameter_schema",
+			Description:   "Get runtime parameter schema and nested inputs example for one pipeline",
+			OperationType: OperationRead,
+			TargetType:    "pipeline",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"workspace_id", "pipeline_id"},
+				"properties": map[string]any{
+					"workspace_id": map[string]any{"type": "integer", "minimum": 1},
+					"pipeline_id":  map[string]any{"type": "integer", "minimum": 1},
+				},
+			},
+			Handler: func(ctx context.Context, invocation Invocation) (ToolResult, error) {
+				actor, err := workspaceToolActor(invocation.Actor)
+				if err != nil {
+					return ToolResult{}, err
+				}
+				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				if err != nil {
+					return ToolResult{}, err
+				}
+				pipelineID, err := requiredUint64Argument(invocation.Arguments, "pipeline_id")
+				if err != nil {
+					return ToolResult{}, err
+				}
+				result, err := usecase.GetPipelineParameterSchema(ctx, services.GetPipelineParameterSchemaRequest{Actor: actor, WorkspaceID: workspaceID, PipelineID: pipelineID})
+				if err != nil {
+					return ToolResult{}, err
+				}
+				return ToolResult{StructuredContent: result}, nil
+			},
+		},
+		{
+			Name:          "easydo_pipeline_trigger_preview",
+			Description:   "Preview and validate nested runtime inputs before triggering one pipeline",
+			OperationType: OperationRead,
+			TargetType:    "pipeline",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"workspace_id", "pipeline_id"},
+				"properties": map[string]any{
+					"workspace_id": map[string]any{"type": "integer", "minimum": 1},
+					"pipeline_id":  map[string]any{"type": "integer", "minimum": 1},
+					"inputs":       map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "object"}},
+				},
+			},
+			Handler: func(ctx context.Context, invocation Invocation) (ToolResult, error) {
+				if err := rejectOversizedPipelineOperationArguments(invocation.Arguments); err != nil {
+					return ToolResult{}, err
+				}
+				actor, err := workspaceToolActor(invocation.Actor)
+				if err != nil {
+					return ToolResult{}, err
+				}
+				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				if err != nil {
+					return ToolResult{}, err
+				}
+				pipelineID, err := requiredUint64Argument(invocation.Arguments, "pipeline_id")
+				if err != nil {
+					return ToolResult{}, err
+				}
+				inputs, err := pipelineTriggerInputsArgument(invocation.Arguments)
+				if err != nil {
+					return ToolResult{}, err
+				}
+				result, err := usecase.PreviewPipelineTriggerParameters(ctx, services.PreviewPipelineTriggerParametersRequest{Actor: actor, WorkspaceID: workspaceID, PipelineID: pipelineID, Inputs: inputs})
+				if err != nil {
+					return ToolResult{}, err
+				}
+				return ToolResult{StructuredContent: result}, nil
+			},
+		},
+		{
+			Name:          "easydo_pipeline_run_parameters_get",
+			Description:   "Get historical runtime parameter view for one pipeline run",
+			OperationType: OperationRead,
+			TargetType:    "pipeline_run",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"workspace_id", "pipeline_id", "run_id"},
+				"properties": map[string]any{
+					"workspace_id": map[string]any{"type": "integer", "minimum": 1},
+					"pipeline_id":  map[string]any{"type": "integer", "minimum": 1},
+					"run_id":       map[string]any{"type": "integer", "minimum": 1},
+				},
+			},
+			Handler: func(ctx context.Context, invocation Invocation) (ToolResult, error) {
+				actor, err := workspaceToolActor(invocation.Actor)
+				if err != nil {
+					return ToolResult{}, err
+				}
+				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				if err != nil {
+					return ToolResult{}, err
+				}
+				pipelineID, err := requiredUint64Argument(invocation.Arguments, "pipeline_id")
+				if err != nil {
+					return ToolResult{}, err
+				}
+				runID, err := requiredUint64Argument(invocation.Arguments, "run_id")
+				if err != nil {
+					return ToolResult{}, err
+				}
+				result, err := usecase.GetPipelineRunParameters(ctx, services.GetPipelineRunParametersRequest{Actor: actor, WorkspaceID: workspaceID, PipelineID: pipelineID, RunID: runID})
+				if err != nil {
+					return ToolResult{}, err
+				}
+				return ToolResult{StructuredContent: result}, nil
+			},
+		},
+		{
 			Name:          "easydo_pipeline_task_get",
 			Description:   "Get one pipeline task in one workspace",
 			OperationType: OperationRead,

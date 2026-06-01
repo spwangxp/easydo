@@ -191,3 +191,97 @@ func TestPipelineRunAndTaskToolsReturnStructuredContentWithoutSensitiveFields(t 
 		}
 	}
 }
+
+func TestPipelineParameterToolsReturnSchemaPreviewAndHistoricalParams(t *testing.T) {
+	db := openPipelineToolTestDB(t)
+	usecase := &services.PipelineQueryUseCase{DB: db}
+	registry := NewRegistry()
+	if err := RegisterPipelineTools(registry, usecase); err != nil {
+		t.Fatalf("RegisterPipelineTools returned error: %v", err)
+	}
+	user, workspace := seedPipelineToolWorkspaceMember(t, db, "pipeline-tool-param-user", models.WorkspaceRoleViewer)
+	pipeline := models.Pipeline{
+		Name:        "tool-param-pipeline",
+		WorkspaceID: workspace.ID,
+		OwnerID:     user.ID,
+		Definition:  `{"version":"2.0","nodes":[{"node_id":"node-build","node_name":"Build","task_key":"shell","params":[{"key":"script","label":"Script","value":"echo default","is_flexible":true}]}]}`,
+	}
+	if err := db.Create(&pipeline).Error; err != nil {
+		t.Fatalf("create pipeline failed: %v", err)
+	}
+	run := models.PipelineRun{
+		WorkspaceID:      workspace.ID,
+		PipelineID:       pipeline.ID,
+		BuildNumber:      2,
+		Status:           models.PipelineRunStatusSuccess,
+		TriggerType:      "mcp",
+		TriggerSource:    streamableHTTPProtocol,
+		TriggerUser:      user.Username,
+		RunConfig:        `{"inputs":{"node-build":{"script":"echo runtime"}}}`,
+		PipelineSnapshot: pipeline.Definition,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	actor := services.ActorContext{UserID: user.ID, Username: user.Username, SystemRole: user.Role}
+
+	schemaResult, err := registry.Invoke(context.Background(), "easydo_pipeline_parameter_schema", Invocation{Actor: actor, Arguments: map[string]any{"workspace_id": workspace.ID, "pipeline_id": pipeline.ID}})
+	if err != nil {
+		t.Fatalf("schema invoke returned error: %v", err)
+	}
+	schema, ok := schemaResult.StructuredContent.(services.PipelineParameterSchemaResult)
+	if !ok {
+		t.Fatalf("schema content type=%T, want services.PipelineParameterSchemaResult", schemaResult.StructuredContent)
+	}
+	if schema.ExampleInputs["node-build"]["script"] != "echo default" {
+		t.Fatalf("schema=%+v, want nested example inputs", schema)
+	}
+	if schema.Prompt == "" || len(schema.InputPrompts) != 1 || schema.InputPrompts[0].InputPath != "inputs.node-build.script" {
+		t.Fatalf("schema prompt=%q input_prompts=%+v, want explicit user prompt", schema.Prompt, schema.InputPrompts)
+	}
+	if len(schema.ParameterTable) != 1 || schema.ParameterTable[0].ParamName != "script" || schema.ParameterTable[0].ValueType != "string" || schema.ParameterTable[0].TaskName != "Build" {
+		t.Fatalf("schema parameter_table=%+v, want table row with param/type/task columns", schema.ParameterTable)
+	}
+
+	previewResult, err := registry.Invoke(context.Background(), "easydo_pipeline_trigger_preview", Invocation{Actor: actor, Arguments: map[string]any{"workspace_id": workspace.ID, "pipeline_id": pipeline.ID, "inputs": map[string]any{"node-build": map[string]any{"unknown": "x"}}}})
+	if err != nil {
+		t.Fatalf("preview invoke returned error: %v", err)
+	}
+	preview, ok := previewResult.StructuredContent.(services.PipelineTriggerPreviewResult)
+	if !ok {
+		t.Fatalf("preview content type=%T, want services.PipelineTriggerPreviewResult", previewResult.StructuredContent)
+	}
+	if preview.CanTrigger || len(preview.Missing) != 1 || len(preview.Unknown) != 1 {
+		t.Fatalf("preview=%+v, want missing script and unknown param", preview)
+	}
+	if preview.Prompt == "" || len(preview.InputPrompts) != 1 {
+		t.Fatalf("preview prompt=%q input_prompts=%+v, want missing input prompt", preview.Prompt, preview.InputPrompts)
+	}
+	if len(preview.ParameterTable) != 1 || preview.ParameterTable[0].InputPath != "inputs.node-build.script" {
+		t.Fatalf("preview parameter_table=%+v, want nested input table row", preview.ParameterTable)
+	}
+
+	completePreviewResult, err := registry.Invoke(context.Background(), "easydo_pipeline_trigger_preview", Invocation{Actor: actor, Arguments: map[string]any{"workspace_id": workspace.ID, "pipeline_id": pipeline.ID, "inputs": map[string]any{"node-build": map[string]any{"script": "echo selected"}}}})
+	if err != nil {
+		t.Fatalf("complete preview invoke returned error: %v", err)
+	}
+	completePreview, ok := completePreviewResult.StructuredContent.(services.PipelineTriggerPreviewResult)
+	if !ok {
+		t.Fatalf("complete preview content type=%T, want services.PipelineTriggerPreviewResult", completePreviewResult.StructuredContent)
+	}
+	if !completePreview.CanTrigger || completePreview.Prompt == "" || !strings.Contains(completePreview.Prompt, "不得自行沿用当前值") || len(completePreview.ParameterTable) != 1 {
+		t.Fatalf("complete preview=%+v, want triggerable preview that still requires table interaction", completePreview)
+	}
+
+	historyResult, err := registry.Invoke(context.Background(), "easydo_pipeline_run_parameters_get", Invocation{Actor: actor, Arguments: map[string]any{"workspace_id": workspace.ID, "pipeline_id": pipeline.ID, "run_id": run.ID}})
+	if err != nil {
+		t.Fatalf("history invoke returned error: %v", err)
+	}
+	history, ok := historyResult.StructuredContent.(services.PipelineRunParameterView)
+	if !ok {
+		t.Fatalf("history content type=%T, want services.PipelineRunParameterView", historyResult.StructuredContent)
+	}
+	if len(history.Nodes) != 1 || len(history.Nodes[0].RuntimeParams) != 1 || history.Nodes[0].RuntimeParams[0].Value != "echo runtime" {
+		t.Fatalf("history=%+v, want runtime script", history)
+	}
+}

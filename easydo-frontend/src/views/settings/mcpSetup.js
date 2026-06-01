@@ -42,7 +42,7 @@ export function buildOpenCodeMcpSnippet({ origin = '' } = {}) {
       easydo: {
         enabled: true,
         type: 'remote',
-        url: buildMcpSseUrl(origin),
+        url: buildMcpUrl(origin),
         oauth: false,
         headers: {
           Authorization: `Bearer {env:${MCP_TOKEN_ENV_NAME}}`

@@ -135,4 +135,5 @@ func registerDefaultTools(registry *Registry, db *gorm.DB) {
 	_ = RegisterPipelineTools(registry, &services.PipelineQueryUseCase{DB: db})
 	_ = RegisterPipelineOperationTools(registry, handlers.NewPipelineOperationService(db))
 	_ = RegisterResourceTools(registry, &services.ResourceUseCase{DB: db})
+	_ = RegisterResourceOperationTools(registry, &handlers.ResourceHandler{DB: db})
 }

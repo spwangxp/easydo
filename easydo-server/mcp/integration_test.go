@@ -41,7 +41,7 @@ func toolsListNames(t *testing.T, resp JSONRPCResponse) []string {
 	return names
 }
 
-func TestToolsListContainsFirstPhaseToolsOnly(t *testing.T) {
+func TestToolsListContainsRegisteredMCPTools(t *testing.T) {
 	router := newTestHTTPServer(t, ServerOptions{AuditRecorder: &fakeAuditRecorder{}})
 
 	w := postJSONRPC(t, router, validMCPBearer(t, 7201), `{"jsonrpc":"2.0","id":"tools-list","method":"tools/list"}`, nil)
@@ -52,13 +52,18 @@ func TestToolsListContainsFirstPhaseToolsOnly(t *testing.T) {
 	want := []string{
 		"easydo_pipeline_get",
 		"easydo_pipeline_list",
+		"easydo_pipeline_parameter_schema",
 		"easydo_pipeline_run_cancel",
 		"easydo_pipeline_run_get",
 		"easydo_pipeline_run_list",
+		"easydo_pipeline_run_parameters_get",
 		"easydo_pipeline_task_get",
 		"easydo_pipeline_task_retry",
 		"easydo_pipeline_trigger",
+		"easydo_pipeline_trigger_preview",
+		"easydo_resource_base_info_refresh",
 		"easydo_resource_get",
+		"easydo_resource_gpu_usage",
 		"easydo_resource_list",
 		"easydo_resource_status",
 		"easydo_workspace_get",
@@ -108,15 +113,15 @@ func TestToolResponseDoesNotLeakSecrets(t *testing.T) {
 	user, workspace := seedResourceToolWorkspaceMember(t, db, "mcp-integration-resource-user", models.WorkspaceRoleViewer)
 	large := strings.Repeat("x", 5000)
 	resource := models.Resource{
-		WorkspaceID:      workspace.ID,
-		Name:             "integration-resource",
-		Type:             models.ResourceTypeK8sCluster,
-		Status:           models.ResourceStatusOnline,
-		CreatedBy:        user.ID,
-		Endpoint:         "https://cluster.example",
-		Metadata:         `{"credential_binding":{"token":"hidden"},"safe":"ok"}`,
-		BaseInfo:         `{"nodes":[{"name":"node-1","password":"hidden","measure":"` + large + `"}],"authorization":"Bearer hidden"}`,
-		LastCheckResult:  "secret=health-secret",
+		WorkspaceID:     workspace.ID,
+		Name:            "integration-resource",
+		Type:            models.ResourceTypeK8sCluster,
+		Status:          models.ResourceStatusOnline,
+		CreatedBy:       user.ID,
+		Endpoint:        "https://cluster.example",
+		Metadata:        `{"credential_binding":{"token":"hidden"},"safe":"ok"}`,
+		BaseInfo:        `{"nodes":[{"name":"node-1","password":"hidden","measure":"` + large + `"}],"authorization":"Bearer hidden"}`,
+		LastCheckResult: "secret=health-secret",
 	}
 	if err := db.Create(&resource).Error; err != nil {
 		t.Fatalf("create resource failed: %v", err)
