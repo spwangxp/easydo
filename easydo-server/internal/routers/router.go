@@ -118,21 +118,37 @@ func InitRouter() *gin.Engine {
 			userHandler := handlers.NewUserHandler()
 			users.POST("", userHandler.CreateUser)
 			users.GET("", middleware.AdminRequired(), userHandler.GetUserList)
+			users.GET("/:id", middleware.AdminRequired(), userHandler.GetManagedUser)
+			users.PATCH("/:id", middleware.AdminRequired(), userHandler.UpdateManagedUser)
+			users.GET("/:id/workspaces", middleware.AdminRequired(), userHandler.GetManagedUserWorkspaces)
+			users.POST("/:id/workspaces", middleware.AdminRequired(), userHandler.AddManagedUserToWorkspace)
+			users.DELETE("/:id/workspaces/:workspace_id", middleware.AdminRequired(), userHandler.RemoveManagedUserFromWorkspace)
+			users.POST("/:id/disable", middleware.AdminRequired(), userHandler.DisableManagedUser)
+			users.POST("/:id/enable", middleware.AdminRequired(), userHandler.EnableManagedUser)
+			users.POST("/:id/reset-password", middleware.AdminRequired(), userHandler.ResetManagedUserPassword)
+			users.PATCH("/:id/system-role", middleware.AdminRequired(), userHandler.UpdateManagedUserSystemRole)
 		}
 
 		workspaces := api.Group("/workspaces")
 		workspaces.Use(middleware.JWTAuth(), middleware.WorkspaceContext())
 		{
 			workspaceHandler := handlers.NewWorkspaceHandler()
+			notificationHandler := handlers.NewNotificationHandler()
+			auditLogHandler := handlers.NewAuditLogHandler()
 			workspaces.GET("", workspaceHandler.GetWorkspaceList)
 			workspaces.POST("", workspaceHandler.CreateWorkspace)
 			workspaces.GET("/:id", workspaceHandler.GetWorkspace)
 			workspaces.PATCH("/:id", workspaceHandler.UpdateWorkspace)
+			workspaces.PUT("/:id/notification-sender", notificationHandler.SaveWorkspaceNotificationSender)
+			workspaces.GET("/:id/audit-logs", auditLogHandler.ListWorkspaceAuditLogs)
 			workspaces.GET("/:id/members", workspaceHandler.ListMembers)
+			workspaces.GET("/:id/members/candidates", workspaceHandler.SearchMemberCandidates)
+			workspaces.POST("/:id/members", workspaceHandler.AddExistingMember)
 			workspaces.PATCH("/:id/members/:member_id", workspaceHandler.UpdateMember)
 			workspaces.DELETE("/:id/members/:member_id", workspaceHandler.RemoveMember)
 			workspaces.GET("/:id/invitations", workspaceHandler.ListInvitations)
 			workspaces.POST("/:id/invitations", workspaceHandler.CreateInvitation)
+			workspaces.POST("/:id/invitations/:invite_id/regenerate", workspaceHandler.RegenerateInvitation)
 			workspaces.DELETE("/:id/invitations/:invite_id", workspaceHandler.RevokeInvitation)
 			workspaces.POST("/invitations/:token/accept", workspaceHandler.AcceptInvitation)
 		}
@@ -178,6 +194,22 @@ func InitRouter() *gin.Engine {
 			notifications.POST("/inbox/read-all", notificationHandler.MarkAllInboxMessagesRead)
 			notifications.GET("/preferences", notificationHandler.ListPreferences)
 			notifications.PUT("/preferences", notificationHandler.UpsertPreference)
+		}
+
+		notificationSenders := api.Group("/notification-senders")
+		notificationSenders.Use(middleware.JWTAuth(), middleware.WorkspaceContext())
+		{
+			notificationHandler := handlers.NewNotificationHandler()
+			notificationSenders.GET("/effective", notificationHandler.GetEffectiveNotificationSender)
+			notificationSenders.PUT("/platform", notificationHandler.SavePlatformNotificationSender)
+			notificationSenders.POST("/test", notificationHandler.TestNotificationSender)
+		}
+
+		auditLogs := api.Group("/audit-logs")
+		auditLogs.Use(middleware.JWTAuth(), middleware.WorkspaceContext())
+		{
+			auditLogHandler := handlers.NewAuditLogHandler()
+			auditLogs.GET("", auditLogHandler.ListGlobalAuditLogs)
 		}
 
 		// Task管理

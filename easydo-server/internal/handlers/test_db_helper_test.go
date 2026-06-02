@@ -79,6 +79,8 @@ func openHandlerTestDB(t *testing.T) *gorm.DB {
 		&models.InboxMessage{},
 		&models.NotificationDelivery{},
 		&models.NotificationPreference{},
+		&models.NotificationSenderConfig{},
+		&models.AuditLog{},
 		&models.WebhookConfig{},
 		&models.WebhookEvent{},
 		&models.Credential{},

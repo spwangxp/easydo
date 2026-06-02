@@ -273,7 +273,7 @@ func createDeliveriesForNotification(tx *gorm.DB, user *models.User, notificatio
 			if delivery.Destination == "" {
 				delivery.Status = models.NotificationDeliveryStatusSkipped
 				delivery.ErrorMessage = "recipient email is empty"
-			} else if !SMTPConfigured() {
+			} else if !SMTPConfiguredForWorkspace(tx, notification.WorkspaceID) {
 				delivery.Status = models.NotificationDeliveryStatusNotConfigured
 				delivery.ErrorMessage = "smtp delivery is not configured"
 			} else {

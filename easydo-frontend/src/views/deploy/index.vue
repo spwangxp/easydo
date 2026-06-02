@@ -246,7 +246,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getDeploymentRequestDetail, getDeploymentRequestList } from '@/api/deployment'
 import { getTemplateList } from '@/api/store'
@@ -287,6 +287,7 @@ const activeStatuses = ['pending', 'validating', 'queued', 'running']
 const failedTaskStatuses = ['execute_failed', 'schedule_failed', 'dispatch_timeout', 'lease_expired', 'cancelled', 'failed']
 const scopedTargetResourceId = computed(() => Number(route.query.target_resource_id || 0))
 const scopedNamespace = computed(() => String(route.query.namespace || '').trim())
+const targetRequestIDFromQuery = computed(() => Number(route.query.request_id || 0))
 
 const filteredDeployList = computed(() => deployList.value.filter(item => {
   if (statusTab.value === 'running' && !isRunningStatus(item.status)) return false
@@ -502,6 +503,7 @@ const fetchDeploys = async () => {
     const requestItems = Array.isArray(reqRes.data) ? reqRes.data : []
     deployList.value = requestItems.map(normalizeDeployment)
     total.value = deployList.value.length
+    await openDeploymentDetailFromQuery()
   } finally {
     loading.value = false
   }
@@ -568,6 +570,22 @@ const clearDeployScope = async () => {
 
 const handleView = async (row) => {
   selectedDeployment.value = { ...row }
+  detailVisible.value = true
+  await refreshSelectedDeployment()
+  startDetailPolling()
+}
+
+const openDeploymentDetailFromQuery = async () => {
+  if (!targetRequestIDFromQuery.value) return
+  if (detailVisible.value && Number(selectedDeployment.value?.id || 0) === targetRequestIDFromQuery.value) return
+
+  const targetDeployment = deployList.value.find(item => Number(item?.id || 0) === targetRequestIDFromQuery.value)
+  if (targetDeployment) {
+    await handleView(targetDeployment)
+    return
+  }
+
+  selectedDeployment.value = { id: targetRequestIDFromQuery.value, name: `部署请求 #${targetRequestIDFromQuery.value}` }
   detailVisible.value = true
   await refreshSelectedDeployment()
   startDetailPolling()
@@ -664,6 +682,10 @@ const getStatusName = (status) => ({
 }[status] || status || '-')
 
 onMounted(fetchDeploys)
+
+watch(targetRequestIDFromQuery, () => {
+  openDeploymentDetailFromQuery()
+})
 
 onUnmounted(() => {
   stopDetailPolling()

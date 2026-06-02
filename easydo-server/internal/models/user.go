@@ -17,6 +17,11 @@ type User struct {
 	Status      string `gorm:"size:32;default:'active'" json:"status"`
 	LastLoginAt int64  `json:"last_login_at"`
 
+	MustChangePassword bool    `gorm:"column:must_change_password;default:false" json:"must_change_password"`
+	PasswordChangedAt  int64   `gorm:"column:password_changed_at" json:"password_changed_at"`
+	DisabledAt         int64   `gorm:"column:disabled_at" json:"disabled_at"`
+	DisabledBy         *uint64 `gorm:"column:disabled_by;index" json:"disabled_by"`
+
 	Projects         []Project         `gorm:"foreignKey:OwnerID" json:"projects"`
 	Pipelines        []Pipeline        `gorm:"foreignKey:OwnerID" json:"pipelines"`
 	DeployRecords    []DeployRecord    `gorm:"foreignKey:DeployerID" json:"deploy_records"`

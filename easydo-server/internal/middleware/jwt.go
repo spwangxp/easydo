@@ -300,6 +300,43 @@ func RevokeSessionByID(ctx context.Context, sessionID string) error {
 	return deleteUserSession(ctx, sessionID)
 }
 
+func RevokeSessionsForUser(ctx context.Context, userID uint64) error {
+	if userID == 0 {
+		return errors.New("invalid user")
+	}
+	if utils.RedisClient == nil {
+		return errors.New("redis client is not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	iter := utils.RedisClient.Scan(ctx, 0, authSessionPrefix+"*", 100).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		raw, err := utils.RedisClient.Get(ctx, key).Result()
+		if err == redis.Nil {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var session userSession
+		if err := json.Unmarshal([]byte(raw), &session); err != nil {
+			return err
+		}
+		if session.UserID != userID {
+			continue
+		}
+		sessionID := strings.TrimPrefix(key, authSessionPrefix)
+		validatedSessionCache.Delete(sessionID)
+		if err := utils.RedisClient.Del(ctx, key).Err(); err != nil {
+			return err
+		}
+	}
+	return iter.Err()
+}
+
 func ExtractBearerToken(header string) (string, error) {
 	token := strings.TrimSpace(header)
 	if token == "" {
@@ -345,6 +382,35 @@ func JWTAuth() gin.HandlerFunc {
 			return
 		}
 
+		if models.DB != nil {
+			var user models.User
+			if err := models.DB.Select("id", "role", "status", "must_change_password").First(&user, claims.UserID).Error; err != nil {
+				c.JSON(http.StatusUnauthorized, gin.H{
+					"code":    401,
+					"message": "登录已过期",
+				})
+				c.Abort()
+				return
+			}
+			if user.Status != "active" {
+				c.JSON(http.StatusForbidden, gin.H{
+					"code":    403,
+					"message": "账户已被禁用",
+				})
+				c.Abort()
+				return
+			}
+			if user.MustChangePassword && !authPathAllowsForcedPasswordChange(c.Request.URL.Path) {
+				c.JSON(http.StatusForbidden, gin.H{
+					"code":    403,
+					"message": "必须先修改密码",
+				})
+				c.Abort()
+				return
+			}
+			claims.Role = user.Role
+		}
+
 		c.Set("user_id", claims.UserID)
 		c.Set("username", claims.Username)
 		c.Set("role", claims.Role)
@@ -352,6 +418,15 @@ func JWTAuth() gin.HandlerFunc {
 		c.Set("auth_token", token)
 
 		c.Next()
+	}
+}
+
+func authPathAllowsForcedPasswordChange(path string) bool {
+	switch strings.TrimSpace(path) {
+	case "/api/auth/password", "/api/auth/logout", "/api/auth/userinfo", "/api/auth/refresh":
+		return true
+	default:
+		return false
 	}
 }
 

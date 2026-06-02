@@ -30,10 +30,27 @@ export function updateWorkspace(id, data) {
   })
 }
 
-export function getWorkspaceMembers(id) {
+export function getWorkspaceMembers(id, params) {
   return request({
     url: `/workspaces/${id}/members`,
-    method: 'get'
+    method: 'get',
+    params
+  })
+}
+
+export function addWorkspaceMember(id, data) {
+  return request({
+    url: `/workspaces/${id}/members`,
+    method: 'post',
+    data
+  })
+}
+
+export function searchWorkspaceMemberCandidates(id, params) {
+  return request({
+    url: `/workspaces/${id}/members/candidates`,
+    method: 'get',
+    params
   })
 }
 
@@ -71,6 +88,13 @@ export function revokeWorkspaceInvitation(id, inviteId) {
   return request({
     url: `/workspaces/${id}/invitations/${inviteId}`,
     method: 'delete'
+  })
+}
+
+export function regenerateWorkspaceInvitation(id, inviteId) {
+  return request({
+    url: `/workspaces/${id}/invitations/${inviteId}/regenerate`,
+    method: 'post'
   })
 }
 

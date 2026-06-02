@@ -4,6 +4,7 @@ import (
 	"context"
 	"easydo-server/internal/middleware"
 	"easydo-server/internal/models"
+	"easydo-server/internal/services"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -186,11 +187,13 @@ func isValidWorkspaceRole(role string) bool {
 
 func (h *UserHandler) createUserWithWorkspaceBinding(tx *gorm.DB, req CreateUserRequest, actorID uint64, targetSystemRole string, targetWorkspaceID uint64, targetWorkspaceRole string) (*models.User, error) {
 	user := &models.User{
-		Username: req.Username,
-		Email:    strings.TrimSpace(req.Email),
-		Nickname: strings.TrimSpace(req.Nickname),
-		Role:     targetSystemRole,
-		Status:   "active",
+		Username:           req.Username,
+		Email:              strings.ToLower(strings.TrimSpace(req.Email)),
+		Nickname:           strings.TrimSpace(req.Nickname),
+		Role:               targetSystemRole,
+		Status:             "active",
+		MustChangePassword: true,
+		PasswordChangedAt:  0,
 	}
 	if err := user.SetPassword(req.Password); err != nil {
 		return nil, err
@@ -274,12 +277,13 @@ func (h *UserHandler) Login(c *gin.Context) {
 			"expires_in":       int64(middleware.GetAuthTokenTTL().Seconds()),
 			"refresh_interval": int64(middleware.GetAuthRefreshInterval().Seconds()),
 			"user": gin.H{
-				"id":       user.ID,
-				"username": user.Username,
-				"email":    user.Email,
-				"nickname": user.Nickname,
-				"avatar":   user.Avatar,
-				"role":     user.Role,
+				"id":                   user.ID,
+				"username":             user.Username,
+				"email":                user.Email,
+				"nickname":             user.Nickname,
+				"avatar":               user.Avatar,
+				"role":                 user.Role,
+				"must_change_password": user.MustChangePassword,
 			},
 		},
 	})
@@ -526,19 +530,20 @@ func (h *UserHandler) GetUserInfo(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": gin.H{
-			"id":                user.ID,
-			"username":          user.Username,
-			"email":             user.Email,
-			"phone":             user.Phone,
-			"nickname":          user.Nickname,
-			"avatar":            user.Avatar,
-			"bio":               user.Bio,
-			"role":              user.Role,
-			"status":            user.Status,
-			"permissions":       permissions,
-			"workspaces":        workspaces,
-			"current_workspace": currentWorkspace,
-			"created_at":        user.CreatedAt,
+			"id":                   user.ID,
+			"username":             user.Username,
+			"email":                user.Email,
+			"phone":                user.Phone,
+			"nickname":             user.Nickname,
+			"avatar":               user.Avatar,
+			"bio":                  user.Bio,
+			"role":                 user.Role,
+			"must_change_password": user.MustChangePassword,
+			"status":               user.Status,
+			"permissions":          permissions,
+			"workspaces":           workspaces,
+			"current_workspace":    currentWorkspace,
+			"created_at":           user.CreatedAt,
 		},
 	})
 }
@@ -622,7 +627,11 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 		return
 	}
 
-	h.DB.Model(&user).Update("password", user.Password)
+	h.DB.Model(&user).Updates(map[string]any{
+		"password":             user.Password,
+		"must_change_password": false,
+		"password_changed_at":  time.Now().Unix(),
+	})
 
 	c.JSON(http.StatusOK, gin.H{
 		"code":    200,
@@ -651,39 +660,31 @@ func (h *UserHandler) Logout(c *gin.Context) {
 }
 
 func (h *UserHandler) GetUserList(c *gin.Context) {
-	ctx := governanceContextForWorkspace(h.DB, c.GetUint64("workspace_id"), c.GetUint64("user_id"), c.GetString("role"))
-	if ctx.WorkspaceID == 0 || !RequirePlatformGovernance(ctx) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "仅平台治理上下文可查看平台用户",
-		})
-		return
-	}
-
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
-
-	var users []models.User
-	var total int64
-
-	offset := (page - 1) * pageSize
-	h.DB.Model(&models.User{}).Count(&total)
-
-	if err := h.DB.Offset(offset).Limit(pageSize).Find(&users).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "获取用户列表失败",
-		})
+	workspaceFilterID, _ := strconv.ParseUint(strings.TrimSpace(c.Query("workspace_filter_id")), 10, 64)
+	result, err := h.userManagementUseCase().ListUsers(c.Request.Context(), services.ListUsersRequest{
+		Actor:             userManagementActor(c),
+		WorkspaceID:       c.GetUint64("workspace_id"),
+		Query:             c.Query("q"),
+		Role:              c.Query("role"),
+		Status:            c.Query("status"),
+		WorkspaceFilterID: workspaceFilterID,
+		Page:              page,
+		Limit:             pageSize,
+	})
+	if err != nil {
+		writeUserManagementError(c, err, "获取用户列表失败")
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": gin.H{
-			"list":  users,
-			"total": total,
-			"page":  page,
-			"size":  pageSize,
+			"list":  result.List,
+			"total": result.Total,
+			"page":  result.Page,
+			"size":  result.Limit,
 		},
 	})
 }

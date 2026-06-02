@@ -118,6 +118,11 @@ const routes = [
         component: () => import('@/views/profile/index.vue')
       },
       {
+        path: 'force-password-change',
+        name: 'ForcePasswordChange',
+        component: () => import('@/views/auth/ForcePasswordChange.vue')
+      },
+      {
         path: 'agent',
         name: 'Agent',
         component: () => import('@/views/agent/index.vue'),
@@ -159,6 +164,8 @@ router.beforeEach((to, _from, next) => {
 
     if (to.meta.requiresAuth && !userStore.isLoggedIn) {
       next({ name: 'Login', query: { redirect: to.fullPath } })
+    } else if (userStore.isLoggedIn && userStore.mustChangePassword && to.name !== 'ForcePasswordChange') {
+      next({ name: 'ForcePasswordChange', query: { redirect: to.fullPath } })
     } else if (to.name === 'Login' && userStore.isLoggedIn) {
       next({ name: 'Dashboard' })
     } else if (to.meta.scope && !canAccessRouteScope(to.meta, {

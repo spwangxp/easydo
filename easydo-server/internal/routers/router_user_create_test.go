@@ -129,6 +129,7 @@ func TestCreateUserRouteAllowsPlatformAdminInAdminWorkspace(t *testing.T) {
 	body, err := json.Marshal(map[string]any{
 		"username":    "route-created-platform-user",
 		"password":    "1qaz2WSX",
+		"email":       "route-created-platform-user@example.com",
 		"system_role": "admin",
 	})
 	if err != nil {

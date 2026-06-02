@@ -130,6 +130,69 @@ func TestListMembers_PlatformAdminCanStillSeePlatformAdmins(t *testing.T) {
 	}
 }
 
+func TestListMembers_FiltersByKeywordAndRole(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	h := &WorkspaceHandler{DB: db}
+
+	owner := models.User{Username: "member-filter-owner", Email: "member-filter-owner@example.com", Role: "user", Status: "active"}
+	viewer := models.User{Username: "alpha-viewer", Email: "alpha-viewer@example.com", Nickname: "Alpha", Role: "user", Status: "active"}
+	developer := models.User{Username: "beta-developer", Email: "beta-developer@example.com", Nickname: "Beta", Role: "user", Status: "active"}
+	maintainer := models.User{Username: "beta-maintainer", Email: "beta-maintainer@example.com", Nickname: "BetaOps", Role: "user", Status: "active"}
+	for _, user := range []*models.User{&owner, &viewer, &developer, &maintainer} {
+		if err := db.Create(user).Error; err != nil {
+			t.Fatalf("create user %s failed: %v", user.Username, err)
+		}
+	}
+	workspace := models.Workspace{Name: "member-filter-space", Slug: "member-filter-space", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: owner.ID}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	members := []models.WorkspaceMember{
+		{WorkspaceID: workspace.ID, UserID: owner.ID, Role: models.WorkspaceRoleOwner, Status: models.WorkspaceMemberStatusActive, InvitedBy: owner.ID},
+		{WorkspaceID: workspace.ID, UserID: viewer.ID, Role: models.WorkspaceRoleViewer, Status: models.WorkspaceMemberStatusActive, InvitedBy: owner.ID},
+		{WorkspaceID: workspace.ID, UserID: developer.ID, Role: models.WorkspaceRoleDeveloper, Status: models.WorkspaceMemberStatusActive, InvitedBy: owner.ID},
+		{WorkspaceID: workspace.ID, UserID: maintainer.ID, Role: models.WorkspaceRoleMaintainer, Status: models.WorkspaceMemberStatusActive, InvitedBy: owner.ID},
+	}
+	for i := range members {
+		if err := db.Create(&members[i]).Error; err != nil {
+			t.Fatalf("create member failed: %v", err)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/workspaces/1/members?q=beta&role=developer", nil)
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(workspace.ID, 10)}}
+	c.Set("user_id", owner.ID)
+	c.Set("role", "user")
+
+	h.ListMembers(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			List []struct {
+				Username string `json:"username"`
+				Role     string `json:"role"`
+			} `json:"list"`
+			Total int `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v body=%s", err, w.Body.String())
+	}
+	if resp.Data.Total != 1 || len(resp.Data.List) != 1 {
+		t.Fatalf("filtered members total=%d len=%d body=%s", resp.Data.Total, len(resp.Data.List), w.Body.String())
+	}
+	if resp.Data.List[0].Username != developer.Username || resp.Data.List[0].Role != models.WorkspaceRoleDeveloper {
+		t.Fatalf("filtered member=%+v, want beta developer", resp.Data.List[0])
+	}
+}
+
 func TestUpdateMember_RequiresWorkspaceGovernance(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)

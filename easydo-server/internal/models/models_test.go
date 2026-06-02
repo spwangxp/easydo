@@ -148,6 +148,46 @@ func TestManagedModelsIncludeNotificationDomainModels(t *testing.T) {
 	}
 }
 
+func TestManagedModelsIncludePersonnelManagementModels(t *testing.T) {
+	managed := managedModels()
+	managedTypes := make(map[reflect.Type]struct{}, len(managed))
+	for _, model := range managed {
+		managedTypes[reflect.TypeOf(model)] = struct{}{}
+	}
+	required := []any{
+		&AuditLog{},
+		&NotificationSenderConfig{},
+	}
+	for _, model := range required {
+		if _, ok := managedTypes[reflect.TypeOf(model)]; !ok {
+			t.Fatalf("managedModels missing %T", model)
+		}
+	}
+}
+
+func TestUserModelIncludesPersonnelManagementFields(t *testing.T) {
+	userType := reflect.TypeOf(User{})
+	for _, fieldName := range []string{"MustChangePassword", "PasswordChangedAt", "DisabledAt", "DisabledBy"} {
+		if _, ok := userType.FieldByName(fieldName); !ok {
+			t.Fatalf("User missing field %s", fieldName)
+		}
+	}
+	emailField, ok := userType.FieldByName("Email")
+	if !ok {
+		t.Fatal("User missing Email field")
+	}
+	if tag := string(emailField.Tag); !strings.Contains(tag, "size:128") {
+		t.Fatalf("Email tag=%q, want size:128", tag)
+	}
+	phoneField, ok := userType.FieldByName("Phone")
+	if !ok {
+		t.Fatal("User missing Phone field")
+	}
+	if tag := string(phoneField.Tag); !strings.Contains(tag, "size:20") {
+		t.Fatalf("Phone tag=%q, want size:20", tag)
+	}
+}
+
 func TestLoadOrCreateSystemDockerHubMirrorsSeedsAndReusesPersistedDefaults(t *testing.T) {
 	db := openModelsTestDB(t)
 	if err := db.AutoMigrate(&SystemSetting{}); err != nil {

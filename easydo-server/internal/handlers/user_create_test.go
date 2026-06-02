@@ -100,6 +100,95 @@ func TestOwnerCreateUserBindsCurrentWorkspaceOnly(t *testing.T) {
 	}
 }
 
+func TestCreateUserRequiresEmailAndForcesPasswordChange(t *testing.T) {
+	db := openHandlerTestDB(t)
+	h := &UserHandler{DB: db}
+	owner := models.User{Username: "owner-create-must-change", Role: "user", Status: "active", Email: "owner-create-must-change@example.com"}
+	_ = owner.SetPassword("1qaz2WSX")
+	if err := db.Create(&owner).Error; err != nil {
+		t.Fatalf("create owner failed: %v", err)
+	}
+	workspace := models.Workspace{Name: "must-change-workspace", Slug: "must-change-workspace", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: owner.ID}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: owner.ID, Role: models.WorkspaceRoleOwner, Status: models.WorkspaceMemberStatusActive, InvitedBy: owner.ID}).Error; err != nil {
+		t.Fatalf("create membership failed: %v", err)
+	}
+
+	w := performCreateUserRequest(t, h, owner.ID, "user", workspace.ID, models.WorkspaceRoleOwner, map[string]any{
+		"username":       "missing-email-user",
+		"password":       "1qaz2WSX",
+		"workspace_role": "developer",
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing email, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	w = performCreateUserRequest(t, h, owner.ID, "user", workspace.ID, models.WorkspaceRoleOwner, map[string]any{
+		"username":       "created-must-change",
+		"password":       "1qaz2WSX",
+		"email":          "Created-Must-Change@Example.COM",
+		"workspace_role": "developer",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			MustChangePassword bool `json:"must_change_password"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response failed: %v", err)
+	}
+	if !resp.Data.MustChangePassword {
+		t.Fatalf("response missing must_change_password=true: %s", w.Body.String())
+	}
+	var created models.User
+	if err := db.Where("username = ?", "created-must-change").First(&created).Error; err != nil {
+		t.Fatalf("load created user failed: %v", err)
+	}
+	if !created.MustChangePassword || created.PasswordChangedAt != 0 {
+		t.Fatalf("created password flags must require change, got must_change=%v changed_at=%d", created.MustChangePassword, created.PasswordChangedAt)
+	}
+	if created.Email != "created-must-change@example.com" {
+		t.Fatalf("created email=%q, want normalized lower-case", created.Email)
+	}
+}
+
+func TestCreateUserRejectsDuplicateEmail(t *testing.T) {
+	db := openHandlerTestDB(t)
+	h := &UserHandler{DB: db}
+	owner := models.User{Username: "owner-duplicate-email", Role: "user", Status: "active", Email: "owner-duplicate-email@example.com"}
+	existing := models.User{Username: "existing-duplicate-email", Role: "user", Status: "active", Email: "duplicate@example.com"}
+	_ = owner.SetPassword("1qaz2WSX")
+	_ = existing.SetPassword("1qaz2WSX")
+	if err := db.Create(&owner).Error; err != nil {
+		t.Fatalf("create owner failed: %v", err)
+	}
+	if err := db.Create(&existing).Error; err != nil {
+		t.Fatalf("create existing user failed: %v", err)
+	}
+	workspace := models.Workspace{Name: "duplicate-email-workspace", Slug: "duplicate-email-workspace", Status: models.WorkspaceStatusActive, Visibility: models.WorkspaceVisibilityPrivate, Kind: models.WorkspaceKindNormal, CreatedBy: owner.ID}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+	if err := db.Create(&models.WorkspaceMember{WorkspaceID: workspace.ID, UserID: owner.ID, Role: models.WorkspaceRoleOwner, Status: models.WorkspaceMemberStatusActive, InvitedBy: owner.ID}).Error; err != nil {
+		t.Fatalf("create membership failed: %v", err)
+	}
+
+	w := performCreateUserRequest(t, h, owner.ID, "user", workspace.ID, models.WorkspaceRoleOwner, map[string]any{
+		"username":       "duplicate-email-created",
+		"password":       "1qaz2WSX",
+		"email":          "DUPLICATE@example.com",
+		"workspace_role": "developer",
+	})
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for duplicate email, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestOwnerCreateUserCannotGrantPlatformAdmin(t *testing.T) {
 	db := openHandlerTestDB(t)
 	h := &UserHandler{DB: db}

@@ -139,6 +139,8 @@ func managedModels() []any {
 		&InboxMessage{},
 		&NotificationDelivery{},
 		&NotificationPreference{},
+		&NotificationSenderConfig{},
+		&AuditLog{},
 		&Credential{},
 		&CredentialEvent{},
 		&PipelineCredentialRef{},
@@ -213,6 +215,10 @@ type columnSync struct {
 
 func managedSchemaColumnSyncs() []columnSync {
 	return []columnSync{
+		{model: &User{}, field: "MustChangePassword"},
+		{model: &User{}, field: "PasswordChangedAt"},
+		{model: &User{}, field: "DisabledAt"},
+		{model: &User{}, field: "DisabledBy"},
 		{model: &Pipeline{}, field: "Definition"},
 		{model: &Pipeline{}, field: "Version"},
 		{model: &PipelineTrigger{}, field: "PushBranchFilters"},

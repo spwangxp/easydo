@@ -679,6 +679,7 @@
 
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, computed, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useUserStore } from '@/stores/user'
 import {
@@ -697,6 +698,7 @@ import { getTaskDispatchList } from '@/api/task'
 import { deriveMirrorEditorText, buildMirrorSubmitPayload } from './mirrorSettings'
 
 const userStore = useUserStore()
+const route = useRoute()
 
 const activeTab = ref('all')
 const searchKeyword = ref('')
@@ -835,6 +837,7 @@ const canEditAgent = (agent) => canManageAgent(agent)
 const canRefreshToken = (agent) => canManageAgent(agent)
 const canRemoveAgent = (agent) => canManageAgent(agent)
 const canDeleteAgent = (agent) => canManageAgent(agent)
+const targetAgentIDFromQuery = computed(() => Number(route.query.agent_id || 0))
 
 const getStatusColor = (status) => {
   const colors = {
@@ -1076,6 +1079,12 @@ const handleDetail = async (agent) => {
     console.error('获取执行器详情失败:', error)
     ElMessage.error('获取详情失败')
   }
+}
+
+const openAgentDetailFromQuery = async () => {
+  if (!targetAgentIDFromQuery.value) return
+  if (detailDialogVisible.value && Number(currentAgent.value?.id || 0) === targetAgentIDFromQuery.value) return
+  await handleDetail({ id: targetAgentIDFromQuery.value })
 }
 
 const handleDelete = (agent) => {
@@ -1396,6 +1405,7 @@ const handleRefreshToken = async () => {
 
 onMounted(() => {
   fetchAgents()
+  openAgentDetailFromQuery()
   // Start polling for agent status updates
   pollingTimer = setInterval(() => {
     fetchAgents()
@@ -1409,6 +1419,10 @@ watch(routeRefresh, () => {
     activeTab.value = 'all'
   }
   fetchAgents()
+})
+
+watch(targetAgentIDFromQuery, () => {
+  openAgentDetailFromQuery()
 })
 
 onUnmounted(() => {

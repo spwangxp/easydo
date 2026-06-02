@@ -19,6 +19,7 @@ export const useUserStore = defineStore('user', () => {
   let isRefreshing = false
 
   const isLoggedIn = computed(() => !!token.value)
+  const mustChangePassword = computed(() => Boolean(userInfo.value?.must_change_password))
   const currentWorkspaceId = computed(() => currentWorkspace.value?.id || 0)
   const governanceMode = computed(() => deriveGovernanceMode({
     currentWorkspace: currentWorkspace.value,
@@ -246,6 +247,7 @@ export const useUserStore = defineStore('user', () => {
     currentSystemRole,
     currentWorkspaceRole,
     isLoggedIn,
+    mustChangePassword,
     isAdminWorkspace,
     isNormalWorkspace,
     isPlatformAdmin,

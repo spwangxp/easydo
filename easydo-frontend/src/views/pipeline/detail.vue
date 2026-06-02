@@ -1213,6 +1213,7 @@ const route = useRoute()
 const router = useRouter()
 
 const pipelineId = computed(() => parseInt(route.params.id))
+const targetRunIDFromQuery = computed(() => Number(route.query.run_id || 0))
 
 // 状态
 const activeTab = ref('design')
@@ -2212,6 +2213,18 @@ const fetchPipelineDetail = async () => {
   return null
 }
 
+const resolveQueryRunFromHistory = () => {
+  if (!targetRunIDFromQuery.value) return null
+  return runHistory.value.find(run => Number(run?.id || 0) === targetRunIDFromQuery.value) || null
+}
+
+const openQueryRunExecutionView = async () => {
+  const targetRun = resolveQueryRunFromHistory()
+  if (!targetRun) return false
+  await openRunExecutionView(targetRun)
+  return true
+}
+
 // 当执行视图可见时，确保按选中/最新构建触发详情与任务接口，避免展示陈旧执行状态。
 const hydrateExecutionViewIfVisible = async () => {
   if (activeTab.value !== 'execution') return
@@ -2269,8 +2282,9 @@ const fetchRunHistory = async (options = {}) => {
 
       if (rehydrateExecution) {
         const latestRun = runHistory.value[0] || null
+        const targetRun = resolveQueryRunFromHistory() || latestRun
 
-        if (!latestRun) {
+        if (!targetRun) {
           currentRun.value = null
           runTasks.value = []
           selectedTask.value = null
@@ -2279,17 +2293,21 @@ const fetchRunHistory = async (options = {}) => {
           return
         }
 
-        const latestRunID = Number(latestRun.id || 0)
+        const latestRunID = Number(targetRun.id || 0)
         const currentRunID = Number(currentRun.value?.id || 0)
         const runChanged = latestRunID !== currentRunID
 
-        currentRun.value = latestRun
+        currentRun.value = targetRun
         if (runChanged) {
           runTasks.value = []
           selectedTask.value = null
           taskLogs.value = []
         }
 
+        if (targetRunIDFromQuery.value) {
+          await openRunExecutionView(targetRun)
+          return
+        }
         await hydrateExecutionViewIfVisible()
       }
     }
@@ -2332,11 +2350,15 @@ const openRunExecutionView = async (run) => {
 
   if (activeTab.value !== 'execution') {
     activeTab.value = 'execution'
-    return
+    await nextTick()
   }
 
   await hydrateExecutionViewIfVisible()
 }
+
+watch(targetRunIDFromQuery, async () => {
+  await openQueryRunExecutionView()
+})
 
 const closeParameterDrawer = () => {
   parameterDrawerVisible.value = false

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"net/mail"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,19 @@ import (
 
 type WorkspaceHandler struct {
 	DB *gorm.DB
+}
+
+type workspaceInvitationCreateRequest struct {
+	Email  string   `json:"email"`
+	Emails []string `json:"emails"`
+	Role   string   `json:"role"`
+}
+
+type workspaceInvitationTokenResponse struct {
+	ID        uint64 `json:"id"`
+	Email     string `json:"email"`
+	Token     string `json:"token"`
+	ExpiresAt int64  `json:"expires_at"`
 }
 
 func NewWorkspaceHandler() *WorkspaceHandler {
@@ -109,6 +123,74 @@ func generateInviteToken() (string, string, error) {
 	token := hex.EncodeToString(buf)
 	hash := sha256.Sum256([]byte(token))
 	return token, hex.EncodeToString(hash[:]), nil
+}
+
+func normalizeInvitationEmails(email string, emails []string) ([]string, error) {
+	candidates := make([]string, 0, len(emails)+1)
+	if strings.TrimSpace(email) != "" {
+		candidates = append(candidates, email)
+	}
+	candidates = append(candidates, emails...)
+	if len(candidates) == 0 {
+		return nil, errors.New("email is required")
+	}
+	if len(candidates) > 50 {
+		return nil, errors.New("too many emails")
+	}
+	seen := make(map[string]bool, len(candidates))
+	normalized := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		value := strings.ToLower(strings.TrimSpace(candidate))
+		if value == "" {
+			continue
+		}
+		parsed, err := mail.ParseAddress(value)
+		if err != nil {
+			return nil, errors.New("invalid email")
+		}
+		value = strings.ToLower(strings.TrimSpace(parsed.Address))
+		if value == "" {
+			return nil, errors.New("invalid email")
+		}
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		normalized = append(normalized, value)
+	}
+	if len(normalized) == 0 {
+		return nil, errors.New("email is required")
+	}
+	return normalized, nil
+}
+
+func (h *WorkspaceHandler) createWorkspaceInvitation(workspaceID uint64, email string, role string, actorID uint64) (models.WorkspaceInvitation, workspaceInvitationTokenResponse, error) {
+	token, tokenHash, err := generateInviteToken()
+	if err != nil {
+		return models.WorkspaceInvitation{}, workspaceInvitationTokenResponse{}, err
+	}
+	invitation := models.WorkspaceInvitation{
+		WorkspaceID: workspaceID,
+		Email:       email,
+		Role:        role,
+		TokenHash:   tokenHash,
+		Status:      models.WorkspaceInvitationStatusPending,
+		InvitedBy:   actorID,
+		ExpiresAt:   time.Now().Add(7 * 24 * time.Hour).Unix(),
+	}
+	var user models.User
+	if err := h.DB.Where("LOWER(email) = ?", invitation.Email).First(&user).Error; err == nil {
+		invitation.InvitedUserID = &user.ID
+	}
+	if err := h.DB.Create(&invitation).Error; err != nil {
+		return models.WorkspaceInvitation{}, workspaceInvitationTokenResponse{}, err
+	}
+	return invitation, workspaceInvitationTokenResponse{
+		ID:        invitation.ID,
+		Email:     invitation.Email,
+		Token:     token,
+		ExpiresAt: invitation.ExpiresAt,
+	}, nil
 }
 
 func (h *WorkspaceHandler) getWorkspaceForUser(c *gin.Context, workspaceID uint64) (*models.Workspace, string, bool) {
@@ -335,7 +417,17 @@ func (h *WorkspaceHandler) ListMembers(c *gin.Context) {
 	}
 	viewerIsPlatformAdmin := isAdminRole(c.GetString("role"))
 	var members []models.WorkspaceMember
-	if err := h.DB.Preload("User").Where("workspace_id = ?", workspaceID).Order("created_at ASC").Find(&members).Error; err != nil {
+	query := h.DB.Preload("User").Where("workspace_members.workspace_id = ?", workspaceID)
+	if keyword := strings.TrimSpace(c.Query("q")); keyword != "" {
+		like := "%" + keyword + "%"
+		query = query.Joins("JOIN users member_filter_users ON member_filter_users.id = workspace_members.user_id").
+			Where("member_filter_users.username LIKE ? OR member_filter_users.nickname LIKE ? OR member_filter_users.email LIKE ?", like, like, like)
+	}
+	switch role := strings.ToLower(strings.TrimSpace(c.Query("role"))); role {
+	case models.WorkspaceRoleViewer, models.WorkspaceRoleDeveloper, models.WorkspaceRoleMaintainer, models.WorkspaceRoleOwner:
+		query = query.Where("workspace_members.role = ?", role)
+	}
+	if err := query.Order("workspace_members.created_at ASC").Find(&members).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "获取成员失败"})
 		return
 	}
@@ -496,11 +588,13 @@ func (h *WorkspaceHandler) CreateInvitation(c *gin.Context) {
 		return
 	}
 	actorRole := effectiveWorkspaceActorRole(governanceCtx.SystemRole, governanceCtx.WorkspaceRole)
-	var req struct {
-		Email string `json:"email" binding:"required,email"`
-		Role  string `json:"role"`
-	}
+	var req workspaceInvitationCreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误: " + err.Error()})
+		return
+	}
+	emails, err := normalizeInvitationEmails(req.Email, req.Emails)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误: " + err.Error()})
 		return
 	}
@@ -509,31 +603,23 @@ func (h *WorkspaceHandler) CreateInvitation(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权邀请该角色"})
 		return
 	}
-	token, tokenHash, err := generateInviteToken()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "生成邀请失败"})
-		return
-	}
 	actorID := c.GetUint64("user_id")
-	invitation := models.WorkspaceInvitation{
-		WorkspaceID: workspaceID,
-		Email:       strings.ToLower(strings.TrimSpace(req.Email)),
-		Role:        inviteRole,
-		TokenHash:   tokenHash,
-		Status:      models.WorkspaceInvitationStatusPending,
-		InvitedBy:   actorID,
-		ExpiresAt:   time.Now().Add(7 * 24 * time.Hour).Unix(),
+	results := make([]workspaceInvitationTokenResponse, 0, len(emails))
+	for _, email := range emails {
+		invitation, result, err := h.createWorkspaceInvitation(workspaceID, email, inviteRole, actorID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "创建邀请失败"})
+			return
+		}
+		emitWorkspaceInvitationCreatedNotification(h.DB, workspace, &invitation, actorID)
+		results = append(results, result)
 	}
-	var user models.User
-	if err := h.DB.Where("LOWER(email) = ?", invitation.Email).First(&user).Error; err == nil {
-		invitation.InvitedUserID = &user.ID
-	}
-	if err := h.DB.Create(&invitation).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "创建邀请失败"})
+	if len(results) == 1 && strings.TrimSpace(req.Email) != "" && len(req.Emails) == 0 {
+		result := results[0]
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"id": result.ID, "email": result.Email, "token": result.Token, "expires_at": result.ExpiresAt}})
 		return
 	}
-	emitWorkspaceInvitationCreatedNotification(h.DB, workspace, &invitation, actorID)
-	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"id": invitation.ID, "token": token, "expires_at": invitation.ExpiresAt}})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"list": results, "total": len(results)}})
 }
 
 func (h *WorkspaceHandler) RevokeInvitation(c *gin.Context) {
@@ -555,6 +641,56 @@ func (h *WorkspaceHandler) RevokeInvitation(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "撤销成功"})
+}
+
+func (h *WorkspaceHandler) RegenerateInvitation(c *gin.Context) {
+	workspaceID, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+	workspace, _, ok := h.getWorkspaceForUser(c, workspaceID)
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权重新生成邀请"})
+		return
+	}
+	governanceCtx := governanceContextForWorkspace(h.DB, workspaceID, c.GetUint64("user_id"), c.GetString("role"))
+	if !RequireWorkspaceGovernance(governanceCtx) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权重新生成邀请"})
+		return
+	}
+	inviteID, err := strconv.ParseUint(c.Param("invite_id"), 10, 64)
+	if err != nil || inviteID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的邀请ID"})
+		return
+	}
+	var invitation models.WorkspaceInvitation
+	if err := h.DB.Where("id = ? AND workspace_id = ?", inviteID, workspaceID).First(&invitation).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "邀请不存在"})
+		return
+	}
+	if invitation.Status != models.WorkspaceInvitationStatusPending {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "只能重新生成待处理邀请"})
+		return
+	}
+	actorRole := effectiveWorkspaceActorRole(governanceCtx.SystemRole, governanceCtx.WorkspaceRole)
+	if !workspaceRoleEditableBy(actorRole, models.WorkspaceRoleViewer, invitation.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权重新生成该角色邀请"})
+		return
+	}
+	token, tokenHash, err := generateInviteToken()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "生成邀请失败"})
+		return
+	}
+	expiresAt := time.Now().Add(7 * 24 * time.Hour).Unix()
+	if err := h.DB.Model(&invitation).Updates(map[string]any{
+		"token_hash": tokenHash,
+		"expires_at": expiresAt,
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "重新生成邀请失败"})
+		return
+	}
+	invitation.TokenHash = tokenHash
+	invitation.ExpiresAt = expiresAt
+	emitWorkspaceInvitationCreatedNotification(h.DB, workspace, &invitation, c.GetUint64("user_id"))
+	c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"id": invitation.ID, "email": invitation.Email, "token": token, "expires_at": invitation.ExpiresAt}})
 }
 
 func (h *WorkspaceHandler) AcceptInvitation(c *gin.Context) {

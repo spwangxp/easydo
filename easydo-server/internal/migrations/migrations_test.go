@@ -255,15 +255,38 @@ func TestDiscoverEmbeddedMigrationsUsesCompactedBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 2 {
-		t.Fatalf("embedded migration count=%d, want 2", len(migrations))
+	if len(migrations) != 3 {
+		t.Fatalf("embedded migration count=%d, want 3", len(migrations))
 	}
 	latest := migrations[len(migrations)-1]
-	if latest.Version != 2 {
-		t.Fatalf("latest migration version=%d, want 2", latest.Version)
+	if latest.Version != 3 {
+		t.Fatalf("latest migration version=%d, want 3", latest.Version)
 	}
-	if latest.Script != "V2__bootstrap_seed_data.sql" {
-		t.Fatalf("latest migration script=%s, want V2__bootstrap_seed_data.sql", latest.Script)
+	if latest.Script != "V3__personnel_management.sql" {
+		t.Fatalf("latest migration script=%s, want V3__personnel_management.sql", latest.Script)
+	}
+}
+
+func TestEmbeddedPersonnelManagementMigrationDeclaresSchemaChanges(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V3__personnel_management.sql")
+	if err != nil {
+		t.Fatalf("read V3 personnel migration failed: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{
+		"CREATE TABLE IF NOT EXISTS `audit_logs`",
+		"CREATE TABLE IF NOT EXISTS `notification_sender_configs`",
+		"ALTER TABLE `users` ADD COLUMN `must_change_password`",
+		"ALTER TABLE `users` ADD COLUMN `password_changed_at`",
+		"ALTER TABLE `users` ADD COLUMN `disabled_at`",
+		"ALTER TABLE `users` ADD COLUMN `disabled_by`",
+		"CREATE UNIQUE INDEX `idx_users_email`",
+		"CREATE UNIQUE INDEX `idx_users_phone`",
+		"UPDATE `workspaces` SET `kind` = 'admin'",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected V3 migration to contain %q", expected)
+		}
 	}
 }
 
@@ -370,14 +393,17 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 2 {
-		t.Fatalf("embedded migration count=%d, want 2", len(migrations))
+	if len(migrations) != 3 {
+		t.Fatalf("embedded migration count=%d, want 3", len(migrations))
 	}
 	if migrations[0].VersionText != "1" || migrations[0].Script != "V1__schema.sql" {
 		t.Fatalf("unexpected first embedded migration: %+v", migrations[0])
 	}
 	if migrations[1].VersionText != "2" || migrations[1].Script != "V2__bootstrap_seed_data.sql" {
 		t.Fatalf("unexpected second embedded migration: %+v", migrations[1])
+	}
+	if migrations[2].VersionText != "3" || migrations[2].Script != "V3__personnel_management.sql" {
+		t.Fatalf("unexpected third embedded migration: %+v", migrations[2])
 	}
 	for _, migration := range migrations {
 		if len(migration.Statements) == 0 {

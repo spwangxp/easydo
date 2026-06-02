@@ -22,6 +22,12 @@
       <el-tab-pane label="默认运行策略" name="runtime-policies">
         <PlatformRuntimePolicyManagement />
       </el-tab-pane>
+      <el-tab-pane label="邮件配置" name="notification-sender">
+        <NotificationSenderConfigPanel scope="platform" />
+      </el-tab-pane>
+      <el-tab-pane label="审计日志" name="audit-logs">
+        <AuditLogPanel scope="platform" />
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
@@ -34,11 +40,13 @@ import PlatformUserManagement from './components/PlatformUserManagement.vue'
 import WorkspaceCatalogManagement from './components/WorkspaceCatalogManagement.vue'
 import PlatformModelManagement from './components/PlatformModelManagement.vue'
 import PlatformRuntimePolicyManagement from './components/PlatformRuntimePolicyManagement.vue'
+import NotificationSenderConfigPanel from '@/views/governance/components/NotificationSenderConfigPanel.vue'
+import AuditLogPanel from '@/views/governance/components/AuditLogPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
-const governanceTabs = ['platform-users', 'workspaces', 'models-providers', 'runtime-policies']
+const governanceTabs = ['platform-users', 'workspaces', 'models-providers', 'runtime-policies', 'notification-sender', 'audit-logs']
 const activeTab = ref(normalizeGovernanceTab(route.query.tab))
 
 const workspaceKindText = computed(() => {

@@ -144,6 +144,111 @@ func TestLoginRefreshLogoutFlowWithStableToken(t *testing.T) {
 	}
 }
 
+func TestLoginIncludesMustChangePasswordAndPasswordChangeClearsFlag(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupUserAuthTestEnv(t, 4*time.Hour, 10*time.Minute)
+
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() {
+		models.DB = originalDB
+	})
+	user := models.User{
+		Username:           "must-change-login-user",
+		Email:              "must-change-login-user@example.com",
+		Role:               "user",
+		Status:             "active",
+		MustChangePassword: true,
+	}
+	if err := user.SetPassword("1qaz2WSX"); err != nil {
+		t.Fatalf("set password failed: %v", err)
+	}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+
+	h := &UserHandler{DB: db}
+	router := gin.New()
+	auth := router.Group("/api/auth")
+	auth.POST("/login", h.Login)
+	auth.GET("/userinfo", middleware.JWTAuth(), h.GetUserInfo)
+	auth.POST("/password", middleware.JWTAuth(), h.ChangePassword)
+	router.GET("/api/projects", middleware.JWTAuth(), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"code": 200})
+	})
+
+	loginBytes, _ := json.Marshal(map[string]string{"username": user.Username, "password": "1qaz2WSX"})
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(loginBytes))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginW := httptest.NewRecorder()
+	router.ServeHTTP(loginW, loginReq)
+	if loginW.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", loginW.Code, loginW.Body.String())
+	}
+	var loginResp struct {
+		Data struct {
+			Token string `json:"token"`
+			User  struct {
+				MustChangePassword bool `json:"must_change_password"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(loginW.Body.Bytes(), &loginResp); err != nil {
+		t.Fatalf("parse login response failed: %v", err)
+	}
+	if !loginResp.Data.User.MustChangePassword {
+		t.Fatalf("login response should include must_change_password=true: %s", loginW.Body.String())
+	}
+
+	userInfoReq := httptest.NewRequest(http.MethodGet, "/api/auth/userinfo", nil)
+	userInfoReq.Header.Set("Authorization", "Bearer "+loginResp.Data.Token)
+	userInfoW := httptest.NewRecorder()
+	router.ServeHTTP(userInfoW, userInfoReq)
+	if userInfoW.Code != http.StatusOK {
+		t.Fatalf("userinfo status=%d body=%s", userInfoW.Code, userInfoW.Body.String())
+	}
+	var userInfoResp struct {
+		Data struct {
+			MustChangePassword bool `json:"must_change_password"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(userInfoW.Body.Bytes(), &userInfoResp); err != nil {
+		t.Fatalf("parse userinfo response failed: %v", err)
+	}
+	if !userInfoResp.Data.MustChangePassword {
+		t.Fatalf("userinfo should include must_change_password=true: %s", userInfoW.Body.String())
+	}
+
+	blockedReq := httptest.NewRequest(http.MethodGet, "/api/projects", nil)
+	blockedReq.Header.Set("Authorization", "Bearer "+loginResp.Data.Token)
+	blockedW := httptest.NewRecorder()
+	router.ServeHTTP(blockedW, blockedReq)
+	if blockedW.Code != http.StatusForbidden {
+		t.Fatalf("expected forced password change guard, got %d body=%s", blockedW.Code, blockedW.Body.String())
+	}
+
+	changeBytes, _ := json.Marshal(map[string]string{"current_password": "1qaz2WSX", "new_password": "NewPass123!"})
+	changeReq := httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(changeBytes))
+	changeReq.Header.Set("Content-Type", "application/json")
+	changeReq.Header.Set("Authorization", "Bearer "+loginResp.Data.Token)
+	changeW := httptest.NewRecorder()
+	router.ServeHTTP(changeW, changeReq)
+	if changeW.Code != http.StatusOK {
+		t.Fatalf("change password status=%d body=%s", changeW.Code, changeW.Body.String())
+	}
+	var reloaded models.User
+	if err := db.First(&reloaded, user.ID).Error; err != nil {
+		t.Fatalf("reload user failed: %v", err)
+	}
+	if reloaded.MustChangePassword || reloaded.PasswordChangedAt == 0 {
+		t.Fatalf("user flags after password change=%+v", reloaded)
+	}
+	if !reloaded.CheckPassword("NewPass123!") {
+		t.Fatal("new password does not verify")
+	}
+}
+
 func TestRefreshReturns401WhenSessionMissing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mini := setupUserAuthTestEnv(t, 4*time.Hour, 10*time.Minute)

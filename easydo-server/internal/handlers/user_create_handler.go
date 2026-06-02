@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"net/mail"
 	"strconv"
 	"strings"
 
@@ -87,6 +88,14 @@ func (h *UserHandler) resolvePlatformScopedCreateTarget(req CreateUserRequest, a
 	return normalizeSystemRole(req.SystemRole), 0, "", http.StatusOK, ""
 }
 
+func normalizeCreateUserEmail(raw string) (string, error) {
+	parsed, err := mail.ParseAddress(strings.TrimSpace(raw))
+	if err != nil || strings.TrimSpace(parsed.Address) == "" {
+		return "", err
+	}
+	return strings.ToLower(strings.TrimSpace(parsed.Address)), nil
+}
+
 func (h *UserHandler) CreateUser(c *gin.Context) {
 	var req CreateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -129,6 +138,22 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 		return
 	}
 
+	normalizedEmail, err := normalizeCreateUserEmail(req.Email)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "邮箱不能为空或格式不正确"})
+		return
+	}
+	req.Email = normalizedEmail
+	var emailCount int64
+	if err := h.DB.Model(&models.User{}).Where("LOWER(email) = LOWER(?)", req.Email).Count(&emailCount).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "校验邮箱失败"})
+		return
+	}
+	if emailCount > 0 {
+		c.JSON(http.StatusConflict, gin.H{"code": 409, "message": "邮箱已存在"})
+		return
+	}
+
 	var createdUser *models.User
 	if err := h.DB.Transaction(func(tx *gorm.DB) error {
 		user, err := h.createUserWithWorkspaceBinding(tx, req, actorID, targetSystemRole, targetWorkspaceID, targetWorkspaceRole)
@@ -143,11 +168,12 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 	}
 
 	response := gin.H{
-		"id":          createdUser.ID,
-		"username":    createdUser.Username,
-		"email":       createdUser.Email,
-		"nickname":    createdUser.Nickname,
-		"system_role": createdUser.Role,
+		"id":                   createdUser.ID,
+		"username":             createdUser.Username,
+		"email":                createdUser.Email,
+		"nickname":             createdUser.Nickname,
+		"system_role":          createdUser.Role,
+		"must_change_password": createdUser.MustChangePassword,
 	}
 	if targetWorkspaceID > 0 {
 		response["workspace_id"] = targetWorkspaceID
