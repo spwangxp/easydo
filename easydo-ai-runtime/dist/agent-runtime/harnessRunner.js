@@ -1,0 +1,424 @@
+import { PiEventAdapter } from './piAdapter.js';
+import { PiToolApprovalRequiredError } from './piResources.js';
+import { classifyRuntimeError, RuntimeSourceError } from '../services/runtimeErrorClassifier.js';
+import { runtimeLogger } from '../observability/runtimeLogger.js';
+import { MissingBindingContextWindowError, buildHistoryCompactionSummary, contextBudgetEventPayload, contextCompactionEventPayload, evaluateContextBudget, planHistoryCompaction } from '../services/contextBudget.js';
+export class AgentHarnessRunner {
+    store;
+    createHarness;
+    now;
+    nextID;
+    activeHarnesses = new Map();
+    acceptedSteerQueueItems = new Map();
+    pendingSteerQueueItems = new Map();
+    abortingRuns = new Set();
+    approvalPauses = new Map();
+    logger;
+    constructor(options) {
+        this.store = options.store;
+        this.createHarness = options.createHarness;
+        this.now = options.now ?? (() => new Date().toISOString());
+        let counter = 0;
+        this.nextID = options.nextID ?? ((prefix) => `${prefix}_${Date.now()}_${++counter}`);
+        this.logger = options.logger ?? runtimeLogger;
+    }
+    async prompt(input) {
+        const logContext = {
+            component: 'pi-harness',
+            operation: 'prompt',
+            request_id: input.requestID,
+            workspace_id: input.workspaceID,
+            session_id: input.sessionID,
+            runtime_run_id: input.runtimeRunID,
+            parent_runtime_run_id: input.parentRuntimeRunID,
+            provider_id: input.model?.provider_id
+        };
+        this.logger.info({ ...logContext, outcome: 'started' });
+        const userMessageID = this.nextID('user');
+        const assistantMessageID = this.nextID('assistant');
+        let textID = `${assistantMessageID}:text`;
+        let assistantText = '';
+        let unsubscribe = () => { };
+        try {
+            await this.append(input.runtimeRunID, {
+                type: 'session.prompted',
+                session_id: input.sessionID,
+                event_id: '',
+                seq: 0,
+                timestamp: this.now(),
+                message_id: userMessageID,
+                prompt: input.prompt,
+                files: input.files ?? [],
+                delivery: 'prompt'
+            });
+            await this.append(input.runtimeRunID, {
+                type: 'session.step.started',
+                session_id: input.sessionID,
+                event_id: '',
+                seq: 0,
+                timestamp: this.now(),
+                assistant_message_id: assistantMessageID,
+                parent_message_id: userMessageID,
+                agent: input.agent,
+                model: input.model
+            });
+            let budgetEvaluation;
+            let compactionPlan;
+            const preparedBudget = tryPrepareProviderBindingContextBudget(input);
+            if (preparedBudget) {
+                budgetEvaluation = preparedBudget.evaluation;
+                compactionPlan = preparedBudget.plan;
+                await this.append(input.runtimeRunID, {
+                    type: 'context.budget.evaluated',
+                    session_id: input.sessionID,
+                    event_id: '',
+                    seq: 0,
+                    timestamp: this.now(),
+                    message_id: userMessageID,
+                    should_compact: budgetEvaluation.should_compact,
+                    reason: budgetEvaluation.reason,
+                    ...contextBudgetEventPayload(budgetEvaluation)
+                });
+                if (budgetEvaluation.should_compact && compactionPlan.compacted.length > 0) {
+                    await this.append(input.runtimeRunID, {
+                        type: 'context.compaction.started',
+                        session_id: input.sessionID,
+                        event_id: '',
+                        seq: 0,
+                        timestamp: this.now(),
+                        message_id: userMessageID,
+                        reason: budgetEvaluation.reason,
+                        ...contextCompactionEventPayload(budgetEvaluation, compactionPlan)
+                    });
+                    await this.append(input.runtimeRunID, {
+                        type: 'session.compaction.started',
+                        session_id: input.sessionID,
+                        event_id: '',
+                        seq: 0,
+                        timestamp: this.now(),
+                        message_id: userMessageID,
+                        reason: budgetEvaluation.reason,
+                        ...contextCompactionEventPayload(budgetEvaluation, compactionPlan)
+                    });
+                }
+            }
+            const harness = await this.createHarness(input);
+            if (this.abortingRuns.has(input.runtimeRunID)) {
+                await harness.abort?.();
+                throw new Error('Pi harness stopped with aborted');
+            }
+            this.activeHarnesses.set(input.runtimeRunID, harness);
+            if (this.approvalPauses.has(input.runtimeRunID)) {
+                await harness.abort?.();
+            }
+            if (budgetEvaluation?.should_compact && compactionPlan && compactionPlan.compacted.length > 0) {
+                const summary = buildHistoryCompactionSummary(compactionPlan.compacted, Math.min(compactionPlan.max_chars, 1200));
+                await this.append(input.runtimeRunID, {
+                    type: 'context.compaction.completed',
+                    session_id: input.sessionID,
+                    event_id: '',
+                    seq: 0,
+                    timestamp: this.now(),
+                    message_id: userMessageID,
+                    reason: budgetEvaluation.reason,
+                    summary,
+                    recent: '',
+                    ...contextCompactionEventPayload(budgetEvaluation, compactionPlan)
+                });
+                await this.append(input.runtimeRunID, {
+                    type: 'session.compaction.ended',
+                    session_id: input.sessionID,
+                    event_id: '',
+                    seq: 0,
+                    timestamp: this.now(),
+                    message_id: userMessageID,
+                    reason: budgetEvaluation.reason,
+                    summary,
+                    recent: '',
+                    ...contextCompactionEventPayload(budgetEvaluation, compactionPlan)
+                });
+            }
+            const adapter = new PiEventAdapter({ sessionID: input.sessionID, assistantMessageID });
+            unsubscribe = harness.subscribe(async (event) => {
+                if (input.onSafeCheckpoint && isPiSavePointEvent(event)) {
+                    await input.onSafeCheckpoint({ runtime_run_id: input.runtimeRunID, checkpoint: 'turn_save_point' });
+                }
+                for (const runtimeEvent of adapter.accept(event)) {
+                    if (runtimeEvent.type === 'session.text.delta') {
+                        assistantText += runtimeEvent.delta;
+                        textID = runtimeEvent.text_id;
+                    }
+                    await this.append(input.runtimeRunID, runtimeEvent);
+                }
+            });
+            const result = await this.invokeHarness(harness, input);
+            const approvalPause = this.approvalPauses.get(input.runtimeRunID);
+            if (approvalPause) {
+                throw new PiToolApprovalRequiredError(approvalPause.approvalID, approvalPause.callID, approvalPause.toolName, approvalPause.reason);
+            }
+            const failureMessage = readAssistantFailureMessage(result);
+            if (failureMessage)
+                throw new Error(failureMessage);
+            if (!assistantText)
+                assistantText = readAssistantText(result);
+            // Only emit session.text.ended when there is actual text content.
+            // When the assistant produced only reasoning and/or tool calls (no visible
+            // text), emitting an empty text part would create a misleading blank card.
+            if (assistantText) {
+                await this.append(input.runtimeRunID, {
+                    type: 'session.text.ended',
+                    session_id: input.sessionID,
+                    event_id: '',
+                    seq: 0,
+                    timestamp: this.now(),
+                    assistant_message_id: assistantMessageID,
+                    text_id: textID,
+                    text: assistantText
+                });
+            }
+            await this.append(input.runtimeRunID, {
+                type: 'session.step.ended',
+                session_id: input.sessionID,
+                event_id: '',
+                seq: 0,
+                timestamp: this.now(),
+                assistant_message_id: assistantMessageID,
+                finish_reason: 'stop',
+                tokens: readTokenUsage(result),
+                cost: readUsageCost(result),
+                files: []
+            });
+            this.logger.info({ ...logContext, outcome: 'completed' });
+            return { session_id: input.sessionID, user_message_id: userMessageID, assistant_message_id: assistantMessageID };
+        }
+        catch (error) {
+            const approvalPause = this.approvalPauses.get(input.runtimeRunID);
+            if (approvalPause) {
+                this.logger.info({ ...logContext, outcome: 'awaiting_approval', code: 'tool_approval_required', category: 'permission' });
+                throw new PiToolApprovalRequiredError(approvalPause.approvalID, approvalPause.callID, approvalPause.toolName, approvalPause.reason);
+            }
+            if (error instanceof PiToolApprovalRequiredError) {
+                this.logger.info({ ...logContext, outcome: 'awaiting_approval', code: 'tool_approval_required', category: 'permission' });
+                throw error;
+            }
+            if (this.abortingRuns.has(input.runtimeRunID)) {
+                this.logger.info({ ...logContext, outcome: 'cancelled', code: 'runtime_cancelled', category: 'cancelled' });
+                throw error;
+            }
+            const descriptor = classifyRuntimeError(error);
+            const sourceError = error instanceof RuntimeSourceError
+                ? error
+                : new RuntimeSourceError({
+                    source: descriptor.source,
+                    code: descriptor.code,
+                    message: descriptor.message,
+                    http_status: descriptor.http_status,
+                    retryable: descriptor.retryable,
+                    cause: error
+                });
+            await this.append(input.runtimeRunID, {
+                type: 'session.step.failed',
+                session_id: input.sessionID,
+                event_id: '',
+                seq: 0,
+                timestamp: this.now(),
+                assistant_message_id: assistantMessageID,
+                error: {
+                    type: descriptor.category,
+                    message: descriptor.user_message,
+                    code: descriptor.code,
+                    category: descriptor.category,
+                    retryable: descriptor.retryable,
+                    http_status: descriptor.http_status,
+                    source: descriptor.source,
+                    terminal_status: descriptor.terminal_status
+                }
+            });
+            this.logger.error({
+                ...logContext,
+                outcome: descriptor.terminal_status,
+                code: descriptor.code,
+                category: descriptor.category
+            });
+            throw sourceError;
+        }
+        finally {
+            this.activeHarnesses.delete(input.runtimeRunID);
+            this.acceptedSteerQueueItems.delete(input.runtimeRunID);
+            this.pendingSteerQueueItems.delete(input.runtimeRunID);
+            this.abortingRuns.delete(input.runtimeRunID);
+            this.approvalPauses.delete(input.runtimeRunID);
+            unsubscribe();
+        }
+    }
+    async invokeHarness(harness, input) {
+        const invocation = input.skillInvocation;
+        if (invocation?.name && typeof harness.skill === 'function') {
+            await this.append(input.runtimeRunID, {
+                type: 'skill.used',
+                session_id: input.sessionID,
+                event_id: '',
+                seq: 0,
+                timestamp: this.now(),
+                name: invocation.name,
+                operation: 'invoked',
+                prompt: invocation.instructions ?? input.prompt
+            });
+            return harness.skill(invocation.name, invocation.instructions ?? input.prompt);
+        }
+        return harness.prompt(input.prompt);
+    }
+    async abort(runtimeRunID) {
+        this.approvalPauses.delete(runtimeRunID);
+        this.abortingRuns.add(runtimeRunID);
+        const harness = this.activeHarnesses.get(runtimeRunID);
+        if (!harness?.abort)
+            return true;
+        await harness.abort();
+        return true;
+    }
+    async steer(runtimeRunID, queueItemID, instruction) {
+        const harness = this.activeHarnesses.get(runtimeRunID);
+        if (!harness?.steer)
+            return 'run_not_active';
+        const acceptedQueueItems = this.acceptedSteerQueueItems.get(runtimeRunID) ?? new Set();
+        if (acceptedQueueItems.has(queueItemID))
+            return 'already_accepted';
+        const pendingQueueItems = this.pendingSteerQueueItems.get(runtimeRunID) ?? new Map();
+        const pending = pendingQueueItems.get(queueItemID);
+        if (pending) {
+            await pending;
+            return 'already_accepted';
+        }
+        const steering = Promise.resolve(harness.steer(instruction)).then(() => { });
+        pendingQueueItems.set(queueItemID, steering);
+        this.pendingSteerQueueItems.set(runtimeRunID, pendingQueueItems);
+        try {
+            await steering;
+        }
+        finally {
+            pendingQueueItems.delete(queueItemID);
+            if (pendingQueueItems.size === 0)
+                this.pendingSteerQueueItems.delete(runtimeRunID);
+        }
+        acceptedQueueItems.add(queueItemID);
+        this.acceptedSteerQueueItems.set(runtimeRunID, acceptedQueueItems);
+        return 'accepted';
+    }
+    async pauseForApproval(runtimeRunID, approval) {
+        if (this.approvalPauses.has(runtimeRunID))
+            return true;
+        this.approvalPauses.set(runtimeRunID, approval);
+        const harness = this.activeHarnesses.get(runtimeRunID);
+        void Promise.resolve(harness?.abort?.()).catch(() => { });
+        return true;
+    }
+    async append(runtimeRunID, event) {
+        await this.store.append({ ...event, runtime_run_id: runtimeRunID });
+    }
+}
+function isPiSavePointEvent(event) {
+    if (!event || typeof event !== 'object' || Array.isArray(event))
+        return false;
+    const type = event.type;
+    return type === 'save_point' || type === 'session.save_point' || type === 'turn_save_point';
+}
+function readAssistantFailureMessage(result) {
+    if (!result || typeof result !== 'object')
+        return '';
+    const record = result;
+    const stopReason = typeof record.stopReason === 'string' ? record.stopReason : '';
+    const errorMessage = typeof record.errorMessage === 'string' ? record.errorMessage.trim() : '';
+    if (errorMessage)
+        return errorMessage;
+    return stopReason === 'error' || stopReason === 'aborted'
+        ? `Pi harness stopped with ${stopReason}`
+        : '';
+}
+function readAssistantText(result) {
+    if (!result || typeof result !== 'object')
+        return '';
+    const record = result;
+    if (typeof record.text === 'string')
+        return record.text;
+    const content = record.content;
+    if (!Array.isArray(content))
+        return '';
+    return content
+        .map((item) => item && typeof item === 'object' ? item : {})
+        .filter((item) => item.type === 'text' && typeof item.text === 'string')
+        .map((item) => String(item.text))
+        .join('');
+}
+function readTokenUsage(result) {
+    const usage = asRecord(asRecord(result).usage);
+    const cache = asRecord(usage.cache);
+    const input = firstNumber(usage.input, usage.input_tokens, usage.prompt_tokens);
+    const output = firstNumber(usage.output, usage.output_tokens, usage.completion_tokens);
+    const reasoning = firstNumber(usage.reasoning, usage.reasoning_tokens, usage.reasoning_output_tokens);
+    const total = firstNumber(usage.total, usage.totalTokens, usage.total_tokens);
+    return {
+        input: input || Math.max(0, total - output - reasoning),
+        output,
+        reasoning,
+        cache: {
+            read: firstNumber(cache.read, usage.cacheRead, usage.cache_read, usage.cache_read_tokens, usage.cached_tokens),
+            write: firstNumber(cache.write, usage.cacheWrite, usage.cache_write, usage.cache_write_tokens)
+        }
+    };
+}
+function readUsageCost(result) {
+    const usage = asRecord(asRecord(result).usage);
+    const cost = asRecord(usage.cost);
+    return firstNumber(cost.total, usage.cost_total, usage.total_cost, typeof usage.cost === 'number' ? usage.cost : 0);
+}
+function tryPrepareProviderBindingContextBudget(input) {
+    const modelConfig = asRecord(input.modelConfig);
+    const model = asRecord(input.model);
+    const contextWindow = firstNumber(modelConfig.context_window, modelConfig.context_window_tokens, model.context_window_tokens, model.context_window);
+    if (!contextWindow)
+        return undefined;
+    const history = Array.isArray(input.history)
+        ? input.history.map((message) => ({ role: message.role, content: message.content }))
+        : [];
+    try {
+        const evaluation = evaluateContextBudget({
+            binding: {
+                provider_id: firstString(modelConfig.provider_id, model.provider_id),
+                provider_model_key: firstString(modelConfig.id, model.id, model.provider_model_key),
+                context_window_tokens: contextWindow,
+                max_output_tokens: firstNumber(modelConfig.max_tokens, model.max_tokens, model.max_output_tokens),
+                capability_source: firstString(asRecord(modelConfig.inference).capability_source, model.capability_source, 'binding_snapshot'),
+                capability_snapshot_hash: firstString(asRecord(modelConfig.inference).capability_snapshot_hash, model.capability_snapshot_hash)
+            },
+            history,
+            system_prompt: input.systemPrompt,
+            prompt: input.prompt
+        });
+        return { evaluation, plan: planHistoryCompaction(history, evaluation) };
+    }
+    catch (error) {
+        if (error instanceof MissingBindingContextWindowError)
+            return undefined;
+        throw error;
+    }
+}
+function firstString(...values) {
+    for (const value of values) {
+        const text = value === undefined || value === null ? '' : String(value).trim();
+        if (text)
+            return text;
+    }
+    return '';
+}
+function asRecord(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+function firstNumber(...values) {
+    for (const value of values) {
+        const number = Number(value);
+        if (Number.isFinite(number) && number > 0)
+            return number;
+    }
+    return 0;
+}

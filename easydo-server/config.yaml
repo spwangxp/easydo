@@ -11,6 +11,11 @@ server:
   internal_url: ""
   internal_token: ""
 
+ai_runtime:
+  base_url: ""
+  internal_token: ""
+  timeout: 180s
+
 database:
   # 通过环境变量覆盖: DB_HOST, DB_PORT, DB_USERNAME, DB_PASSWORD, DB_NAME
   host: ""     

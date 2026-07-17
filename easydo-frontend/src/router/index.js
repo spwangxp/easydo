@@ -84,6 +84,24 @@ const routes = [
 		meta: { permission: 'store.template.read', scope: 'workspace-business' }
       },
       {
+        path: 'store/ai-agents',
+        name: 'AIAgentStore',
+        component: () => import('@/views/store/ai-agent-store.vue'),
+        meta: { permission: 'store.template.read', scope: 'workspace-business' }
+      },
+      {
+        path: 'store/ai-agents/chat/:session_id',
+        name: 'AIAgentChatbox',
+        component: () => import('@/views/ai-agent-chatbox/AgentChatbox.vue'),
+        meta: { permission: 'store.template.read', scope: 'workspace-business' }
+      },
+      {
+        path: 'store/ai-agents/chat/:session_id/subagents/:child_run_id',
+        name: 'AIAgentChatboxChildThread',
+        component: () => import('@/views/ai-agent-chatbox/AgentChatbox.vue'),
+        meta: { permission: 'store.template.read', scope: 'workspace-business' }
+      },
+      {
         path: 'statistics',
         name: 'Statistics',
         component: () => import('@/views/statistics/index.vue'),

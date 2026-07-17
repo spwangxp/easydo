@@ -188,6 +188,7 @@ type AIModelCatalog struct {
 	Source        string `gorm:"size:32;not null;index:idx_llm_model_catalog_source_ref,priority:1" json:"source"`
 	SourceModelID string `gorm:"size:255;not null;index:idx_llm_model_catalog_source_ref,priority:2" json:"source_model_id"`
 	ParameterSize string `gorm:"size:64" json:"parameter_size"`
+	ContextWindow int64  `json:"context_window"`
 	Summary       string `gorm:"type:text" json:"summary"`
 	License       string `gorm:"size:128" json:"license"`
 	Tags          string `gorm:"type:longtext" json:"tags"`

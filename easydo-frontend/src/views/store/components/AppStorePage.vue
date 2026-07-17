@@ -654,6 +654,10 @@ function createParameterViewRow() {
 
 function handleStoreTabChange(tabName) {
   if (tabName === 'app') return
+  if (tabName === 'ai-agent') {
+    router.push('/store/ai-agents')
+    return
+  }
 	router.push('/store/ai')
 }
 

@@ -255,40 +255,26 @@ func TestDiscoverEmbeddedMigrationsUsesCompactedBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 3 {
-		t.Fatalf("embedded migration count=%d, want 3", len(migrations))
+	if len(migrations) != 2 {
+		t.Fatalf("embedded migration count=%d, want 2", len(migrations))
 	}
-	latest := migrations[len(migrations)-1]
-	if latest.Version != 3 {
-		t.Fatalf("latest migration version=%d, want 3", latest.Version)
+	if migrations[0].Version != 1 || migrations[0].Script != "V1__schema.sql" {
+		t.Fatalf("unexpected first migration: %+v", migrations[0])
 	}
-	if latest.Script != "V3__personnel_management.sql" {
-		t.Fatalf("latest migration script=%s, want V3__personnel_management.sql", latest.Script)
+	if migrations[1].Version != 2 || migrations[1].Script != "V2__bootstrap_seed_data.sql" {
+		t.Fatalf("unexpected second migration: %+v", migrations[1])
 	}
 }
 
-func TestEmbeddedPersonnelManagementMigrationDeclaresSchemaChanges(t *testing.T) {
-	content, err := fs.ReadFile(dbmigrations.Files, "V3__personnel_management.sql")
-	if err != nil {
-		t.Fatalf("read V3 personnel migration failed: %v", err)
-	}
-	text := string(content)
-	for _, expected := range []string{
-		"CREATE TABLE IF NOT EXISTS `audit_logs`",
-		"CREATE TABLE IF NOT EXISTS `notification_sender_configs`",
-		"ALTER TABLE `users` ADD COLUMN `must_change_password`",
-		"ALTER TABLE `users` ADD COLUMN `password_changed_at`",
-		"ALTER TABLE `users` ADD COLUMN `disabled_at`",
-		"ALTER TABLE `users` ADD COLUMN `disabled_by`",
-		"CREATE UNIQUE INDEX `idx_users_email`",
-		"CREATE UNIQUE INDEX `idx_users_phone`",
-		"UPDATE `workspaces` SET `kind` = 'admin'",
-	} {
-		if !strings.Contains(text, expected) {
-			t.Fatalf("expected V3 migration to contain %q", expected)
-		}
-	}
-}
+
+
+
+
+
+
+
+
+
 
 func TestEmbeddedBaselineDeclaresDurableLabelTable(t *testing.T) {
 	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
@@ -306,7 +292,7 @@ func TestEmbeddedBaselineDeclaresDurableLabelTable(t *testing.T) {
 		"KEY `idx_resource_runtime_labels_resource_target` (`resource_id`,`target_type`,`target_key`)",
 	} {
 		if !strings.Contains(text, expected) {
-			t.Fatalf("expected V5 migration to contain %q, got %s", expected, text)
+			t.Fatalf("expected V1 baseline to contain %q, got %s", expected, text)
 		}
 	}
 }
@@ -374,6 +360,112 @@ func TestEmbeddedBaselineDeclaresMCPCallAuditTable(t *testing.T) {
 	}
 }
 
+
+func TestEmbeddedFinalSchemaFoldsHistoricalMigrations(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
+	if err != nil {
+		t.Fatalf("read V1 schema failed: %v", err)
+	}
+	text := string(content)
+
+	// Intermediate ALTER/UPDATE migrations must not remain as standalone files.
+	entries, err := fs.ReadDir(dbmigrations.Files, ".")
+	if err != nil {
+		t.Fatalf("read embedded migrations dir failed: %v", err)
+	}
+	var scripts []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			scripts = append(scripts, entry.Name())
+		}
+	}
+	if len(scripts) != 2 {
+		t.Fatalf("embedded sql files=%v, want only V1 and V2", scripts)
+	}
+
+	for _, expected := range []string{
+		// personnel
+		"CREATE TABLE `audit_logs`",
+		"CREATE TABLE `notification_sender_configs`",
+		"`must_change_password` tinyint(1) NOT NULL DEFAULT 0",
+		"`phone_unique` varchar(20) GENERATED ALWAYS AS (NULLIF(`phone`, '')) VIRTUAL",
+		"UNIQUE KEY `idx_users_email` (`email`)",
+		"UNIQUE KEY `idx_users_phone` (`phone_unique`)",
+		// AI runtime core
+		"CREATE TABLE `ai_runtime_sequences`",
+		"CREATE TABLE `ai_agent_profiles`",
+		"CREATE TABLE `ai_agent_resources`",
+		"CREATE TABLE `ai_agent_profile_versions`",
+		"CREATE TABLE `ai_sessions`",
+		"CREATE TABLE `ai_runtime_runs`",
+		"CREATE TABLE `ai_agent_actions`",
+		"CREATE TABLE `ai_action_decisions`",
+		"CREATE TABLE `ai_session_permission_grants`",
+		"CREATE TABLE `ai_action_executions`",
+		"CREATE TABLE `ai_action_events`",
+		"CREATE TABLE `ai_agent_runtime_event_sequences`",
+		"CREATE TABLE `ai_agent_runtime_events`",
+		"CREATE TABLE `ai_runtime_artifacts`",
+		"CREATE TABLE `ai_child_run_links`",
+		"CREATE TABLE `ai_agent_resource_versions`",
+		"CREATE TABLE `ai_session_queue_items`",
+		"CREATE TABLE `mcp_tokens`",
+		// folded final columns
+		"`model_override_json` longtext NOT NULL",
+		"`title_source` varchar(32) NOT NULL DEFAULT 'fallback'",
+		"`owner_instance_id` varchar(191) DEFAULT NULL",
+		"KEY `idx_ai_runtime_runs_owner_lease`",
+		"`input_digest` varchar(71) NOT NULL",
+		"`provision_owner_instance_id` varchar(128) DEFAULT NULL",
+		"KEY `idx_ai_runtime_workspaces_provision`",
+		"`resource_id_kind` enum('database_id','resource_key')",
+		"`context_window_tokens` bigint unsigned DEFAULT NULL",
+		"`capability_snapshot_hash` varchar(71) DEFAULT NULL",
+		"KEY `idx_ai_model_bindings_capability`",
+		"CONSTRAINT `fk_ai_sessions_agent_profile`",
+		"ON DELETE RESTRICT",
+		"`tool_policy_json` longtext NOT NULL",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected final V1 schema to contain %q", expected)
+		}
+	}
+
+	// Historical intermediate patterns that must not reappear as migration-time ALTER flow.
+	for _, unexpected := range []string{
+		"ADD COLUMN IF NOT EXISTS",
+		"CREATE TEMPORARY TABLE `_v10_requires_clean_ai_resource_state`",
+		"JSON_REMOVE",
+		"$.chat_endpoint",
+	} {
+		if strings.Contains(text, unexpected) {
+			t.Fatalf("expected final V1 schema not to contain intermediate migration residue %q", unexpected)
+		}
+	}
+}
+
+func TestEmbeddedSeedDataUsesFinalPersonnelDefaults(t *testing.T) {
+	content, err := fs.ReadFile(dbmigrations.Files, "V2__bootstrap_seed_data.sql")
+	if err != nil {
+		t.Fatalf("read V2 seed data failed: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{
+		"`must_change_password`",
+		"`password_changed_at`",
+		"`disabled_at`",
+		"`disabled_by`",
+		"'AdminWorkspace','AdminWorkspace','','active','private','admin',2",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected V2 seed data to contain %q", expected)
+		}
+	}
+	if strings.Contains(text, "chat_endpoint") {
+		t.Fatal("expected V2 seed data not to contain legacy chat_endpoint")
+	}
+}
+
 func TestDiscoverMigrationsRejectsUnexpectedNames(t *testing.T) {
 	_, err := discoverMigrations(fstest.MapFS{
 		"bad_name.sql":         {Data: []byte("SELECT 1;")},
@@ -393,17 +485,14 @@ func TestDiscoverMigrationsParsesEmbeddedMigrationFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover embedded migrations failed: %v", err)
 	}
-	if len(migrations) != 3 {
-		t.Fatalf("embedded migration count=%d, want 3", len(migrations))
+	if len(migrations) != 2 {
+		t.Fatalf("embedded migration count=%d, want 2", len(migrations))
 	}
 	if migrations[0].VersionText != "1" || migrations[0].Script != "V1__schema.sql" {
 		t.Fatalf("unexpected first embedded migration: %+v", migrations[0])
 	}
 	if migrations[1].VersionText != "2" || migrations[1].Script != "V2__bootstrap_seed_data.sql" {
 		t.Fatalf("unexpected second embedded migration: %+v", migrations[1])
-	}
-	if migrations[2].VersionText != "3" || migrations[2].Script != "V3__personnel_management.sql" {
-		t.Fatalf("unexpected third embedded migration: %+v", migrations[2])
 	}
 	for _, migration := range migrations {
 		if len(migration.Statements) == 0 {
@@ -566,12 +655,20 @@ func TestEmbeddedBaselineIncludesAIFoundation(t *testing.T) {
 		t.Fatalf("read V1 schema failed: %v", err)
 	}
 	text := string(content)
-	for _, expected := range []string{"CREATE TABLE `ai_model_catalogs`", "`ai_model_id` bigint unsigned DEFAULT NULL", "`ai_model_snapshot` longtext", "CREATE TABLE `ai_providers`", "CREATE TABLE `ai_model_bindings`", "CREATE TABLE `ai_agents`", "CREATE TABLE `ai_runtime_profiles`", "CREATE TABLE `ai_sessions`"} {
+	for _, expected := range []string{"CREATE TABLE `ai_model_catalogs`", "`ai_model_id` bigint unsigned DEFAULT NULL", "`ai_model_snapshot` longtext", "CREATE TABLE `ai_providers`", "CREATE TABLE `ai_model_bindings`"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("expected V1 baseline to contain AI foundation %q", expected)
 		}
 	}
-	for _, unexpected := range []string{"CREATE TABLE `llm_model_catalogs`", "`llm_model_id` bigint unsigned DEFAULT NULL", "`llm_model_snapshot` longtext"} {
+	for _, unexpected := range []string{
+		"CREATE TABLE `llm_model_catalogs`",
+		"`llm_model_id` bigint unsigned DEFAULT NULL",
+		"`llm_model_snapshot` longtext",
+		"CREATE TABLE `ai_agents`",
+		"CREATE TABLE `ai_runtime_profiles`",
+		"CREATE TABLE `ai_scenes`",
+		"CREATE TABLE `ai_session_turns`",
+	} {
 		if strings.Contains(text, unexpected) {
 			t.Fatalf("expected V1 baseline to exclude legacy LLM fragment %q", unexpected)
 		}
@@ -600,7 +697,7 @@ func TestEmbeddedBaselineDeclaresAgentRuntimeCapabilityAlignment(t *testing.T) {
 		t.Fatalf("read V1 baseline failed: %v", err)
 	}
 	text := string(content)
-	for _, expected := range []string{
+	for _, unexpected := range []string{
 		"`runtime_profile_id` bigint unsigned DEFAULT NULL",
 		"`tools_json` longtext DEFAULT NULL",
 		"`skills_json` longtext DEFAULT NULL",
@@ -608,71 +705,49 @@ func TestEmbeddedBaselineDeclaresAgentRuntimeCapabilityAlignment(t *testing.T) {
 		"`mcp_servers_json` longtext DEFAULT NULL",
 		"`sub_agents_json` longtext DEFAULT NULL",
 		"CONSTRAINT `fk_ai_agents_runtime_profile` FOREIGN KEY (`runtime_profile_id`) REFERENCES `ai_runtime_profiles` (`id`)",
+		"`scenario` varchar(64) NOT NULL",
+		"idx_ai_runtime_profiles_agent_id",
+		"fk_ai_runtime_profiles_agent",
 	} {
-		if !strings.Contains(text, expected) {
-			t.Fatalf("expected V1 baseline to contain %q, got %s", expected, text)
-		}
-	}
-	for _, unexpected := range []string{"`scenario` varchar(64) NOT NULL", "idx_ai_runtime_profiles_agent_id", "fk_ai_runtime_profiles_agent"} {
 		if strings.Contains(text, unexpected) {
 			t.Fatalf("expected V1 baseline to exclude legacy runtime profile ownership %q", unexpected)
 		}
 	}
 }
 
-func TestEmbeddedBaselineUsesAISessionTaskTypeColumn(t *testing.T) {
+func TestEmbeddedBaselineExcludesServerOwnedAISessions(t *testing.T) {
 	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
 	if err != nil {
 		t.Fatalf("read V1 baseline failed: %v", err)
 	}
 	text := string(content)
-	for _, expected := range []string{
-		"`task_type` varchar(64) NOT NULL",
-		"KEY `idx_ai_sessions_task_type` (`task_type`)",
-	} {
-		if !strings.Contains(text, expected) {
-			t.Fatalf("expected V1 baseline to contain %q, got %s", expected, text)
-		}
+	// Modern runtime owns ai_sessions; only legacy session-turn/scenario fragments stay excluded.
+	if !strings.Contains(text, "CREATE TABLE `ai_sessions`") {
+		t.Fatal("expected final V1 schema to include modern ai_sessions table")
 	}
-	if strings.Contains(text, "idx_ai_sessions_scenario") {
-		t.Fatalf("expected V1 baseline not to contain legacy ai_sessions scenario index")
+	for _, unexpected := range []string{"CREATE TABLE `ai_session_turns`", "idx_ai_sessions_task_type", "idx_ai_sessions_scenario"} {
+		if strings.Contains(text, unexpected) {
+			t.Fatalf("expected V1 baseline to exclude legacy AI session fragment %q", unexpected)
+		}
 	}
 }
 
-func TestEmbeddedBaselineCreatesSceneRuntimeTables(t *testing.T) {
+func TestEmbeddedBaselineExcludesServerOwnedAISceneRuntimeTables(t *testing.T) {
 	content, err := fs.ReadFile(dbmigrations.Files, "V1__schema.sql")
 	if err != nil {
 		t.Fatalf("read V1 baseline failed: %v", err)
 	}
 	text := string(content)
-	for _, expected := range []string{
+	for _, unexpected := range []string{
 		"UNIQUE KEY `uk_ai_agents_id_workspace` (`id`,`workspace_id`)",
 		"CREATE TABLE `ai_scenes`",
-		"`created_at` datetime(3) NOT NULL",
-		"`updated_at` datetime(3) NOT NULL",
 		"UNIQUE KEY `uk_ai_scenes_workspace_code` (`workspace_id`,`code`)",
-		"UNIQUE KEY `uk_ai_scenes_id_workspace` (`id`,`workspace_id`)",
 		"FOREIGN KEY (`main_agent_id`, `workspace_id`) REFERENCES `ai_agents` (`id`, `workspace_id`)",
-		"`context_provider` varchar(128) DEFAULT NULL",
-		"`display_name_override` varchar(128) DEFAULT NULL",
-		"`intro_message_override` text DEFAULT NULL",
-		"`scene_id` bigint unsigned DEFAULT NULL",
-		"`parent_session_id` bigint unsigned DEFAULT NULL",
-		"`root_session_id` bigint unsigned DEFAULT NULL",
-		"`context_snapshot_json` longtext DEFAULT NULL",
-		"`memory_snapshot_json` longtext DEFAULT NULL",
-		"UNIQUE KEY `uk_ai_sessions_id_workspace` (`id`,`workspace_id`)",
-		"FOREIGN KEY (`scene_id`, `workspace_id`) REFERENCES `ai_scenes` (`id`, `workspace_id`)",
 		"CREATE TABLE `ai_session_turns`",
 		"UNIQUE KEY `uk_ai_session_turns_session_seq` (`session_id`,`turn_seq`)",
-		"`error_msg` text DEFAULT NULL",
-		"`role` varchar(32) NOT NULL DEFAULT 'system'",
-		"`metadata_json` longtext DEFAULT NULL",
-		"`started_at` bigint DEFAULT NULL",
-		"`completed_at` bigint DEFAULT NULL",
 	} {
-		if !strings.Contains(text, expected) {
-			t.Fatalf("expected V1 baseline to contain %q, got %s", expected, text)
+		if strings.Contains(text, unexpected) {
+			t.Fatalf("expected V1 baseline to exclude server-owned scene/runtime table fragment %q", unexpected)
 		}
 	}
 }

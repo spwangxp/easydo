@@ -33,6 +33,47 @@ export const parseModelParameterCount = (value) => {
   return numeric > 1_000_000 ? numeric : numeric * 1e9
 }
 
+const parseModelIdentifierParameterCount = (value) => {
+  const text = String(value || '').trim().toLowerCase().replace(/,/g, '')
+  if (!text) return 0
+
+  const unitMap = { t: 1e12, b: 1e9, m: 1e6, k: 1e3 }
+  const mixedMatch = text.match(/(?:^|[^0-9a-z])(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*([tbmk])(?:$|[^0-9a-z])/)
+  if (mixedMatch) {
+    return Number(mixedMatch[1]) * Number(mixedMatch[2]) * unitMap[mixedMatch[3]]
+  }
+
+  const directMatches = [...text.matchAll(/(?:^|[^0-9a-z])(\d+(?:\.\d+)?)\s*([tbmk])(?:$|[^0-9a-z])/g)]
+  return directMatches.reduce((total, match) => total + Number(match[1]) * unitMap[match[2]], 0)
+}
+
+const resolveModelParameterCount = (model = {}) => {
+  const structuredValue = (
+    model?.parameterSize
+    || model?.parameter_size
+    || model?.metadata?.parameter_size
+    || model?.metadata?.model_size
+    || model?.metadata?.ModelInfos?.safetensor?.model_size
+    || model?.metadata?.modelInfos?.safetensor?.model_size
+    || model?.metadata?.model_infos?.safetensor?.model_size
+    || model?.metadata?.cardData?.model_size
+  )
+  const structuredCount = parseModelParameterCount(structuredValue)
+  if (structuredCount > 0) return structuredCount
+
+  for (const identifier of [
+    model?.sourceModelId,
+    model?.source_model_id,
+    model?.name,
+    model?.displayName,
+    model?.display_name
+  ]) {
+    const inferredCount = parseModelIdentifierParameterCount(identifier)
+    if (inferredCount > 0) return inferredCount
+  }
+  return 0
+}
+
 const pickFirstParameterValue = (parameterValues, keys) => {
   for (const key of keys) {
     const value = parameterValues?.[key]
@@ -266,15 +307,7 @@ export const buildDeployVramEstimate = ({
   gpuDevices = [],
   selectedGpuDeviceKeys = []
 } = {}) => {
-  const parameterCount = parseModelParameterCount(
-    model?.parameterSize
-    || model?.metadata?.parameter_size
-    || model?.metadata?.model_size
-    || model?.metadata?.ModelInfos?.safetensor?.model_size
-    || model?.metadata?.modelInfos?.safetensor?.model_size
-    || model?.metadata?.model_infos?.safetensor?.model_size
-    || model?.metadata?.cardData?.model_size
-  )
+  const parameterCount = resolveModelParameterCount(model)
 
   const modelPrecision = resolveModelPrecisionBytes({ parameterValues, model })
   const kvPrecision = resolveKvPrecisionBytes({ parameterValues, model })

@@ -1,15 +1,5 @@
 import request from './request'
-import {
-  createWorkspaceAIAgent,
-  createWorkspaceAIRuntimeProfile,
-  deleteWorkspaceAIAgent,
-  deleteWorkspaceAIRuntimeProfile,
-  getWorkspaceAIAgents,
-  getWorkspaceAIModelCatalog,
-  getWorkspaceAIRuntimeProfiles,
-  updateWorkspaceAIAgent,
-  updateWorkspaceAIRuntimeProfile
-} from './agent'
+import { getWorkspaceAIModelCatalog } from './agent'
 
 export function getTemplateList(params) {
   return request({
@@ -170,6 +160,22 @@ export function deleteAIProvider(id) {
 	})
 }
 
+export function testAIProviderConnection(data) {
+	return request({
+		url: '/store/ai-providers/test-connection',
+		method: 'post',
+		data
+	})
+}
+
+export function discoverAIProviderModels(data) {
+	return request({
+		url: '/store/ai-providers/discover-models',
+		method: 'post',
+		data
+	})
+}
+
 export function getAIModelBindings(providerId) {
 	return request({
 		url: `/store/ai-providers/${providerId}/model-bindings`,
@@ -200,38 +206,6 @@ export function deleteAIModelBinding(providerId, bindingId) {
 	})
 }
 
-export function getAIAgents() {
-	return getWorkspaceAIAgents()
-}
-
-export function createAIAgent(data) {
-	return createWorkspaceAIAgent(data)
-}
-
-export function updateAIAgent(id, data) {
-	return updateWorkspaceAIAgent(id, data)
-}
-
-export function deleteAIAgent(id) {
-	return deleteWorkspaceAIAgent(id)
-}
-
-export function getAIRuntimeProfiles() {
-	return getWorkspaceAIRuntimeProfiles()
-}
-
-export function createAIRuntimeProfile(data) {
-	return createWorkspaceAIRuntimeProfile(data)
-}
-
-export function updateAIRuntimeProfile(id, data) {
-	return updateWorkspaceAIRuntimeProfile(id, data)
-}
-
-export function deleteAIRuntimeProfile(id) {
-	return deleteWorkspaceAIRuntimeProfile(id)
-}
-
 export function listAIModels(params) {
 	return getAIModelCatalog(params)
 }
@@ -242,12 +216,4 @@ export function importLocalAIModel(data) {
 
 export function listAIProviders() {
 	return getAIProviders()
-}
-
-export function listAIAgents() {
-	return getAIAgents()
-}
-
-export async function listAIRuntimeProfiles() {
-	return getAIRuntimeProfiles()
 }

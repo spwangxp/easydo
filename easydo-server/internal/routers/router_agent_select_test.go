@@ -125,7 +125,7 @@ func TestSelectAgentRouteRequiresAuthentication(t *testing.T) {
 	}
 }
 
-func TestAIRuntimeProfileRoutesUseWorkspaceLevelPaths(t *testing.T) {
+func TestLegacyAIRuntimeProfileRoutesAreRemoved(t *testing.T) {
 	setupRouterUserCreateTestEnv(t)
 	db := openRouterTestDB(t)
 	originalDB := models.DB
@@ -146,8 +146,8 @@ func TestAIRuntimeProfileRoutesUseWorkspaceLevelPaths(t *testing.T) {
 	workspaceLevelReq := httptest.NewRequest(http.MethodGet, "/api/ai/runtime-profiles?workspace_id=1", nil)
 	workspaceLevelW := httptest.NewRecorder()
 	router.ServeHTTP(workspaceLevelW, workspaceLevelReq)
-	if workspaceLevelW.Code != http.StatusUnauthorized {
-		t.Fatalf("expected workspace-level runtime profile route to require auth, got %d body=%s", workspaceLevelW.Code, workspaceLevelW.Body.String())
+	if workspaceLevelW.Code != http.StatusNotFound {
+		t.Fatalf("expected legacy runtime profile route to be removed, got %d body=%s", workspaceLevelW.Code, workspaceLevelW.Body.String())
 	}
 
 	nestedReq := httptest.NewRequest(http.MethodGet, "/api/ai/agents/1/runtime-profiles?workspace_id=1", nil)
@@ -155,5 +155,19 @@ func TestAIRuntimeProfileRoutesUseWorkspaceLevelPaths(t *testing.T) {
 	router.ServeHTTP(nestedW, nestedReq)
 	if nestedW.Code != http.StatusNotFound {
 		t.Fatalf("expected nested runtime profile route to be removed, got %d body=%s", nestedW.Code, nestedW.Body.String())
+	}
+
+	storeReq := httptest.NewRequest(http.MethodGet, "/api/store/ai-agents/profiles?workspace_id=1", nil)
+	storeW := httptest.NewRecorder()
+	router.ServeHTTP(storeW, storeReq)
+	if storeW.Code != http.StatusUnauthorized {
+		t.Fatalf("expected AI Agent Store route to require auth, got %d body=%s", storeW.Code, storeW.Body.String())
+	}
+
+	operationsReq := httptest.NewRequest(http.MethodGet, "/api/store/ai-agents/operations/summary?workspace_id=1", nil)
+	operationsW := httptest.NewRecorder()
+	router.ServeHTTP(operationsW, operationsReq)
+	if operationsW.Code != http.StatusUnauthorized {
+		t.Fatalf("expected AI Agent Store operations route to require auth, got %d body=%s", operationsW.Code, operationsW.Body.String())
 	}
 }

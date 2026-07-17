@@ -1,0 +1,16 @@
+FROM node:22-alpine
+
+RUN apk add --no-cache \
+    bash \
+    coreutils \
+    curl \
+    git \
+    openssh-client \
+    ripgrep \
+    && mkdir -p /workspace \
+    && chown 1000:1000 /workspace
+
+WORKDIR /workspace
+USER 1000:1000
+
+CMD ["sleep", "infinity"]

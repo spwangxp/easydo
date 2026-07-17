@@ -175,6 +175,10 @@ func TestStreamableHTTPToolsListRequiresValidAuth(t *testing.T) {
 	if len(tools) != 1 || tools[0].(map[string]any)["name"] != "easydo_test" {
 		t.Fatalf("tools=%#v, want registered tool metadata", tools)
 	}
+	tool := tools[0].(map[string]any)
+	if tool["operationType"] != "read" || tool["targetType"] != "test" {
+		t.Fatalf("tool operation metadata=%#v/%#v, want read/test", tool["operationType"], tool["targetType"])
+	}
 }
 
 func TestStreamableHTTPToolsCallRecordsAudit(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -211,6 +212,70 @@ func (u *ResourceUseCase) loadResource(ctx context.Context, workspaceID uint64, 
 		return nil, ServiceError{Code: ErrorCodeInternalError, Message: "failed to load resource"}
 	}
 	return &resource, nil
+}
+
+func (u *ResourceUseCase) ResolveMCPResourceID(ctx context.Context, actor ActorContext, workspaceID uint64, rawValue any) (uint64, error) {
+	if err := validateResourceQueryActor(actor); err != nil {
+		return 0, err
+	}
+	if u == nil || u.DB == nil {
+		return 0, ServiceError{Code: ErrorCodeInvalidArgument, Message: "db is required"}
+	}
+	if _, err := u.resolveWorkspace(ctx, actor, workspaceID); err != nil {
+		return 0, err
+	}
+	return ResolveResourceIDForMCPTool(ctx, u.DB, workspaceID, rawValue)
+}
+
+func ResolveResourceIDForMCPTool(ctx context.Context, db *gorm.DB, workspaceID uint64, rawValue any) (uint64, error) {
+	if db == nil {
+		return 0, ServiceError{Code: ErrorCodeInvalidArgument, Message: "db is required"}
+	}
+	label := strings.TrimSpace(fmt.Sprint(rawValue))
+	if label == "" {
+		return 0, ServiceError{Code: ErrorCodeInvalidArgument, Message: "resource_id is required"}
+	}
+	if id, err := strconv.ParseUint(label, 10, 64); err == nil && id > 0 {
+		var resource models.Resource
+		err := db.WithContext(ctx).Where("workspace_id = ? AND id = ?", workspaceID, id).First(&resource).Error
+		if err == nil {
+			return resource.ID, nil
+		}
+		if err != gorm.ErrRecordNotFound {
+			return 0, ServiceError{Code: ErrorCodeInternalError, Message: "failed to resolve resource"}
+		}
+	}
+
+	like := "%" + label + "%"
+	var resources []models.Resource
+	if err := db.WithContext(ctx).
+		Where("workspace_id = ?", workspaceID).
+		Where("name = ? OR endpoint = ? OR labels LIKE ? OR metadata LIKE ?", label, label, like, like).
+		Order("id ASC").
+		Limit(10).
+		Find(&resources).Error; err != nil {
+		return 0, ServiceError{Code: ErrorCodeInternalError, Message: "failed to resolve resource"}
+	}
+	sort.SliceStable(resources, func(i, j int) bool {
+		return resourceMatchRank(resources[i], label) < resourceMatchRank(resources[j], label)
+	})
+	if len(resources) == 1 {
+		return resources[0].ID, nil
+	}
+	if len(resources) > 1 {
+		return 0, ServiceError{Code: ErrorCodeInvalidArgument, Message: "resource_id matched multiple resources; call easydo_resource_list first and pass the internal id"}
+	}
+	return 0, ServiceError{Code: ErrorCodeNotFound, Message: "resource not found"}
+}
+
+func resourceMatchRank(resource models.Resource, label string) int {
+	if resource.Name == label {
+		return 0
+	}
+	if resource.Endpoint == label {
+		return 1
+	}
+	return 2
 }
 
 func buildResourceSummary(resource models.Resource) ResourceSummary {

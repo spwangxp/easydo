@@ -12,95 +12,22 @@ import (
 	"easydo-server/internal/models"
 )
 
-func TestBuildAgentTaskParams_UsesExecutorPayloadForAITasks(t *testing.T) {
-	nodeConfig := map[string]any{"input_text": "raw"}
-	executorPayload := map[string]any{
-		"mode":          "ai-task",
-		"ai_session_id": float64(88),
-		"task_type":     "mr_quality_check",
-		"request":       map[string]any{"input_text": "normalized"},
-	}
-
-	params := buildAgentTaskParams(nodeConfig, executorPayload)
-	if params["task_type"] != "mr_quality_check" {
-		t.Fatalf("expected ai executor payload to be used, got=%#v", params)
-	}
-	if _, exists := params["request"]; !exists {
-		t.Fatalf("expected nested request payload for ai task, got=%#v", params)
-	}
-	if _, exists := params["scenario"]; exists {
-		t.Fatalf("expected ai-task payload to stop exposing scenario, got=%#v", params)
-	}
-
-	shellAIParams := buildAgentTaskParams(nodeConfig, executorPayload)
-	if shellAIParams["task_type"] != "mr_quality_check" {
-		t.Fatalf("expected ai-task payload to be preserved even for shell task type, got=%#v", shellAIParams)
-	}
-
-	nonAIParams := buildAgentTaskParams(nodeConfig, map[string]any{"script": "echo hi"})
-	if nonAIParams["input_text"] != "raw" {
-		t.Fatalf("expected non-ai tasks to keep node config, got=%#v", nonAIParams)
-	}
-}
-
-func TestBuildAISessionRequestPayload_UsesSceneAwareRuntimeContract(t *testing.T) {
-	scene := &models.AIScene{BaseModel: models.BaseModel{ID: 17}, SceneType: pipelineTaskSceneType, Code: "pipeline_task:mr_quality_check:agent:9"}
-	payload := buildAISessionRequestPayload(&models.PipelineRun{BaseModel: models.BaseModel{ID: 9}, WorkspaceID: 11}, &PipelineNode{ID: "mr-review", Name: "MR Review"}, "mr_quality_check", map[string]any{
-		"input_text":      "review this MR",
-		"output_language": "en-US",
-	}, scene)
-	if payload["task_type"] != "mr_quality_check" {
-		t.Fatalf("task_type=%v, want mr_quality_check", payload["task_type"])
-	}
-	if toUint64Value(payload["scene_id"]) != scene.ID {
-		t.Fatalf("scene_id=%v, want %d", payload["scene_id"], scene.ID)
-	}
-	if payload["scene_code"] != scene.Code {
-		t.Fatalf("scene_code=%v, want %s", payload["scene_code"], scene.Code)
-	}
-	if payload["scene_type"] != scene.SceneType {
-		t.Fatalf("scene_type=%v, want %s", payload["scene_type"], scene.SceneType)
-	}
-	if _, exists := payload["scenario"]; exists {
-		t.Fatalf("expected request payload to stop exposing scenario, got=%#v", payload)
-	}
-}
-
-func TestBuildAIExecutorPayload_UsesSceneAwareRuntimeContract(t *testing.T) {
-	sceneID := uint64(17)
-	scene := &models.AIScene{BaseModel: models.BaseModel{ID: sceneID}, SceneType: pipelineTaskSceneType, Code: "pipeline_task:mr_quality_check:agent:9"}
-	payload := buildAIExecutorPayload(models.AISession{BaseModel: models.BaseModel{ID: 7}, SceneID: &sceneID, TaskType: "mr_quality_check"}, scene)
-	if payload["task_type"] != "mr_quality_check" {
-		t.Fatalf("task_type=%v, want mr_quality_check", payload["task_type"])
-	}
-	if toUint64Value(payload["scene_id"]) != scene.ID {
-		t.Fatalf("scene_id=%v, want %d", payload["scene_id"], scene.ID)
-	}
-	if payload["scene_code"] != scene.Code {
-		t.Fatalf("scene_code=%v, want %s", payload["scene_code"], scene.Code)
-	}
-	if payload["scene_type"] != scene.SceneType {
-		t.Fatalf("scene_type=%v, want %s", payload["scene_type"], scene.SceneType)
-	}
-	if _, exists := payload["scenario"]; exists {
-		t.Fatalf("expected executor payload to stop exposing scenario, got=%#v", payload)
-	}
-}
-
-func TestGetTaskDefinition_UsesAITaskExecutionModeForAIJobs(t *testing.T) {
+func TestPipelineTaskDefinitionsExcludeAIAgentJobs(t *testing.T) {
 	for _, taskType := range []string{"mr_quality_check", "requirement_defect_check"} {
-		def, ok := getTaskDefinition(taskType)
-		if !ok {
-			t.Fatalf("expected typed task definition for %s", taskType)
+		if _, ok := getTaskDefinition(taskType); ok {
+			t.Fatalf("pipeline must not expose AI Agent task definition %s", taskType)
 		}
-		if def.ExecutionSpec.Mode != "ai-task" {
-			t.Fatalf("expected ai-task execution mode for %s, got %s", taskType, def.ExecutionSpec.Mode)
-		}
-		if def.ExecutionSpec.ScriptTemplate != "" {
-			t.Fatalf("expected empty script template for %s, got %q", taskType, def.ExecutionSpec.ScriptTemplate)
-		}
-		if _, ok := findTaskField(def.FieldsSchema, "scene_code"); ok {
-			t.Fatalf("expected scene_code to stay backend-managed for %s", taskType)
+	}
+}
+
+func TestPipelineHandlerDoesNotCallAIRuntime(t *testing.T) {
+	source, err := os.ReadFile("pipeline.go")
+	if err != nil {
+		t.Fatalf("read pipeline.go: %v", err)
+	}
+	for _, forbidden := range []string{"AIRuntimeClient", "executePipelineAITask", "callAIRuntime", "pipeline-task"} {
+		if strings.Contains(string(source), forbidden) {
+			t.Fatalf("pipeline handler must not contain AI Runtime coupling %q", forbidden)
 		}
 	}
 }
@@ -628,39 +555,6 @@ func TestTaskCredentialSlots(t *testing.T) {
 	}
 	if !sshSlot.allowsCategory(models.CategoryGitHub) || !sshSlot.allowsCategory(models.CategoryCustom) {
 		t.Fatalf("ssh_auth should not restrict SSH credentials by category")
-	}
-}
-
-func TestAIPipelineTaskDefinitions(t *testing.T) {
-	_, mrDef, ok := getPipelineTaskDefinition("mr_quality_check")
-	if !ok {
-		t.Fatalf("expected mr_quality_check definition")
-	}
-	if mrDef.ExecMode != taskExecModeAgent {
-		t.Fatalf("expected mr_quality_check to be agent executed")
-	}
-	if len(mrDef.FieldsSchema) == 0 || len(mrDef.OutputsSchema) == 0 {
-		t.Fatalf("expected mr_quality_check to expose fields and outputs schema")
-	}
-	if field, ok := findTaskField(mrDef.FieldsSchema, "runtime_profile_id"); !ok || field.Required {
-		t.Fatalf("expected mr_quality_check runtime_profile_id to be optional")
-	}
-
-	_, reqDef, ok := getPipelineTaskDefinition("requirement_defect_check")
-	if !ok {
-		t.Fatalf("expected requirement_defect_check definition")
-	}
-	if reqDef.ExecMode != taskExecModeAgent {
-		t.Fatalf("expected requirement_defect_check to be agent executed")
-	}
-	if field, ok := findTaskField(reqDef.FieldsSchema, "runtime_profile_id"); !ok || field.Required {
-		t.Fatalf("expected requirement_defect_check runtime_profile_id to be optional")
-	}
-	if _, script, err := renderPipelineAgentScript("mr_quality_check", map[string]any{"input_text": "demo"}); err != nil || script != "" {
-		t.Fatalf("expected AI pipeline task to render empty script without error, got script=%q err=%v", script, err)
-	}
-	if _, script, err := renderPipelineAgentScript("requirement_defect_check", map[string]any{"input_text": "demo"}); err != nil || script != "" {
-		t.Fatalf("expected ai-task execution mode to render empty script without error, got script=%q err=%v", script, err)
 	}
 }
 

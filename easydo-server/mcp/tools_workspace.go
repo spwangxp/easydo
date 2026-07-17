@@ -72,7 +72,7 @@ func RegisterWorkspaceTools(registry *Registry, usecase *services.WorkspaceUseCa
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -141,6 +141,17 @@ func requiredUint64Argument(args map[string]any, key string) (uint64, error) {
 		return 0, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: key + " is required"}
 	}
 	return parseUint64ArgumentValue(value, key)
+}
+
+func requiredWorkspaceArgument(actor services.ActorContext, args map[string]any) (uint64, error) {
+	workspaceID, err := requiredUint64Argument(args, "workspace_id")
+	if err != nil {
+		return 0, err
+	}
+	if err := enforceMCPTokenWorkspace(actor, workspaceID); err != nil {
+		return 0, err
+	}
+	return workspaceID, nil
 }
 
 func parseUint64ArgumentValue(value any, key string) (uint64, error) {

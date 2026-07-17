@@ -35,7 +35,7 @@ test('hasReadableMcpToken returns false for empty token', () => {
 test('buildClaudeCodeMcpSnippet emits .mcp.json server config', () => {
   assert.equal(
     buildClaudeCodeMcpSnippet({ origin: 'https://easydo.example.com' }),
-    '{\n  "mcpServers": {\n    "easydo": {\n      "type": "http",\n      "url": "https://easydo.example.com/mcp",\n      "headers": {\n        "Authorization": "Bearer ${EASYDO_MCP_TOKEN}"\n      }\n    }\n  }\n}'
+    '{\n  "mcpServers": {\n    "easydo": {\n      "type": "streamable_http",\n      "url": "https://easydo.example.com/mcp",\n      "headers": {\n        "Authorization": "Bearer ${EASYDO_MCP_TOKEN}"\n      }\n    }\n  }\n}'
   )
 })
 

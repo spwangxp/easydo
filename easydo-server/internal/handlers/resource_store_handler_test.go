@@ -3333,6 +3333,53 @@ func TestLLMModelHandler_AdminImportAndListCatalog(t *testing.T) {
 	}
 }
 
+func TestLLMModelHandler_AdminImportsProviderDiscoveredModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	admin, workspace := seedResourceStoreUserAndWorkspace(t, db, "provider-discovered-admin", models.WorkspaceRoleOwner)
+	admin.Role = "admin"
+	if err := db.Save(&admin).Error; err != nil {
+		t.Fatalf("update admin role failed: %v", err)
+	}
+
+	h := NewAIModelCatalogHandler()
+	importBody := mustJSON(t, map[string]interface{}{
+		"source":          "provider-discovered",
+		"source_model_id": "openai/gpt-4.1",
+		"name":            "GPT-4.1",
+		"display_name":    "GPT-4.1",
+		"summary":         "Discovered from OpenRouter",
+		"tags":            []string{"chat", "vision", "tool"},
+		"metadata": map[string]interface{}{
+			"provider_model_key": "openai/gpt-4.1",
+			"provider_type":      "openrouter",
+			"context_window":     float64(1047576),
+		},
+	})
+	importResp := performResourceStoreRequest(t, h.ImportModel, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodPost, "/api/store/ai-models/import", importBody)
+	if importResp.Code != http.StatusOK {
+		t.Fatalf("expected provider discovered import success, got=%d body=%s", importResp.Code, importResp.Body.String())
+	}
+
+	var stored models.AIModelCatalog
+	if err := db.Where("source = ? AND source_model_id = ?", "provider-discovered", "openai/gpt-4.1").First(&stored).Error; err != nil {
+		t.Fatalf("expected provider discovered model stored: %v", err)
+	}
+	if stored.Name != "GPT-4.1" {
+		t.Fatalf("expected model name from request, got=%q", stored.Name)
+	}
+	if stored.ContextWindow != 1047576 {
+		t.Fatalf("expected context_window from provider metadata, got=%d", stored.ContextWindow)
+	}
+	if !bytes.Contains([]byte(stored.Metadata), []byte(`"provider_type":"openrouter"`)) {
+		t.Fatalf("expected provider metadata to be stored, got=%s", stored.Metadata)
+	}
+}
+
 func TestLLMModelHandler_ListModelsBackfillsParameterSizeFromMetadata(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openHandlerTestDB(t)
@@ -3376,6 +3423,48 @@ func TestLLMModelHandler_ListModelsBackfillsParameterSizeFromMetadata(t *testing
 	}
 	if !bytes.Contains(listResp.Body.Bytes(), []byte(`"parameter_size":"2.27B"`)) {
 		t.Fatalf("expected parameter_size backfilled from metadata, got=%s", listResp.Body.String())
+	}
+}
+
+func TestLLMModelHandler_ListModelsInfersParameterSizeFromModelIdentifier(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openHandlerTestDB(t)
+	originalDB := models.DB
+	models.DB = db
+	t.Cleanup(func() { models.DB = originalDB })
+
+	admin, workspace := seedResourceStoreUserAndWorkspace(t, db, "catalog-name-size-admin", models.WorkspaceRoleOwner)
+	admin.Role = "admin"
+	if err := db.Save(&admin).Error; err != nil {
+		t.Fatalf("update admin role failed: %v", err)
+	}
+	model := models.AIModelCatalog{
+		Name:          "openai/gpt-oss-120b",
+		DisplayName:   "GPT OSS 120B",
+		Source:        "provider-discovered",
+		SourceModelID: "openai/gpt-oss-120b",
+		ImportedBy:    admin.ID,
+	}
+	if err := db.Create(&model).Error; err != nil {
+		t.Fatalf("create llm model failed: %v", err)
+	}
+
+	h := NewAIModelCatalogHandler()
+	listResp := performResourceStoreRequest(t, h.ListModels, admin.ID, "admin", workspace.ID, models.WorkspaceRoleOwner, http.MethodGet, "/api/store/ai-models", nil)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("expected list models success, got=%d body=%s", listResp.Code, listResp.Body.String())
+	}
+	if !bytes.Contains(listResp.Body.Bytes(), []byte(`"parameter_size":"120B"`)) {
+		t.Fatalf("expected parameter_size inferred from model identifier, got=%s", listResp.Body.String())
+	}
+}
+
+func TestResolveModelIdentifierParameterSizeIgnoresVersionOnlyIdentifiers(t *testing.T) {
+	if got := resolveModelIdentifierParameterSize("openai/gpt-4.1", "claude-3-5-sonnet"); got != "" {
+		t.Fatalf("expected version-only identifiers to be ignored, got=%q", got)
+	}
+	if got := resolveModelIdentifierParameterSize("Qwen/Qwen2.5-72B-Instruct"); got != "72.0B" {
+		t.Fatalf("expected parameter size from unit-bearing identifier, got=%q", got)
 	}
 }
 

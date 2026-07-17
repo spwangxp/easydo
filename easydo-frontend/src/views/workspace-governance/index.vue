@@ -15,12 +15,6 @@
       <el-tab-pane label="邀请管理" name="invitations">
         <InvitationManagement />
       </el-tab-pane>
-      <el-tab-pane label="AI Agent" name="agents">
-        <WorkspaceAgentManagement />
-      </el-tab-pane>
-      <el-tab-pane label="运行策略" name="runtime-profiles">
-        <RuntimeProfileManagement />
-      </el-tab-pane>
       <el-tab-pane label="邮件配置" name="notification-sender">
         <NotificationSenderConfigPanel scope="workspace" :workspace-id="userStore.currentWorkspaceId" />
       </el-tab-pane>
@@ -37,15 +31,13 @@ import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import MemberManagement from './components/MemberManagement.vue'
 import InvitationManagement from './components/InvitationManagement.vue'
-import WorkspaceAgentManagement from './components/WorkspaceAgentManagement.vue'
-import RuntimeProfileManagement from './components/RuntimeProfileManagement.vue'
 import NotificationSenderConfigPanel from '@/views/governance/components/NotificationSenderConfigPanel.vue'
 import AuditLogPanel from '@/views/governance/components/AuditLogPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
-const governanceTabs = ['members', 'invitations', 'agents', 'runtime-profiles', 'notification-sender', 'audit-logs']
+const governanceTabs = ['members', 'invitations', 'notification-sender', 'audit-logs']
 const activeTab = ref(normalizeGovernanceTab(route.query.tab))
 
 const roleText = (role) => {

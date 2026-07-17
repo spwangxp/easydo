@@ -5,7 +5,6 @@ import {
   applyTaskStatusPayload,
   buildTaskOutputsFromPayload,
   getTaskOutputDisplayKind,
-  isAITaskOutputs,
   normalizeExecutionTaskOutputs
 } from './executionRealtimeState.js'
 
@@ -122,29 +121,9 @@ test('applyTaskStatusPayload preserves exit code and duration on failed tasks', 
   })
 })
 
-test('isAITaskOutputs detects mr quality outputs', () => {
-  assert.equal(isAITaskOutputs({ summary: 'ok', quality_score: 91, issues_count: 0 }), true)
-})
-
-test('isAITaskOutputs ignores ordinary shell outputs', () => {
-  assert.equal(isAITaskOutputs({ exit_code: 0, duration: 8 }), false)
-})
-
 test('getTaskOutputDisplayKind prefers explicit task type', () => {
   assert.equal(getTaskOutputDisplayKind({
     task_type: 'docker',
-    outputs: { summary: 'ok', quality_score: 88 }
+    outputs: { image_ref: 'demo:latest' }
   }), 'docker')
-})
-
-test('getTaskOutputDisplayKind infers mr quality kind from structured outputs', () => {
-  assert.equal(getTaskOutputDisplayKind({
-    outputs: { summary: 'ok', quality_score: 88, issues_count: 1 }
-  }), 'mr_quality_check')
-})
-
-test('getTaskOutputDisplayKind infers requirement defect kind from structured outputs', () => {
-  assert.equal(getTaskOutputDisplayKind({
-    outputs: { summary: 'ok', defect_count: 2, suggestions: ['补充验收标准'] }
-  }), 'requirement_defect_check')
 })

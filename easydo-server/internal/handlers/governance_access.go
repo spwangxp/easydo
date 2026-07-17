@@ -75,6 +75,10 @@ func governanceContextForWorkspace(db *gorm.DB, workspaceID, userID uint64, syst
 		WorkspaceRole: "",
 		WorkspaceKind: workspaceKindByID(db, workspaceID),
 	}
+	if isAdminRole(ctx.SystemRole) {
+		ctx.WorkspaceRole = models.WorkspaceRoleOwner
+		return ctx
+	}
 	if role, ok := userWorkspaceRole(db, workspaceID, userID); ok {
 		ctx.WorkspaceRole = role
 	}

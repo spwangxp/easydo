@@ -17,8 +17,9 @@ test('renders EasyDo MCP section inside integrations content', () => {
 
 test('contains explicit empty-state and token-unavailable branches', () => {
   assert.match(source, /请先在顶部切换到一个工作空间/)
-  assert.match(source, /当前 token 获取失败/)
+  assert.match(source, /当前 MCP token 获取失败/)
   assert.match(source, /!hasReadableToken/)
+  assert.match(source, /getMcpConfig/)
 })
 
 test('does not add a new sidebar item for MCP setup', () => {

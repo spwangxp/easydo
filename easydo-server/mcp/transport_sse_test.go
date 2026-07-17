@@ -203,7 +203,7 @@ func TestSSEMessageRelaysAcrossServerReplicas(t *testing.T) {
 func TestSSEMessageReturnsErrorWhenRelayOwnerUnavailable(t *testing.T) {
 	setupMCPAuthTestRedis(t)
 	auth := issueMCPBearerForSharedRedis(t, 7121)
-	actor, err := AuthenticateRequest(context.Background(), auth)
+	actor, err := AuthenticateRequest(context.Background(), nil, auth)
 	if err != nil {
 		t.Fatalf("authenticate token failed: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestSSEMessageReturnsErrorWhenRelayOwnerUnavailable(t *testing.T) {
 func TestSSEMessageReturnsErrorWhenRelayOwnerCannotFindSession(t *testing.T) {
 	setupMCPAuthTestRedis(t)
 	auth := issueMCPBearerForSharedRedis(t, 7122)
-	actor, err := AuthenticateRequest(context.Background(), auth)
+	actor, err := AuthenticateRequest(context.Background(), nil, auth)
 	if err != nil {
 		t.Fatalf("authenticate token failed: %v", err)
 	}

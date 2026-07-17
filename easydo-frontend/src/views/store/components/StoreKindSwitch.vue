@@ -1,21 +1,28 @@
 <template>
-  <div class="store-kind-switch" role="tablist" aria-label="商店切换">
+  <div class="store-switch" role="tablist" aria-label="商店切换">
     <button
       type="button"
-      class="store-kind-option"
+      class="store-switch__option"
       :class="{ active: modelValue === 'app' }"
       @click="$emit('update:modelValue', 'app')"
     >
       应用商店
     </button>
-    <span class="store-kind-divider" aria-hidden="true"></span>
     <button
       type="button"
-      class="store-kind-option"
+      class="store-switch__option"
       :class="{ active: modelValue === 'ai' }"
       @click="$emit('update:modelValue', 'ai')"
     >
-      AI 商店
+      AI 模型
+    </button>
+    <button
+      type="button"
+      class="store-switch__option"
+      :class="{ active: modelValue === 'ai-agent' }"
+      @click="$emit('update:modelValue', 'ai-agent')"
+    >
+      AI Agent
     </button>
   </div>
 </template>
@@ -32,39 +39,40 @@ defineEmits(['update:modelValue'])
 </script>
 
 <style scoped>
-.store-kind-switch {
+.store-switch {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
+  min-height: 38px;
+  padding: 3px;
+  border: 1px solid var(--border-color-light);
+  border-radius: 12px;
+  background: var(--bg-card);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
 }
 
-.store-kind-option {
+.store-switch__option {
   border: 0;
-  padding: 0;
+  min-height: 30px;
+  padding: 5px 12px;
+  border-radius: 9px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 15px;
-  font-weight: 400;
-  line-height: 1.15;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
   cursor: pointer;
-  transition: color 0.2s ease, font-size 0.2s ease, font-weight 0.2s ease, opacity 0.2s ease;
+  white-space: nowrap;
+  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
 }
 
-.store-kind-option.active {
-  color: var(--text-primary);
-  font-size: 28px;
-  font-weight: 760;
-  opacity: 1;
+.store-switch__option:hover {
+  color: var(--primary-color);
 }
 
-.store-kind-option:not(.active) {
-  opacity: 0.6;
-}
-
-.store-kind-divider {
-  width: 1px;
-  height: 16px;
-  background: var(--border-color-light);
-  opacity: 0.6;
+.store-switch__option.active {
+  background: var(--primary-color);
+  color: #fff;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.2);
 }
 </style>

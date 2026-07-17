@@ -7,6 +7,7 @@
     "dev": "node ./node_modules/vite/bin/vite.js",
     "build": "node ./node_modules/vite/bin/vite.js build",
     "preview": "node ./node_modules/vite/bin/vite.js preview",
+    "lint": "eslint src/api/agentRuntimeSse.js src/api/agentChatbox.js src/api/pageAiAssistant.js src/stores/agentRuntimeConnectionState.js src/stores/agentChatbox.js src/stores/pageAiAssistant.js src/utils/agentRuntimeError.js src/components/ai-runtime src/views/ai-agent-chatbox src/views/ai-assistant src/views/store/ai-agent-store.vue src/views/store/ai-runtime-operations.vue src/views/store/aiRuntimeOperations.js --max-warnings=0",
     "test:theme": "node scripts/check-theme-architecture.mjs"
   },
   "dependencies": {
@@ -23,6 +24,9 @@
   "devDependencies": {
     "@playwright/test": "^1.58.1",
     "@vitejs/plugin-vue": "^4.5.2",
+    "eslint": "^9.39.2",
+    "eslint-plugin-vue": "^10.7.0",
+    "globals": "^16.5.0",
     "sass": "^1.69.5",
     "vite": "^5.0.10"
   }

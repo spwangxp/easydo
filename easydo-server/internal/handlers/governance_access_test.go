@@ -119,6 +119,38 @@ func TestGovernanceWorkspaceKindByIDFallsBackToNormalForBlankKind(t *testing.T) 
 	}
 }
 
+func TestGovernanceContextForWorkspaceTreatsAdminAsWorkspaceOwner(t *testing.T) {
+	db := openHandlerTestDB(t)
+
+	admin := models.User{Username: "governance-admin-owner", Role: "admin", Status: "active"}
+	if err := db.Create(&admin).Error; err != nil {
+		t.Fatalf("create admin failed: %v", err)
+	}
+	workspace := models.Workspace{
+		Name:       "governance-admin-normal-workspace",
+		Slug:       "governance-admin-normal-workspace",
+		Status:     models.WorkspaceStatusActive,
+		Visibility: models.WorkspaceVisibilityPrivate,
+		Kind:       models.WorkspaceKindNormal,
+		CreatedBy:  admin.ID,
+	}
+	if err := db.Create(&workspace).Error; err != nil {
+		t.Fatalf("create workspace failed: %v", err)
+	}
+
+	ctx := governanceContextForWorkspace(db, workspace.ID, admin.ID, admin.Role)
+
+	if ctx.WorkspaceKind != models.WorkspaceKindNormal {
+		t.Fatalf("WorkspaceKind=%s, want=%s", ctx.WorkspaceKind, models.WorkspaceKindNormal)
+	}
+	if ctx.WorkspaceRole != models.WorkspaceRoleOwner {
+		t.Fatalf("WorkspaceRole=%s, want=%s", ctx.WorkspaceRole, models.WorkspaceRoleOwner)
+	}
+	if !RequireWorkspaceGovernance(ctx) {
+		t.Fatal("admin should have workspace governance in normal workspace")
+	}
+}
+
 func TestGenericAccessControlHelpersDoNotDependOnWorkspaceKind(t *testing.T) {
 	db := openHandlerTestDB(t)
 

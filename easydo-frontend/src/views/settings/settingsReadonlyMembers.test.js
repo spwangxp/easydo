@@ -26,3 +26,16 @@ test('does not show governance actions in settings', () => {
   assert.doesNotMatch(source, /loadAIManagementData/)
   assert.doesNotMatch(source, /canManageAI/)
 })
+
+test('does not expose platform name or logo editing in basic settings', () => {
+  assert.match(source, /<h2 class="section-title">基本设置<\/h2>/)
+  assert.match(source, /系统主题/)
+  assert.doesNotMatch(source, /系统名称/)
+  assert.doesNotMatch(source, /请输入系统名称/)
+  assert.doesNotMatch(source, /systemName/)
+  assert.doesNotMatch(source, /系统 Logo/)
+  assert.doesNotMatch(source, /点击上传 Logo/)
+  assert.doesNotMatch(source, /logo-upload/)
+  assert.doesNotMatch(source, /<Upload/)
+  assert.doesNotMatch(source, /saveSettings/)
+})

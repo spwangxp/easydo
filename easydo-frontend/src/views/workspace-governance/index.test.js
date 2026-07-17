@@ -10,28 +10,26 @@ const readSource = (relativePath) => {
   return readFileSync(resolve(currentDir, relativePath), 'utf8')
 }
 
-test('renders member, invitation, agent, runtime profile tabs', () => {
+test('renders workspace governance tabs without AI runtime management', () => {
   const indexSource = readSource('index.vue')
 
   assert.match(indexSource, /<el-tab-pane label="成员管理"/)
   assert.match(indexSource, /<el-tab-pane label="邀请管理"/)
-  assert.match(indexSource, /<el-tab-pane label="AI Agent"/)
-  assert.match(indexSource, /<el-tab-pane label="运行策略"/)
   assert.match(indexSource, /<el-tab-pane label="邮件配置"/)
   assert.match(indexSource, /<el-tab-pane label="审计日志"/)
   assert.match(indexSource, /<MemberManagement\s*\/>/)
   assert.match(indexSource, /<InvitationManagement\s*\/>/)
-  assert.match(indexSource, /<WorkspaceAgentManagement\s*\/>/)
-  assert.match(indexSource, /<RuntimeProfileManagement\s*\/>/)
   assert.match(indexSource, /<NotificationSenderConfigPanel scope="workspace" :workspace-id="userStore\.currentWorkspaceId"\s*\/>/)
   assert.match(indexSource, /<AuditLogPanel scope="workspace" :workspace-id="userStore\.currentWorkspaceId"\s*\/>/)
+  assert.doesNotMatch(indexSource, /WorkspaceAgentManagement/)
+  assert.doesNotMatch(indexSource, /RuntimeProfileManagement/)
 })
 
 test('syncs workspace governance ai tabs with route query', () => {
   const indexSource = readSource('index.vue')
 
   assert.match(indexSource, /import \{ useRoute, useRouter \} from 'vue-router'/)
-  assert.match(indexSource, /const governanceTabs = \['members', 'invitations', 'agents', 'runtime-profiles', 'notification-sender', 'audit-logs'\]/)
+  assert.match(indexSource, /const governanceTabs = \['members', 'invitations', 'notification-sender', 'audit-logs'\]/)
   assert.match(indexSource, /const activeTab = ref\(normalizeGovernanceTab\(route\.query\.tab\)\)/)
   assert.match(indexSource, /watch\(\(\) => route\.query\.tab/)
   assert.match(indexSource, /router\.replace\(\{ query \}\)/)
@@ -40,14 +38,10 @@ test('syncs workspace governance ai tabs with route query', () => {
 test('asks for confirmation before destructive workspace governance actions', () => {
   const memberSource = readSource('components/MemberManagement.vue')
   const invitationSource = readSource('components/InvitationManagement.vue')
-  const agentSource = readSource('components/WorkspaceAgentManagement.vue')
-  const runtimeProfileSource = readSource('components/RuntimeProfileManagement.vue')
 
   assert.match(memberSource, /ElMessageBox\.confirm\(`确认移除成员 \$\{row\.username\} 吗？`/)
   assert.match(memberSource, /ElMessageBox\.confirm\(`确认将 \$\{row\.username\} 提升为 Owner 吗？`/)
   assert.match(invitationSource, /ElMessageBox\.confirm\(`确认撤销发往 \$\{row\.email\} 的邀请吗？`/)
-  assert.match(agentSource, /ElMessageBox\.confirm\(`确认删除 AI Agent \$\{row\.name\} 吗？`/)
-  assert.match(runtimeProfileSource, /ElMessageBox\.confirm\(`确认删除运行策略 \$\{row\.name\} 吗？`/)
 })
 
 test('does not render a duplicate page title header in workspace governance page', () => {

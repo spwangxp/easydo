@@ -43,6 +43,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-frontend" (include "easydo.fullname" .) -}}
 {{- end -}}
 
+{{- define "easydo.aiRuntimeFullname" -}}
+{{- printf "%s-ai-runtime" (include "easydo.fullname" .) -}}
+{{- end -}}
+
+{{- define "easydo.runtimeSecretFullname" -}}
+{{- printf "%s-runtime" (include "easydo.fullname" .) -}}
+{{- end -}}
+
 {{- define "easydo.agentFullname" -}}
 {{- printf "%s-agent" (include "easydo.fullname" .) -}}
 {{- end -}}

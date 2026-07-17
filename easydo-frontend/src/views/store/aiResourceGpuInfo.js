@@ -4,6 +4,8 @@ const ALLOWED_STATUSES = new Set(['idle', 'loading', 'ready', 'error', 'unsuppor
 
 const normalizeObjectField = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {})
 
+const normalizeArrayField = (value) => (Array.isArray(value) ? [...value] : [])
+
 const normalizeBaseInfoStatus = (resource = {}) => String(resource.baseInfoStatus || resource.base_info_status || '').trim()
 
 const normalizeBaseInfoCollectedAt = (resource = {}) => Number(resource.baseInfoCollectedAt || resource.base_info_collected_at || 0) || 0
@@ -12,8 +14,66 @@ const normalizeBaseInfoLastError = (resource = {}) => String(resource.baseInfoLa
 
 const resolveBaseInfoSnapshot = (resource = {}) => normalizeObjectField(resource.baseInfo || resource.base_info)
 
+const normalizeNamedArrayMap = (items) => Object.fromEntries(normalizeArrayField(items)
+  .map((item) => [String(item?.name || item?.key || '').trim(), item])
+  .filter(([name]) => Boolean(name)))
+
+const pickMeasureNumber = (measure, keys) => {
+  if (!measure) return 0
+  for (const key of keys) {
+    const value = Number(measure[key])
+    if (Number.isFinite(value) && value !== 0) return value
+  }
+  for (const key of keys) {
+    const value = Number(measure[key])
+    if (Number.isFinite(value)) return value
+  }
+  return 0
+}
+
+const resolveMeasureMap = (resourceInstance = {}, fieldName, mapName) => {
+  if (resourceInstance?.[mapName] && typeof resourceInstance[mapName] === 'object') {
+    return resourceInstance[mapName]
+  }
+  return normalizeNamedArrayMap(resourceInstance?.[fieldName])
+}
+
+const resolveFieldMap = (resourceInstance = {}, fieldName, mapName) => {
+  if (resourceInstance?.[mapName] && typeof resourceInstance[mapName] === 'object') {
+    return resourceInstance[mapName]
+  }
+  return Object.fromEntries(normalizeArrayField(resourceInstance?.[fieldName])
+    .map((item) => [String(item?.name || item?.key || '').trim(), item?.value])
+    .filter(([name]) => Boolean(name)))
+}
+
+const resolveCanonicalGpuDevices = (baseInfo = {}) => normalizeArrayField(baseInfo.resourceInstances || baseInfo.resource_instances)
+  .filter((resourceInstance) => String(resourceInstance?.resourceTypeId || resourceInstance?.resource_type_id || '').trim() === 'gpu')
+  .map((resourceInstance, fallbackIndex) => {
+    const identityMap = resolveFieldMap(resourceInstance, 'identity', 'identityMap')
+    const specMap = resolveFieldMap(resourceInstance, 'spec', 'specMap')
+    const capacityMap = resolveMeasureMap(resourceInstance, 'capacity', 'capacityMap')
+    const metricsMap = resolveMeasureMap(resourceInstance, 'metrics', 'metricsMap')
+    const index = Number.isFinite(Number(identityMap.index)) ? Number(identityMap.index) : fallbackIndex
+    return {
+      id: resourceInstance.id,
+      index,
+      uuid: identityMap.uuid || identityMap.deviceUUID || '',
+      busId: identityMap.busId || identityMap.bus_id || '',
+      vendor: specMap.vendor || '',
+      model: specMap.model || specMap.name || '',
+      name: specMap.model || specMap.name || `GPU ${index}`,
+      memoryBytes: pickMeasureNumber(capacityMap.memoryBytes, ['capacity', 'allocatable', 'total', 'value']),
+      memoryBytesAvailable: pickMeasureNumber(capacityMap.memoryBytesAvailable, ['available', 'value', 'allocatable']),
+      memoryBytesUsed: pickMeasureNumber(metricsMap.memoryBytesUsed || capacityMap.memoryBytesUsed, ['value', 'used']),
+      utilizationGpuPercent: pickMeasureNumber(metricsMap.utilizationGpuPercent, ['value', 'used']),
+      temperatureGpuCelsius: pickMeasureNumber(metricsMap.temperatureGpuCelsius, ['value'])
+    }
+  })
+
 const resolveGpuDeviceCandidates = (resource = {}, baseInfo = {}) => {
   const candidates = [
+    resolveCanonicalGpuDevices(baseInfo),
     baseInfo?.machine?.gpu?.devices,
     resource.gpuDevices,
     resource.gpu_devices,
@@ -21,7 +81,7 @@ const resolveGpuDeviceCandidates = (resource = {}, baseInfo = {}) => {
     resource.gpu?.devices
   ]
 
-  return candidates.find((devices) => Array.isArray(devices)) || []
+  return candidates.find((devices) => Array.isArray(devices) && devices.length > 0) || []
 }
 
 const hasUsableGpuDevices = (gpuDevices = []) => gpuDevices.some((device) => Number(device?.memoryBytes || 0) > 0)

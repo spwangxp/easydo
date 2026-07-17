@@ -41,7 +41,7 @@ func RegisterPipelineTools(registry *Registry, usecase *services.PipelineQueryUs
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -78,7 +78,7 @@ func RegisterPipelineTools(registry *Registry, usecase *services.PipelineQueryUs
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -113,7 +113,7 @@ func RegisterPipelineTools(registry *Registry, usecase *services.PipelineQueryUs
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -155,7 +155,7 @@ func RegisterPipelineTools(registry *Registry, usecase *services.PipelineQueryUs
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -192,7 +192,7 @@ func RegisterPipelineTools(registry *Registry, usecase *services.PipelineQueryUs
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -229,7 +229,7 @@ func RegisterPipelineTools(registry *Registry, usecase *services.PipelineQueryUs
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -267,7 +267,7 @@ func RegisterPipelineTools(registry *Registry, usecase *services.PipelineQueryUs
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -306,7 +306,7 @@ func RegisterPipelineTools(registry *Registry, usecase *services.PipelineQueryUs
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -368,7 +368,7 @@ func RegisterPipelineOperationTools(registry *Registry, usecase PipelineOperatio
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -420,7 +420,7 @@ func RegisterPipelineOperationTools(registry *Registry, usecase PipelineOperatio
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -457,7 +457,7 @@ func RegisterPipelineOperationTools(registry *Registry, usecase PipelineOperatio
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}

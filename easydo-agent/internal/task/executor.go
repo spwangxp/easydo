@@ -249,10 +249,6 @@ func (e *Executor) Execute(ctx context.Context, params TaskParams, callback LogC
 		params.Script = dockerScript
 	}
 
-	if isAITaskParams(params) {
-		return e.executeAITask(ctx, params, callback)
-	}
-
 	// Write task file
 	if workspacePath != "" {
 		_, err = e.workspace.WriteTaskFile(workspacePath, params.TaskID, params.Script)

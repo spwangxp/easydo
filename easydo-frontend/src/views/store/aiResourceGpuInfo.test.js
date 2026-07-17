@@ -45,6 +45,48 @@ test('normalizeResourceGpuInfo extracts gpu devices from baseInfo.machine.gpu.de
   assert.notEqual(result.baseInfoSnapshot, resource.baseInfo)
 })
 
+test('normalizeResourceGpuInfo extracts gpu devices from canonical base info resourceInstances', () => {
+  const resource = {
+    baseInfoStatus: 'succeeded',
+    baseInfo: {
+      resourceInstances: [
+        {
+          id: 'gpu-0',
+          resourceTypeId: 'gpu',
+          identity: [
+            { name: 'index', value: 0 },
+            { name: 'uuid', value: 'GPU-0-UUID' },
+            { name: 'busId', value: '0000:01:00.0' }
+          ],
+          spec: [
+            { name: 'vendor', value: 'NVIDIA' },
+            { name: 'model', value: 'A100' }
+          ],
+          capacity: [
+            { name: 'memoryBytes', capacity: 80 * 1024 ** 3 },
+            { name: 'memoryBytesAvailable', available: 64 * 1024 ** 3 }
+          ],
+          metrics: [
+            { name: 'memoryBytesUsed', value: 16 * 1024 ** 3 },
+            { name: 'utilizationGpuPercent', value: 55 },
+            { name: 'temperatureGpuCelsius', value: 67 }
+          ]
+        }
+      ]
+    }
+  }
+
+  const result = normalizeResourceGpuInfo(resource)
+
+  assert.equal(result.status, 'ready')
+  assert.equal(result.gpuDevices.length, 1)
+  assert.equal(result.gpuDevices[0].index, 0)
+  assert.equal(result.gpuDevices[0].uuid, 'GPU-0-UUID')
+  assert.equal(result.gpuDevices[0].model, 'A100')
+  assert.equal(result.gpuDevices[0].memoryBytes, 80 * 1024 ** 3)
+  assert.equal(result.gpuDevices[0].memoryBytesAvailable, 64 * 1024 ** 3)
+})
+
 test('normalizeResourceGpuInfo does not treat count-only gpu data as ready', () => {
   const resource = {
     baseInfo: {

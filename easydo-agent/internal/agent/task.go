@@ -27,22 +27,22 @@ import (
 // server relies on to converge run/task state. Terminal status/log messages may
 // need to survive temporary WS outages and be replayed after reconnect.
 type TaskHandler struct {
-	httpClient       *client.HTTPClient
-	wsClient         *client.WebSocketClient
-	cfg              *config.Config
-	tokenMgr         *TokenManager
-	agentID          uint64
-	token            string
-	log              *logrus.Logger
-	executor         *task.Executor
-	embeddedBuildkit *task.EmbeddedBuildkitManager
-	mu               sync.RWMutex
-	running          bool
-	stopChan         chan struct{}
-	runCtx           context.Context
-	inFlight         sync.Map
-	runningTasks     sync.Map
-	cancelledTasks   sync.Map
+	httpClient        *client.HTTPClient
+	wsClient          *client.WebSocketClient
+	cfg               *config.Config
+	tokenMgr          *TokenManager
+	agentID           uint64
+	token             string
+	log               *logrus.Logger
+	executor          *task.Executor
+	embeddedBuildkit  *task.EmbeddedBuildkitManager
+	mu                sync.RWMutex
+	running           bool
+	stopChan          chan struct{}
+	runCtx            context.Context
+	inFlight          sync.Map
+	runningTasks      sync.Map
+	cancelledTasks    sync.Map
 	pendingMu         sync.Mutex
 	pendingWS         []pendingWebSocketMessage
 	taskConcurrencyMu sync.Mutex
@@ -1020,10 +1020,6 @@ func getTaskOutputs(t *Task, result *task.Result) map[string]interface{} {
 	if t == nil {
 		return outputs
 	}
-	if isAITaskOutputTask(t) {
-		return getAITaskOutputs(result)
-	}
-
 	switch t.TaskType {
 	case "git_clone":
 		return getGitCloneOutputs(t)
@@ -1038,31 +1034,6 @@ func getTaskOutputs(t *Task, result *task.Result) map[string]interface{} {
 	case "shell":
 		return getShellOutputs(t, result)
 	}
-	return outputs
-}
-
-func isAITaskOutputTask(t *Task) bool {
-	if t == nil {
-		return false
-	}
-	return task.IsAITaskPayload(t.TaskType, task.ParseStructuredParamsJSON(t.Params))
-}
-
-func getAITaskOutputs(result *task.Result) map[string]interface{} {
-	outputs := make(map[string]interface{})
-	if result == nil {
-		return outputs
-	}
-	if len(result.StructuredOutput) > 0 {
-		for k, v := range result.StructuredOutput {
-			outputs[k] = v
-		}
-		return outputs
-	}
-	if strings.TrimSpace(result.Stdout) == "" {
-		return outputs
-	}
-	_ = json.Unmarshal([]byte(result.Stdout), &outputs)
 	return outputs
 }
 

@@ -212,6 +212,13 @@ func InitRouter() *gin.Engine {
 			auditLogs.GET("", auditLogHandler.ListGlobalAuditLogs)
 		}
 
+		mcpConfig := api.Group("/mcp")
+		mcpConfig.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		{
+			mcpConfigHandler := handlers.NewMCPConfigHandler()
+			mcpConfig.GET("/config", mcpConfigHandler.GetCurrentWorkspaceConfig)
+		}
+
 		// Task管理
 		tasks := api.Group("/tasks")
 		{
@@ -315,6 +322,8 @@ func InitRouter() *gin.Engine {
 		{
 			aiProviderHandler := handlers.NewAIProviderHandler()
 			aiProviders.GET("", aiProviderHandler.ListProviders)
+			aiProviders.POST("/test-connection", aiProviderHandler.TestConnection)
+			aiProviders.POST("/discover-models", aiProviderHandler.DiscoverModels)
 			aiProviders.POST("", aiProviderHandler.CreateProvider)
 			aiProviders.PUT("/:id", aiProviderHandler.UpdateProvider)
 			aiProviders.DELETE("/:id", aiProviderHandler.DeleteProvider)
@@ -324,24 +333,84 @@ func InitRouter() *gin.Engine {
 			aiProviders.DELETE("/:id/model-bindings/:binding_id", aiProviderHandler.DeleteBinding)
 		}
 
-		aiAgents := api.Group("/ai/agents")
-		aiAgents.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		aiAgentStore := api.Group("/store/ai-agents")
+		aiAgentStore.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
 		{
-			aiAgentHandler := handlers.NewAIAgentHandler()
-			aiAgents.GET("", aiAgentHandler.ListAgents)
-			aiAgents.POST("", aiAgentHandler.CreateAgent)
-			aiAgents.PUT("/:id", aiAgentHandler.UpdateAgent)
-			aiAgents.DELETE("/:id", aiAgentHandler.DeleteAgent)
+			aiAgentStoreHandler := handlers.NewAIAgentStoreHandler()
+			aiAgentStore.GET("/operations/summary", aiAgentStoreHandler.GetOperationsSummary)
+			aiAgentStore.GET("/workspaces", aiAgentStoreHandler.ListWorkspaces)
+			aiAgentStore.POST("/workspaces", aiAgentStoreHandler.EnsureWorkspace)
+			aiAgentStore.GET("/workspaces/:workspace_runtime_id", aiAgentStoreHandler.GetWorkspace)
+			aiAgentStore.GET("/workspaces/:workspace_runtime_id/audits", aiAgentStoreHandler.ListWorkspaceAudits)
+			aiAgentStore.POST("/workspaces/:workspace_runtime_id/connect", aiAgentStoreHandler.ConnectWorkspace)
+			aiAgentStore.POST("/workspaces/:workspace_runtime_id/pause", aiAgentStoreHandler.PauseWorkspace)
+			aiAgentStore.POST("/workspaces/:workspace_runtime_id/resume", aiAgentStoreHandler.ResumeWorkspace)
+			aiAgentStore.POST("/workspaces/:workspace_runtime_id/recycle", aiAgentStoreHandler.RecycleWorkspace)
+			aiAgentStore.GET("/profiles", aiAgentStoreHandler.ListProfiles)
+			aiAgentStore.POST("/profiles", aiAgentStoreHandler.CreateProfile)
+			aiAgentStore.GET("/profiles/:id", aiAgentStoreHandler.GetProfile)
+			aiAgentStore.PUT("/profiles/:id", aiAgentStoreHandler.UpdateProfile)
+			aiAgentStore.DELETE("/profiles/:id", aiAgentStoreHandler.DeleteProfile)
+			aiAgentStore.POST("/profiles/:id/publish", aiAgentStoreHandler.PublishProfile)
+			aiAgentStore.POST("/profiles/:id/validate", aiAgentStoreHandler.ValidateProfile)
+			aiAgentStore.GET("/profiles/:id/versions", aiAgentStoreHandler.ListProfileVersions)
+			aiAgentStore.GET("/profiles/:id/dependencies", aiAgentStoreHandler.GetProfileDependencies)
+			aiAgentStore.GET("/resources", aiAgentStoreHandler.ListResources)
+			aiAgentStore.GET("/resources/:id/versions", aiAgentStoreHandler.ListResourceVersions)
+			aiAgentStore.GET("/resources/:id/dependencies", aiAgentStoreHandler.GetResourceDependencies)
+			aiAgentStore.POST("/resources", aiAgentStoreHandler.CreateResource)
+			aiAgentStore.PUT("/resources/:id", aiAgentStoreHandler.UpdateResource)
+			aiAgentStore.POST("/resources/mcp/probe", aiAgentStoreHandler.ProbeMcpResource)
+			aiAgentStore.POST("/resources/:id/scan", aiAgentStoreHandler.ScanResource)
+			aiAgentStore.DELETE("/resources/:id", aiAgentStoreHandler.DeleteResource)
 		}
 
-		aiRuntimeProfiles := api.Group("/ai/runtime-profiles")
-		aiRuntimeProfiles.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		aiRuntime := api.Group("/ai")
+		aiRuntime.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
 		{
-			aiAgentHandler := handlers.NewAIAgentHandler()
-			aiRuntimeProfiles.GET("", aiAgentHandler.ListRuntimeProfiles)
-			aiRuntimeProfiles.POST("", aiAgentHandler.CreateRuntimeProfile)
-			aiRuntimeProfiles.PUT("/:profile_id", aiAgentHandler.UpdateRuntimeProfile)
-			aiRuntimeProfiles.DELETE("/:profile_id", aiAgentHandler.DeleteRuntimeProfile)
+			aiRuntimeSessionHandler := handlers.NewAIRuntimeSessionHandler()
+			aiRuntime.GET("/sessions", aiRuntimeSessionHandler.ListSessions)
+			aiRuntime.POST("/sessions/current", aiRuntimeSessionHandler.CurrentSession)
+			aiRuntime.GET("/sessions/:id", aiRuntimeSessionHandler.GetSession)
+			aiRuntime.GET("/sessions/:id/entries", aiRuntimeSessionHandler.ListEntries)
+			aiRuntime.POST("/sessions/:id/entries/stream", aiRuntimeSessionHandler.CreateEntryStream)
+			aiRuntime.POST("/sessions/:id/entries", aiRuntimeSessionHandler.CreateEntry)
+			aiRuntime.POST("/sessions/:id/cancel", aiRuntimeSessionHandler.CancelSession)
+			aiRuntime.PUT("/sessions/:id/model", aiRuntimeSessionHandler.UpdateSessionModel)
+			aiRuntime.POST("/actions/:id/decision", aiRuntimeSessionHandler.DecideAction)
+			aiRuntime.POST("/actions/:id/decision/stream", aiRuntimeSessionHandler.DecideActionStream)
+			aiRuntime.POST("/runs/:runtime_run_id/pi-approval/decision", aiRuntimeSessionHandler.DecidePiApproval)
+			aiRuntime.POST("/runs/:runtime_run_id/pi-approval/decision/stream", aiRuntimeSessionHandler.DecidePiApprovalStream)
+			aiRuntime.GET("/runs/:runtime_run_id/events", aiRuntimeSessionHandler.ListRunEvents)
+			aiRuntime.POST("/runs/:runtime_run_id/events/stream", aiRuntimeSessionHandler.StreamRunEvents)
+			aiRuntime.GET("/artifacts/:artifact_id", aiRuntimeSessionHandler.GetArtifact)
+		}
+
+		aiAgentChatbox := api.Group("/ai/agent-chatbox")
+		aiAgentChatbox.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+		{
+			aiAgentChatboxHandler := handlers.NewAIAgentChatboxHandler()
+			aiAgentChatbox.GET("/profiles", aiAgentChatboxHandler.ListProfiles)
+			aiAgentChatbox.GET("/sessions", aiAgentChatboxHandler.ListSessions)
+			aiAgentChatbox.POST("/sessions/open", aiAgentChatboxHandler.OpenSession)
+			aiAgentChatbox.POST("/sessions", aiAgentChatboxHandler.CreateSession)
+			aiAgentChatbox.GET("/sessions/:id", aiAgentChatboxHandler.GetSession)
+			aiAgentChatbox.GET("/sessions/:id/entries", aiAgentChatboxHandler.ListEntries)
+			aiAgentChatbox.POST("/sessions/:id/entries/stream", aiAgentChatboxHandler.CreateEntryStream)
+			aiAgentChatbox.POST("/sessions/:id/cancel", aiAgentChatboxHandler.CancelSession)
+			aiAgentChatbox.POST("/sessions/:id/archive", aiAgentChatboxHandler.ArchiveSession)
+			aiAgentChatbox.POST("/sessions/:id/queue-items", aiAgentChatboxHandler.EnqueueQueueItem)
+			aiAgentChatbox.GET("/sessions/:id/queue-items", aiAgentChatboxHandler.ListQueueItems)
+			aiAgentChatbox.DELETE("/sessions/:id/queue-items/:queue_item_id", aiAgentChatboxHandler.CancelQueueItem)
+			aiAgentChatbox.POST("/sessions/:id/queue-items/reorder", aiAgentChatboxHandler.ReorderQueueItems)
+			aiAgentChatbox.PUT("/sessions/:id/model", aiAgentChatboxHandler.UpdateSessionModel)
+			aiAgentChatbox.POST("/sessions/:id/continue/stream", aiAgentChatboxHandler.ContinueSessionStream)
+			aiAgentChatbox.POST("/actions/:id/decision/stream", aiAgentChatboxHandler.DecideActionStream)
+			aiAgentChatbox.POST("/runs/:runtime_run_id/pi-approval/decision", aiAgentChatboxHandler.DecidePiApproval)
+			aiAgentChatbox.POST("/runs/:runtime_run_id/pi-approval/decision/stream", aiAgentChatboxHandler.DecidePiApprovalStream)
+			aiAgentChatbox.GET("/runs/:runtime_run_id/events", aiAgentChatboxHandler.ListRunEvents)
+			aiAgentChatbox.POST("/runs/:runtime_run_id/events/stream", aiAgentChatboxHandler.StreamRunEvents)
+			aiAgentChatbox.GET("/artifacts/:artifact_id", aiAgentChatboxHandler.GetArtifact)
 		}
 
 		deployments := api.Group("/deployments")
@@ -375,6 +444,27 @@ func InitRouter() *gin.Engine {
 			stats.GET("/trend", statsHandler.GetTrend)
 			stats.GET("/top-pipelines", statsHandler.GetTopPipelines)
 		}
+	}
+
+	// Agent Runtime v2 — Event Store + Projection 原生路由
+	agentV2 := api.Group("/v2/agent")
+	agentV2.Use(middleware.JWTAuth(), middleware.WorkspaceContext(), middleware.WorkspaceMemberRequired())
+	{
+		agentSessionHandler := handlers.NewAgentSessionHandler()
+		agentV2.GET("/sessions", agentSessionHandler.ListSessions)
+		agentV2.POST("/sessions", agentSessionHandler.CreateSession)
+		agentV2.GET("/sessions/:id/projection", agentSessionHandler.GetProjection)
+		agentV2.GET("/sessions/:id/events", agentSessionHandler.EventStream)
+		agentV2.POST("/sessions/:id/prompt", agentSessionHandler.Prompt)
+		agentV2.POST("/sessions/:id/approval/:request_id", agentSessionHandler.Approve)
+	}
+
+	// Agent Runtime v2 — Internal API (Pi Runtime 回调)
+	internalV2 := api.Group("/v2/agent/internal")
+	internalV2.Use(middleware.InternalServerAuth())
+	{
+		agentSessionHandler := handlers.NewAgentSessionHandler()
+		internalV2.POST("/events", agentSessionHandler.IngestEvent)
 	}
 
 	return router

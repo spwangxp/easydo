@@ -22,11 +22,11 @@ import {
 } from './runtimeConfig.js'
 
 const buildTaskRuntimeSummary = (source) => {
-  const runtimeProfileID = Number(source?.runtime_profile_id || 0)
+  const agentProfileVersionID = Number(source?.agent_profile_version_id || 0)
   const providerID = Number(source?.provider_id || 0)
   const modelID = Number(source?.model_id || 0)
   const parts = []
-  if (runtimeProfileID > 0) parts.push(`Runtime #${runtimeProfileID}`)
+  if (agentProfileVersionID > 0) parts.push(`Agent Profile Version #${agentProfileVersionID}`)
   if (providerID > 0) parts.push(`Provider #${providerID}`)
   if (modelID > 0) parts.push(`Model #${modelID}`)
   return parts.join(' / ')
@@ -150,7 +150,7 @@ test('buildRunTasksFromRunRecord carries node ignore_failure and failed attempt 
             duration: 33,
             exit_code: 7,
             error_msg: 'build failed',
-            runtime_profile_id: 11,
+            agent_profile_version_id: 11,
             provider_id: 22,
             model_id: 33
           }
@@ -173,7 +173,7 @@ test('buildRunTasksFromRunRecord carries node ignore_failure and failed attempt 
   assert.equal(tasks[0].ignore_failure, true)
   assert.equal(tasks[0].exit_code, 7)
   assert.equal(tasks[0].duration, 33)
-  assert.equal(tasks[0].runtime_summary, 'Runtime #11 / Provider #22 / Model #33')
+  assert.equal(tasks[0].runtime_summary, 'Agent Profile Version #11 / Provider #22 / Model #33')
 })
 
 test('normalizeRunTaskFromApi preserves ignore_failure exit code and duration from fallback snapshot', () => {

@@ -18,30 +18,13 @@
         <!-- 基本设置 -->
         <div v-if="activeMenu === 'basic'" class="settings-section">
           <h2 class="section-title">基本设置</h2>
-          
-          <div class="form-group">
-            <label>系统名称</label>
-            <el-input v-model="settings.systemName" placeholder="请输入系统名称" />
-          </div>
-          
-          <div class="form-group">
-            <label>系统 Logo</label>
-            <div class="logo-upload">
-              <el-icon :size="40"><Upload /></el-icon>
-              <span>点击上传 Logo</span>
-            </div>
-          </div>
-          
+
           <div class="form-group">
             <label>系统主题</label>
             <el-radio-group v-model="settings.theme">
               <el-radio-button label="light">浅色主题</el-radio-button>
               <el-radio-button label="dark">深色主题</el-radio-button>
             </el-radio-group>
-          </div>
-          
-          <div class="form-actions">
-            <el-button type="primary" @click="saveSettings">保存设置</el-button>
           </div>
         </div>
         
@@ -225,13 +208,15 @@
             <div class="mcp-setup-header">
               <div>
                 <h3>EasyDo MCP 接入</h3>
-                <p>使用当前登录身份认证，调用 workspace 相关工具时显式携带当前 workspace_id。</p>
+                <p>使用当前工作空间的 MCP token 认证，调用 workspace 相关工具时显式携带当前 workspace_id。</p>
               </div>
             </div>
 
             <div v-if="!userStore.currentWorkspaceId" class="empty-hint">请先在顶部切换到一个工作空间</div>
 
-            <div v-else-if="!hasReadableToken" class="mcp-token-error-state">当前 token 获取失败</div>
+            <div v-else-if="mcpConfigLoading" class="mcp-token-error-state">MCP token 加载中...</div>
+
+            <div v-else-if="!hasReadableToken" class="mcp-token-error-state">当前 MCP token 获取失败</div>
 
             <template v-else>
               <div class="mcp-context-grid">
@@ -266,7 +251,7 @@
                   <span class="mcp-label">Bearer token</span>
                   <code>{{ mcpVisibleToken }}</code>
                   <el-button size="small" @click="toggleMcpTokenVisible">{{ mcpTokenVisible ? '隐藏' : '显示' }}</el-button>
-                  <el-button size="small" @click="copyMcpText(userStore.token, 'Bearer token')">复制</el-button>
+                  <el-button size="small" @click="copyMcpText(mcpToken, 'Bearer token')">复制</el-button>
                 </div>
                 <div class="mcp-field-item">
                   <span class="mcp-label">workspace_id</span>
@@ -322,6 +307,7 @@ import {
   upsertNotificationPreferenceInList
 } from '@/api/notification'
 import { getWorkspaceMembers } from '@/api/workspace'
+import { getMcpConfig } from '@/api/mcp'
 import {
   buildMcpUrl,
   buildMcpSseUrl,
@@ -340,7 +326,6 @@ import {
   Bell,
   User,
   Link,
-  Upload,
   ChatDotRound,
   ChatLineRound,
   Key
@@ -354,7 +339,6 @@ const notificationPreferencesLoading = ref(false)
 const notificationSavingKeys = ref([])
 const activeNotificationModule = ref(NOTIFICATION_EVENT_GROUPS[0]?.value || '')
 const settings = reactive({
-  systemName: 'EasyDo',
   theme: 'light',
   twoFactorEnabled: false
 })
@@ -362,6 +346,8 @@ const showPasswordDialog = ref(false)
 const showDevicesDialog = ref(false)
 const activeMcpSnippetTab = ref('claude')
 const mcpTokenVisible = ref(false)
+const mcpConfigLoading = ref(false)
+const mcpConfig = ref(null)
 const mcpSnippetTabs = [
   { key: 'claude', label: 'Claude Code' },
   { key: 'opencode', label: 'OpenCode' },
@@ -370,24 +356,26 @@ const mcpSnippetTabs = [
 ]
 
 const browserOrigin = computed(() => typeof window === 'undefined' ? '' : window.location.origin)
-const hasReadableToken = computed(() => hasReadableMcpToken(userStore.token))
+const mcpToken = computed(() => String(mcpConfig.value?.token || '').trim())
+const mcpWorkspaceId = computed(() => Number(mcpConfig.value?.workspace_id || userStore.currentWorkspaceId || 0))
+const hasReadableToken = computed(() => hasReadableMcpToken(mcpToken.value))
 const mcpUrl = computed(() => buildMcpUrl(browserOrigin.value))
 const mcpSseUrl = computed(() => buildMcpSseUrl(browserOrigin.value))
 const mcpVisibleToken = computed(() => {
-  return mcpTokenVisible.value ? userStore.token : buildMaskedToken(userStore.token)
+  return mcpTokenVisible.value ? mcpToken.value : buildMaskedToken(mcpToken.value)
 })
 const mcpClaudeCodeSnippet = computed(() => buildClaudeCodeMcpSnippet({ origin: browserOrigin.value }))
 const mcpOpenCodeSnippet = computed(() => buildOpenCodeMcpSnippet({ origin: browserOrigin.value }))
 const mcpCodexSnippet = computed(() => buildCodexMcpSnippet({ origin: browserOrigin.value }))
 const mcpEnvironmentSnippet = computed(() => buildMcpEnvironmentSnippet({
   origin: browserOrigin.value,
-  token: userStore.token,
-  workspaceId: userStore.currentWorkspaceId
+  token: mcpToken.value,
+  workspaceId: mcpWorkspaceId.value
 }))
 const mcpDisplayEnvironmentSnippet = computed(() => buildDisplayMcpEnvironmentSnippet({
   origin: browserOrigin.value,
-  token: userStore.token,
-  workspaceId: userStore.currentWorkspaceId
+  token: mcpToken.value,
+  workspaceId: mcpWorkspaceId.value
 }))
 const activeMcpSnippet = computed(() => {
   const snippets = {
@@ -466,10 +454,6 @@ const loadWorkspaceMembers = async () => {
   }
 }
 
-const saveSettings = () => {
-  ElMessage.success('当前阶段未实现基础设置保存')
-}
-
 const fallbackCopyText = async (value) => {
   const textarea = document.createElement('textarea')
   textarea.value = value
@@ -496,6 +480,28 @@ const copyMcpText = async (value, label) => {
     onSuccess: () => ElMessage.success(`${label} 已复制`),
     onError: () => ElMessage.error(`${label} 复制失败`)
   })
+}
+
+const loadMcpConfig = async () => {
+  if (!userStore.currentWorkspaceId) {
+    mcpConfig.value = null
+    return
+  }
+  mcpConfigLoading.value = true
+  try {
+    const res = await getMcpConfig()
+    if (res.code === 200) {
+      mcpConfig.value = res.data || null
+      return
+    }
+    mcpConfig.value = null
+    ElMessage.error(res.message || '加载 MCP token 失败')
+  } catch (error) {
+    mcpConfig.value = null
+    ElMessage.error('加载 MCP token 失败')
+  } finally {
+    mcpConfigLoading.value = false
+  }
 }
 
 const getPreferenceSavingKey = (workspaceId, eventType, channel) => {
@@ -586,6 +592,9 @@ watch(() => [activeMenu.value, userStore.currentWorkspaceId], async ([menu]) => 
   }
   if (menu === 'notifications') {
     await loadNotificationPreferences()
+  }
+  if (menu === 'integrations') {
+    await loadMcpConfig()
   }
 }, { immediate: true })
 </script>
@@ -705,48 +714,6 @@ watch(() => [activeMenu.value, userStore.currentWorkspaceId], async ([menu]) => 
               color: white;
               box-shadow: none;
             }
-          }
-        }
-      }
-      
-      .logo-upload {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        width: 120px;
-        height: 120px;
-        border: 2px dashed var(--border-color);
-        border-radius: $radius-lg;
-        cursor: pointer;
-        color: var(--text-muted);
-        transition: all $transition-base;
-        background: var(--bg-secondary);
-        
-        &:hover {
-          border-color: var(--primary-color);
-          color: var(--primary-color);
-          background: var(--primary-lighter);
-        }
-      }
-      
-      .form-actions {
-        margin-top: 32px;
-        padding-top: 24px;
-        border-top: 1px solid var(--border-color);
-        
-        :deep(.el-button--primary) {
-          height: 44px;
-          padding: 0 32px;
-          border-radius: $radius-md;
-          font-weight: 600;
-          background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
-          border: none;
-          box-shadow: $shadow-md;
-          
-          &:hover {
-            transform: translateY(-2px);
-            box-shadow: $shadow-lg;
           }
         }
       }

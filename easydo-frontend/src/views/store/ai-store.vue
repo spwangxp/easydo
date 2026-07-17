@@ -4,18 +4,13 @@
       <div class="content-toolbar__start">
         <StoreKindSwitch :model-value="storeKind" @update:model-value="handleStoreTabChange" />
       </div>
-      <div class="content-toolbar__meta store-page-hint">模型、Provider、Deployment、Runtime Profile 与 Agent 引用一体查看。</div>
+      <div class="content-toolbar__meta store-page-hint">模型、Provider 与 Deployment 一体查看，Agent Profile 请在 AI Agent 商店管理。</div>
       <div class="content-toolbar__actions">
         <StoreHeaderActions>
-          <el-input
-            v-model="filters.keyword"
-            clearable
-            placeholder="搜索模型 / Provider / Runtime"
-            style="width: 280px"
-          />
+          <el-input v-model="filters.keyword" clearable placeholder="搜索模型 / Provider / Deployment" style="width: 280px" />
           <el-button type="primary" @click="openImportModelDialog">导入模型</el-button>
           <el-button type="primary" @click="openDeployDialog">部署模型</el-button>
-          <el-button type="primary" @click="openProviderDialog">接入外部 Provider</el-button>
+          <el-button v-if="canManageAIProviders" type="primary" @click="openProviderDialog()">接入外部 Provider</el-button>
         </StoreHeaderActions>
       </div>
     </div>
@@ -23,12 +18,17 @@
     <section class="card-shell section-shell">
       <div class="section-header">
         <div>
-          <h2>模型总览</h2>
-          <p>按模型聚合展示 Provider、部署、Runtime Profile 以及 Agent 引用，并支持单行展开查看详情。</p>
+          <h2>{{ supplyView === 'models' ? '模型视角' : 'Provider 视角' }}</h2>
+          <p>{{ supplyView === 'models' ? '按模型聚合展示 Provider 与部署。' : '按 Provider 查看当前供应商提供哪些模型，并支持重新发现模型。' }}</p>
         </div>
+        <el-radio-group v-model="supplyView" size="small" class="supply-view-switch">
+          <el-radio-button value="models">模型视角</el-radio-button>
+          <el-radio-button value="providers">Provider 视角</el-radio-button>
+        </el-radio-group>
       </div>
 
       <el-table
+        v-if="supplyView === 'models'"
         v-loading="loading"
         :data="modelRows"
         :expand-row-keys="expandedRowKeys"
@@ -88,25 +88,6 @@
                 </el-table>
               </div>
 
-              <div class="detail-block">
-                <div class="detail-block-header">
-                  <strong>Runtime Usage</strong>
-                  <span class="detail-count">{{ row.runtimeCount }}</span>
-                </div>
-                <el-table :data="row.runtimeUsage" size="small" empty-text="暂无 Runtime 引用">
-                  <el-table-column prop="runtime_name" label="Runtime Profile" min-width="180" />
-                  <el-table-column prop="agent_name" label="Agent" min-width="180" />
-                  <el-table-column prop="binding_priority_text" label="Binding 优先级" min-width="200" />
-                  <el-table-column prop="status" label="状态" width="120" />
-                  <el-table-column label="操作" width="140" fixed="right">
-                    <template #default>
-                      <div class="table-actions">
-                        <el-button link type="primary" @click.stop="openRuntimeProfile(row)">查看 Runtime</el-button>
-                      </div>
-                    </template>
-                  </el-table-column>
-                </el-table>
-              </div>
             </div>
           </template>
         </el-table-column>
@@ -116,7 +97,6 @@
         <el-table-column prop="source" label="来源" min-width="120" />
         <el-table-column prop="deploymentCount" label="已部署数" width="120" />
         <el-table-column prop="providerCount" label="Provider 数" width="120" />
-        <el-table-column prop="runtimeCount" label="Runtime 引用数" width="140" />
         <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
             <div class="table-actions">
@@ -128,65 +108,132 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <el-table
+        v-else
+        v-loading="loading"
+        :data="providerRows"
+        row-key="id"
+        empty-text="暂无 AI Provider"
+      >
+        <el-table-column type="expand" width="56">
+          <template #default="{ row }">
+            <div class="expand-panel">
+              <div class="detail-block">
+                <div class="detail-block-header">
+                  <strong>模型供给关系</strong>
+                  <span class="detail-count">{{ providerBindingRows(row).length }}</span>
+                </div>
+                <el-table :data="providerBindingRows(row)" size="small" empty-text="暂无模型供给">
+                  <el-table-column prop="modelName" label="模型" min-width="180" />
+                  <el-table-column prop="provider_model_key" label="Provider Model Key" min-width="220" />
+                  <el-table-column prop="status" label="状态" width="120" />
+                  <el-table-column label="能力" min-width="180">
+                    <template #default="{ row: binding }">
+                      <div class="tag-list">
+                        <el-tag v-for="item in binding.capabilities" :key="item" size="small" effect="plain">{{ item }}</el-tag>
+                        <span v-if="binding.capabilities.length === 0">-</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="name" label="Provider 名称" min-width="200" />
+        <el-table-column prop="provider_type" label="类型" min-width="150" />
+        <el-table-column prop="base_url" label="Base URL" min-width="260" />
+        <el-table-column prop="bindingCount" label="模型数" width="100" />
+        <el-table-column prop="status" label="状态" width="120" />
+        <el-table-column label="操作" width="220" fixed="right">
+          <template #default="{ row }">
+            <div class="table-actions">
+              <el-button link type="primary" @click="openProviderDiscoveryDialog(row)">重新发现模型</el-button>
+              <el-button link type="primary" @click="openProviderDialog(row)">编辑</el-button>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
     </section>
 
     <el-dialog v-model="dialogs.deploy" title="部署模型" width="920px" destroy-on-close>
       <el-form label-position="top">
-        <el-form-item label="模型" required>
-          <el-select v-model="deployForm.modelId" filterable style="width: 100%" @change="handleDeployModelChange">
-            <el-option v-for="item in aiState.models" :key="item.id" :label="item.name" :value="item.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="部署模板" required>
-          <el-select v-model="deployForm.templateId" filterable style="width: 100%" @change="handleDeployTemplateChange">
-            <el-option
-              v-for="item in deployTemplates"
-              :key="item.id"
-              :label="`${item.name} · ${item.target_resource_type === 'k8s' ? 'K8s' : 'VM'}`"
-              :value="item.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="版本 / 部署参数" required>
-          <el-select v-model="deployForm.templateVersionId" filterable style="width: 100%" @change="handleDeployVersionChange">
-            <el-option
-              v-for="item in deployTemplateVersions"
-              :key="item.id"
-              :label="item.version"
-              :value="item.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="目标资源" required>
-          <el-select v-model="deployForm.targetResourceId" filterable style="width: 100%">
-            <el-option
-              v-for="item in availableDeployResources"
-              :key="item.id"
-              :label="`${item.name} · ${item.endpoint || item.type}`"
-              :value="item.id"
-            />
-          </el-select>
-        </el-form-item>
+        <el-steps :active="deployStep" finish-status="success" class="dialog-stepper" simple>
+          <el-step title="选择模型资产" />
+          <el-step title="模板与资源" />
+          <el-step title="参数预览" />
+          <el-step title="同步 Provider" />
+        </el-steps>
 
-        <el-form-item v-if="canSelectGpuDevices" label="GPU">
-          <el-select
-            v-model="selectedGpuDeviceKeys"
-            multiple
-            collapse-tags
-            collapse-tags-tooltip
-            placeholder="选择 GPU"
-            style="width: 100%"
-          >
-            <el-option
-              v-for="device in selectedResourceGpuDevices"
-              :key="device.deviceKey"
-              :label="device.label"
-              :value="device.deviceKey"
-            />
-          </el-select>
-        </el-form-item>
+        <div v-show="deployStep === 0" class="dialog-step-body">
+          <el-form-item label="模型" required>
+            <el-select v-model="deployForm.modelId" filterable style="width: 100%" @change="handleDeployModelChange">
+              <el-option v-for="item in aiState.models" :key="item.id" :label="item.name" :value="item.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="Model Asset" required>
+            <el-select v-model="deployForm.modelAssetId" style="width: 100%">
+              <el-option v-for="item in selectedModelAssetOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </el-form-item>
+        </div>
 
-        <div class="deploy-vram-estimate-panel">
+        <div v-show="deployStep === 1" class="dialog-step-body">
+          <div class="form-grid form-grid--two">
+            <el-form-item label="部署模板" required>
+              <el-select v-model="deployForm.templateId" filterable style="width: 100%" @change="handleDeployTemplateChange">
+                <el-option
+                  v-for="item in deployTemplates"
+                  :key="item.id"
+                  :label="`${item.name} · ${item.target_resource_type === 'k8s' ? 'K8s' : 'VM'}`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="版本 / 部署参数" required>
+              <el-select v-model="deployForm.templateVersionId" filterable style="width: 100%" @change="handleDeployVersionChange">
+                <el-option
+                  v-for="item in deployTemplateVersions"
+                  :key="item.id"
+                  :label="item.version"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="目标资源" required>
+              <el-select v-model="deployForm.targetResourceId" filterable style="width: 100%" @change="handleDeployResourceChange">
+                <el-option
+                  v-for="item in availableDeployResources"
+                  :key="item.id"
+                  :label="`${item.name} · ${item.endpoint || item.type}`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="canSelectGpuDevices" label="GPU">
+              <el-select
+                v-model="selectedGpuDeviceKeys"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                placeholder="选择 GPU"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="device in selectedResourceGpuDevices"
+                  :key="device.deviceKey"
+                  :label="device.label"
+                  :value="device.deviceKey"
+                />
+              </el-select>
+            </el-form-item>
+          </div>
+          <el-alert title="选择 GPU 后会自动同步 cuda_visible_devices、gpu_count、gpu_uuids 等隐式部署参数。" type="info" :closable="false" show-icon />
+        </div>
+
+        <div v-show="deployStep === 2" class="dialog-step-body">
+          <div class="deploy-vram-estimate-panel">
           <div class="deploy-vram-estimate-header">
             <div>
               <h3>显存估算</h3>
@@ -232,24 +279,104 @@
           :advanced-title="`高级配置（${deployAdvancedFields.length} 项）`"
           :default-open-advanced="deployAdvancedFields.length > 0"
         />
+        </div>
+
+        <div v-show="deployStep === 3" class="dialog-step-body">
+          <el-descriptions :column="2" border>
+            <el-descriptions-item label="模型">{{ selectedDeployModel?.name || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="Model Asset">{{ selectedModelAssetOptions.find((item) => item.value === deployForm.modelAssetId)?.label || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="模板">{{ selectedDeployTemplate?.name || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="模板版本">{{ deployTemplateVersions.find((item) => String(item.id) === String(deployForm.templateVersionId))?.version || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="资源">{{ selectedDeployResource?.name || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="GPU">{{ selectedGpuDevices.map((item) => item.label).join(' / ') || '-' }}</el-descriptions-item>
+          </el-descriptions>
+          <el-alert class="dialog-summary-alert" title="部署成功后，系统会由部署同步任务创建或更新 self-deploy Provider 供给关系。" type="success" :closable="false" show-icon />
+        </div>
       </el-form>
       <template #footer>
         <el-button @click="dialogs.deploy = false">取消</el-button>
-        <el-button type="primary" :loading="deploySubmitting" @click="submitDeploy">开始部署</el-button>
+        <el-button :disabled="deployStep === 0" @click="deployStep -= 1">上一步</el-button>
+        <el-button v-if="deployStep < 3" type="primary" @click="goNextDeployStep">下一步</el-button>
+        <el-button v-else type="primary" :loading="deploySubmitting" @click="submitDeploy">开始部署</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="dialogs.importModel" title="导入模型元数据" width="560px" destroy-on-close>
+    <el-dialog v-model="dialogs.importModel" title="导入模型" width="780px" destroy-on-close>
       <el-form label-position="top">
-        <el-form-item label="模型来源" required>
-          <el-select v-model="importModelForm.source" style="width: 100%">
-            <el-option label="Hugging Face" value="huggingface" />
-            <el-option label="ModelScope" value="modelscope" />
-          </el-select>
+        <div class="form-grid form-grid--two">
+          <el-form-item label="模型来源" required>
+            <el-select v-model="importModelForm.source" style="width: 100%">
+              <el-option label="Hugging Face" value="huggingface" />
+              <el-option label="ModelScope" value="modelscope" />
+              <el-option label="私有模型仓库" value="private-repo" />
+              <el-option label="手动录入" value="manual" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="来源模型 ID" required>
+            <el-input v-model="importModelForm.sourceModelId" placeholder="如 Qwen/Qwen2.5-7B-Instruct" />
+          </el-form-item>
+          <el-form-item label="模型名称">
+            <el-input v-model="importModelForm.name" placeholder="Qwen2.5-7B-Instruct" />
+          </el-form-item>
+          <el-form-item label="Display Name">
+            <el-input v-model="importModelForm.displayName" placeholder="Qwen2.5 7B Instruct" />
+          </el-form-item>
+          <el-form-item label="模型类型">
+            <el-select v-model="importModelForm.modelKind" style="width: 100%">
+              <el-option label="chat" value="chat" />
+              <el-option label="embedding" value="embedding" />
+              <el-option label="rerank" value="rerank" />
+              <el-option label="image" value="image" />
+              <el-option label="audio" value="audio" />
+              <el-option label="multimodal" value="multimodal" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="参数规模">
+            <el-input v-model="importModelForm.parameterSize" placeholder="7B / 32B / 235B" />
+          </el-form-item>
+          <el-form-item label="License">
+            <el-input v-model="importModelForm.license" placeholder="apache-2.0 / internal" />
+          </el-form-item>
+          <el-form-item label="标签">
+            <el-input v-model="importModelForm.tagsText" placeholder="qwen, chat, tool" />
+          </el-form-item>
+          <el-form-item label="仓库 / 下载地址">
+            <el-input v-model="importModelForm.repositoryUrl" placeholder="https://huggingface.co/Qwen/... 或私有仓库地址" />
+          </el-form-item>
+          <el-form-item label="Revision">
+            <el-input v-model="importModelForm.revision" placeholder="main / commit hash" />
+          </el-form-item>
+          <el-form-item label="文件格式">
+            <el-select v-model="importModelForm.format" clearable style="width: 100%">
+              <el-option label="safetensors" value="safetensors" />
+              <el-option label="gguf" value="gguf" />
+              <el-option label="onnx" value="onnx" />
+              <el-option label="pytorch bin" value="pytorch-bin" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="推荐 Runtime">
+            <el-select v-model="importModelForm.recommendedRuntime" clearable style="width: 100%">
+              <el-option label="vLLM" value="vllm" />
+              <el-option label="SGLang" value="sglang" />
+              <el-option label="Ollama" value="ollama" />
+              <el-option label="TGI" value="tgi" />
+              <el-option label="自定义" value="custom" />
+            </el-select>
+          </el-form-item>
+        </div>
+        <el-form-item v-if="importModelForm.source === 'private-repo'" label="私有仓库 Credential">
+          <CredentialSelector
+            v-model="importModelForm.credentialId"
+            :credential-types="['TOKEN', 'SSH_KEY', 'PASSWORD']"
+            credential-category="custom"
+            placeholder="选择访问私有仓库的凭据"
+            :create-route-query="{ category: 'custom', type: 'TOKEN', source: 'ai-model-import' }"
+          />
         </el-form-item>
-        <el-form-item label="模型 ID" required>
-          <el-input v-model="importModelForm.sourceModelId" placeholder="如 Qwen/Qwen2.5-7B-Instruct" />
+        <el-form-item label="摘要">
+          <el-input v-model="importModelForm.summary" type="textarea" :rows="3" placeholder="模型用途、来源和部署注意事项" />
         </el-form-item>
+        <el-alert title="导入模型只创建模型目录元数据，不会自动创建 Provider 供给关系；外部可调用模型请走接入 Provider。" type="info" :closable="false" show-icon />
       </el-form>
       <template #footer>
         <el-button @click="dialogs.importModel = false">取消</el-button>
@@ -257,69 +384,216 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="dialogs.provider" title="接入外部 Provider" width="720px" destroy-on-close>
+    <el-dialog v-model="dialogs.provider" :title="providerDialogTitle" width="1040px" destroy-on-close>
       <el-form label-position="top">
-        <el-form-item label="Provider 名称" required>
-          <el-input v-model="providerForm.providerName" />
-        </el-form-item>
-        <el-form-item label="Endpoint" required>
-          <el-input v-model="providerForm.endpoint" placeholder="https://api.example.com/v1" />
-        </el-form-item>
-        <el-form-item label="Credential" required>
-          <CredentialSelector
-            v-model="providerForm.credentialId"
-            :credential-types="['TOKEN', 'OAUTH2', 'PASSWORD']"
-            credential-category="custom"
-            placeholder="选择用于 Provider 的凭据"
-            :create-route-query="{ category: 'custom', type: 'TOKEN', source: 'ai-provider' }"
-          />
-        </el-form-item>
-        <el-form-item label="状态">
-          <el-select v-model="providerForm.status" style="width: 100%">
-            <el-option label="active" value="active" />
-            <el-option label="draft" value="draft" />
-          </el-select>
-        </el-form-item>
+        <el-steps :active="providerDialog.step" finish-status="success" class="dialog-stepper" simple>
+          <el-step title="Provider 配置" />
+          <el-step title="发现模型" />
+          <el-step title="建立供给关系" />
+        </el-steps>
 
-        <el-form-item label="立即绑定模型">
-          <el-switch v-model="providerForm.bindModelNow" />
-        </el-form-item>
-
-        <template v-if="providerForm.bindModelNow">
-          <el-form-item label="模型" required>
-            <el-select v-model="providerForm.modelId" filterable style="width: 100%">
-              <el-option v-for="item in aiState.models" :key="item.id" :label="item.name" :value="item.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="Provider Model Key" required>
-            <el-input v-model="providerForm.providerModelKey" placeholder="如 qwen2.5-7b-instruct" />
-          </el-form-item>
-          <el-collapse>
-            <el-collapse-item title="Binding 高级配置">
-              <el-form-item label="Binding Settings JSON">
-                <el-input v-model="providerForm.bindingSettingsJSON" type="textarea" :rows="3" placeholder='{"temperature":0.2}' />
-              </el-form-item>
-              <el-form-item label="Binding Metadata JSON">
-                <el-input v-model="providerForm.bindingMetadataJSON" type="textarea" :rows="3" placeholder='{"source":"manual"}' />
-              </el-form-item>
+        <div v-show="providerDialog.step === 0" class="dialog-step-body">
+          <div class="form-grid form-grid--two">
+            <el-form-item label="Provider 名称" required>
+              <el-input v-model="providerForm.providerName" placeholder="OpenRouter Main" />
+            </el-form-item>
+            <el-form-item label="Provider 类型" required>
+              <el-select v-model="providerForm.providerType" filterable allow-create default-first-option style="width: 100%" @change="applyProviderTemplate">
+                <el-option label="OpenRouter" value="openrouter" />
+                <el-option label="OpenAI Compatible" value="openai-compatible" />
+                <el-option label="OpenAI" value="openai" />
+                <el-option label="Azure OpenAI" value="azure-openai" />
+                <el-option label="Anthropic" value="anthropic" />
+                <el-option label="Ollama" value="ollama" />
+                <el-option label="vLLM / SGLang" value="vllm" />
+                <el-option label="Custom" value="custom" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="Base URL" required>
+              <el-input v-model="providerForm.endpoint" placeholder="https://openrouter.ai/api/v1" />
+            </el-form-item>
+            <el-form-item label="Credential" required>
+              <CredentialSelector
+                v-model="providerForm.credentialId"
+                :credential-types="['TOKEN', 'OAUTH2', 'PASSWORD']"
+                credential-category="custom"
+                placeholder="选择用于 Provider 的凭据"
+                :create-route-query="{ category: 'custom', type: 'TOKEN', source: 'ai-provider' }"
+              />
+            </el-form-item>
+            <el-form-item label="状态">
+              <el-select v-model="providerForm.status" style="width: 100%">
+                <el-option label="active" value="active" />
+                <el-option label="draft" value="draft" />
+                <el-option label="disabled" value="disabled" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="Models Endpoint">
+              <div class="endpoint-preview-field">
+                <el-input v-model="providerForm.modelsEndpoint" class="endpoint-path-input" placeholder="/models" />
+                <span class="endpoint-preview-inline">{{ providerModelsEndpointURL }}</span>
+              </div>
+            </el-form-item>
+            <el-form-item label="LLM Endpoint">
+              <div class="endpoint-preview-field">
+                <el-input v-model="providerForm.llmEndpoint" class="endpoint-path-input" placeholder="/chat/completions" />
+                <span class="endpoint-preview-inline">{{ providerLlmEndpointURL }}</span>
+              </div>
+            </el-form-item>
+          </div>
+          <el-alert title="API key 必须通过 Credential 引用，不能写入 Headers JSON 或部署环境变量。" type="info" :closable="false" show-icon />
+          <el-collapse class="advanced-collapse">
+            <el-collapse-item title="Provider 高级配置">
+              <div class="form-grid form-grid--two">
+                <el-form-item label="Headers JSON">
+                  <el-input v-model="providerForm.headersJSON" type="textarea" :rows="3" placeholder='{"HTTP-Referer":"https://easydo.local"}' />
+                </el-form-item>
+                <el-form-item label="Settings JSON">
+                  <el-input v-model="providerForm.settingsJSON" type="textarea" :rows="3" placeholder='{"timeout":30000,"retry":2}' />
+                </el-form-item>
+              </div>
             </el-collapse-item>
           </el-collapse>
-        </template>
+          <div class="provider-connection-panel">
+            <div class="provider-connection-header">
+              <div>
+                <strong>连接测试</strong>
+                <p>使用当前配置调用 Provider Models API，通过后才能继续发现模型。</p>
+              </div>
+              <div class="provider-connection-actions">
+                <el-tag :type="providerConnectionTagType">{{ providerConnectionStatusLabel }}</el-tag>
+                <el-button type="primary" :loading="providerConnectionTesting" @click="handleTestProviderConnection">测试连接</el-button>
+              </div>
+            </div>
+            <div class="provider-test-grid">
+              <div class="provider-test-card">
+                <span>连接</span>
+                <strong>{{ providerForm.endpoint || '-' }}</strong>
+                <el-tag size="small" effect="plain">{{ providerForm.modelsEndpoint || '/models' }}</el-tag>
+              </div>
+              <div class="provider-test-card">
+                <span>认证</span>
+                <strong>Credential #{{ providerForm.credentialId || '-' }}</strong>
+                <el-tag type="success" size="small">后端注入密钥</el-tag>
+              </div>
+              <div class="provider-test-card">
+                <span>发现能力</span>
+                <strong>{{ providerConnection.modelsCount ?? '-' }} 个模型</strong>
+                <el-tag size="small" effect="plain">{{ providerConnection.latencyMs == null ? '-' : `${providerConnection.latencyMs} ms` }}</el-tag>
+              </div>
+            </div>
+            <el-alert
+              v-if="providerConnection.message"
+              :title="providerConnection.message"
+              :type="providerConnectionAlertType"
+              :closable="false"
+              show-icon
+            />
+          </div>
+        </div>
 
-        <el-collapse>
-          <el-collapse-item title="Provider 高级配置">
-            <el-form-item label="Headers JSON">
-              <el-input v-model="providerForm.headersJSON" type="textarea" :rows="3" placeholder='{"Authorization":"Bearer ..."}' />
-            </el-form-item>
-            <el-form-item label="Settings JSON">
-              <el-input v-model="providerForm.settingsJSON" type="textarea" :rows="3" placeholder='{"timeout":30000}' />
-            </el-form-item>
-          </el-collapse-item>
-        </el-collapse>
+        <div v-show="providerDialog.step === 1" class="dialog-step-body">
+          <div class="provider-discovery-toolbar">
+            <div class="provider-discovery-summary">
+              <strong>{{ filteredDiscoveredProviderModelRows.length }} 个候选模型</strong>
+              <span>全部 {{ discoveredProviderModelRows.length }}，已选择 {{ selectedDiscoveredModelRows.length }}</span>
+            </div>
+            <div class="provider-discovery-controls">
+              <el-input
+                v-model="providerDiscoveryFilters.keyword"
+                clearable
+                placeholder="搜索模型 / Provider Key / 能力"
+                class="provider-discovery-search"
+              />
+              <el-button size="small" :loading="providerDiscovery.loading" @click="loadProviderDiscovery">重新发现</el-button>
+              <el-button size="small" @click="toggleAllDiscoveredModels(false)">全不选</el-button>
+              <el-button size="small" @click="toggleRecommendedDiscoveredModels">选择推荐模型</el-button>
+              <el-tag type="primary" effect="plain">{{ selectedDiscoveredModelRows.length }} / {{ discoveredProviderModelRows.length }}</el-tag>
+            </div>
+          </div>
+          <el-alert v-if="providerDiscovery.error" :title="providerDiscovery.error" type="error" :closable="false" show-icon />
+          <el-table
+            v-loading="providerDiscovery.loading"
+            :data="paginatedDiscoveredProviderModelRows"
+            row-key="local_id"
+            size="small"
+            class="provider-discovery-table"
+            empty-text="暂无发现模型"
+          >
+            <el-table-column width="72" label="导入">
+              <template #default="{ row }">
+                <el-checkbox v-model="row.selected" />
+              </template>
+            </el-table-column>
+            <el-table-column prop="provider_display_name" label="发现模型" min-width="260">
+              <template #default="{ row }">
+                <div class="provider-model-cell">
+                  <strong>{{ row.provider_display_name }}</strong>
+                  <code>{{ row.provider_model_key }}</code>
+                  <div class="provider-model-meta">
+                    <el-tag size="small" effect="plain">{{ row.model_kind || 'chat' }}</el-tag>
+                    <el-tag v-if="row.model_family" size="small" effect="plain">{{ row.model_family }}</el-tag>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="模型归属" min-width="260">
+              <template #default="{ row }">
+                <el-radio-group v-model="row.target_mode" size="small">
+                  <el-radio-button v-for="option in modelTargetModeOptions" :key="option.value" :value="option.value">{{ option.label }}</el-radio-button>
+                </el-radio-group>
+                <el-select v-if="row.target_mode === 'existing'" v-model="row.model_id" filterable placeholder="选择已有 Model" style="width: 100%; margin-top: 8px">
+                  <el-option v-for="item in aiState.models" :key="item.id" :label="item.name" :value="item.id" />
+                </el-select>
+                <el-input v-else v-model="row.model_name" style="margin-top: 8px" placeholder="新建模型名称" />
+              </template>
+            </el-table-column>
+            <el-table-column label="能力" min-width="220">
+              <template #default="{ row }">
+                <div class="tag-list provider-capability-list">
+                  <el-tag v-for="item in [...row.modalities, ...row.capabilities]" :key="item" size="small" effect="plain">{{ item }}</el-tag>
+                  <span v-if="[...row.modalities, ...row.capabilities].length === 0" class="field-tip">-</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="上下文 / 输出" width="150">
+              <template #default="{ row }">
+                <div class="provider-metric-pair">
+                  <span>Ctx {{ row.context_window || '-' }}</span>
+                  <span>Out {{ row.max_output_tokens || '-' }}</span>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div v-if="filteredDiscoveredProviderModelRows.length > 0" class="provider-discovery-pagination">
+            <el-pagination
+              v-model:current-page="providerDiscoveryFilters.page"
+              v-model:page-size="providerDiscoveryFilters.pageSize"
+              :page-sizes="providerDiscoveryPageSizeOptions"
+              :total="filteredDiscoveredProviderModelRows.length"
+              background
+              small
+              layout="total, sizes, prev, pager, next"
+            />
+          </div>
+        </div>
+
+        <div v-show="providerDialog.step === 2" class="dialog-step-body">
+          <el-alert :title="selectedDiscoveredModelRows.length ? `将保存 ${selectedDiscoveredModelRows.length} 个模型供给关系` : '将保存 Provider，0 个模型供给'" type="success" :closable="false" show-icon />
+          <el-table :data="selectedDiscoveredModelRows" size="small" empty-text="未选择任何发现模型">
+            <el-table-column prop="provider_display_name" label="模型" min-width="180" />
+            <el-table-column prop="provider_model_key" label="Provider Model Key" min-width="220" />
+            <el-table-column label="动作" width="160">
+              <template #default="{ row }">{{ row.target_mode === 'existing' ? '关联已有 Model' : '新建 Model' }}</template>
+            </el-table-column>
+          </el-table>
+        </div>
       </el-form>
       <template #footer>
         <el-button @click="dialogs.provider = false">取消</el-button>
-        <el-button type="primary" @click="submitProviderDemo">保存</el-button>
+        <el-button :disabled="providerDialog.step === 0" @click="providerDialog.step -= 1">上一步</el-button>
+        <el-button v-if="providerDialog.step < 2" type="primary" :disabled="providerNextDisabled" @click="goNextProviderStep">下一步</el-button>
+        <el-button v-else type="primary" :loading="providerSubmitting" @click="submitProviderDemo">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -329,6 +603,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { useUserStore } from '@/stores/user'
 import CredentialSelector from '@/views/pipeline/components/CredentialSelector.vue'
 import StoreHeaderActions from './components/StoreHeaderActions.vue'
 import StoreKindSwitch from './components/StoreKindSwitch.vue'
@@ -339,12 +614,14 @@ import {
   getTemplateList,
   getTemplateVersions,
   importLocalAIModel,
-  listAIAgents,
   listAIModels,
   listAIProviders,
-  listAIRuntimeProfiles,
   createAIProvider,
-  createAIModelBinding
+  updateAIProvider,
+  testAIProviderConnection,
+  discoverAIProviderModels,
+  createAIModelBinding,
+  updateAIModelBinding
 } from '@/api/store'
 import { splitParametersByAdvanced } from './appStoreHelpers'
 import { buildDeployVramEstimate, buildDeployVramEstimateViewModel } from './aiVramEstimate'
@@ -361,24 +638,37 @@ import {
 import {
   buildAIDeploymentRequestPayload,
   buildAIModelImportPayload,
+  buildDiscoveredModelBindingMetadata,
+  buildModelBindingCapabilityPayload,
+  buildDiscoveredModelImportPayload,
+  buildDiscoveredProviderModelRows,
   buildDemoDeploymentRecord,
   buildDemoProviderRecord,
   buildDeployParameterState,
+  filterDiscoveredProviderModelRows,
+  buildProviderRows,
   buildModelRows,
   getInvalidJsonFieldLabels,
+  paginateDiscoveredProviderModelRows,
   normalizeAiStoreState
 } from './aiStoreConfig'
 
 const router = useRouter()
+const userStore = useUserStore()
 const loading = ref(false)
 const deploySubmitting = ref(false)
 const importSubmitting = ref(false)
+const providerSubmitting = ref(false)
+const providerConnectionTesting = ref(false)
 const filters = reactive({ keyword: '' })
 const dialogs = reactive({ deploy: false, provider: false, importModel: false })
+const supplyView = ref('models')
+const deployStep = ref(0)
 const expandedRowId = ref(null)
 const deployTemplates = ref([])
 const deployTemplateVersions = ref([])
 const deployResources = ref([])
+const discoveredProviderModelRows = ref([])
 const resourceGpuInfoCache = reactive({})
 const resourceRefreshTimers = new Map()
 const selectedGpuDeviceKeys = ref([])
@@ -389,8 +679,6 @@ const DEPLOY_VRAM_IDLE_MESSAGE = '先选择目标资源以继续核对 GPU 容�
 const aiState = reactive({
   models: [],
   providers: [],
-  agents: [],
-  runtimeProfiles: [],
   deployments: []
 })
 
@@ -402,28 +690,37 @@ const localDemoState = reactive({
 const deployForm = reactive(createDeployForm())
 const providerForm = reactive(createProviderForm())
 const importModelForm = reactive(createImportModelForm())
+const providerDialog = reactive({ step: 0, mode: 'create', providerId: null })
+const providerConnection = reactive({ status: 'idle', message: '', endpoint: '', modelsCount: null, latencyMs: null })
+const providerDiscovery = reactive({ loading: false, loaded: false, error: '' })
+const providerDiscoveryFilters = reactive({ keyword: '', page: 1, pageSize: 10 })
+const providerDiscoveryPageSizeOptions = [10, 20, 50]
+const modelTargetModeOptions = [
+  { label: '关联已有 Model', value: 'existing' },
+  { label: '新建 Model', value: 'create' }
+]
 
 const mergedState = computed(() => normalizeAiStoreState({
   models: aiState.models,
   providers: [...aiState.providers, ...localDemoState.providers],
-  agents: aiState.agents,
-  runtimeProfiles: aiState.runtimeProfiles,
   deployments: [...aiState.deployments, ...localDemoState.deployments]
 }))
 
 const modelRows = computed(() => buildModelRows({
   models: mergedState.value.models,
   providers: mergedState.value.providers,
-  runtimeProfiles: mergedState.value.runtimeProfiles,
-  agents: mergedState.value.agents,
   deployments: mergedState.value.deployments,
+  keyword: filters.keyword
+}))
+const providerRows = computed(() => buildProviderRows({
+  providers: mergedState.value.providers,
   keyword: filters.keyword
 }))
 
 const expandedRowKeys = computed(() => (expandedRowId.value ? [expandedRowId.value] : []))
 const selectedDeployModel = computed(() => modelRows.value.find((item) => String(item.id) === String(deployForm.modelId)) || null)
-const selectedProviderModel = computed(() => modelRows.value.find((item) => String(item.id) === String(providerForm.modelId)) || null)
 const selectedDeployTemplate = computed(() => deployTemplates.value.find((item) => String(item.id) === String(deployForm.templateId)) || null)
+const selectedModelAssetOptions = computed(() => buildSelectedModelAssetOptions(selectedDeployModel.value))
 const availableDeployResources = computed(() => {
   if (!selectedDeployTemplate.value?.target_resource_type) return deployResources.value
   return deployResources.value.filter((item) => item.type === selectedDeployTemplate.value.target_resource_type)
@@ -465,6 +762,52 @@ const deployVramEstimateViewModel = computed(() => {
 const deployParameterGroups = computed(() => splitParametersByAdvanced(deployForm.parameterFields || []))
 const deployBasicFields = computed(() => deployParameterGroups.value.basic)
 const deployAdvancedFields = computed(() => deployParameterGroups.value.advanced)
+const filteredDiscoveredProviderModelRows = computed(() => filterDiscoveredProviderModelRows({
+  rows: discoveredProviderModelRows.value,
+  keyword: providerDiscoveryFilters.keyword
+}))
+const paginatedDiscoveredProviderModelRows = computed(() => paginateDiscoveredProviderModelRows({
+  rows: filteredDiscoveredProviderModelRows.value,
+  page: providerDiscoveryFilters.page,
+  pageSize: providerDiscoveryFilters.pageSize
+}))
+const selectedDiscoveredModelRows = computed(() => discoveredProviderModelRows.value.filter((row) => row.selected))
+const providerDialogTitle = computed(() => providerDialog.mode === 'rediscover' ? '重新发现 Provider 模型' : '接入外部 Provider')
+const providerConnectionStatusLabel = computed(() => {
+  if (providerConnection.status === 'success') return '连接通过'
+  if (providerConnection.status === 'failed') return '连接失败'
+  if (providerConnection.status === 'testing') return '测试中'
+  return '未测试'
+})
+const providerConnectionTagType = computed(() => {
+  if (providerConnection.status === 'success') return 'success'
+  if (providerConnection.status === 'failed') return 'danger'
+  if (providerConnection.status === 'testing') return 'warning'
+  return 'info'
+})
+const providerConnectionAlertType = computed(() => providerConnection.status === 'success' ? 'success' : 'error')
+const providerNextDisabled = computed(() => {
+  if (providerDialog.step === 0) {
+    return providerConnectionTesting.value || providerConnection.status !== 'success'
+  }
+  if (providerDialog.step === 1) return providerDiscovery.loading || !providerDiscovery.loaded
+  return false
+})
+const canManageAIProviders = computed(() => {
+  return Boolean(userStore.currentWorkspaceId) && String(userStore.currentWorkspaceRole || '').toLowerCase() !== 'viewer'
+})
+const providerModelsEndpointURL = computed(() => resolveProviderEndpointURL(providerForm.endpoint, providerForm.modelsEndpoint))
+const providerLlmEndpointURL = computed(() => resolveProviderEndpointURL(providerForm.endpoint, providerForm.llmEndpoint))
+const providerConfigSignature = computed(() => JSON.stringify({
+  providerName: providerForm.providerName,
+  providerType: providerForm.providerType,
+  endpoint: providerForm.endpoint,
+  credentialId: providerForm.credentialId,
+  modelsEndpoint: providerForm.modelsEndpoint,
+  llmEndpoint: providerForm.llmEndpoint,
+  headersJSON: providerForm.headersJSON,
+  settingsJSON: providerForm.settingsJSON
+}))
 
 onMounted(() => {
   loadData()
@@ -489,24 +832,38 @@ watch(() => deployForm.targetResourceId, (resourceId, previousResourceId) => {
   if (previousResourceId && String(previousResourceId) !== String(resourceId)) {
     invalidateResourceGpuRefresh(previousResourceId)
   }
-  syncSelectedGpuDevices()
-  syncSelectedGpuIntoParameters()
-  if (resourceId) {
-    ensureResourceGpuInfo(resourceId)
-  }
+  handleDeployResourceChange(resourceId)
 })
 
 watch(selectedGpuDeviceKeys, () => {
   syncSelectedGpuIntoParameters()
 })
 
+watch(providerConfigSignature, () => {
+  if (!dialogs.provider) return
+  resetProviderConnectionState()
+  resetProviderDiscoveryState()
+})
+
+watch(() => providerDiscoveryFilters.keyword, () => {
+  providerDiscoveryFilters.page = 1
+})
+
+watch(
+  () => [filteredDiscoveredProviderModelRows.value.length, providerDiscoveryFilters.pageSize],
+  ([total, pageSize]) => {
+    const maxPage = Math.max(Math.ceil(total / Math.max(Number(pageSize) || 1, 1)), 1)
+    if (providerDiscoveryFilters.page > maxPage) {
+      providerDiscoveryFilters.page = maxPage
+    }
+  }
+)
+
 async function loadData() {
   loading.value = true
   try {
-    const [providerRes, agentRes, runtimeRes, aiModelRes, templateRes, resourceRes] = await Promise.all([
+    const [providerRes, aiModelRes, templateRes, resourceRes] = await Promise.all([
       listAIProviders(),
-      listAIAgents(),
-      listAIRuntimeProfiles(),
       listAIModels(),
       getTemplateList({ template_type: 'ai' }),
       getResourceList()
@@ -515,15 +872,11 @@ async function loadData() {
     const nextState = normalizeAiStoreState({
       models: extractArray(aiModelRes?.data),
       providers: extractArray(providerRes?.data),
-      agents: extractArray(agentRes?.data),
-      runtimeProfiles: extractArray(runtimeRes?.data),
       deployments: []
     })
 
     aiState.models = nextState.models
     aiState.providers = nextState.providers
-    aiState.agents = nextState.agents
-    aiState.runtimeProfiles = nextState.runtimeProfiles
     aiState.deployments = nextState.deployments
     deployTemplates.value = extractArray(templateRes?.data)
     deployResources.value = extractArray(resourceRes?.data)
@@ -539,14 +892,9 @@ const storeKind = computed(() => 'ai')
 function handleStoreTabChange(name) {
   if (name === 'app') {
     router.push('/store/apps')
+  } else if (name === 'ai-agent') {
+    router.push('/store/ai-agents')
   }
-}
-
-function openRuntimeProfile() {
-  router.push({
-    path: '/workspace-governance',
-    query: { tab: 'runtime-profiles' }
-  })
 }
 
 function toggleExpandedRow(row) {
@@ -774,6 +1122,7 @@ function retryResourceGpuRefresh() {
 
 async function openDeployDialog(row = null) {
   Object.assign(deployForm, createDeployForm())
+  deployStep.value = 0
   deployTemplateVersions.value = []
   resetDeployDialogRuntimeState()
   if (row) {
@@ -788,9 +1137,32 @@ function openImportModelDialog() {
   dialogs.importModel = true
 }
 
-function openProviderDialog() {
-  Object.assign(providerForm, createProviderForm())
+function normalizeProviderDialogRow(event) {
+  if (!event || typeof event !== 'object') return null
+  if (typeof Event !== 'undefined' && event instanceof Event) return null
+  if ('target' in event && 'currentTarget' in event && !('id' in event)) return null
+  return event
+}
+
+function openProviderDialog(row = null) {
+  if (!canManageAIProviders.value) {
+    ElMessage.warning('当前工作空间角色无权接入外部 Provider')
+    return
+  }
+  const provider = normalizeProviderDialogRow(row)
+  Object.assign(providerForm, createProviderForm(provider || {}))
+  providerDialog.mode = provider?.id ? 'edit' : 'create'
+  providerDialog.providerId = provider?.id || null
+  providerDialog.step = 0
+  resetProviderConnectionState()
+  resetProviderDiscoveryState()
   dialogs.provider = true
+}
+
+function openProviderDiscoveryDialog(row) {
+  openProviderDialog(row)
+  providerDialog.mode = 'rediscover'
+  supplyView.value = 'providers'
 }
 
 function handleDeployModelChange() {
@@ -798,6 +1170,41 @@ function handleDeployModelChange() {
     fields: deployForm.parameterFields,
     selectedModel: selectedDeployModel.value || {}
   })
+  deployForm.modelAssetId = selectedModelAssetOptions.value[0]?.value || null
+}
+
+function handleDeployResourceChange(resourceId) {
+  syncSelectedGpuDevices()
+  syncSelectedGpuIntoParameters()
+  if (resourceId) {
+    ensureResourceGpuInfo(resourceId)
+  }
+}
+
+function goNextDeployStep() {
+  if (deployStep.value === 0) {
+    if (!deployForm.modelId) {
+      ElMessage.warning('请选择模型')
+      return
+    }
+    if (!deployForm.modelAssetId) {
+      ElMessage.warning('请选择 Model Asset')
+      return
+    }
+  }
+  if (deployStep.value === 1 && (!deployForm.templateId || !deployForm.templateVersionId || !deployForm.targetResourceId)) {
+    ElMessage.warning('请选择部署模板、模板版本和目标资源')
+    return
+  }
+  if (deployStep.value === 1) {
+    handleDeployResourceChange(deployForm.targetResourceId)
+  }
+  if (deployStep.value === 2 && findMissingDeployRequiredField()) {
+    const missingField = findMissingDeployRequiredField()
+    ElMessage.warning(`请填写${missingField.label || missingField.name}`)
+    return
+  }
+  deployStep.value = Math.min(deployStep.value + 1, 3)
 }
 
 async function handleDeployTemplateChange(templateId) {
@@ -823,6 +1230,160 @@ function handleDeployVersionChange(versionId) {
   deployForm.parameters = buildDeployParameterState({
     fields: deployForm.parameterFields,
     selectedModel: selectedDeployModel.value || {}
+  })
+}
+
+function applyProviderTemplate() {
+  const template = providerTemplateDefaults(providerForm.providerType)
+  providerForm.endpoint = providerForm.endpoint || template.endpoint
+  providerForm.modelsEndpoint = template.modelsEndpoint
+  providerForm.llmEndpoint = template.llmEndpoint
+}
+
+function resetProviderConnectionState() {
+  providerConnectionTesting.value = false
+  Object.assign(providerConnection, {
+    status: 'idle',
+    message: '',
+    endpoint: '',
+    modelsCount: null,
+    latencyMs: null
+  })
+}
+
+function resetProviderDiscoveryState() {
+  Object.assign(providerDiscovery, {
+    loading: false,
+    loaded: false,
+    error: ''
+  })
+  providerDiscoveryFilters.keyword = ''
+  providerDiscoveryFilters.page = 1
+  discoveredProviderModelRows.value = []
+}
+
+function validateProviderJsonFields() {
+  const invalidJsonFields = getInvalidJsonFieldLabels([
+    { label: 'Headers JSON', value: providerForm.headersJSON },
+    { label: 'Settings JSON', value: providerForm.settingsJSON }
+  ])
+  if (invalidJsonFields.length > 0) {
+    ElMessage.warning(`JSON 格式无效：${invalidJsonFields.join('、')}`)
+    return false
+  }
+  return true
+}
+
+function buildProviderPayload() {
+  const providerHeaders = providerForm.headersJSON.trim() ? JSON.parse(providerForm.headersJSON) : {}
+  const providerSettings = providerForm.settingsJSON.trim() ? JSON.parse(providerForm.settingsJSON) : {}
+
+  return {
+    name: providerForm.providerName.trim(),
+    provider_type: providerForm.providerType,
+    base_url: providerForm.endpoint.trim(),
+    credential_id: providerForm.credentialId,
+    headers_json: providerHeaders,
+    settings_json: {
+      ...providerSettings,
+      models_endpoint: providerForm.modelsEndpoint,
+      llm_endpoint: providerForm.llmEndpoint
+    },
+    status: providerForm.status
+  }
+}
+
+async function handleTestProviderConnection() {
+  if (!validateProviderBaseForm() || !validateProviderJsonFields()) return
+  providerConnectionTesting.value = true
+  providerConnection.status = 'testing'
+  providerConnection.message = '正在调用 Provider Models API'
+  try {
+    const response = await testAIProviderConnection(buildProviderPayload())
+    const data = response?.data || {}
+    providerConnection.status = 'success'
+    providerConnection.endpoint = data.endpoint || ''
+    providerConnection.modelsCount = data.models_count ?? 0
+    providerConnection.latencyMs = data.latency_ms ?? null
+    providerConnection.message = `连接通过，发现 ${providerConnection.modelsCount} 个模型候选`
+    resetProviderDiscoveryState()
+    ElMessage.success('Provider 连接测试通过')
+  } catch (error) {
+    providerConnection.status = 'failed'
+    providerConnection.endpoint = ''
+    providerConnection.modelsCount = null
+    providerConnection.latencyMs = null
+    providerConnection.message = error?.response?.data?.message || error?.message || 'Provider 连接测试失败'
+    ElMessage.error(providerConnection.message)
+  } finally {
+    providerConnectionTesting.value = false
+  }
+}
+
+async function loadProviderDiscovery() {
+  if (providerConnection.status !== 'success') {
+    ElMessage.warning('请先完成 Provider 连接测试')
+    return
+  }
+  if (!validateProviderBaseForm() || !validateProviderJsonFields()) return
+  providerDiscovery.loading = true
+  providerDiscovery.error = ''
+  try {
+    const response = await discoverAIProviderModels(buildProviderPayload())
+    const candidates = extractArray(response?.data?.models)
+    discoveredProviderModelRows.value = buildDiscoveredProviderModelRows({
+      candidates,
+      models: aiState.models
+    })
+    providerDiscoveryFilters.page = 1
+    providerDiscovery.loaded = true
+    if (candidates.length === 0) {
+      ElMessage.warning('Provider 未返回可导入模型')
+    }
+  } catch (error) {
+    providerDiscovery.error = error?.response?.data?.message || error?.message || '发现 Provider 模型失败'
+    ElMessage.error(providerDiscovery.error)
+  } finally {
+    providerDiscovery.loading = false
+  }
+}
+
+async function goNextProviderStep() {
+  if (providerDialog.step === 0) {
+    if (!validateProviderBaseForm() || !validateProviderJsonFields()) return
+    if (providerConnection.status !== 'success') {
+      ElMessage.warning('请先通过 Provider 连接测试')
+      return
+    }
+    providerDialog.step = 1
+    if (!providerDiscovery.loaded) {
+      await loadProviderDiscovery()
+    }
+    return
+  }
+  if (providerDialog.step === 1) {
+    if (!providerDiscovery.loaded) {
+      ElMessage.warning('请先完成模型发现')
+      return
+    }
+    const invalidRow = selectedDiscoveredModelRows.value.find((row) => row.target_mode === 'existing' && !row.model_id)
+    if (invalidRow) {
+      ElMessage.warning(`请选择 ${invalidRow.provider_display_name} 要关联的已有 Model`)
+      return
+    }
+  }
+  providerDialog.step = Math.min(providerDialog.step + 1, 2)
+}
+
+function toggleAllDiscoveredModels(selected) {
+  discoveredProviderModelRows.value.forEach((row) => {
+    row.selected = selected
+  })
+}
+
+function toggleRecommendedDiscoveredModels() {
+  discoveredProviderModelRows.value.forEach((row, index) => {
+    row.selected = index === 0 || row.provider_model_key.includes('gpt-4.1') || row.provider_model_key.includes('qwen')
   })
 }
 
@@ -855,6 +1416,10 @@ async function submitDeploy() {
     ElMessage.warning('请选择模型')
     return
   }
+  if (!deployForm.modelAssetId) {
+    ElMessage.warning('请选择 Model Asset')
+    return
+  }
   if (!deployForm.templateId) {
     ElMessage.warning('请选择部署模板')
     return
@@ -864,11 +1429,7 @@ async function submitDeploy() {
     return
   }
 
-  const missingField = (deployForm.parameterFields || []).find((field) => {
-    if (!field.required) return false
-    const value = deployForm.parameters?.[field.name]
-    return value === undefined || value === null || String(value).trim() === ''
-  })
+  const missingField = findMissingDeployRequiredField()
   if (missingField) {
     ElMessage.warning(`请填写${missingField.label || missingField.name}`)
     return
@@ -919,88 +1480,176 @@ async function submitDeploy() {
 }
 
 async function submitProviderDemo() {
-  if (!providerForm.providerName.trim()) {
-    ElMessage.warning('请填写 Provider 名称')
-    return
-  }
-  if (!providerForm.endpoint.trim()) {
-    ElMessage.warning('请填写 Endpoint')
-    return
-  }
-  if (!providerForm.credentialId) {
-    ElMessage.warning('请选择 Credential')
-    return
-  }
-  if (providerForm.bindModelNow && !providerForm.modelId) {
-    ElMessage.warning('请先选择模型')
-    return
-  }
-  if (providerForm.bindModelNow && !providerForm.providerModelKey.trim()) {
-    ElMessage.warning('请填写 Provider Model Key')
+  if (!validateProviderBaseForm()) return
+  if (!validateProviderJsonFields()) return
+  if (providerConnection.status !== 'success') {
+    providerDialog.step = 0
+    ElMessage.warning('保存前必须先通过 Provider 连接测试')
     return
   }
 
-  const invalidJsonFields = getInvalidJsonFieldLabels([
-    { label: 'Headers JSON', value: providerForm.headersJSON },
-    { label: 'Settings JSON', value: providerForm.settingsJSON },
-    ...(providerForm.bindModelNow
-      ? [
-          { label: 'Binding Settings JSON', value: providerForm.bindingSettingsJSON },
-          { label: 'Binding Metadata JSON', value: providerForm.bindingMetadataJSON }
-        ]
-      : [])
-  ])
-  if (invalidJsonFields.length > 0) {
-    ElMessage.warning(`JSON 格式无效：${invalidJsonFields.join('、')}`)
-    return
-  }
-
-  const baseModel = selectedProviderModel.value || {}
-  const selectedModel = providerForm.bindModelNow
-    ? {
-        ...baseModel,
-        id: providerForm.modelId,
-        providerModelKey: providerForm.providerModelKey,
-        provider_model_key: providerForm.providerModelKey,
-        binding_key: providerForm.providerModelKey
-      }
-    : {}
-  const providerHeaders = providerForm.headersJSON.trim() ? JSON.parse(providerForm.headersJSON) : {}
-  const providerSettings = providerForm.settingsJSON.trim() ? JSON.parse(providerForm.settingsJSON) : {}
-  const bindingSettings = providerForm.bindingSettingsJSON.trim() ? JSON.parse(providerForm.bindingSettingsJSON) : {}
-  const bindingMetadata = providerForm.bindingMetadataJSON.trim() ? JSON.parse(providerForm.bindingMetadataJSON) : {}
-
+  providerSubmitting.value = true
   try {
-    const providerResp = await createAIProvider({
-      name: providerForm.providerName.trim(),
-      base_url: providerForm.endpoint.trim(),
-      credential_id: providerForm.credentialId,
-      headers_json: providerHeaders,
-      settings_json: providerSettings,
-      status: providerForm.status
-    })
+    const providerPayload = buildProviderPayload()
+    const providerResp = providerDialog.providerId
+      ? await updateAIProvider(providerDialog.providerId, providerPayload)
+      : await createAIProvider(providerPayload)
 
     const createdProvider = providerResp?.data
-    if (providerForm.bindModelNow && createdProvider?.id) {
-      await createAIModelBinding(createdProvider.id, {
-        model_id: providerForm.modelId,
-        provider_model_key: providerForm.providerModelKey.trim(),
-        settings_json: bindingSettings,
-        metadata_json: bindingMetadata,
-        status: providerForm.status
-      })
+    if (createdProvider?.id) {
+      for (const row of selectedDiscoveredModelRows.value) {
+        const modelID = await ensureDiscoveredModelCatalog(row)
+        const existingBinding = findExistingProviderBinding(createdProvider.id, row.provider_model_key)
+        const capability = buildModelBindingCapabilityPayload(row)
+        const payload = {
+          model_id: modelID,
+          provider_model_key: row.provider_model_key.trim(),
+          settings_json: {},
+          metadata_json: capability.metadata_json,
+          context_window_tokens: capability.context_window_tokens,
+          max_output_tokens: capability.max_output_tokens,
+          supports_tool_use: capability.supports_tool_use,
+          supports_streaming: capability.supports_streaming,
+          capability_source: capability.capability_source,
+          status: providerForm.status === 'disabled' ? 'disabled' : 'active'
+        }
+        if (existingBinding?.id) {
+          await updateAIModelBinding(createdProvider.id, existingBinding.id, payload)
+        } else {
+          await createAIModelBinding(createdProvider.id, payload)
+        }
+      }
     }
 
     dialogs.provider = false
     await loadData()
-    if (providerForm.bindModelNow && providerForm.modelId) {
-      expandedRowId.value = providerForm.modelId
+    if (selectedDiscoveredModelRows.value[0]?.model_id) {
+      expandedRowId.value = selectedDiscoveredModelRows.value[0].model_id
     }
     ;(providerResp?.warnings || []).forEach((warning) => ElMessage.warning(warning))
-    ElMessage.success(providerForm.bindModelNow ? 'Provider 与 Binding 已保存' : 'Provider 已保存，可稍后再补 Binding')
+    ElMessage.success(selectedDiscoveredModelRows.value.length ? 'Provider 与模型供给关系已保存' : 'Provider 已保存，0 个模型供给')
   } catch (error) {
     ElMessage.error(error?.response?.data?.message || error?.message || '保存 Provider 失败')
+  } finally {
+    providerSubmitting.value = false
   }
+}
+
+async function ensureDiscoveredModelCatalog(row) {
+  if (row.target_mode === 'existing') {
+    return row.model_id
+  }
+  const response = await importLocalAIModel(buildDiscoveredModelImportPayload(row))
+  const model = response?.data || {}
+  row.model_id = model.id
+  return model.id
+}
+
+function findExistingProviderBinding(providerId, providerModelKey) {
+  const provider = mergedState.value.providers.find((item) => String(item.id) === String(providerId))
+  return (provider?.bindings || []).find((binding) => String(binding.provider_model_key || binding.binding_key || '') === String(providerModelKey)) || null
+}
+
+function providerBindingRows(provider) {
+  return (provider?.bindings || []).map((binding) => {
+    const model = mergedState.value.models.find((item) => String(item.id) === String(binding.model_id)) || {}
+    const metadata = parseMaybeObject(binding.metadata_json)
+    return {
+      ...binding,
+      modelName: model.name || metadata.model_name || binding.model_name || `Model #${binding.model_id}`,
+      capabilities: normalizeTagList(metadata.capabilities)
+    }
+  })
+}
+
+function buildSelectedModelAssetOptions(model) {
+  if (!model) return []
+  const source = model.source || 'manual'
+  const sourceModelID = model.source_model_id || model.sourceModelId || model.name
+  return [{
+    label: `${source} · ${sourceModelID || model.name}`,
+    value: `${model.id}:${source}:${sourceModelID || model.name}`
+  }]
+}
+
+function providerTemplateDefaults(providerType) {
+  const normalized = String(providerType || '').toLowerCase()
+  if (normalized === 'openrouter') {
+    return {
+      endpoint: 'https://openrouter.ai/api/v1',
+      modelsEndpoint: '/models',
+      llmEndpoint: '/chat/completions'
+    }
+  }
+  if (normalized === 'anthropic') {
+    return {
+      // Anthropic SDK（Pi 运行时）会在 baseURL 后自行拼接 /v1，因此版本前缀必须放在
+      // endpoint 路径里，而不是 base_url。这样真实 Anthropic 与第三方兼容端点（如
+      // SenseNova https://token.sensenova.cn）都能正确工作：
+      //   test-connection: base + /v1/models
+      //   runtime(Pi):     new Anthropic({ baseURL: base }) -> base + /v1/messages
+      endpoint: 'https://api.anthropic.com',
+      modelsEndpoint: '/v1/models',
+      llmEndpoint: '/v1/messages'
+    }
+  }
+  if (normalized === 'ollama') {
+    return {
+      endpoint: 'http://localhost:11434',
+      modelsEndpoint: '/api/tags',
+      llmEndpoint: '/api/chat'
+    }
+  }
+  return {
+    endpoint: '',
+    modelsEndpoint: '/models',
+    llmEndpoint: '/chat/completions'
+  }
+}
+
+function validateProviderBaseForm() {
+  if (!providerForm.providerName.trim()) {
+    ElMessage.warning('请填写 Provider 名称')
+    return false
+  }
+  if (!providerForm.providerType.trim()) {
+    ElMessage.warning('请选择 Provider 类型')
+    return false
+  }
+  if (!providerForm.endpoint.trim()) {
+    ElMessage.warning('请填写 Base URL')
+    return false
+  }
+  if (!providerForm.credentialId) {
+    ElMessage.warning('请选择 Credential')
+    return false
+  }
+  return true
+}
+
+function findMissingDeployRequiredField() {
+  return (deployForm.parameterFields || []).find((field) => {
+    if (!field.required) return false
+    const value = deployForm.parameters?.[field.name]
+    return value === undefined || value === null || String(value).trim() === ''
+  })
+}
+
+function parseMaybeObject(value) {
+  if (!value) return {}
+  if (typeof value === 'object') return value
+  try {
+    const parsed = JSON.parse(String(value))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function normalizeTagList(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean)
+  if (typeof value === 'string') return value.split(',').map((item) => item.trim()).filter(Boolean)
+  return []
 }
 
 function extractArray(payload) {
@@ -1014,6 +1663,7 @@ function extractArray(payload) {
 function createDeployForm() {
   return {
     modelId: null,
+    modelAssetId: null,
     templateId: null,
     templateVersionId: null,
     targetResourceId: null,
@@ -1025,24 +1675,57 @@ function createDeployForm() {
 function createImportModelForm() {
   return {
     source: 'huggingface',
-    sourceModelId: ''
+    sourceModelId: '',
+    name: '',
+    displayName: '',
+    modelKind: 'chat',
+    parameterSize: '',
+    license: '',
+    tagsText: '',
+    repositoryUrl: '',
+    revision: 'main',
+    format: 'safetensors',
+    recommendedRuntime: 'vllm',
+    credentialId: null,
+    summary: ''
   }
 }
 
-function createProviderForm() {
+function createProviderForm(provider = {}) {
+  const providerType = provider.provider_type || provider.type || 'openrouter'
+  const defaults = providerTemplateDefaults(providerType)
+  const settings = parseMaybeObject(provider.settings_json)
+  const headers = parseMaybeObject(provider.headers_json)
   return {
-    providerName: '',
-    endpoint: '',
-    credentialId: null,
-    status: 'active',
-    bindModelNow: false,
-    modelId: null,
-    providerModelKey: '',
-    bindingSettingsJSON: '',
-    bindingMetadataJSON: '',
-    headersJSON: '',
-    settingsJSON: ''
+    id: provider.id || null,
+    providerName: provider.name || '',
+    providerType,
+    endpoint: provider.base_url || provider.endpoint || defaults.endpoint,
+    credentialId: provider.credential_id || provider.credentialId || null,
+    status: provider.status || 'active',
+    modelsEndpoint: settings.models_endpoint || defaults.modelsEndpoint,
+    llmEndpoint: settings.llm_endpoint || defaults.llmEndpoint,
+    headersJSON: Object.keys(headers).length ? JSON.stringify(headers, null, 2) : '',
+    settingsJSON: JSON.stringify(stripProviderRuntimeSettings(settings), null, 2)
   }
+}
+
+function resolveProviderEndpointURL(baseURL, endpointPath) {
+  const base = String(baseURL || '').trim().replace(/\/+$/, '')
+  const path = String(endpointPath || '').trim()
+  if (!path) return base || '-'
+  if (/^https?:\/\//i.test(path)) return path
+  if (!base) return path
+  return `${base}/${path.replace(/^\/+/, '')}`
+}
+
+function stripProviderRuntimeSettings(settings) {
+  const {
+    models_endpoint: _modelsEndpoint,
+    llm_endpoint: _llmEndpoint,
+    ...rest
+  } = settings || {}
+  return rest
 }
 </script>
 
@@ -1116,6 +1799,176 @@ function createProviderForm() {
   font-size: 12px;
 }
 
+.provider-connection-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--border-color-light);
+  border-radius: 12px;
+  background: var(--bg-card);
+}
+
+.provider-connection-header,
+.provider-connection-actions,
+.provider-test-grid,
+.provider-test-card {
+  display: flex;
+  gap: 10px;
+}
+
+.provider-connection-header {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.provider-connection-actions {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.provider-connection-header p {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+}
+
+.provider-test-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.provider-test-card {
+  flex-direction: column;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border-color-light);
+  border-radius: 10px;
+  background: var(--bg-page);
+}
+
+.provider-test-card span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.provider-test-card strong {
+  overflow-wrap: anywhere;
+}
+
+.provider-discovery-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-color-light);
+  border-radius: 12px;
+  background: var(--bg-page);
+}
+
+.provider-discovery-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 180px;
+}
+
+.provider-discovery-summary strong {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.provider-discovery-summary span,
+.provider-model-cell code,
+.provider-metric-pair span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.provider-discovery-controls {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.provider-discovery-search {
+  width: 280px;
+}
+
+.provider-discovery-table {
+  border: 1px solid var(--border-color-light);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.provider-model-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.provider-model-cell code {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--bg-page);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.endpoint-preview-field {
+  position: relative;
+  width: 100%;
+}
+
+.endpoint-path-input :deep(.el-input__wrapper) {
+  padding-right: min(430px, 50%);
+}
+
+.endpoint-preview-inline {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  z-index: 1;
+  max-width: min(410px, 46%);
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  text-align: right;
+  transform: translateY(-50%);
+  white-space: nowrap;
+}
+
+.provider-model-meta,
+.provider-capability-list {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.provider-metric-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.provider-discovery-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
 .deploy-vram-estimate-panel {
   display: flex;
   flex-direction: column;
@@ -1182,9 +2035,19 @@ function createProviderForm() {
 
 @media (max-width: 960px) {
   .section-header,
-  .detail-block-header {
+  .detail-block-header,
+  .provider-connection-header,
+  .provider-discovery-toolbar {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .provider-test-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .provider-discovery-search {
+    width: 100%;
   }
 }
 </style>

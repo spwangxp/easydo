@@ -38,7 +38,17 @@ spec:
             - name: SERVER_PUBLIC_URL
               value: {{ .Values.server.env.serverPublicURL | quote }}
             - name: SERVER_INTERNAL_TOKEN
-              value: {{ .Values.server.env.serverInternalToken | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "easydo.runtimeSecretFullname" . }}
+                  key: server-internal-token
+            - name: AI_RUNTIME_BASE_URL
+              value: "http://{{ include "easydo.aiRuntimeFullname" . }}:{{ .Values.aiRuntime.service.port }}"
+            - name: AI_RUNTIME_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "easydo.runtimeSecretFullname" . }}
+                  key: ai-runtime-internal-token
             - name: DB_HOST
               value: {{ include "easydo.mariadbFullname" . | quote }}
             - name: DB_PORT

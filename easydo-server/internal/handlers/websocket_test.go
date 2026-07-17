@@ -1761,7 +1761,6 @@ func TestWsClientStructure(t *testing.T) {
 	assert.Equal(t, uint64(1), client.agentID)
 	assert.NotZero(t, client.lastHeartAt)
 	assert.Nil(t, client.conn)
-	assert.NotNil(t, client.mu)
 }
 
 func TestFrontendClientStructure(t *testing.T) {
@@ -1773,7 +1772,6 @@ func TestFrontendClientStructure(t *testing.T) {
 	assert.Equal(t, "run_123", client.runID)
 	assert.Equal(t, uint64(1), client.userID)
 	assert.Nil(t, client.conn)
-	assert.NotNil(t, client.mu)
 }
 
 func TestClientIDCounter(t *testing.T) {
@@ -4008,6 +4006,11 @@ func TestRedrivePendingTasksForConnectedAgent_ResendsCancelRequestedTask(t *test
 		return nil
 	}
 	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := handler.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown cancel redrive worker: %v", err)
+		}
 		writeAgentTextMessage = previousWrite
 	}()
 

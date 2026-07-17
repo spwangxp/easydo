@@ -3,8 +3,8 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"runtime/debug"
 	"net/http"
 	"strconv"
 	"strings"
@@ -81,7 +81,29 @@ type WebSocketHandler struct {
 
 	taskCancelAcks   map[string]*taskCancelAckTracker
 	taskCancelAcksMu sync.Mutex
+	runtimeConfig    WebSocketRuntimeConfig
+	lifecycleCtx     context.Context
+	lifecycleCancel  context.CancelFunc
+	lifecycleMu      sync.Mutex
+	lifecycleWG      sync.WaitGroup
+	closed           bool
 }
+
+// WebSocketRuntimeConfig is the immutable configuration used by one
+// WebSocketHandler instance. Background workers must read this snapshot rather
+// than the process-global Viper map, which may be replaced by tests or reload
+// code while a worker is still running.
+type WebSocketRuntimeConfig struct {
+	TaskCancelAckTimeout time.Duration
+	TaskCancelMaxRetries int
+	TaskDispatchTimeout  time.Duration
+}
+
+const (
+	defaultTaskCancelAckTimeout = 5 * time.Second
+	defaultTaskCancelMaxRetries = 3
+	defaultTaskDispatchTimeout  = 30 * time.Second
+)
 
 type runWatcher struct {
 	runID      uint64
@@ -116,6 +138,15 @@ var (
 
 // NewWebSocketHandler creates a new WebSocket handler
 func NewWebSocketHandler() *WebSocketHandler {
+	return NewWebSocketHandlerWithRuntimeConfig(webSocketRuntimeConfigSnapshot())
+}
+
+// NewWebSocketHandlerWithRuntimeConfig constructs a handler from a caller-owned
+// immutable snapshot. Tests and process bootstrap can therefore configure a
+// handler without mutating shared global state after workers have started.
+func NewWebSocketHandlerWithRuntimeConfig(runtimeConfig WebSocketRuntimeConfig) *WebSocketHandler {
+	runtimeConfig = normalizeWebSocketRuntimeConfig(runtimeConfig)
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	handler := &WebSocketHandler{
 		agents:            make(map[uint64]*wsClient),
 		frontends:         make(map[string]map[string]*frontendClient),
@@ -123,8 +154,214 @@ func NewWebSocketHandler() *WebSocketHandler {
 		runWatchers:       make(map[uint64]*runWatcher),
 		serverID:          utils.ServerID(),
 		taskCancelAcks:    make(map[string]*taskCancelAckTracker),
+		runtimeConfig:     runtimeConfig,
+		lifecycleCtx:      lifecycleCtx,
+		lifecycleCancel:   lifecycleCancel,
 	}
 	return handler
+}
+
+func webSocketRuntimeConfigSnapshot() WebSocketRuntimeConfig {
+	runtimeConfig := WebSocketRuntimeConfig{}
+	if config.Config != nil {
+		runtimeConfig.TaskCancelAckTimeout = config.Config.GetDuration("task.cancel_ack_timeout")
+		runtimeConfig.TaskCancelMaxRetries = config.Config.GetInt("task.cancel_max_retries")
+		runtimeConfig.TaskDispatchTimeout = config.Config.GetDuration("task.dispatch_timeout")
+	}
+	return normalizeWebSocketRuntimeConfig(runtimeConfig)
+}
+
+func normalizeWebSocketRuntimeConfig(runtimeConfig WebSocketRuntimeConfig) WebSocketRuntimeConfig {
+	if runtimeConfig.TaskCancelAckTimeout <= 0 {
+		runtimeConfig.TaskCancelAckTimeout = defaultTaskCancelAckTimeout
+	}
+	if runtimeConfig.TaskCancelMaxRetries <= 0 {
+		runtimeConfig.TaskCancelMaxRetries = defaultTaskCancelMaxRetries
+	}
+	if runtimeConfig.TaskDispatchTimeout <= 0 {
+		runtimeConfig.TaskDispatchTimeout = defaultTaskDispatchTimeout
+	}
+	return runtimeConfig
+}
+
+func (h *WebSocketHandler) newLifecycleChildContext() (context.Context, context.CancelFunc, bool) {
+	if h == nil {
+		return nil, nil, false
+	}
+	h.lifecycleMu.Lock()
+	defer h.lifecycleMu.Unlock()
+	if h.closed || h.lifecycleCtx == nil {
+		return nil, nil, false
+	}
+	ctx, cancel := context.WithCancel(h.lifecycleCtx)
+	return ctx, cancel, true
+}
+
+// startBackground starts work owned by this handler. Add and shutdown are
+// serialized so Wait never races with a new WaitGroup Add.
+func (h *WebSocketHandler) startBackground(run func(context.Context)) bool {
+	if h == nil || run == nil {
+		return false
+	}
+	h.lifecycleMu.Lock()
+	if h.closed || h.lifecycleCtx == nil {
+		h.lifecycleMu.Unlock()
+		return false
+	}
+	ctx := h.lifecycleCtx
+	h.lifecycleWG.Add(1)
+	h.lifecycleMu.Unlock()
+
+	go func() {
+		defer h.lifecycleWG.Done()
+		run(ctx)
+	}()
+	return true
+}
+
+// Shutdown stops handler-owned background work and waits for every worker to
+// finish. It is safe to call more than once.
+func (h *WebSocketHandler) Shutdown(ctx context.Context) error {
+	if h == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	h.lifecycleMu.Lock()
+	if !h.closed {
+		h.closed = true
+		if h.lifecycleCancel != nil {
+			h.lifecycleCancel()
+		}
+	}
+	h.lifecycleMu.Unlock()
+	h.closeActiveConnections()
+
+	done := make(chan struct{})
+	go func() {
+		h.lifecycleWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (h *WebSocketHandler) closeActiveConnections() {
+	if h == nil {
+		return
+	}
+
+	h.agentsMu.RLock()
+	agents := make([]*wsClient, 0, len(h.agents))
+	for _, client := range h.agents {
+		if client != nil {
+			agents = append(agents, client)
+		}
+	}
+	h.agentsMu.RUnlock()
+	for _, client := range agents {
+		if client.cancel != nil {
+			client.cancel()
+		}
+		client.mu.Lock()
+		if client.conn != nil {
+			_ = closeWebSocketConn(client.conn)
+		}
+		client.mu.Unlock()
+	}
+
+	h.frontendsMu.RLock()
+	frontends := make([]*frontendClient, 0)
+	for _, clients := range h.frontends {
+		for _, client := range clients {
+			if client != nil {
+				frontends = append(frontends, client)
+			}
+		}
+	}
+	h.frontendsMu.RUnlock()
+	for _, client := range frontends {
+		if client.cancelRemoteWatch != nil {
+			client.cancelRemoteWatch()
+		}
+		client.mu.Lock()
+		if client.conn != nil {
+			_ = closeWebSocketConn(client.conn)
+		}
+		client.mu.Unlock()
+	}
+
+	h.terminalFrontendsMu.RLock()
+	terminalFrontends := make([]*terminalFrontendClient, 0)
+	for _, clients := range h.terminalFrontends {
+		for _, client := range clients {
+			if client != nil {
+				terminalFrontends = append(terminalFrontends, client)
+			}
+		}
+	}
+	h.terminalFrontendsMu.RUnlock()
+	for _, client := range terminalFrontends {
+		client.mu.Lock()
+		if client.conn != nil {
+			_ = closeWebSocketConn(client.conn)
+		}
+		client.mu.Unlock()
+	}
+
+	h.proxyFrontendsMu.RLock()
+	proxyFrontends := make([]*proxyFrontendClient, 0)
+	for _, clients := range h.proxyFrontends {
+		for _, client := range clients {
+			if client != nil {
+				proxyFrontends = append(proxyFrontends, client)
+			}
+		}
+	}
+	h.proxyFrontendsMu.RUnlock()
+	for _, client := range proxyFrontends {
+		client.writeMu.Lock()
+		if client.conn != nil {
+			_ = closeWebSocketConn(client.conn)
+		}
+		client.writeMu.Unlock()
+	}
+
+	h.runWatchersMu.Lock()
+	watchers := make([]*runWatcher, 0, len(h.runWatchers))
+	for _, watcher := range h.runWatchers {
+		if watcher != nil {
+			watchers = append(watchers, watcher)
+		}
+	}
+	h.runWatchersMu.Unlock()
+	for _, watcher := range watchers {
+		if watcher.cancel != nil {
+			watcher.cancel()
+		}
+	}
+
+	if h.proxyPool != nil {
+		h.proxyPool.closeAll()
+	}
+}
+
+func closeWebSocketConn(conn *websocket.Conn) (err error) {
+	if conn == nil {
+		return nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("close websocket connection panic: %v\n%s", recovered, debug.Stack())
+		}
+	}()
+	return conn.Close()
 }
 
 // SharedWebSocketHandler returns the singleton realtime runtime for this server
@@ -242,7 +479,11 @@ func (h *WebSocketHandler) HandleAgentConnection(c *gin.Context) {
 		return
 	}
 
-	streamCtx, streamCancel := context.WithCancel(context.Background())
+	streamCtx, streamCancel, ok := h.newLifecycleChildContext()
+	if !ok {
+		_ = conn.Close()
+		return
+	}
 
 	client := &wsClient{
 		conn:        conn,
@@ -258,12 +499,16 @@ func (h *WebSocketHandler) HandleAgentConnection(c *gin.Context) {
 	h.agentsMu.Unlock()
 
 	fmt.Printf("Agent %d connected via WebSocket\n", agentID)
-	h.rebindExecutionTasksForReconnect(client, &agent)
+	if models.DB != nil {
+		h.rebindExecutionTasksForReconnect(client, &agent)
+	}
 
-	models.DB.Model(agent).Updates(map[string]interface{}{
-		"status":        models.AgentStatusOnline,
-		"last_heart_at": time.Now().Unix(),
-	})
+	if models.DB != nil {
+		models.DB.Model(agent).Updates(map[string]interface{}{
+			"status":        models.AgentStatusOnline,
+			"last_heart_at": time.Now().Unix(),
+		})
+	}
 
 	_ = utils.PutAgentPresence(streamCtx, utils.AgentPresence{
 		AgentID:           agentID,
@@ -274,8 +519,15 @@ func (h *WebSocketHandler) HandleAgentConnection(c *gin.Context) {
 		LastHeartbeatAt:   time.Now().Unix(),
 		HeartbeatInterval: agent.HeartbeatInterval,
 	})
-	go h.consumeAgentStream(streamCtx, client)
-	h.redrivePendingTasksForConnectedAgent(client)
+	if ok := h.startBackground(func(context.Context) {
+		h.consumeAgentStream(streamCtx, client)
+	}); !ok {
+		h.cleanupAgentConnection(client, &agent)
+		return
+	}
+	if models.DB != nil {
+		h.redrivePendingTasksForConnectedAgent(client)
+	}
 
 	h.handleAgentMessages(client, &agent)
 }
@@ -347,7 +599,11 @@ func (h *WebSocketHandler) HandleFrontendConnection(c *gin.Context) {
 		runID:  runID,
 		userID: userID,
 	}
-	remoteWatchCtx, cancelRemoteWatch := context.WithCancel(context.Background())
+	remoteWatchCtx, cancelRemoteWatch, ok := h.newLifecycleChildContext()
+	if !ok {
+		_ = conn.Close()
+		return
+	}
 	client.cancelRemoteWatch = cancelRemoteWatch
 
 	h.frontendsMu.Lock()
@@ -363,7 +619,22 @@ func (h *WebSocketHandler) HandleFrontendConnection(c *gin.Context) {
 	// Keep resolving remote run ownership while the frontend stays connected.
 	// Runs may be queued when the page opens, so the remote agent server can
 	// appear only after scheduling finishes.
-	go h.watchRemoteRunEvents(remoteWatchCtx, runIDNum, clientID)
+	if ok := h.startBackground(func(context.Context) {
+		h.watchRemoteRunEvents(remoteWatchCtx, runIDNum, clientID)
+	}); !ok {
+		cancelRemoteWatch()
+		h.frontendsMu.Lock()
+		if runClients := h.frontends[runID]; runClients != nil {
+			delete(runClients, clientID)
+			if len(runClients) == 0 {
+				delete(h.frontends, runID)
+				h.stopRunWatcher(runID)
+			}
+		}
+		h.frontendsMu.Unlock()
+		_ = conn.Close()
+		return
+	}
 
 	h.handleFrontendMessages(client, runID, clientID)
 }
@@ -471,14 +742,22 @@ func (h *WebSocketHandler) ensureRunWatcher(runID uint64) {
 	if _, exists := h.runWatchers[runID]; exists {
 		return
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel, ok := h.newLifecycleChildContext()
+	if !ok {
+		return
+	}
 	watcher := &runWatcher{
 		runID:      runID,
 		cancel:     cancel,
 		taskStates: make(map[uint64]taskRealtimeState),
 	}
 	h.runWatchers[runID] = watcher
-	go h.runWatcherLoop(ctx, watcher)
+	if ok := h.startBackground(func(context.Context) {
+		h.runWatcherLoop(ctx, watcher)
+	}); !ok {
+		delete(h.runWatchers, runID)
+		cancel()
+	}
 }
 
 func (h *WebSocketHandler) stopRunWatcher(runID string) {
@@ -1114,7 +1393,6 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 	// Automatic retry/failover: only when task failed and retries remain.
 	// Final failure after retries will be handled by ignore_failure semantics at pipeline level.
 	if willRetry {
-		updateAISessionStateForTask(models.DB, &task, taskUpdatePayloadV2{Status: models.TaskStatusRunning}, now)
 		nextRetry := task.RetryCount + 1
 		retryUpdates := map[string]interface{}{
 			"status":           models.TaskStatusQueued,
@@ -1183,8 +1461,6 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 		return
 	}
 
-	updateAISessionStateForTask(models.DB, &task, update, now)
-
 	h.checkAgentStatus(client.agentID)
 	h.persistResourceBaseInfoTaskResult(&task, update)
 
@@ -1198,180 +1474,6 @@ func (h *WebSocketHandler) handleTaskUpdateV2(client *wsClient, agent *models.Ag
 	if !ackSent {
 		h.sendAgentAck(client, "task_update_v2", update.TaskID, update.Attempt, true, "", nil)
 	}
-}
-
-func updateAISessionStateForTask(db *gorm.DB, task *models.AgentTask, update taskUpdatePayloadV2, now int64) {
-	if db == nil || task == nil || task.ID == 0 {
-		return
-	}
-
-	aiSessionID := extractAISessionIDFromTask(task)
-	if aiSessionID == 0 {
-		return
-	}
-
-	var session models.AISession
-	if err := db.Select("id", "task_type", "request_json", "started_at").First(&session, aiSessionID).Error; err != nil {
-		return
-	}
-
-	updates := map[string]interface{}{}
-	responseJSON := ""
-	switch update.Status {
-	case models.TaskStatusRunning:
-		updates["status"] = models.AISessionStatusRunning
-		if session.StartedAt == 0 {
-			updates["started_at"] = now
-			session.StartedAt = now
-		}
-	case models.TaskStatusExecuteSuccess:
-		updates["status"] = models.AISessionStatusCompleted
-		updates["completed_at"] = now
-		updates["error_msg"] = ""
-		if update.Result != nil {
-			if data, err := json.Marshal(update.Result); err == nil {
-				responseJSON = string(data)
-				updates["response_json"] = responseJSON
-			}
-		}
-	case models.TaskStatusExecuteFailed, models.TaskStatusScheduleFailed:
-		updates["status"] = models.AISessionStatusFailed
-		updates["completed_at"] = now
-		updates["error_msg"] = strings.TrimSpace(update.ErrorMsg)
-		if update.Result != nil {
-			if data, err := json.Marshal(update.Result); err == nil {
-				responseJSON = string(data)
-				updates["response_json"] = responseJSON
-			}
-		}
-	case models.TaskStatusCancelled:
-		updates["status"] = models.AISessionStatusCancelled
-		updates["completed_at"] = now
-		updates["error_msg"] = strings.TrimSpace(update.ErrorMsg)
-		if update.Result != nil {
-			if data, err := json.Marshal(update.Result); err == nil {
-				responseJSON = string(data)
-				updates["response_json"] = responseJSON
-			}
-		}
-	default:
-		return
-	}
-
-	if len(updates) == 0 {
-		return
-	}
-	if err := db.Model(&models.AISession{}).Where("id = ?", aiSessionID).Updates(updates).Error; err != nil {
-		return
-	}
-	if err := upsertAISessionTurnForTaskUpdate(db, session, task, update, now, responseJSON); err != nil {
-		fmt.Printf("Failed to persist ai session turn for session %d attempt %d: %v\n", aiSessionID, update.Attempt, err)
-	}
-}
-
-func upsertAISessionTurnForTaskUpdate(tx *gorm.DB, session models.AISession, task *models.AgentTask, update taskUpdatePayloadV2, now int64, responseJSON string) error {
-	if tx == nil || session.ID == 0 {
-		return nil
-	}
-
-	turnSeq := update.Attempt
-	if turnSeq <= 0 {
-		turnSeq = 1
-	}
-
-	var turn models.AISessionTurn
-	if err := tx.Where("session_id = ? AND turn_seq = ?", session.ID, turnSeq).First(&turn).Error; err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		turn = models.AISessionTurn{
-			SessionID: session.ID,
-			TurnSeq:   turnSeq,
-			TurnType:  firstNonEmptyTaskValue(session.TaskType, task.TaskType, "ai_task"),
-			Role:      "assistant",
-			InputJSON: session.RequestJSON,
-		}
-		if err := tx.Create(&turn).Error; err != nil {
-			return err
-		}
-	}
-
-	updates := buildAISessionTurnTaskUpdates(turn, session, task, update, now, responseJSON)
-	if len(updates) == 0 {
-		return nil
-	}
-	return tx.Model(&models.AISessionTurn{}).Where("id = ?", turn.ID).Updates(updates).Error
-}
-
-func buildAISessionTurnTaskUpdates(turn models.AISessionTurn, session models.AISession, task *models.AgentTask, update taskUpdatePayloadV2, now int64, responseJSON string) map[string]interface{} {
-	updates := map[string]interface{}{
-		"turn_type": firstNonEmptyTaskValue(turn.TurnType, session.TaskType, task.TaskType, "ai_task"),
-		"role":      "assistant",
-	}
-	if turn.InputJSON == "" && strings.TrimSpace(session.RequestJSON) != "" {
-		updates["input_json"] = session.RequestJSON
-	}
-
-	setStartedAt := func() {
-		if turn.StartedAt != nil && *turn.StartedAt > 0 {
-			return
-		}
-		if session.StartedAt > 0 {
-			updates["started_at"] = session.StartedAt
-			return
-		}
-		updates["started_at"] = now
-	}
-
-	switch update.Status {
-	case models.TaskStatusRunning:
-		updates["status"] = string(models.AISessionStatusRunning)
-		setStartedAt()
-	case models.TaskStatusExecuteSuccess:
-		updates["status"] = string(models.AISessionStatusCompleted)
-		updates["error_msg"] = ""
-		updates["completed_at"] = now
-		setStartedAt()
-		if responseJSON != "" {
-			updates["output_json"] = responseJSON
-		}
-	case models.TaskStatusExecuteFailed:
-		updates["status"] = string(models.AISessionStatusFailed)
-		updates["error_msg"] = strings.TrimSpace(update.ErrorMsg)
-		updates["completed_at"] = now
-		setStartedAt()
-		if responseJSON != "" {
-			updates["output_json"] = responseJSON
-		}
-	case models.TaskStatusScheduleFailed:
-		updates["status"] = string(models.AISessionStatusFailed)
-		updates["error_msg"] = strings.TrimSpace(update.ErrorMsg)
-		updates["completed_at"] = now
-		if responseJSON != "" {
-			updates["output_json"] = responseJSON
-		}
-	case models.TaskStatusCancelled:
-		updates["status"] = string(models.AISessionStatusCancelled)
-		updates["error_msg"] = strings.TrimSpace(update.ErrorMsg)
-		updates["completed_at"] = now
-		if responseJSON != "" {
-			updates["output_json"] = responseJSON
-		}
-	default:
-		return nil
-	}
-	return updates
-}
-
-func extractAISessionIDFromTask(task *models.AgentTask) uint64 {
-	if task == nil || strings.TrimSpace(task.Params) == "" {
-		return 0
-	}
-	var params map[string]interface{}
-	if err := json.Unmarshal([]byte(task.Params), &params); err != nil {
-		return 0
-	}
-	return toUint64Value(params["ai_session_id"])
 }
 
 func (h *WebSocketHandler) persistResourceBaseInfoTaskResult(task *models.AgentTask, update taskUpdatePayloadV2) {
@@ -1762,10 +1864,7 @@ func (h *WebSocketHandler) reconcileDispatchTimeouts(db *gorm.DB, now int64) (in
 	if db == nil {
 		return 0, nil
 	}
-	timeout := config.Config.GetDuration("task.dispatch_timeout")
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
+	timeout := h.taskDispatchTimeout()
 	cutoff := time.Unix(now, 0).Add(-timeout)
 	var tasks []models.AgentTask
 	if err := db.Where("status IN ?", []string{models.TaskStatusDispatching, models.TaskStatusPulling}).Find(&tasks).Error; err != nil {
@@ -2107,7 +2206,12 @@ func (h *WebSocketHandler) sendTaskCancel(task models.AgentTask) bool {
 	if tracker == nil {
 		return false
 	}
-	go h.dispatchTaskCancelWithRetry(task, commandID, tracker)
+	if !h.startBackground(func(ctx context.Context) {
+		h.dispatchTaskCancelWithRetry(ctx, task, commandID, tracker)
+	}) {
+		h.clearTaskCancelTracker(commandID)
+		return false
+	}
 	return true
 }
 
@@ -2186,19 +2290,24 @@ func (h *WebSocketHandler) clearTaskCancelTracker(commandID string) {
 }
 
 func (h *WebSocketHandler) taskCancelAckTimeout() time.Duration {
-	timeout := config.Config.GetDuration("task.cancel_ack_timeout")
-	if timeout <= 0 {
-		timeout = 5 * time.Second
+	if h == nil || h.runtimeConfig.TaskCancelAckTimeout <= 0 {
+		return defaultTaskCancelAckTimeout
 	}
-	return timeout
+	return h.runtimeConfig.TaskCancelAckTimeout
 }
 
 func (h *WebSocketHandler) taskCancelMaxRetries() int {
-	maxRetries := config.Config.GetInt("task.cancel_max_retries")
-	if maxRetries <= 0 {
-		maxRetries = 3
+	if h == nil || h.runtimeConfig.TaskCancelMaxRetries <= 0 {
+		return defaultTaskCancelMaxRetries
 	}
-	return maxRetries
+	return h.runtimeConfig.TaskCancelMaxRetries
+}
+
+func (h *WebSocketHandler) taskDispatchTimeout() time.Duration {
+	if h == nil || h.runtimeConfig.TaskDispatchTimeout <= 0 {
+		return defaultTaskDispatchTimeout
+	}
+	return h.runtimeConfig.TaskDispatchTimeout
 }
 
 func taskCancelRetryDelay(timeout time.Duration, attempt int) time.Duration {
@@ -2218,15 +2327,23 @@ func taskCancelRetryDelay(timeout time.Duration, attempt int) time.Duration {
 	return delay
 }
 
-func (h *WebSocketHandler) dispatchTaskCancelWithRetry(task models.AgentTask, commandID string, tracker *taskCancelAckTracker) {
+func (h *WebSocketHandler) dispatchTaskCancelWithRetry(ctx context.Context, task models.AgentTask, commandID string, tracker *taskCancelAckTracker) {
 	if h == nil || tracker == nil {
 		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	defer h.clearTaskCancelTracker(commandID)
 
 	timeout := h.taskCancelAckTimeout()
 	maxRetries := h.taskCancelMaxRetries()
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		payload := map[string]interface{}{
 			"task_id":    task.ID,
 			"run_id":     task.PipelineRunID,
@@ -2238,12 +2355,27 @@ func (h *WebSocketHandler) dispatchTaskCancelWithRetry(task models.AgentTask, co
 
 		sent := h.sendControlMessageToAgent(task.AgentID, "task_cancel", payload)
 		if sent {
+			timer := time.NewTimer(timeout)
 			select {
 			case ok := <-tracker.done:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				if ok {
 					return
 				}
-			case <-time.After(timeout):
+			case <-timer.C:
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
 			}
 		}
 
@@ -2251,7 +2383,18 @@ func (h *WebSocketHandler) dispatchTaskCancelWithRetry(task models.AgentTask, co
 			h.markTaskCancelDeliveryTimeout(task, timeout, maxRetries)
 			return
 		}
-		time.Sleep(taskCancelRetryDelay(timeout, attempt))
+		delayTimer := time.NewTimer(taskCancelRetryDelay(timeout, attempt))
+		select {
+		case <-delayTimer.C:
+		case <-ctx.Done():
+			if !delayTimer.Stop() {
+				select {
+				case <-delayTimer.C:
+				default:
+				}
+			}
+			return
+		}
 	}
 }
 

@@ -118,6 +118,23 @@ func newProxyClientPool(handler *WebSocketHandler) *proxyClientPool {
 	}
 }
 
+func (p *proxyClientPool) closeAll() {
+	if p == nil {
+		return
+	}
+	p.mu.RLock()
+	clients := make([]*proxyClient, 0, len(p.clients))
+	for _, client := range p.clients {
+		if client != nil {
+			clients = append(clients, client)
+		}
+	}
+	p.mu.RUnlock()
+	for _, client := range clients {
+		client.close()
+	}
+}
+
 // GetOrCreateProxyClient returns an existing proxy client for targetServerID,
 // or creates a new one if none exists. The connection is established lazily.
 func (p *proxyClientPool) GetOrCreateProxyClient(ctx context.Context, targetServerID, targetServerURL string) (*proxyClient, error) {

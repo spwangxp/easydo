@@ -12,6 +12,10 @@ type ResourceBaseInfoRefreshService interface {
 	RequestResourceBaseInfoRefresh(context.Context, services.RefreshResourceBaseInfoRequest) (services.RefreshResourceBaseInfoResult, error)
 }
 
+type resourceResolver interface {
+	ResolveMCPResourceID(context.Context, services.ActorContext, uint64, any) (uint64, error)
+}
+
 func RegisterResourceTools(registry *Registry, usecase *services.ResourceUseCase) error {
 	if registry == nil {
 		return services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: "registry is required"}
@@ -42,7 +46,7 @@ func RegisterResourceTools(registry *Registry, usecase *services.ResourceUseCase
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -79,11 +83,11 @@ func RegisterResourceTools(registry *Registry, usecase *services.ResourceUseCase
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
-				resourceID, err := requiredUint64Argument(invocation.Arguments, "resource_id")
+				resourceID, err := resolveMCPResourceIDArgument(ctx, usecase, actor, workspaceID, invocation.Arguments, "resource_id")
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -112,11 +116,11 @@ func RegisterResourceTools(registry *Registry, usecase *services.ResourceUseCase
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
-				resourceID, err := requiredUint64Argument(invocation.Arguments, "resource_id")
+				resourceID, err := resolveMCPResourceIDArgument(ctx, usecase, actor, workspaceID, invocation.Arguments, "resource_id")
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -146,11 +150,11 @@ func RegisterResourceTools(registry *Registry, usecase *services.ResourceUseCase
 				if err != nil {
 					return ToolResult{}, err
 				}
-				workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+				workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 				if err != nil {
 					return ToolResult{}, err
 				}
-				resourceID, err := requiredUint64Argument(invocation.Arguments, "resource_id")
+				resourceID, err := resolveMCPResourceIDArgument(ctx, usecase, actor, workspaceID, invocation.Arguments, "resource_id")
 				if err != nil {
 					return ToolResult{}, err
 				}
@@ -198,11 +202,11 @@ func RegisterResourceOperationTools(registry *Registry, service ResourceBaseInfo
 			if err != nil {
 				return ToolResult{}, err
 			}
-			workspaceID, err := requiredUint64Argument(invocation.Arguments, "workspace_id")
+			workspaceID, err := requiredWorkspaceArgument(actor, invocation.Arguments)
 			if err != nil {
 				return ToolResult{}, err
 			}
-			resourceID, err := requiredUint64Argument(invocation.Arguments, "resource_id")
+			resourceID, err := resolveMCPResourceIDArgument(ctx, service, actor, workspaceID, invocation.Arguments, "resource_id")
 			if err != nil {
 				return ToolResult{}, err
 			}
@@ -213,6 +217,20 @@ func RegisterResourceOperationTools(registry *Registry, service ResourceBaseInfo
 			return ToolResult{StructuredContent: result}, nil
 		},
 	})
+}
+
+func resolveMCPResourceIDArgument(ctx context.Context, resolver any, actor services.ActorContext, workspaceID uint64, args map[string]any, key string) (uint64, error) {
+	if args == nil {
+		return 0, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: fmt.Sprintf("%s is required", key)}
+	}
+	rawValue, exists := args[key]
+	if !exists || rawValue == nil || strings.TrimSpace(fmt.Sprint(rawValue)) == "" {
+		return 0, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: fmt.Sprintf("%s is required", key)}
+	}
+	if typed, ok := resolver.(resourceResolver); ok {
+		return typed.ResolveMCPResourceID(ctx, actor, workspaceID, rawValue)
+	}
+	return requiredUint64Argument(args, key)
 }
 
 func optionalBoolArgument(args map[string]any, key string, defaultValue bool) (bool, error) {

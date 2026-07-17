@@ -16,7 +16,7 @@ services:
     restart: unless-stopped
 
   server-lb:
-    image: nginx:alpine
+    image: docker.1ms.run/nginx:alpine
     depends_on:
       - server
       - server2
@@ -44,6 +44,9 @@ services:
       - MCP_ALLOWED_ORIGINS=http://127.0.0.1:8088,http://localhost:8088
       - SERVER_INTERNAL_URL=http://server:8080
       - SERVER_INTERNAL_TOKEN=easydo-internal-token
+      - AI_RUNTIME_BASE_URL=http://ai-runtime:8090
+      - AI_RUNTIME_INTERNAL_TOKEN=easydo-internal-token
+      - AI_RUNTIME_TIMEOUT=180s
       - DB_HOST=db
       - DB_PORT=3306
       - DB_USERNAME=root
@@ -70,6 +73,8 @@ services:
       - NOTIFICATION_SMTP_FROM_NAME=${NOTIFICATION_SMTP_FROM_NAME:-EasyDo}
     depends_on:
       db:
+        condition: service_healthy
+      ai-runtime:
         condition: service_healthy
       redis:
         condition: service_started
@@ -95,6 +100,9 @@ services:
       - MCP_ALLOWED_ORIGINS=http://127.0.0.1:8088,http://localhost:8088
       - SERVER_INTERNAL_URL=http://server2:8080
       - SERVER_INTERNAL_TOKEN=easydo-internal-token
+      - AI_RUNTIME_BASE_URL=http://ai-runtime:8090
+      - AI_RUNTIME_INTERNAL_TOKEN=easydo-internal-token
+      - AI_RUNTIME_TIMEOUT=180s
       - DB_HOST=db
       - DB_PORT=3306
       - DB_USERNAME=root
@@ -122,6 +130,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      ai-runtime:
+        condition: service_healthy
       redis:
         condition: service_started
       minio:
@@ -131,7 +141,7 @@ services:
     restart: unless-stopped
 
   db:
-    image: mariadb:11.4
+    image: docker.1ms.run/mariadb:11.4
     ports:
       - "3306:3306"
     environment:
@@ -150,8 +160,51 @@ services:
       - easydo-network
     restart: unless-stopped
 
+  ai-runtime:
+    build:
+      context: ../../easydo-ai-runtime
+      dockerfile: Dockerfile
+    environment:
+      - AI_RUNTIME_PORT=8090
+      - AI_RUNTIME_RUN_LEASE_MS=15000
+      - AI_RUNTIME_RUN_STREAM_POLL_MS=250
+      - AI_RUNTIME_INTERNAL_TOKEN=easydo-internal-token
+      - AI_RUNTIME_DB_ENABLED=true
+      - AI_RUNTIME_DB_HOST=db
+      - AI_RUNTIME_DB_PORT=3306
+      - AI_RUNTIME_DB_USER=root
+      - AI_RUNTIME_DB_PASSWORD=password
+      - AI_RUNTIME_DB_NAME=easydo
+      - AI_RUNTIME_EASYDO_SERVER_URL=http://server-lb:8080
+      - AI_RUNTIME_WORKSPACE_IMAGE=easydo-ai-workspace:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      db:
+        condition: service_healthy
+      ai-workspace-image:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8090/healthz >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - easydo-network
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+
+  ai-workspace-image:
+    image: easydo-ai-workspace:latest
+    pull_policy: build
+    build:
+      context: ../../easydo-ai-runtime
+      dockerfile: Dockerfile.workspace
+    command: ["true"]
+
   redis:
-    image: redis:7-alpine
+    image: docker.1ms.run/redis:7-alpine
     ports:
       - "6379:6379"
     volumes:
@@ -161,7 +214,7 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:latest
+    image: docker.1ms.run/minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
       - MINIO_ROOT_USER=minioadmin

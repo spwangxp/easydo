@@ -27,6 +27,15 @@ func (f *fakeResourceRefreshService) RequestResourceBaseInfoRefresh(ctx context.
 	return f.result, nil
 }
 
+type fakeResolvingResourceRefreshService struct {
+	*fakeResourceRefreshService
+	resolvedResourceID uint64
+}
+
+func (f *fakeResolvingResourceRefreshService) ResolveMCPResourceID(_ context.Context, _ services.ActorContext, _ uint64, _ any) (uint64, error) {
+	return f.resolvedResourceID, nil
+}
+
 func openResourceToolTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := openAuditTestDB(t)
@@ -252,6 +261,43 @@ func TestResourceGPUUsageToolReturnsStructuredGPUUsage(t *testing.T) {
 	}
 }
 
+func TestResourceGPUUsageToolResolvesResourceNameLabel(t *testing.T) {
+	db := openResourceToolTestDB(t)
+	usecase := &services.ResourceUseCase{DB: db}
+	registry := NewRegistry()
+	if err := RegisterResourceTools(registry, usecase); err != nil {
+		t.Fatalf("RegisterResourceTools returned error: %v", err)
+	}
+	user, workspace := seedResourceToolWorkspaceMember(t, db, "resource-tool-gpu-label-user", models.WorkspaceRoleViewer)
+	resource := models.Resource{
+		WorkspaceID:    workspace.ID,
+		Name:           "7022",
+		Type:           models.ResourceTypeVM,
+		Status:         models.ResourceStatusOnline,
+		BaseInfoStatus: "success",
+		BaseInfo:       `{"schemaVersion":3,"resourceInstances":[{"id":"gpu-0","resourceTypeId":"gpu","identity":[{"name":"uuid","value":"GPU-label"}],"capacity":[{"name":"memoryBytes","capacity":100}],"metrics":[{"name":"memoryBytesUsed","value":25}]}]}`,
+		CreatedBy:      user.ID,
+	}
+	if err := db.Create(&resource).Error; err != nil {
+		t.Fatalf("create resource failed: %v", err)
+	}
+
+	result, err := registry.Invoke(context.Background(), "easydo_resource_gpu_usage", Invocation{
+		Actor:     services.ActorContext{UserID: user.ID, Username: user.Username, SystemRole: user.Role},
+		Arguments: map[string]any{"workspace_id": workspace.ID, "resource_id": "7022"},
+	})
+	if err != nil {
+		t.Fatalf("gpu usage invoke returned error: %v", err)
+	}
+	content, ok := result.StructuredContent.(services.ResourceGPUUsageResult)
+	if !ok {
+		t.Fatalf("structured content type=%T, want services.ResourceGPUUsageResult", result.StructuredContent)
+	}
+	if content.ResourceID != resource.ID || len(content.GPUs) != 1 || content.GPUs[0].UUID != "GPU-label" {
+		t.Fatalf("content=%+v, want resolved internal resource %d", content, resource.ID)
+	}
+}
+
 func TestResourceBaseInfoRefreshToolPassesRequestToService(t *testing.T) {
 	fake := &fakeResourceRefreshService{result: services.RefreshResourceBaseInfoResult{TaskID: 77, Status: models.TaskStatusQueued, AgentID: 9}}
 	registry := NewRegistry()
@@ -277,6 +323,29 @@ func TestResourceBaseInfoRefreshToolPassesRequestToService(t *testing.T) {
 	}
 	if fake.lastRequest.WorkspaceID != 34 || fake.lastRequest.ResourceID != 56 || fake.lastRequest.Actor.UserID != actor.UserID {
 		t.Fatalf("last request=%+v, want parsed actor and ids", fake.lastRequest)
+	}
+}
+
+func TestResourceBaseInfoRefreshToolUsesResolverWhenAvailable(t *testing.T) {
+	fake := &fakeResolvingResourceRefreshService{
+		fakeResourceRefreshService: &fakeResourceRefreshService{result: services.RefreshResourceBaseInfoResult{TaskID: 77, Status: models.TaskStatusQueued, AgentID: 9}},
+		resolvedResourceID:         2,
+	}
+	registry := NewRegistry()
+	if err := RegisterResourceOperationTools(registry, fake); err != nil {
+		t.Fatalf("RegisterResourceOperationTools returned error: %v", err)
+	}
+	actor := services.ActorContext{UserID: 12, Username: "refresh-user", SystemRole: "user"}
+
+	_, err := registry.Invoke(context.Background(), "easydo_resource_base_info_refresh", Invocation{
+		Actor:     actor,
+		Arguments: map[string]any{"workspace_id": 34, "resource_id": "7022"},
+	})
+	if err != nil {
+		t.Fatalf("refresh invoke returned error: %v", err)
+	}
+	if fake.lastRequest.ResourceID != 2 {
+		t.Fatalf("last request resource_id=%d, want resolved internal id 2", fake.lastRequest.ResourceID)
 	}
 }
 

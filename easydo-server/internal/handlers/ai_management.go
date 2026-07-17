@@ -1,12 +1,20 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
+	"easydo-server/internal/middleware"
 	"easydo-server/internal/models"
+	"easydo-server/internal/services"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -15,16 +23,10 @@ type AIProviderHandler struct {
 	DB *gorm.DB
 }
 
-type AIAgentHandler struct {
-	DB *gorm.DB
-}
+var aiProviderDiscoveryHTTPClient = &http.Client{Timeout: 20 * time.Second}
 
 func NewAIProviderHandler() *AIProviderHandler {
 	return &AIProviderHandler{DB: models.DB}
-}
-
-func NewAIAgentHandler() *AIAgentHandler {
-	return &AIAgentHandler{DB: models.DB}
 }
 
 type aiProviderRequest struct {
@@ -40,11 +42,39 @@ type aiProviderRequest struct {
 }
 
 type aiModelBindingRequest struct {
-	ModelID          uint64         `json:"model_id" binding:"required"`
-	ProviderModelKey string         `json:"provider_model_key"`
-	SettingsJSON     map[string]any `json:"settings_json"`
-	MetadataJSON     map[string]any `json:"metadata_json"`
-	Status           string         `json:"status"`
+	ModelID                uint64         `json:"model_id" binding:"required"`
+	ProviderModelKey       string         `json:"provider_model_key"`
+	SettingsJSON           map[string]any `json:"settings_json"`
+	MetadataJSON           map[string]any `json:"metadata_json"`
+	ContextWindowTokens    *int64         `json:"context_window_tokens"`
+	MaxOutputTokens        *int64         `json:"max_output_tokens"`
+	SupportsToolUse        *bool          `json:"supports_tool_use"`
+	SupportsStreaming      *bool          `json:"supports_streaming"`
+	CapabilitySource       string         `json:"capability_source"`
+	Status                 string         `json:"status"`
+}
+
+type aiProviderModelCandidate struct {
+	ProviderModelKey    string         `json:"provider_model_key"`
+	ProviderDisplayName string         `json:"provider_display_name"`
+	ModelName           string         `json:"model_name"`
+	ModelKind           string         `json:"model_kind"`
+	ModelFamily         string         `json:"model_family"`
+	SourceModelID       string         `json:"source_model_id"`
+	Modalities          []string       `json:"modalities"`
+	Capabilities        []string       `json:"capabilities"`
+	ContextWindow       int64          `json:"context_window,omitempty"`
+	MaxOutputTokens     int64          `json:"max_output_tokens,omitempty"`
+	Pricing             map[string]any `json:"pricing,omitempty"`
+	Recommended         bool           `json:"recommended"`
+	Raw                 map[string]any `json:"raw,omitempty"`
+}
+
+type aiProviderDiscoveryResult struct {
+	Endpoint   string
+	StatusCode int
+	LatencyMS  int64
+	Models     []aiProviderModelCandidate
 }
 
 func decodeAIModelBindingRequest(c *gin.Context) (aiModelBindingRequest, bool) {
@@ -60,7 +90,7 @@ func decodeAIModelBindingRequest(c *gin.Context) (aiModelBindingRequest, bool) {
 		return req, false
 	}
 	if _, exists := raw["capabilities_json"]; exists {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "capabilities_json 已废弃，请改用 runtime profile / agent capability 定义"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "capabilities_json 已废弃，请改用 Agent Profile 定义"})
 		return req, false
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -74,59 +104,164 @@ func decodeAIModelBindingRequest(c *gin.Context) (aiModelBindingRequest, bool) {
 	return req, true
 }
 
-type aiAgentRequest struct {
-	Name               string           `json:"name" binding:"required"`
-	Description        string           `json:"description"`
-	ScopeType          string           `json:"scope_type"`
-	RuntimeProfileID   *uint64          `json:"runtime_profile_id"`
-	SystemPrompt       *string          `json:"system_prompt"`
-	UserPromptTemplate *string          `json:"user_prompt_template"`
-	InputSchemaJSON    *json.RawMessage `json:"input_schema_json"`
-	OutputSchemaJSON   *json.RawMessage `json:"output_schema_json"`
-	ToolPolicyJSON     *json.RawMessage `json:"tool_policy_json"`
-	ToolsJSON          *json.RawMessage `json:"tools_json"`
-	SkillsJSON         *json.RawMessage `json:"skills_json"`
-	MemoryJSON         *json.RawMessage `json:"memory_json"`
-	MCPServersJSON     *json.RawMessage `json:"mcp_servers_json"`
-	SubAgentsJSON      *json.RawMessage `json:"sub_agents_json"`
-	MetadataJSON       *json.RawMessage `json:"metadata_json"`
-	Status             string           `json:"status"`
+
+type modelBindingCapabilitySnapshot struct {
+	ContextWindowTokens    uint64
+	MaxOutputTokens        *uint64
+	SupportsToolUse        bool
+	SupportsStreaming      bool
+	CapabilitySource       string
+	CapabilityCheckedAt    time.Time
+	CapabilitySnapshotHash string
 }
 
-type aiAgentRuntimeProfileRequest struct {
-	Name                string           `json:"name" binding:"required"`
-	ModelID             uint64           `json:"model_id" binding:"required"`
-	BindingPriorityJSON []map[string]any `json:"binding_priority_json"`
-	RuntimeSettingsJSON map[string]any   `json:"runtime_settings_json"`
-	FallbackEnabled     *bool            `json:"fallback_enabled"`
-	Status              string           `json:"status"`
+func freezeModelBindingCapability(req *aiModelBindingRequest, model models.AIModelCatalog) (modelBindingCapabilitySnapshot, error) {
+	if req == nil {
+		return modelBindingCapabilitySnapshot{}, fmt.Errorf("model binding request is required")
+	}
+	metadata := map[string]any{}
+	if req.MetadataJSON != nil {
+		for key, value := range req.MetadataJSON {
+			metadata[key] = value
+		}
+	}
+	contextWindow := firstPositiveInt64(
+		valueOrZero(req.ContextWindowTokens),
+		firstObjectInt64(metadata, "context_window_tokens", "context_window", "contextWindow", "context_length"),
+		model.ContextWindow,
+	)
+	if contextWindow <= 0 {
+		return modelBindingCapabilitySnapshot{}, fmt.Errorf("context_window_tokens is required for model binding capability snapshot")
+	}
+	maxOutput := firstPositiveInt64(
+		valueOrZero(req.MaxOutputTokens),
+		firstObjectInt64(metadata, "max_output_tokens", "maxOutputTokens", "max_tokens"),
+	)
+	supportsToolUse := false
+	if req.SupportsToolUse != nil {
+		supportsToolUse = *req.SupportsToolUse
+	} else {
+		supportsToolUse = firstObjectBool(metadata, "supports_tool_use", "supportsToolUse") ||
+			stringListContains(stringListFromAny(metadata["capabilities"]), "tool", "tools", "function_calling")
+	}
+	supportsStreaming := true
+	if req.SupportsStreaming != nil {
+		supportsStreaming = *req.SupportsStreaming
+	} else if value, ok := metadataBool(metadata, "supports_streaming", "supportsStreaming"); ok {
+		supportsStreaming = value
+	}
+	source := strings.TrimSpace(req.CapabilitySource)
+	if source == "" {
+		source = firstObjectString(metadata, "capability_source", "capabilitySource", "source")
+	}
+	if source == "" {
+		if firstObjectInt64(metadata, "context_window_tokens", "context_window", "contextWindow", "context_length") > 0 {
+			source = "provider_api"
+		} else if model.ContextWindow > 0 {
+			source = "catalog"
+		} else {
+			source = "manual_override"
+		}
+	}
+	checkedAt := time.Now().UTC()
+	var maxOutputPtr *uint64
+	if maxOutput > 0 {
+		v := uint64(maxOutput)
+		maxOutputPtr = &v
+	}
+	contextTokens := uint64(contextWindow)
+	hash := hashModelBindingCapability(contextTokens, maxOutputPtr, supportsToolUse, supportsStreaming, source)
+	// keep metadata aligned with frozen columns for older consumers
+	metadata["context_window"] = contextTokens
+	metadata["context_window_tokens"] = contextTokens
+	if maxOutputPtr != nil {
+		metadata["max_output_tokens"] = *maxOutputPtr
+	}
+	metadata["supports_tool_use"] = supportsToolUse
+	metadata["supports_streaming"] = supportsStreaming
+	metadata["capability_source"] = source
+	metadata["capability_checked_at"] = checkedAt.Format(time.RFC3339Nano)
+	metadata["capability_snapshot_hash"] = hash
+	req.MetadataJSON = metadata
+	return modelBindingCapabilitySnapshot{
+		ContextWindowTokens:    contextTokens,
+		MaxOutputTokens:        maxOutputPtr,
+		SupportsToolUse:        supportsToolUse,
+		SupportsStreaming:      supportsStreaming,
+		CapabilitySource:       source,
+		CapabilityCheckedAt:    checkedAt,
+		CapabilitySnapshotHash: hash,
+	}, nil
 }
 
-type aiModelSummary struct {
-	ID          uint64 `json:"id"`
-	Name        string `json:"name"`
-	DisplayName string `json:"display_name"`
+func hashModelBindingCapability(contextWindow uint64, maxOutput *uint64, supportsToolUse, supportsStreaming bool, source string) string {
+	maxOutputValue := uint64(0)
+	if maxOutput != nil {
+		maxOutputValue = *maxOutput
+	}
+	payload := fmt.Sprintf("cw=%d;mo=%d;tool=%t;stream=%t;source=%s", contextWindow, maxOutputValue, supportsToolUse, supportsStreaming, source)
+	sum := sha256.Sum256([]byte(payload))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-type aiRuntimeProfileSummary struct {
-	ID              uint64                        `json:"id"`
-	WorkspaceID     uint64                        `json:"workspace_id"`
-	Name            string                        `json:"name"`
-	ModelID         uint64                        `json:"model_id"`
-	FallbackEnabled bool                          `json:"fallback_enabled"`
-	Status          models.AIRuntimeProfileStatus `json:"status"`
-	Model           *aiModelSummary               `json:"model,omitempty"`
+func valueOrZero(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
-type aiAgentSummary struct {
-	ID               uint64                   `json:"id"`
-	WorkspaceID      uint64                   `json:"workspace_id"`
-	Name             string                   `json:"name"`
-	Description      string                   `json:"description"`
-	ScopeType        string                   `json:"scope_type"`
-	RuntimeProfileID *uint64                  `json:"runtime_profile_id"`
-	Status           models.AIAgentStatus     `json:"status"`
-	RuntimeProfile   *aiRuntimeProfileSummary `json:"runtime_profile,omitempty"`
+func firstPositiveInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func metadataBool(metadata map[string]any, keys ...string) (bool, bool) {
+	for _, key := range keys {
+		if raw, ok := metadata[key]; ok {
+			switch value := raw.(type) {
+			case bool:
+				return value, true
+			case string:
+				trimmed := strings.TrimSpace(strings.ToLower(value))
+				if trimmed == "true" || trimmed == "1" || trimmed == "yes" {
+					return true, true
+				}
+				if trimmed == "false" || trimmed == "0" || trimmed == "no" {
+					return false, true
+				}
+			case float64:
+				return value != 0, true
+			case int:
+				return value != 0, true
+			case int64:
+				return value != 0, true
+			}
+		}
+	}
+	return false, false
+}
+
+func firstObjectBool(metadata map[string]any, keys ...string) bool {
+	value, ok := metadataBool(metadata, keys...)
+	return ok && value
+}
+
+func stringListContains(values []string, candidates ...string) bool {
+	set := map[string]struct{}{}
+	for _, value := range values {
+		set[strings.ToLower(strings.TrimSpace(value))] = struct{}{}
+	}
+	for _, candidate := range candidates {
+		if _, ok := set[strings.ToLower(candidate)]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func ensureProviderExists(db *gorm.DB, workspaceID, providerID uint64) error {
@@ -137,50 +272,6 @@ func ensureProviderExists(db *gorm.DB, workspaceID, providerID uint64) error {
 func ensureModelExists(db *gorm.DB, modelID uint64) error {
 	var model models.AIModelCatalog
 	return db.First(&model, modelID).Error
-}
-
-func ensureRuntimeProfileExists(db *gorm.DB, workspaceID, runtimeProfileID uint64) error {
-	if runtimeProfileID == 0 {
-		return nil
-	}
-	var profile models.AIRuntimeProfile
-	return db.Where("workspace_id = ? AND id = ?", workspaceID, runtimeProfileID).First(&profile).Error
-}
-
-func optionalRuntimeProfileID(runtimeProfileID *uint64) *uint64 {
-	if runtimeProfileID == nil || *runtimeProfileID == 0 {
-		return nil
-	}
-	id := *runtimeProfileID
-	return &id
-}
-
-func optionalRuntimeProfileIDOrExisting(runtimeProfileID *uint64, existing *uint64) *uint64 {
-	if runtimeProfileID == nil {
-		if existing == nil {
-			return nil
-		}
-		id := *existing
-		return &id
-	}
-	return optionalRuntimeProfileID(runtimeProfileID)
-}
-
-func validateRuntimeProfileBindings(db *gorm.DB, workspaceID, modelID uint64, items []map[string]any) error {
-	for _, item := range items {
-		bindingID := toUint64Value(item["binding_id"])
-		if bindingID == 0 {
-			return gorm.ErrInvalidData
-		}
-		var binding models.AIModelBinding
-		if err := db.Where("workspace_id = ? AND id = ?", workspaceID, bindingID).First(&binding).Error; err != nil {
-			return err
-		}
-		if binding.ModelID != modelID || binding.Status != models.AIModelBindingStatusActive {
-			return gorm.ErrInvalidData
-		}
-	}
-	return nil
 }
 
 func marshalJSONOrEmpty(v any) string {
@@ -194,75 +285,11 @@ func marshalJSONOrEmpty(v any) string {
 	return string(data)
 }
 
-func normalizeOptionalRawJSON(v *json.RawMessage) string {
-	if v == nil {
-		return ""
-	}
-	raw := strings.TrimSpace(string(*v))
-	if raw == "" || raw == "null" {
-		return ""
-	}
-	var payload any
-	if err := json.Unmarshal(*v, &payload); err != nil {
-		return ""
-	}
-	return marshalJSONOrEmpty(payload)
-}
-
-func normalizeOptionalRawJSONOrExisting(v *json.RawMessage, existing string) string {
-	if v == nil {
-		return existing
-	}
-	return normalizeOptionalRawJSON(v)
-}
-
-func optionalStringValue(v *string) string {
-	if v == nil {
-		return ""
-	}
-	return *v
-}
-
-func optionalStringValueOrExisting(v *string, existing string) string {
-	if v == nil {
-		return existing
-	}
-	return *v
-}
-
-func buildRuntimeProfileSummary(item *models.AIRuntimeProfile) *aiRuntimeProfileSummary {
-	if item == nil {
+func optionalAIProviderCredentialID(id uint64) *uint64 {
+	if id == 0 {
 		return nil
 	}
-	summary := &aiRuntimeProfileSummary{
-		ID:              item.ID,
-		WorkspaceID:     item.WorkspaceID,
-		Name:            item.Name,
-		ModelID:         item.ModelID,
-		FallbackEnabled: item.FallbackEnabled,
-		Status:          item.Status,
-	}
-	if item.Model != nil {
-		summary.Model = &aiModelSummary{
-			ID:          item.Model.ID,
-			Name:        item.Model.Name,
-			DisplayName: item.Model.DisplayName,
-		}
-	}
-	return summary
-}
-
-func buildAgentSummary(item models.AIAgent) aiAgentSummary {
-	return aiAgentSummary{
-		ID:               item.ID,
-		WorkspaceID:      item.WorkspaceID,
-		Name:             item.Name,
-		Description:      item.Description,
-		ScopeType:        item.ScopeType,
-		RuntimeProfileID: item.RuntimeProfileID,
-		Status:           item.Status,
-		RuntimeProfile:   buildRuntimeProfileSummary(item.RuntimeProfile),
-	}
+	return &id
 }
 
 func aiGovernanceContext(c *gin.Context, db *gorm.DB) GovernanceContext {
@@ -273,22 +300,439 @@ func aiGovernanceContext(c *gin.Context, db *gorm.DB) GovernanceContext {
 	return governanceContextForWorkspace(db, ctx.WorkspaceID, ctx.UserID, ctx.SystemRole)
 }
 
-func requirePlatformGovernance(c *gin.Context, db *gorm.DB) (uint64, uint64, bool) {
+func requireAIProviderWrite(c *gin.Context, db *gorm.DB) (uint64, uint64, bool) {
 	ctx := aiGovernanceContext(c, db)
-	if ctx.WorkspaceID == 0 || !RequirePlatformGovernance(ctx) {
-		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "仅平台治理上下文可执行该操作"})
+	if ctx.WorkspaceID == 0 || ctx.UserID == 0 || !canWriteAIProvider(ctx) {
+		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "当前工作空间角色无权管理 AI Provider"})
 		return 0, 0, false
 	}
 	return ctx.WorkspaceID, ctx.UserID, true
 }
 
-func requireWorkspaceGovernance(c *gin.Context, db *gorm.DB) (uint64, uint64, bool) {
-	ctx := aiGovernanceContext(c, db)
-	if ctx.WorkspaceID == 0 || !RequireWorkspaceGovernance(ctx) {
-		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "仅普通工作空间治理上下文可执行该操作"})
-		return 0, 0, false
+func canWriteAIProvider(ctx GovernanceContext) bool {
+	if isAdminRole(ctx.SystemRole) {
+		return true
 	}
-	return ctx.WorkspaceID, ctx.UserID, true
+	return middleware.WorkspaceRoleAtLeast(ctx.WorkspaceRole, models.WorkspaceRoleDeveloper)
+}
+
+func (h *AIProviderHandler) TestConnection(c *gin.Context) {
+	workspaceID, userID, ok := requireAIProviderWrite(c, h.DB)
+	if !ok {
+		return
+	}
+	_, role := getRequestUser(c)
+	var req aiProviderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
+		return
+	}
+	result, err := h.fetchProviderModels(c, workspaceID, userID, role, req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
+		return
+	}
+	sampleSize := len(result.Models)
+	if sampleSize > 5 {
+		sampleSize = 5
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code": http.StatusOK,
+		"data": gin.H{
+			"ok":            true,
+			"endpoint":      result.Endpoint,
+			"status_code":   result.StatusCode,
+			"latency_ms":    result.LatencyMS,
+			"models_count":  len(result.Models),
+			"sample_models": result.Models[:sampleSize],
+		},
+	})
+}
+
+func (h *AIProviderHandler) DiscoverModels(c *gin.Context) {
+	workspaceID, userID, ok := requireAIProviderWrite(c, h.DB)
+	if !ok {
+		return
+	}
+	_, role := getRequestUser(c)
+	var req aiProviderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
+		return
+	}
+	result, err := h.fetchProviderModels(c, workspaceID, userID, role, req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code": http.StatusOK,
+		"data": gin.H{
+			"endpoint":    result.Endpoint,
+			"status_code": result.StatusCode,
+			"latency_ms":  result.LatencyMS,
+			"count":       len(result.Models),
+			"models":      result.Models,
+		},
+	})
+}
+
+func (h *AIProviderHandler) fetchProviderModels(c *gin.Context, workspaceID, userID uint64, role string, req aiProviderRequest) (aiProviderDiscoveryResult, error) {
+	if strings.TrimSpace(req.ProviderType) == "" {
+		return aiProviderDiscoveryResult{}, fmt.Errorf("Provider 类型不能为空")
+	}
+	if strings.TrimSpace(req.BaseURL) == "" {
+		return aiProviderDiscoveryResult{}, fmt.Errorf("Base URL 不能为空")
+	}
+	if req.CredentialID == 0 {
+		return aiProviderDiscoveryResult{}, fmt.Errorf("必须选择 Provider Credential")
+	}
+	var credential models.Credential
+	if err := h.DB.First(&credential, req.CredentialID).Error; err != nil {
+		return aiProviderDiscoveryResult{}, fmt.Errorf("Credential 不存在")
+	}
+	if credential.WorkspaceID != workspaceID || !canReadCredentialValue(h.DB, &credential, userID, role) {
+		return aiProviderDiscoveryResult{}, fmt.Errorf("无权使用该 Credential")
+	}
+	if !credential.IsUsable() {
+		return aiProviderDiscoveryResult{}, fmt.Errorf("Credential 当前不可用")
+	}
+	payload, err := services.NewCredentialEncryptionService().DecryptCredentialData(credential.EncryptedPayload)
+	if err != nil {
+		return aiProviderDiscoveryResult{}, fmt.Errorf("Credential 解密失败")
+	}
+	modelsEndpoint := stringSetting(req.SettingsJSON, "models_endpoint", "/models")
+	modelsURL, err := buildAIProviderModelsURL(req.BaseURL, modelsEndpoint)
+	if err != nil {
+		return aiProviderDiscoveryResult{}, err
+	}
+	httpReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, modelsURL, nil)
+	if err != nil {
+		return aiProviderDiscoveryResult{}, fmt.Errorf("构造 Provider 请求失败")
+	}
+	applyAIProviderHeaders(httpReq, req.HeadersJSON, payload)
+	startedAt := time.Now()
+	resp, err := aiProviderDiscoveryHTTPClient.Do(httpReq)
+	if err != nil {
+		return aiProviderDiscoveryResult{}, fmt.Errorf("Provider 连接失败：%v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
+	if err != nil {
+		return aiProviderDiscoveryResult{}, fmt.Errorf("读取 Provider 响应失败")
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return aiProviderDiscoveryResult{}, fmt.Errorf("Provider 返回状态码 %d", resp.StatusCode)
+	}
+	candidates, err := normalizeAIProviderModelCandidates(body)
+	if err != nil {
+		return aiProviderDiscoveryResult{}, err
+	}
+	return aiProviderDiscoveryResult{
+		Endpoint:   modelsURL,
+		StatusCode: resp.StatusCode,
+		LatencyMS:  time.Since(startedAt).Milliseconds(),
+		Models:     candidates,
+	}, nil
+}
+
+func buildAIProviderModelsURL(baseURL string, modelsEndpoint string) (string, error) {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base == "" {
+		return "", fmt.Errorf("Base URL 不能为空")
+	}
+	endpoint := strings.TrimSpace(modelsEndpoint)
+	if endpoint == "" {
+		endpoint = "/models"
+	}
+	if parsedEndpoint, err := url.Parse(endpoint); err == nil && parsedEndpoint.IsAbs() {
+		return endpoint, nil
+	}
+	joined := base + "/" + strings.TrimLeft(endpoint, "/")
+	parsed, err := url.Parse(joined)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("Models Endpoint 无效")
+	}
+	return parsed.String(), nil
+}
+
+func applyAIProviderHeaders(req *http.Request, headers map[string]any, credentialPayload map[string]any) {
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("User-Agent", "EasyDo-AI-Provider-Discovery/1.0")
+	for key, value := range headers {
+		headerName := strings.TrimSpace(key)
+		headerValue := strings.TrimSpace(fmt.Sprintf("%v", value))
+		if headerName == "" || headerValue == "" || strings.EqualFold(headerName, "Authorization") {
+			continue
+		}
+		req.Header.Set(headerName, headerValue)
+	}
+	secret := firstPayloadValue(credentialPayload, "token", "access_token", "api_key", "key", "password")
+	if secret == "" {
+		return
+	}
+	headerName := firstPayloadValue(credentialPayload, "auth_header", "header_name", "api_key_header")
+	if headerName != "" {
+		req.Header.Set(headerName, secret)
+		return
+	}
+	tokenType := firstPayloadValue(credentialPayload, "token_type", "auth_scheme")
+	if tokenType == "" {
+		tokenType = "Bearer"
+	}
+	if strings.EqualFold(tokenType, "raw") || strings.EqualFold(tokenType, "none") || strings.EqualFold(tokenType, "no_prefix") {
+		req.Header.Set("Authorization", secret)
+		return
+	}
+	req.Header.Set("Authorization", strings.TrimSpace(tokenType+" "+secret))
+}
+
+func normalizeAIProviderModelCandidates(body []byte) ([]aiProviderModelCandidate, error) {
+	var payload any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("Provider 模型响应不是有效 JSON")
+	}
+	items := extractAIProviderModelItems(payload)
+	candidates := make([]aiProviderModelCandidate, 0, len(items))
+	for index, item := range items {
+		candidate := buildAIProviderModelCandidate(item, index == 0)
+		if candidate.ProviderModelKey == "" {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates, nil
+}
+
+func extractAIProviderModelItems(payload any) []map[string]any {
+	switch value := payload.(type) {
+	case []any:
+		return normalizeAIProviderModelItemSlice(value)
+	case map[string]any:
+		for _, key := range []string{"data", "models"} {
+			if items, ok := value[key].([]any); ok {
+				return normalizeAIProviderModelItemSlice(items)
+			}
+		}
+		if nested, ok := value["response"].(map[string]any); ok {
+			return extractAIProviderModelItems(nested)
+		}
+	}
+	return nil
+}
+
+func normalizeAIProviderModelItemSlice(items []any) []map[string]any {
+	models := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if object, ok := item.(map[string]any); ok {
+			models = append(models, object)
+		}
+	}
+	return models
+}
+
+func buildAIProviderModelCandidate(item map[string]any, recommended bool) aiProviderModelCandidate {
+	key := firstObjectString(item, "id", "model", "name")
+	displayName := firstObjectString(item, "display_name", "displayName", "name", "id", "model")
+	modelName := firstObjectString(item, "model_name", "modelName", "name", "id", "model")
+	architecture := objectMap(item["architecture"])
+	topProvider := objectMap(item["top_provider"])
+	contextWindow := firstObjectInt64(
+		item,
+		"context_length",
+		"contextLength",
+		"context_window",
+		"contextWindow",
+		"max_context_length",
+		"maxContextLength",
+		"max_model_len",
+		"maxModelLen",
+		"max_model_length",
+		"maxModelLength",
+		"max_position_embeddings",
+		"max_sequence_length",
+	)
+	if contextWindow == 0 {
+		contextWindow = firstObjectInt64(topProvider, "context_length", "context_window", "max_context_length", "max_model_len")
+	}
+	maxOutputTokens := firstObjectInt64(item, "max_output_tokens", "max_completion_tokens", "max_tokens")
+	if maxOutputTokens == 0 {
+		maxOutputTokens = firstObjectInt64(topProvider, "max_completion_tokens", "max_output_tokens", "max_tokens")
+	}
+	modalities := normalizeProviderModelModalities(item, architecture)
+	capabilities := normalizeProviderModelCapabilities(item)
+	pricing := objectMap(item["pricing"])
+	return aiProviderModelCandidate{
+		ProviderModelKey:    key,
+		ProviderDisplayName: displayName,
+		ModelName:           defaultIfEmpty(modelName, displayName),
+		ModelKind:           defaultIfEmpty(firstObjectString(item, "model_kind", "kind", "type"), "chat"),
+		ModelFamily:         inferAIModelFamily(key, displayName),
+		SourceModelID:       key,
+		Modalities:          modalities,
+		Capabilities:        capabilities,
+		ContextWindow:       contextWindow,
+		MaxOutputTokens:     maxOutputTokens,
+		Pricing:             pricing,
+		Recommended:         recommended,
+		Raw:                 item,
+	}
+}
+
+func normalizeProviderModelModalities(item map[string]any, architecture map[string]any) []string {
+	values := append(stringListFromAny(item["modalities"]), stringListFromAny(item["input_modalities"])...)
+	values = append(values, stringListFromAny(item["output_modalities"])...)
+	modalityText := strings.ToLower(strings.Join(append(values, firstObjectString(architecture, "modality", "input_modalities")), " "))
+	modalities := make([]string, 0, 3)
+	if modalityText == "" || strings.Contains(modalityText, "text") {
+		modalities = appendUniqueString(modalities, "text")
+	}
+	if strings.Contains(modalityText, "image") || strings.Contains(modalityText, "vision") {
+		modalities = appendUniqueString(modalities, "vision")
+	}
+	if strings.Contains(modalityText, "audio") {
+		modalities = appendUniqueString(modalities, "audio")
+	}
+	if strings.Contains(modalityText, "video") {
+		modalities = appendUniqueString(modalities, "video")
+	}
+	return modalities
+}
+
+func normalizeProviderModelCapabilities(item map[string]any) []string {
+	parameters := strings.ToLower(strings.Join(stringListFromAny(item["supported_parameters"]), " "))
+	capabilities := make([]string, 0, 4)
+	if strings.Contains(parameters, "tool") || strings.Contains(parameters, "function") {
+		capabilities = appendUniqueString(capabilities, "tool")
+	}
+	if strings.Contains(parameters, "response_format") || strings.Contains(parameters, "json") {
+		capabilities = appendUniqueString(capabilities, "json")
+	}
+	if strings.Contains(parameters, "reasoning") {
+		capabilities = appendUniqueString(capabilities, "reasoning")
+	}
+	if strings.Contains(parameters, "stream") {
+		capabilities = appendUniqueString(capabilities, "stream")
+	}
+	return capabilities
+}
+
+func inferAIModelFamily(values ...string) string {
+	joined := strings.ToLower(strings.Join(values, " "))
+	switch {
+	case strings.Contains(joined, "gpt") || strings.Contains(joined, "openai"):
+		return "gpt"
+	case strings.Contains(joined, "claude") || strings.Contains(joined, "anthropic"):
+		return "claude"
+	case strings.Contains(joined, "gemini") || strings.Contains(joined, "google"):
+		return "gemini"
+	case strings.Contains(joined, "qwen"):
+		return "qwen"
+	case strings.Contains(joined, "llama"):
+		return "llama"
+	default:
+		return ""
+	}
+}
+
+func stringSetting(settings map[string]any, key, fallback string) string {
+	if settings == nil {
+		return fallback
+	}
+	value := strings.TrimSpace(fmt.Sprintf("%v", settings[key]))
+	if value == "" || value == "<nil>" {
+		return fallback
+	}
+	return value
+}
+
+func firstObjectString(values map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := values[key]
+		if !ok || value == nil {
+			continue
+		}
+		text := strings.TrimSpace(fmt.Sprintf("%v", value))
+		if text != "" && text != "<nil>" {
+			return text
+		}
+	}
+	return ""
+}
+
+func firstObjectInt64(values map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		value, ok := values[key]
+		if !ok || value == nil {
+			continue
+		}
+		switch typed := value.(type) {
+		case float64:
+			if typed > 0 {
+				return int64(typed)
+			}
+		case float32:
+			if typed > 0 {
+				return int64(typed)
+			}
+		case int:
+			if typed > 0 {
+				return int64(typed)
+			}
+		case int64:
+			if typed > 0 {
+				return typed
+			}
+		case json.Number:
+			if parsed, err := typed.Int64(); err == nil && parsed > 0 {
+				return parsed
+			}
+		case string:
+			parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+			if err == nil && parsed > 0 {
+				return parsed
+			}
+		}
+	}
+	return 0
+}
+
+func objectMap(value any) map[string]any {
+	if object, ok := value.(map[string]any); ok {
+		return object
+	}
+	return map[string]any{}
+}
+
+func stringListFromAny(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return typed
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := strings.TrimSpace(fmt.Sprintf("%v", item))
+			if text != "" && text != "<nil>" {
+				values = append(values, text)
+			}
+		}
+		return values
+	case string:
+		parts := strings.FieldsFunc(typed, func(r rune) bool {
+			return r == ',' || r == ';' || r == '|' || r == '/' || r == '>' || r == '+'
+		})
+		values := make([]string, 0, len(parts))
+		for _, part := range parts {
+			text := strings.TrimSpace(part)
+			if text != "" {
+				values = append(values, text)
+			}
+		}
+		return values
+	default:
+		return nil
+	}
 }
 
 func (h *AIProviderHandler) ListProviders(c *gin.Context) {
@@ -307,7 +751,7 @@ func (h *AIProviderHandler) ListProviders(c *gin.Context) {
 }
 
 func (h *AIProviderHandler) CreateProvider(c *gin.Context) {
-	workspaceID, userID, ok := requirePlatformGovernance(c, h.DB)
+	workspaceID, userID, ok := requireAIProviderWrite(c, h.DB)
 	if !ok {
 		return
 	}
@@ -322,7 +766,7 @@ func (h *AIProviderHandler) CreateProvider(c *gin.Context) {
 		Description:  req.Description,
 		ProviderType: strings.TrimSpace(req.ProviderType),
 		BaseURL:      strings.TrimSpace(req.BaseURL),
-		CredentialID: req.CredentialID,
+		CredentialID: optionalAIProviderCredentialID(req.CredentialID),
 		HeadersJSON:  marshalJSONOrEmpty(req.HeadersJSON),
 		SettingsJSON: marshalJSONOrEmpty(req.SettingsJSON),
 		MetadataJSON: marshalJSONOrEmpty(req.MetadataJSON),
@@ -337,7 +781,7 @@ func (h *AIProviderHandler) CreateProvider(c *gin.Context) {
 }
 
 func (h *AIProviderHandler) UpdateProvider(c *gin.Context) {
-	workspaceID, _, ok := requirePlatformGovernance(c, h.DB)
+	workspaceID, _, ok := requireAIProviderWrite(c, h.DB)
 	if !ok {
 		return
 	}
@@ -356,7 +800,7 @@ func (h *AIProviderHandler) UpdateProvider(c *gin.Context) {
 		"description":   req.Description,
 		"provider_type": strings.TrimSpace(req.ProviderType),
 		"base_url":      strings.TrimSpace(req.BaseURL),
-		"credential_id": req.CredentialID,
+		"credential_id": optionalAIProviderCredentialID(req.CredentialID),
 		"headers_json":  marshalJSONOrEmpty(req.HeadersJSON),
 		"settings_json": marshalJSONOrEmpty(req.SettingsJSON),
 		"metadata_json": marshalJSONOrEmpty(req.MetadataJSON),
@@ -371,7 +815,7 @@ func (h *AIProviderHandler) UpdateProvider(c *gin.Context) {
 }
 
 func (h *AIProviderHandler) DeleteProvider(c *gin.Context) {
-	workspaceID, _, ok := requirePlatformGovernance(c, h.DB)
+	workspaceID, _, ok := requireAIProviderWrite(c, h.DB)
 	if !ok {
 		return
 	}
@@ -403,7 +847,7 @@ func (h *AIProviderHandler) ListBindings(c *gin.Context) {
 }
 
 func (h *AIProviderHandler) CreateBinding(c *gin.Context) {
-	workspaceID, userID, ok := requirePlatformGovernance(c, h.DB)
+	workspaceID, userID, ok := requireAIProviderWrite(c, h.DB)
 	if !ok {
 		return
 	}
@@ -420,19 +864,33 @@ func (h *AIProviderHandler) CreateBinding(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := ensureModelExists(h.DB, req.ModelID); err != nil {
+	var model models.AIModelCatalog
+	if err := h.DB.First(&model, req.ModelID).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "模型不存在"})
 		return
 	}
+	capability, err := freezeModelBindingCapability(&req, model)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
+		return
+	}
+	checkedAt := capability.CapabilityCheckedAt
 	binding := models.AIModelBinding{
-		WorkspaceID:      workspaceID,
-		ModelID:          req.ModelID,
-		ProviderID:       providerID,
-		ProviderModelKey: strings.TrimSpace(req.ProviderModelKey),
-		SettingsJSON:     marshalJSONOrEmpty(req.SettingsJSON),
-		MetadataJSON:     marshalJSONOrEmpty(req.MetadataJSON),
-		Status:           models.AIModelBindingStatus(defaultIfEmpty(strings.TrimSpace(req.Status), string(models.AIModelBindingStatusActive))),
-		CreatedBy:        userID,
+		WorkspaceID:            workspaceID,
+		ModelID:                req.ModelID,
+		ProviderID:             providerID,
+		ProviderModelKey:       strings.TrimSpace(req.ProviderModelKey),
+		SettingsJSON:           marshalJSONOrEmpty(req.SettingsJSON),
+		MetadataJSON:           marshalJSONOrEmpty(req.MetadataJSON),
+		ContextWindowTokens:    &capability.ContextWindowTokens,
+		MaxOutputTokens:        capability.MaxOutputTokens,
+		SupportsToolUse:        capability.SupportsToolUse,
+		SupportsStreaming:      capability.SupportsStreaming,
+		CapabilitySource:       capability.CapabilitySource,
+		CapabilityCheckedAt:    &checkedAt,
+		CapabilitySnapshotHash: capability.CapabilitySnapshotHash,
+		Status:                 models.AIModelBindingStatus(defaultIfEmpty(strings.TrimSpace(req.Status), string(models.AIModelBindingStatusActive))),
+		CreatedBy:              userID,
 	}
 	if err := h.DB.Create(&binding).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "创建 AI 模型绑定失败"})
@@ -442,7 +900,7 @@ func (h *AIProviderHandler) CreateBinding(c *gin.Context) {
 }
 
 func (h *AIProviderHandler) UpdateBinding(c *gin.Context) {
-	workspaceID, _, ok := requirePlatformGovernance(c, h.DB)
+	workspaceID, _, ok := requireAIProviderWrite(c, h.DB)
 	if !ok {
 		return
 	}
@@ -460,16 +918,30 @@ func (h *AIProviderHandler) UpdateBinding(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := ensureModelExists(h.DB, req.ModelID); err != nil {
+	var model models.AIModelCatalog
+	if err := h.DB.First(&model, req.ModelID).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "模型不存在"})
 		return
 	}
+	capability, err := freezeModelBindingCapability(&req, model)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
+		return
+	}
+	checkedAt := capability.CapabilityCheckedAt
 	updates := map[string]any{
-		"model_id":           req.ModelID,
-		"provider_model_key": strings.TrimSpace(req.ProviderModelKey),
-		"settings_json":      marshalJSONOrEmpty(req.SettingsJSON),
-		"metadata_json":      marshalJSONOrEmpty(req.MetadataJSON),
-		"status":             defaultIfEmpty(strings.TrimSpace(req.Status), string(binding.Status)),
+		"model_id":                 req.ModelID,
+		"provider_model_key":       strings.TrimSpace(req.ProviderModelKey),
+		"settings_json":            marshalJSONOrEmpty(req.SettingsJSON),
+		"metadata_json":            marshalJSONOrEmpty(req.MetadataJSON),
+		"context_window_tokens":    capability.ContextWindowTokens,
+		"max_output_tokens":        capability.MaxOutputTokens,
+		"supports_tool_use":        capability.SupportsToolUse,
+		"supports_streaming":       capability.SupportsStreaming,
+		"capability_source":        capability.CapabilitySource,
+		"capability_checked_at":    checkedAt,
+		"capability_snapshot_hash": capability.CapabilitySnapshotHash,
+		"status":                   defaultIfEmpty(strings.TrimSpace(req.Status), string(binding.Status)),
 	}
 	if err := h.DB.Model(&binding).Updates(updates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "更新 AI 模型绑定失败"})
@@ -480,7 +952,7 @@ func (h *AIProviderHandler) UpdateBinding(c *gin.Context) {
 }
 
 func (h *AIProviderHandler) DeleteBinding(c *gin.Context) {
-	workspaceID, _, ok := requirePlatformGovernance(c, h.DB)
+	workspaceID, _, ok := requireAIProviderWrite(c, h.DB)
 	if !ok {
 		return
 	}
@@ -491,319 +963,6 @@ func (h *AIProviderHandler) DeleteBinding(c *gin.Context) {
 	}
 	if err := h.DB.Where("workspace_id = ? AND provider_id = ?", workspaceID, providerID).Delete(&models.AIModelBinding{}, c.Param("binding_id")).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "删除 AI 模型绑定失败"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "message": "删除成功"})
-}
-
-func (h *AIAgentHandler) ListAgents(c *gin.Context) {
-	ctx := aiGovernanceContext(c, h.DB)
-	if ctx.WorkspaceID == 0 || !userCanAccessWorkspace(h.DB, ctx.WorkspaceID, ctx.UserID, ctx.SystemRole) {
-		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "无权访问 AI Agent 定义"})
-		return
-	}
-	var items []models.AIAgent
-	if err := h.DB.Preload("RuntimeProfile").Preload("RuntimeProfile.Model").Where("workspace_id = ?", ctx.WorkspaceID).Order("updated_at DESC, id DESC").Find(&items).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "加载 AI Agent 定义失败"})
-		return
-	}
-	if RequireWorkspaceGovernance(ctx) {
-		c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": items})
-		return
-	}
-	summaries := make([]aiAgentSummary, 0, len(items))
-	for _, item := range items {
-		summaries = append(summaries, buildAgentSummary(item))
-	}
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": summaries})
-}
-
-func (h *AIAgentHandler) CreateAgent(c *gin.Context) {
-	workspaceID, userID, ok := requireWorkspaceGovernance(c, h.DB)
-	if !ok {
-		return
-	}
-	var req aiAgentRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
-		return
-	}
-	if err := ensureRuntimeProfileExists(h.DB, workspaceID, toUint64Value(req.RuntimeProfileID)); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "runtime_profile_id 无效"})
-		return
-	}
-	item := models.AIAgent{
-		WorkspaceID:        workspaceID,
-		Name:               strings.TrimSpace(req.Name),
-		Description:        req.Description,
-		ScopeType:          defaultIfEmpty(strings.TrimSpace(req.ScopeType), models.AgentScopeWorkspace),
-		RuntimeProfileID:   optionalRuntimeProfileID(req.RuntimeProfileID),
-		SystemPrompt:       optionalStringValue(req.SystemPrompt),
-		UserPromptTemplate: optionalStringValue(req.UserPromptTemplate),
-		InputSchemaJSON:    normalizeOptionalRawJSON(req.InputSchemaJSON),
-		OutputSchemaJSON:   normalizeOptionalRawJSON(req.OutputSchemaJSON),
-		ToolPolicyJSON:     normalizeOptionalRawJSON(req.ToolPolicyJSON),
-		ToolsJSON:          normalizeOptionalRawJSON(req.ToolsJSON),
-		SkillsJSON:         normalizeOptionalRawJSON(req.SkillsJSON),
-		MemoryJSON:         normalizeOptionalRawJSON(req.MemoryJSON),
-		MCPServersJSON:     normalizeOptionalRawJSON(req.MCPServersJSON),
-		SubAgentsJSON:      normalizeOptionalRawJSON(req.SubAgentsJSON),
-		MetadataJSON:       normalizeOptionalRawJSON(req.MetadataJSON),
-		Status:             models.AIAgentStatus(defaultIfEmpty(strings.TrimSpace(req.Status), string(models.AIAgentStatusDraft))),
-		CreatedBy:          userID,
-	}
-	if err := h.DB.Create(&item).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "创建 AI Agent 定义失败"})
-		return
-	}
-	_ = h.DB.Preload("RuntimeProfile").Preload("RuntimeProfile.Model").First(&item, item.ID).Error
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": item})
-}
-
-func (h *AIAgentHandler) UpdateAgent(c *gin.Context) {
-	workspaceID, _, ok := requireWorkspaceGovernance(c, h.DB)
-	if !ok {
-		return
-	}
-	var item models.AIAgent
-	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&item, c.Param("id")).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "AI Agent 定义不存在"})
-		return
-	}
-	var req aiAgentRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
-		return
-	}
-	if err := ensureRuntimeProfileExists(h.DB, workspaceID, toUint64Value(req.RuntimeProfileID)); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "runtime_profile_id 无效"})
-		return
-	}
-	updates := map[string]any{
-		"name":                 strings.TrimSpace(req.Name),
-		"description":          req.Description,
-		"scope_type":           defaultIfEmpty(strings.TrimSpace(req.ScopeType), item.ScopeType),
-		"runtime_profile_id":   optionalRuntimeProfileIDOrExisting(req.RuntimeProfileID, item.RuntimeProfileID),
-		"system_prompt":        optionalStringValueOrExisting(req.SystemPrompt, item.SystemPrompt),
-		"user_prompt_template": optionalStringValueOrExisting(req.UserPromptTemplate, item.UserPromptTemplate),
-		"input_schema_json":    normalizeOptionalRawJSONOrExisting(req.InputSchemaJSON, item.InputSchemaJSON),
-		"output_schema_json":   normalizeOptionalRawJSONOrExisting(req.OutputSchemaJSON, item.OutputSchemaJSON),
-		"tool_policy_json":     normalizeOptionalRawJSONOrExisting(req.ToolPolicyJSON, item.ToolPolicyJSON),
-		"tools_json":           normalizeOptionalRawJSONOrExisting(req.ToolsJSON, item.ToolsJSON),
-		"skills_json":          normalizeOptionalRawJSONOrExisting(req.SkillsJSON, item.SkillsJSON),
-		"memory_json":          normalizeOptionalRawJSONOrExisting(req.MemoryJSON, item.MemoryJSON),
-		"mcp_servers_json":     normalizeOptionalRawJSONOrExisting(req.MCPServersJSON, item.MCPServersJSON),
-		"sub_agents_json":      normalizeOptionalRawJSONOrExisting(req.SubAgentsJSON, item.SubAgentsJSON),
-		"metadata_json":        normalizeOptionalRawJSONOrExisting(req.MetadataJSON, item.MetadataJSON),
-		"status":               defaultIfEmpty(strings.TrimSpace(req.Status), string(item.Status)),
-	}
-	if err := h.DB.Model(&item).Updates(updates).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "更新 AI Agent 定义失败"})
-		return
-	}
-	_ = h.DB.Preload("RuntimeProfile").Preload("RuntimeProfile.Model").First(&item, item.ID).Error
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": item})
-}
-
-func (h *AIAgentHandler) DeleteAgent(c *gin.Context) {
-	workspaceID, _, ok := requireWorkspaceGovernance(c, h.DB)
-	if !ok {
-		return
-	}
-	if err := h.DB.Where("workspace_id = ?", workspaceID).Delete(&models.AIAgent{}, c.Param("id")).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "删除 AI Agent 定义失败"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "message": "删除成功"})
-}
-
-func (h *AIAgentHandler) ListRuntimeProfiles(c *gin.Context) {
-	ctx := aiGovernanceContext(c, h.DB)
-	if ctx.WorkspaceID == 0 || !userCanAccessWorkspace(h.DB, ctx.WorkspaceID, ctx.UserID, ctx.SystemRole) {
-		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "无权访问 Runtime Profile"})
-		return
-	}
-	var profiles []models.AIRuntimeProfile
-	if err := h.DB.Preload("Model").Where("workspace_id = ?", ctx.WorkspaceID).Order("updated_at DESC, id DESC").Find(&profiles).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "加载 Runtime Profile 失败"})
-		return
-	}
-	if RequireWorkspaceGovernance(ctx) {
-		c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": profiles})
-		return
-	}
-	summaries := make([]*aiRuntimeProfileSummary, 0, len(profiles))
-	for i := range profiles {
-		summaries = append(summaries, buildRuntimeProfileSummary(&profiles[i]))
-	}
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": summaries})
-}
-
-func (h *AIAgentHandler) CreateRuntimeProfile(c *gin.Context) {
-	workspaceID, userID, ok := requireWorkspaceGovernance(c, h.DB)
-	if !ok {
-		return
-	}
-	var req aiAgentRuntimeProfileRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
-		return
-	}
-	if err := ensureModelExists(h.DB, req.ModelID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "模型不存在"})
-		return
-	}
-	if err := validateRuntimeProfileBindings(h.DB, workspaceID, req.ModelID, req.BindingPriorityJSON); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "binding_priority_json 无效"})
-		return
-	}
-	fallbackEnabled := true
-	if req.FallbackEnabled != nil {
-		fallbackEnabled = *req.FallbackEnabled
-	}
-	item := models.AIRuntimeProfile{
-		WorkspaceID:         workspaceID,
-		Name:                strings.TrimSpace(req.Name),
-		ModelID:             req.ModelID,
-		BindingPriorityJSON: marshalJSONOrEmpty(req.BindingPriorityJSON),
-		RuntimeSettingsJSON: marshalJSONOrEmpty(req.RuntimeSettingsJSON),
-		FallbackEnabled:     fallbackEnabled,
-		Status:              models.AIRuntimeProfileStatus(defaultIfEmpty(strings.TrimSpace(req.Status), string(models.AIRuntimeProfileStatusDraft))),
-		CreatedBy:           userID,
-	}
-	if err := h.DB.Create(&item).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "创建 Runtime Profile 失败"})
-		return
-	}
-	_ = h.DB.Preload("Model").First(&item, item.ID).Error
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": item})
-}
-
-func (h *AIAgentHandler) UpdateRuntimeProfile(c *gin.Context) {
-	workspaceID, _, ok := requireWorkspaceGovernance(c, h.DB)
-	if !ok {
-		return
-	}
-	var item models.AIRuntimeProfile
-	if err := h.DB.Where("workspace_id = ?", workspaceID).First(&item, c.Param("profile_id")).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "Runtime Profile 不存在"})
-		return
-	}
-	var req aiAgentRuntimeProfileRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
-		return
-	}
-	if err := ensureModelExists(h.DB, req.ModelID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "模型不存在"})
-		return
-	}
-	if err := validateRuntimeProfileBindings(h.DB, workspaceID, req.ModelID, req.BindingPriorityJSON); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "binding_priority_json 无效"})
-		return
-	}
-	fallbackEnabled := item.FallbackEnabled
-	if req.FallbackEnabled != nil {
-		fallbackEnabled = *req.FallbackEnabled
-	}
-	updates := map[string]any{
-		"name":                  strings.TrimSpace(req.Name),
-		"model_id":              req.ModelID,
-		"binding_priority_json": marshalJSONOrEmpty(req.BindingPriorityJSON),
-		"runtime_settings_json": marshalJSONOrEmpty(req.RuntimeSettingsJSON),
-		"fallback_enabled":      fallbackEnabled,
-		"status":                defaultIfEmpty(strings.TrimSpace(req.Status), string(item.Status)),
-	}
-	if err := h.DB.Model(&item).Updates(updates).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "更新 Runtime Profile 失败"})
-		return
-	}
-	_ = h.DB.Preload("Model").First(&item, item.ID).Error
-	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": item})
-}
-
-func pipelineNodeReferencesRuntimeProfile(node PipelineNode, profileID uint64) bool {
-	if profileID == 0 {
-		return false
-	}
-	if toUint64Value(node.Config["runtime_profile_id"]) == profileID {
-		return true
-	}
-	if toUint64Value(node.Params["runtime_profile_id"]) == profileID {
-		return true
-	}
-	for _, param := range node.DefinitionParams {
-		if param.Key == "runtime_profile_id" && toUint64Value(param.Value) == profileID {
-			return true
-		}
-	}
-	return false
-}
-
-func (h *AIAgentHandler) countPipelineDefinitionRuntimeProfileRefs(workspaceID, profileID uint64) (int64, error) {
-	var pipelines []models.Pipeline
-	if err := h.DB.Select("id", "name", "workspace_id", "config", "definition_json").Where("workspace_id = ?", workspaceID).Find(&pipelines).Error; err != nil {
-		return 0, err
-	}
-	var count int64
-	for _, pipeline := range pipelines {
-		raw := strings.TrimSpace(pipelineDefinitionPayload(pipeline))
-		if raw == "" {
-			continue
-		}
-		config, err := parsePipelineConfigJSON(raw)
-		if err != nil {
-			return 0, err
-		}
-		for _, node := range config.Nodes {
-			if pipelineNodeReferencesRuntimeProfile(node, profileID) {
-				count++
-				break
-			}
-		}
-	}
-	return count, nil
-}
-
-func (h *AIAgentHandler) DeleteRuntimeProfile(c *gin.Context) {
-	workspaceID, _, ok := requireWorkspaceGovernance(c, h.DB)
-	if !ok {
-		return
-	}
-	profileID, err := strconv.ParseUint(c.Param("profile_id"), 10, 64)
-	if err != nil || profileID == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "profile_id 无效"})
-		return
-	}
-	var agentRefCount int64
-	if err := h.DB.Model(&models.AIAgent{}).Where("workspace_id = ? AND runtime_profile_id = ?", workspaceID, profileID).Count(&agentRefCount).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "检查 Runtime Profile 引用失败"})
-		return
-	}
-	if agentRefCount > 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "该 Runtime Profile 已被 AI Agent 引用，无法删除"})
-		return
-	}
-	var sessionRefCount int64
-	if err := h.DB.Model(&models.AISession{}).Where("workspace_id = ? AND runtime_profile_id = ?", workspaceID, profileID).Count(&sessionRefCount).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "检查 Runtime Profile 引用失败"})
-		return
-	}
-	if sessionRefCount > 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "该 Runtime Profile 已被 AI Session 引用，无法删除"})
-		return
-	}
-	pipelineRefCount, err := h.countPipelineDefinitionRuntimeProfileRefs(workspaceID, profileID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "检查 Runtime Profile 引用失败"})
-		return
-	}
-	if pipelineRefCount > 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "该 Runtime Profile 已被流水线定义引用，无法删除"})
-		return
-	}
-	if err := h.DB.Where("workspace_id = ?", workspaceID).Delete(&models.AIRuntimeProfile{}, profileID).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "删除 Runtime Profile 失败"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "message": "删除成功"})

@@ -1,5 +1,6 @@
 global:
   imagePullSecrets: []
+  internalToken: easydo-internal-token
 
 frontend:
   replicaCount: 1
@@ -23,7 +24,6 @@ server:
   env:
     serverMode: release
     serverPublicURL: http://easydo.local
-    serverInternalToken: easydo-internal-token
     jwtSecret: easydo-secret-key
     authTokenTTL: 4h
     authRefreshInterval: 10m
@@ -32,6 +32,39 @@ server:
     smtpPort: "25"
     smtpFromAddress: noreply@easydo.local
     smtpFromName: EasyDo
+
+aiRuntime:
+  replicaCount: 2
+  image:
+    repository: easydo-ai-runtime
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8090
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  probes:
+    liveness:
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 6
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 6
+  runLeaseMs: 15000
+  runStreamPollMs: 250
+  workspace:
+    dockerHost: ""
+    image: easydo-ai-workspace:latest
 
 agent:
   replicaCount: 2
@@ -116,6 +149,9 @@ ingress:
   enabled: true
   className: nginx
   host: easydo.local
+  proxyReadTimeout: "3600"
+  proxySendTimeout: "3600"
+  proxyBuffering: "off"
   annotations: {}
 
 storage:

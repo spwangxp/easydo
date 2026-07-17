@@ -2720,32 +2720,11 @@ const formatTaskOutputs = (outputs, taskType) => {
     // shell 类型输出已经在通用字段中显示
   }
 
-  if (taskType === 'mr_quality_check') {
-    if (outputs.summary) lines.push({ label: 'Summary', value: outputs.summary, type: 'info' })
-    if (outputs.quality_score !== undefined) lines.push({ label: 'Quality Score', value: outputs.quality_score, type: Number(outputs.quality_score) >= 80 ? 'success' : 'warning' })
-    if (outputs.issues_count !== undefined) lines.push({ label: 'Issues Count', value: outputs.issues_count, type: outputs.issues_count > 0 ? 'warning' : 'success' })
-    if (Array.isArray(outputs.issues) && outputs.issues.length > 0) {
-      lines.push({ label: 'Issues', value: formatTaskOutputValue(outputs.issues), type: 'default' })
-    }
-  }
-
-  if (taskType === 'requirement_defect_check') {
-    if (outputs.summary) lines.push({ label: 'Summary', value: outputs.summary, type: 'info' })
-    if (outputs.defect_count !== undefined) lines.push({ label: 'Defect Count', value: outputs.defect_count, type: outputs.defect_count > 0 ? 'warning' : 'success' })
-    if (Array.isArray(outputs.defects) && outputs.defects.length > 0) {
-      lines.push({ label: 'Defects', value: formatTaskOutputValue(outputs.defects), type: 'default' })
-    }
-    if (Array.isArray(outputs.suggestions) && outputs.suggestions.length > 0) {
-      lines.push({ label: 'Suggestions', value: formatTaskOutputValue(outputs.suggestions), type: 'info' })
-    }
-  }
-
   // 添加其他未处理的字段
   const knownKeys = ['exit_code', 'duration', 'git_commit', 'git_commit_short', 'git_ref', 'git_repo_url', 'git_checkout_path',
     'image_name', 'image_tag', 'image_full_name', 'pushed', 'artifact_path',
     'tests_passed', 'tests_failed', 'tests_skipped', 'coverage_percentage',
-    'container_id', 'container_name', 'image_ref',
-    'summary', 'quality_score', 'issues', 'issues_count', 'defects', 'defect_count', 'suggestions']
+    'container_id', 'container_name', 'image_ref']
   for (const [key, value] of Object.entries(outputs)) {
     if (!knownKeys.includes(key) && value !== undefined && value !== null && value !== '') {
       lines.push({ label: key, value: formatTaskOutputValue(value), type: 'default' })

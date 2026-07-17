@@ -91,6 +91,36 @@ test('buildDeployVramEstimate returns sufficient status when gpu capacity is ade
   assert.ok(estimate.usageRatio < estimate.gpuUtilization)
 })
 
+test('buildDeployVramEstimate infers parameter size from model identifiers when catalog metadata is missing', () => {
+  const estimate = buildDeployVramEstimate({
+    model: { name: 'openai/gpt-oss-120b', sourceModelId: 'openai/gpt-oss-120b' },
+    parameterValues: { max_model_len: 4096, max_num_seqs: 1, gpu_memory_utilization: 0.9 },
+    gpuDevices: [
+      { index: 0, memoryBytes: 64 * 1024 ** 3, deviceKey: 'gpu-0' },
+      { index: 1, memoryBytes: 64 * 1024 ** 3, deviceKey: 'gpu-1' },
+      { index: 2, memoryBytes: 64 * 1024 ** 3, deviceKey: 'gpu-2' },
+      { index: 3, memoryBytes: 64 * 1024 ** 3, deviceKey: 'gpu-3' }
+    ],
+    selectedGpuDeviceKeys: ['gpu-0', 'gpu-1', 'gpu-2', 'gpu-3']
+  })
+
+  assert.equal(estimate.parameterCount, 120e9)
+  assert.ok(estimate.totalBytes > 0)
+  assert.notEqual(estimate.status, 'missing-data')
+})
+
+test('buildDeployVramEstimate does not infer parameter size from version-only model identifiers', () => {
+  const estimate = buildDeployVramEstimate({
+    model: { name: 'openai/gpt-4.1', sourceModelId: 'openai/gpt-4.1' },
+    parameterValues: { max_model_len: 4096, max_num_seqs: 1, gpu_memory_utilization: 0.9 },
+    gpuDevices: [{ index: 0, memoryBytes: 80 * 1024 ** 3, deviceKey: 'gpu-0' }],
+    selectedGpuDeviceKeys: ['gpu-0']
+  })
+
+  assert.equal(estimate.parameterCount, 0)
+  assert.equal(estimate.status, 'missing-data')
+})
+
  test('buildDeployVramEstimate returns missing-data when gpu memory is unavailable', () => {
   const estimate = buildDeployVramEstimate({
     model: { parameterSize: '7B', architecture: 'qwen' },

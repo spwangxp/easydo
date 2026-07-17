@@ -1,7 +1,6 @@
 export const aiStoreSections = [
   { key: 'providers', title: 'AI Providers' },
-  { key: 'agents', title: 'AI Agents' },
-  { key: 'runtimeProfiles', title: 'AI Runtime Profiles' }
+  { key: 'deployments', title: 'AI Deployments' }
 ]
 
 export function normalizeAiStoreState(payload = {}) {
@@ -27,8 +26,6 @@ export function normalizeAiStoreState(payload = {}) {
   return {
     models,
     providers,
-    agents: normalizeArray(payload.agents),
-    runtimeProfiles: normalizeArray(payload.runtimeProfiles),
     deployments: normalizeArray(payload.deployments)
   }
 }
@@ -40,13 +37,12 @@ export function buildAiStoreSummary(payload = {}) {
   return [
     { key: 'providers', label: 'AI Providers', value: state.providers.length, tone: 'primary' },
     { key: 'bindings', label: 'Model Bindings', value: activeBindings, tone: 'warning' },
-    { key: 'agents', label: 'AI Agents', value: state.agents.length, tone: 'success' },
-    { key: 'runtimeProfiles', label: 'AI Runtime Profiles', value: state.runtimeProfiles.length, tone: 'info' }
+    { key: 'deployments', label: 'AI Deployments', value: state.deployments.length, tone: 'success' }
   ]
 }
 
-export function buildModelRows({ models = [], providers = [], runtimeProfiles = [], agents = [], deployments = [], keyword = '' } = {}) {
-  const state = normalizeAiStoreState({ models, providers, runtimeProfiles, agents, deployments })
+export function buildModelRows({ models = [], providers = [], deployments = [], keyword = '' } = {}) {
+  const state = normalizeAiStoreState({ models, providers, deployments })
   const normalizedKeyword = String(keyword).trim().toLowerCase()
 
   return state.models
@@ -62,43 +58,6 @@ export function buildModelRows({ models = [], providers = [], runtimeProfiles = 
         return buildProviderRow(provider, providerBindings)
       })
 
-      const modelRuntimeProfiles = state.runtimeProfiles.filter(
-        (runtimeProfile) => String(runtimeProfile.model_id) === String(model.id)
-      )
-
-      const runtimeUsage = modelRuntimeProfiles.flatMap((runtimeProfile) => {
-        const bindingPriorityText = normalizeBindingPriorityText(
-          runtimeProfile.binding_priority_json ?? runtimeProfile.bindingPriorityJSON
-        )
-
-        const referencingAgents = state.agents.filter((agent) => {
-          const runtimeProfileId = agent.runtime_profile_id ?? agent.runtimeProfileID ?? agent.runtime_profile?.id ?? null
-          return runtimeProfileId != null && runtimeProfileId !== '' && String(runtimeProfileId) === String(runtimeProfile.id)
-        })
-
-        if (referencingAgents.length === 0) {
-          return [{
-            id: `${runtimeProfile.id}-unbound`,
-            runtime_profile_id: runtimeProfile.id,
-            runtime_name: runtimeProfile.runtime_name || runtimeProfile.name || '',
-            agent_id: null,
-            agent_name: '未绑定 Agent',
-            binding_priority_text: bindingPriorityText,
-            status: runtimeProfile.status || ''
-          }]
-        }
-
-        return referencingAgents.map((agent) => ({
-          id: `${runtimeProfile.id}-${agent.id}`,
-          runtime_profile_id: runtimeProfile.id,
-          runtime_name: runtimeProfile.runtime_name || runtimeProfile.name || '',
-          agent_id: agent.id,
-          agent_name: agent.name || '',
-          binding_priority_text: bindingPriorityText,
-          status: runtimeProfile.status || ''
-        }))
-      })
-
       const row = {
         id: model.id,
         name: model.name || '',
@@ -107,18 +66,15 @@ export function buildModelRows({ models = [], providers = [], runtimeProfiles = 
         source: model.source || '',
         deploymentCount: modelDeployments.length,
         providerCount: modelProviders.length,
-        runtimeCount: runtimeUsage.length,
         providers: providerRows,
         deployments: modelDeployments,
-        runtimeUsage,
         searchText: [
           model.name,
           model.parameter_size,
           formatModalities(model.modalities),
           model.source,
           ...providerRows.flatMap((provider) => [provider.name, provider.source, provider.endpoint, provider.status, provider.binding_key]),
-          ...modelDeployments.flatMap((deployment) => [deployment.resource_name, deployment.template_name, deployment.version_label, deployment.provider_name]),
-          ...runtimeUsage.flatMap((runtimeRow) => [runtimeRow.runtime_name, runtimeRow.agent_name, runtimeRow.binding_priority_text, runtimeRow.status])
+          ...modelDeployments.flatMap((deployment) => [deployment.resource_name, deployment.template_name, deployment.version_label, deployment.provider_name])
         ]
           .filter(Boolean)
           .join(' ')
@@ -150,6 +106,130 @@ export function buildProviderRows({ providers = [], keyword = '' } = {}) {
       provider.status
     ].join(' ').toLowerCase().includes(normalizedKeyword)
   })
+}
+
+export function buildDiscoveredProviderModelRows({ candidates = [], models = [] } = {}) {
+  return normalizeArray(candidates).map((candidate, index) => {
+    const providerModelKey = String(candidate.provider_model_key || candidate.id || '').trim()
+    const modelName = String(candidate.model_name || candidate.name || candidate.provider_display_name || providerModelKey).trim()
+    const matchedModel = findMatchingModelForCandidate(candidate, models)
+    return {
+      local_id: `discovered-${index}-${providerModelKey || modelName}`,
+      selected: candidate.recommended === true || index === 0,
+      provider_model_key: providerModelKey,
+      provider_display_name: String(candidate.provider_display_name || modelName || providerModelKey).trim(),
+      model_name: modelName || providerModelKey,
+      model_kind: candidate.model_kind || 'chat',
+      model_family: candidate.model_family || '',
+      source_model_id: String(candidate.source_model_id || providerModelKey || modelName).trim(),
+      target_mode: matchedModel ? 'existing' : 'create',
+      model_id: matchedModel?.id ?? null,
+      modalities: normalizeStringList(candidate.modalities),
+      capabilities: normalizeStringList(candidate.capabilities),
+      context_window: numberOrNull(candidate.context_window),
+      max_output_tokens: numberOrNull(candidate.max_output_tokens),
+      pricing: candidate.pricing || {},
+      raw: candidate.raw || candidate
+    }
+  })
+}
+
+export function filterDiscoveredProviderModelRows({ rows = [], keyword = '' } = {}) {
+  const terms = String(keyword || '').trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const normalizedRows = normalizeArray(rows)
+  if (terms.length === 0) return normalizedRows
+
+  return normalizedRows.filter((row) => {
+    const searchText = [
+      row.provider_display_name,
+      row.provider_model_key,
+      row.model_name,
+      row.model_kind,
+      row.model_family,
+      row.source_model_id,
+      row.context_window,
+      row.max_output_tokens,
+      ...normalizeStringList(row.modalities),
+      ...normalizeStringList(row.capabilities)
+    ]
+      .filter((item) => item !== undefined && item !== null && item !== '')
+      .join(' ')
+      .toLowerCase()
+
+    return terms.every((term) => searchText.includes(term))
+  })
+}
+
+export function paginateDiscoveredProviderModelRows({ rows = [], page = 1, pageSize = 10 } = {}) {
+  const normalizedRows = normalizeArray(rows)
+  const safePageSize = Math.max(Number(pageSize) || 10, 1)
+  const safePage = Math.max(Number(page) || 1, 1)
+  const start = (safePage - 1) * safePageSize
+  return normalizedRows.slice(start, start + safePageSize)
+}
+
+export function buildDiscoveredModelImportPayload(row = {}) {
+  const metadata = {
+    provider_model_key: row.provider_model_key,
+    provider_display_name: row.provider_display_name,
+    model_family: row.model_family,
+    model_kind: row.model_kind,
+    modalities: row.modalities || [],
+    capabilities: row.capabilities || [],
+    context_window: row.context_window,
+    max_output_tokens: row.max_output_tokens,
+    pricing: row.pricing || {},
+    raw: row.raw || {}
+  }
+
+  return {
+    source: 'provider-discovered',
+    source_model_id: String(row.source_model_id || row.provider_model_key || row.model_name || '').trim(),
+    name: String(row.model_name || row.provider_display_name || row.provider_model_key || '').trim(),
+    display_name: String(row.provider_display_name || row.model_name || row.provider_model_key || '').trim(),
+    context_window: numberOrNull(row.context_window),
+    tags: [...normalizeStringList(row.modalities), ...normalizeStringList(row.capabilities)],
+    metadata
+  }
+}
+
+export function buildDiscoveredModelBindingMetadata(row = {}) {
+  const contextWindow = numberOrNull(row.context_window)
+  const maxOutputTokens = numberOrNull(row.max_output_tokens)
+  const capabilities = normalizeStringList(row.capabilities)
+  const supportsToolUse = capabilities.some((item) => ['tool', 'tools', 'function_calling', 'tool_use'].includes(String(item).toLowerCase()))
+  return {
+    source: 'discovered',
+    capability_source: contextWindow ? 'provider_api' : 'manual_override',
+    provider_display_name: row.provider_display_name || '',
+    model_name: row.model_name || '',
+    model_kind: row.model_kind || '',
+    model_family: row.model_family || '',
+    modalities: normalizeStringList(row.modalities),
+    capabilities,
+    context_window: contextWindow,
+    context_window_tokens: contextWindow,
+    max_output_tokens: maxOutputTokens,
+    supports_tool_use: supportsToolUse,
+    supports_streaming: true,
+    pricing: row.pricing || {},
+    raw: row.raw || {}
+  }
+}
+
+export function buildModelBindingCapabilityPayload(row = {}, metadata = {}) {
+  const merged = {
+    ...buildDiscoveredModelBindingMetadata(row),
+    ...(metadata && typeof metadata === 'object' ? metadata : {})
+  }
+  return {
+    context_window_tokens: numberOrNull(merged.context_window_tokens || merged.context_window),
+    max_output_tokens: numberOrNull(merged.max_output_tokens),
+    supports_tool_use: Boolean(merged.supports_tool_use),
+    supports_streaming: merged.supports_streaming !== false,
+    capability_source: String(merged.capability_source || (numberOrNull(merged.context_window_tokens || merged.context_window) ? 'provider_api' : 'manual_override')),
+    metadata_json: merged
+  }
 }
 
 export function buildRuntimeBindingHints({ modelId, providers = [] } = {}) {
@@ -220,10 +300,58 @@ export function buildAIDeploymentRequestPayload({ modelId, templateVersionId, ta
   }
 }
 
-export function buildAIModelImportPayload({ source, sourceModelId, source_model_id } = {}) {
+export function buildAIModelImportPayload({
+  source,
+  sourceModelId,
+  source_model_id,
+  name,
+  displayName,
+  display_name,
+  modelKind,
+  parameterSize,
+  parameter_size,
+  summary,
+  license,
+  tagsText,
+  tags,
+  repositoryUrl,
+  repository_url,
+  revision,
+  format,
+  recommendedRuntime,
+  recommended_runtime,
+  credentialId,
+  credential_id,
+  contextWindow,
+  context_window
+} = {}) {
+  const trimmedName = String(name || '').trim()
+  const modelSourceID = String(sourceModelId || source_model_id || trimmedName || '').trim()
+  const resolvedContextWindow = numberOrNull(contextWindow || context_window)
+  const metadata = {
+    model_kind: String(modelKind || '').trim(),
+    context_window: resolvedContextWindow,
+    repository_url: String(repositoryUrl || repository_url || '').trim(),
+    revision: String(revision || '').trim(),
+    format: String(format || '').trim(),
+    recommended_runtime: String(recommendedRuntime || recommended_runtime || '').trim()
+  }
+  const resolvedCredentialID = credentialId || credential_id || null
+  if (resolvedCredentialID) {
+    metadata.credential_id = resolvedCredentialID
+  }
+
   return {
     source: String(source || '').trim(),
-    source_model_id: String(sourceModelId || source_model_id || '').trim()
+    source_model_id: modelSourceID,
+    name: trimmedName,
+    display_name: String(displayName || display_name || '').trim(),
+    parameter_size: String(parameterSize || parameter_size || '').trim(),
+    context_window: resolvedContextWindow,
+    summary: String(summary || '').trim(),
+    license: String(license || '').trim(),
+    tags: normalizeStringList(tags || tagsText),
+    metadata
   }
 }
 
@@ -309,12 +437,6 @@ export function buildDemoProviderRecord(form = {}, selectedModel = {}) {
   }
 }
 
-export function shouldResetRuntimeBindingPriority({ previousModelId, nextModelId, bindingPriorityJSON } = {}) {
-  if (!previousModelId || !nextModelId) return false
-  if (String(previousModelId) === String(nextModelId)) return false
-  return String(bindingPriorityJSON || '').trim() !== '' && String(bindingPriorityJSON || '').trim() !== '[]'
-}
-
 export function getInvalidJsonFieldLabels(fields = []) {
   return normalizeArray(fields)
     .filter((field) => {
@@ -345,6 +467,22 @@ function buildProviderRow(provider, bindings = []) {
   }
 }
 
+function findMatchingModelForCandidate(candidate = {}, models = []) {
+  const sourceModelID = String(candidate.source_model_id || candidate.provider_model_key || '').trim().toLowerCase()
+  const modelName = String(candidate.model_name || candidate.name || candidate.provider_display_name || '').trim().toLowerCase()
+  return normalizeArray(models).find((model) => {
+    const names = [
+      model.id,
+      model.name,
+      model.display_name,
+      model.displayName,
+      model.source_model_id,
+      model.sourceModelId
+    ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)
+    return names.includes(sourceModelID) || names.includes(modelName)
+  }) || null
+}
+
 function normalizeBindings(...candidates) {
   for (const candidate of candidates) {
     if (Array.isArray(candidate)) {
@@ -352,19 +490,6 @@ function normalizeBindings(...candidates) {
     }
   }
   return []
-}
-
-function normalizeBindingPriorityText(value) {
-  if (value == null) return '-'
-  if (typeof value === 'string') {
-    const normalized = value.trim()
-    return normalized || '-'
-  }
-  try {
-    return JSON.stringify(value)
-  } catch {
-    return '-'
-  }
 }
 
 function normalizeParameterFields(fields = []) {
@@ -431,6 +556,17 @@ function normalizeParameterFieldOptions(optionValues) {
 
 function normalizeArray(value) {
   return Array.isArray(value) ? value : []
+}
+
+function normalizeStringList(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean)
+  if (typeof value === 'string') return value.split(',').map((item) => item.trim()).filter(Boolean)
+  return []
+}
+
+function numberOrNull(value) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : null
 }
 
 function normalizeModalities(modalities, modalitiesText) {

@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "easydo.aiRuntimeFullname" . }}
+  labels:
+    {{- include "easydo.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.aiRuntime.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "easydo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ai-runtime
+  template:
+    metadata:
+      labels:
+        {{- include "easydo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ai-runtime
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: ai-runtime
+          image: "{{ .Values.aiRuntime.image.repository }}:{{ .Values.aiRuntime.image.tag }}"
+          imagePullPolicy: {{ .Values.aiRuntime.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.aiRuntime.service.port }}
+          env:
+            - name: AI_RUNTIME_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: AI_RUNTIME_RUN_LEASE_MS
+              value: {{ .Values.aiRuntime.runLeaseMs | quote }}
+            - name: AI_RUNTIME_RUN_STREAM_POLL_MS
+              value: {{ .Values.aiRuntime.runStreamPollMs | quote }}
+            - name: AI_RUNTIME_PORT
+              value: {{ .Values.aiRuntime.service.port | quote }}
+            - name: AI_RUNTIME_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "easydo.runtimeSecretFullname" . }}
+                  key: ai-runtime-internal-token
+            - name: AI_RUNTIME_DB_ENABLED
+              value: "true"
+            - name: AI_RUNTIME_DB_HOST
+              value: {{ include "easydo.mariadbFullname" . | quote }}
+            - name: AI_RUNTIME_DB_PORT
+              value: {{ .Values.mariadb.service.port | quote }}
+            - name: AI_RUNTIME_DB_USER
+              value: root
+            - name: AI_RUNTIME_DB_PASSWORD
+              value: {{ .Values.mariadb.auth.rootPassword | quote }}
+            - name: AI_RUNTIME_DB_NAME
+              value: {{ .Values.mariadb.auth.database | quote }}
+            - name: AI_RUNTIME_EASYDO_SERVER_URL
+              value: "http://{{ include "easydo.serverFullname" . }}:{{ .Values.server.service.port }}"
+            - name: AI_RUNTIME_WORKSPACE_DOCKER_HOST
+              value: {{ required "aiRuntime.workspace.dockerHost must reference a remote Docker-compatible sandbox endpoint" .Values.aiRuntime.workspace.dockerHost | quote }}
+            - name: AI_RUNTIME_WORKSPACE_IMAGE
+              value: {{ .Values.aiRuntime.workspace.image | quote }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: {{ .Values.aiRuntime.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.aiRuntime.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.aiRuntime.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.aiRuntime.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: {{ .Values.aiRuntime.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.aiRuntime.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.aiRuntime.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.aiRuntime.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.aiRuntime.resources | nindent 12 }}

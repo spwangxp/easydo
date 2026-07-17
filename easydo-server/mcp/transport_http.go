@@ -82,7 +82,7 @@ func (s *Server) handleStreamableHTTP(c *gin.Context) {
 		return
 	}
 
-	actor, authErr := AuthenticateRequest(ctx, c.GetHeader("Authorization"))
+	actor, authErr := AuthenticateRequest(ctx, s.db, c.GetHeader("Authorization"))
 	if authErr != nil {
 		s.recordFailure(ctx, auditInput, authErr)
 		s.writeJSONRPCError(c, req.ID, authErr)
@@ -230,9 +230,11 @@ func (s *Server) toolMetadata() []any {
 	tools := make([]any, 0, len(registered))
 	for _, tool := range registered {
 		tools = append(tools, map[string]any{
-			"name":        tool.Name,
-			"description": tool.Description,
-			"inputSchema": tool.InputSchema,
+			"name":          tool.Name,
+			"description":   tool.Description,
+			"inputSchema":   tool.InputSchema,
+			"operationType": string(tool.OperationType),
+			"targetType":    tool.TargetType,
 		})
 	}
 	return tools

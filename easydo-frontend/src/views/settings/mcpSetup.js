@@ -26,7 +26,7 @@ export function buildClaudeCodeMcpSnippet({ origin = '' } = {}) {
   return JSON.stringify({
     mcpServers: {
       easydo: {
-        type: 'http',
+        type: 'streamable_http',
         url: buildMcpUrl(origin),
         headers: {
           Authorization: `Bearer \${${MCP_TOKEN_ENV_NAME}}`

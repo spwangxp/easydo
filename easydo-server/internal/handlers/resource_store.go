@@ -535,6 +535,22 @@ func (h *ResourceHandler) RequestResourceBaseInfoRefresh(ctx context.Context, re
 	return services.RefreshResourceBaseInfoResult{TaskID: task.ID, Status: task.Status, AgentID: task.AgentID}, nil
 }
 
+func (h *ResourceHandler) ResolveMCPResourceID(ctx context.Context, actor services.ActorContext, workspaceID uint64, rawValue any) (uint64, error) {
+	if actor.UserID == 0 {
+		return 0, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: "actor user id is required"}
+	}
+	if h == nil || h.DB == nil {
+		return 0, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: "db is required"}
+	}
+	if workspaceID == 0 {
+		return 0, services.ServiceError{Code: services.ErrorCodeInvalidArgument, Message: "workspace_id is required"}
+	}
+	if !userCanManageWorkspace(h.DB.WithContext(ctx), workspaceID, actor.UserID, actor.SystemRole) {
+		return 0, services.ServiceError{Code: services.ErrorCodeForbidden, Message: "workspace manage access required"}
+	}
+	return services.ResolveResourceIDForMCPTool(ctx, h.DB, workspaceID, rawValue)
+}
+
 func (h *ResourceHandler) DeleteResource(c *gin.Context) {
 	workspaceID, _ := getRequestWorkspace(c)
 	userID, role := getRequestUser(c)
@@ -2244,11 +2260,13 @@ func (h *AIModelCatalogHandler) ListModels(c *gin.Context) {
 		return
 	}
 	for i := range catalog {
-		if strings.TrimSpace(catalog[i].ParameterSize) != "" {
-			continue
-		}
 		metadata := decodeJSONObjectField(catalog[i].Metadata, map[string]interface{}{}).(map[string]interface{})
-		catalog[i].ParameterSize = resolveImportedModelParameterSize(metadata)
+		if strings.TrimSpace(catalog[i].ParameterSize) == "" {
+			catalog[i].ParameterSize = resolveAIModelCatalogParameterSize(catalog[i], metadata)
+		}
+		if catalog[i].ContextWindow <= 0 {
+			catalog[i].ContextWindow = resolveAIModelCatalogContextWindow(catalog[i], metadata)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "data": catalog})
@@ -2256,21 +2274,27 @@ func (h *AIModelCatalogHandler) ListModels(c *gin.Context) {
 
 func (h *AIModelCatalogHandler) ImportModel(c *gin.Context) {
 	userID, role := getRequestUser(c)
-	if !isAdminRole(role) {
-		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "仅管理员可导入模型"})
-		return
-	}
+	workspaceID, _ := getRequestWorkspace(c)
 
 	var req importAIModelRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "请求参数无效"})
 		return
 	}
+	normalizedSource := normalizeAIModelCatalogSource(req.Source)
+	if normalizedSource == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "模型来源仅支持 huggingface、modelscope、provider-discovered、manual、private-repo 或 self-deploy"})
+		return
+	}
+	if !canImportAIModelCatalogSource(h.DB, workspaceID, userID, role, normalizedSource) {
+		c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "无权导入模型"})
+		return
+	}
 	if strings.TrimSpace(req.SourceModelID) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "模型 ID 不能为空"})
 		return
 	}
-	if req.Metadata == nil {
+	if req.Metadata == nil && (normalizedSource == "huggingface" || normalizedSource == "modelscope") {
 		fetched, err := fetchImportedAIModelMetadata(req.Source, req.SourceModelID)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": err.Error()})
@@ -2336,6 +2360,7 @@ type importAIModelRequest struct {
 	Name          string                 `json:"name"`
 	DisplayName   string                 `json:"display_name"`
 	ParameterSize string                 `json:"parameter_size"`
+	ContextWindow int64                  `json:"context_window"`
 	Summary       string                 `json:"summary"`
 	License       string                 `json:"license"`
 	Tags          []string               `json:"tags"`
@@ -3345,15 +3370,42 @@ func normalizeAIModelCatalogSource(source string) string {
 		return "huggingface"
 	case "modelscope", "ms":
 		return "modelscope"
+	case "provider-discovered", "provider_discovered", "provider":
+		return "provider-discovered"
+	case "manual":
+		return "manual"
+	case "private-repo", "private_repo":
+		return "private-repo"
+	case "self-deploy", "self_deploy":
+		return "self-deploy"
 	default:
 		return ""
 	}
 }
 
+func isWorkspaceAIModelCatalogSource(source string) bool {
+	switch normalizeAIModelCatalogSource(source) {
+	case "provider-discovered", "manual", "private-repo", "self-deploy":
+		return true
+	default:
+		return false
+	}
+}
+
+func canImportAIModelCatalogSource(db *gorm.DB, workspaceID, userID uint64, systemRole, source string) bool {
+	if isAdminRole(systemRole) {
+		return true
+	}
+	if !isWorkspaceAIModelCatalogSource(source) {
+		return false
+	}
+	return workspaceID > 0 && userCanWriteWorkspaceResource(db, workspaceID, userID, systemRole)
+}
+
 func buildImportedAIModelCatalog(req importAIModelRequest, importedBy uint64) (models.AIModelCatalog, error) {
 	source := normalizeAIModelCatalogSource(req.Source)
 	if source == "" {
-		return models.AIModelCatalog{}, fmt.Errorf("模型来源仅支持 huggingface 或 modelscope")
+		return models.AIModelCatalog{}, fmt.Errorf("模型来源仅支持 huggingface、modelscope、provider-discovered、manual、private-repo 或 self-deploy")
 	}
 	metadata := req.Metadata
 	if metadata == nil {
@@ -3389,11 +3441,25 @@ func buildImportedAIModelCatalog(req importAIModelRequest, importedBy uint64) (m
 		return models.AIModelCatalog{}, fmt.Errorf("模型元数据序列化失败")
 	}
 	parameterSize := defaultIfEmpty(strings.TrimSpace(req.ParameterSize), resolveImportedModelParameterSize(metadata))
+	if parameterSize == "" {
+		parameterSize = resolveModelIdentifierParameterSize(req.SourceModelID, req.Name, req.DisplayName)
+	}
 	if parameterSize != "" {
 		metadata["parameter_size"] = parameterSize
 		if _, exists := metadata["model_size"]; !exists {
 			metadata["model_size"] = parameterSize
 		}
+		metadataJSON, err = json.Marshal(metadata)
+		if err != nil {
+			return models.AIModelCatalog{}, fmt.Errorf("模型元数据序列化失败")
+		}
+	}
+	contextWindow := req.ContextWindow
+	if contextWindow <= 0 {
+		contextWindow = resolveImportedModelContextWindow(metadata)
+	}
+	if contextWindow > 0 {
+		metadata["context_window"] = contextWindow
 		metadataJSON, err = json.Marshal(metadata)
 		if err != nil {
 			return models.AIModelCatalog{}, fmt.Errorf("模型元数据序列化失败")
@@ -3405,6 +3471,7 @@ func buildImportedAIModelCatalog(req importAIModelRequest, importedBy uint64) (m
 		Source:        source,
 		SourceModelID: sourceModelID,
 		ParameterSize: parameterSize,
+		ContextWindow: contextWindow,
 		Summary: defaultIfEmpty(strings.TrimSpace(req.Summary), firstNonEmptyString(
 			stringValue(metadata["description"]),
 			stringValue(nestedMapValue(metadata, "cardData", "description")),
@@ -3566,6 +3633,121 @@ func resolveImportedModelParameterSize(metadata map[string]interface{}) string {
 		}
 	}
 	return ""
+}
+
+func resolveImportedModelContextWindow(metadata map[string]interface{}) int64 {
+	if metadata == nil {
+		return 0
+	}
+	for _, candidate := range []interface{}{
+		metadata["context_window"],
+		metadata["contextWindow"],
+		metadata["context_length"],
+		metadata["contextLength"],
+		metadata["max_context_length"],
+		metadata["maxContextLength"],
+		metadata["max_model_len"],
+		metadata["maxModelLen"],
+		metadata["max_model_length"],
+		metadata["maxModelLength"],
+		metadata["max_position_embeddings"],
+		metadata["max_sequence_length"],
+		nestedMapValue(metadata, "raw", "context_window"),
+		nestedMapValue(metadata, "raw", "contextWindow"),
+		nestedMapValue(metadata, "raw", "context_length"),
+		nestedMapValue(metadata, "raw", "contextLength"),
+		nestedMapValue(metadata, "raw", "max_context_length"),
+		nestedMapValue(metadata, "raw", "max_model_len"),
+		nestedMapValue(metadata, "raw", "maxModelLen"),
+		nestedMapValue(metadata, "raw", "max_model_length"),
+		nestedMapValue(metadata, "raw", "max_position_embeddings"),
+		nestedMapValue(metadata, "raw", "max_sequence_length"),
+		nestedMapPathValue(metadata, "raw", "top_provider", "context_length"),
+		nestedMapPathValue(metadata, "raw", "top_provider", "context_window"),
+		nestedMapPathValue(metadata, "raw", "top_provider", "max_context_length"),
+		nestedMapPathValue(metadata, "raw", "top_provider", "max_model_len"),
+		nestedMapValue(metadata, "top_provider", "context_length"),
+		nestedMapValue(metadata, "top_provider", "context_window"),
+		nestedMapValue(metadata, "top_provider", "max_context_length"),
+		nestedMapValue(metadata, "top_provider", "max_model_len"),
+	} {
+		if resolved := int64(numericValue(candidate)); resolved > 0 {
+			return resolved
+		}
+	}
+	return 0
+}
+
+func resolveAIModelCatalogParameterSize(model models.AIModelCatalog, metadata map[string]interface{}) string {
+	if resolved := resolveImportedModelParameterSize(metadata); resolved != "" {
+		return resolved
+	}
+	return resolveModelIdentifierParameterSize(model.SourceModelID, model.Name, model.DisplayName)
+}
+
+func resolveAIModelCatalogContextWindow(model models.AIModelCatalog, metadata map[string]interface{}) int64 {
+	if model.ContextWindow > 0 {
+		return model.ContextWindow
+	}
+	return resolveImportedModelContextWindow(metadata)
+}
+
+func resolveModelIdentifierParameterSize(values ...string) string {
+	for _, value := range values {
+		if resolved := normalizeModelIdentifierParameterSize(value); resolved != "" {
+			return resolved
+		}
+	}
+	return ""
+}
+
+func normalizeModelIdentifierParameterSize(value string) string {
+	text := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, ",", "")))
+	if text == "" {
+		return ""
+	}
+
+	mixedRe := regexp.MustCompile(`(?:^|[^0-9a-z])(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*([tbmk])(?:$|[^0-9a-z])`)
+	if match := mixedRe.FindStringSubmatch(text); len(match) == 4 {
+		left, leftErr := strconv.ParseFloat(match[1], 64)
+		right, rightErr := strconv.ParseFloat(match[2], 64)
+		if leftErr == nil && rightErr == nil {
+			return formatParameterCountLabel(left * right * parameterUnitMultiplier(match[3]))
+		}
+	}
+
+	directRe := regexp.MustCompile(`(?:^|[^0-9a-z])(\d+(?:\.\d+)?)\s*([tbmk])(?:$|[^0-9a-z])`)
+	matches := directRe.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	var total float64
+	for _, match := range matches {
+		if len(match) != 3 {
+			continue
+		}
+		numeric, err := strconv.ParseFloat(match[1], 64)
+		if err != nil {
+			continue
+		}
+		total += numeric * parameterUnitMultiplier(match[2])
+	}
+	return formatParameterCountLabel(total)
+}
+
+func parameterUnitMultiplier(unit string) float64 {
+	switch strings.ToLower(unit) {
+	case "t":
+		return 1e12
+	case "b":
+		return 1e9
+	case "m":
+		return 1e6
+	case "k":
+		return 1e3
+	default:
+		return 0
+	}
 }
 
 func normalizeImportedParameterSize(value interface{}) string {

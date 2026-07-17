@@ -120,6 +120,7 @@
         <router-view />
       </section>
     </main>
+    <PageAssistant />
   </div>
 </template>
 
@@ -130,6 +131,7 @@ import { ElMessageBox } from 'element-plus'
 import { useUserStore } from '@/stores/user'
 import { useNotificationStore } from '@/stores/notification'
 import { useThemeStore } from '@/stores/theme'
+import PageAssistant from '@/views/ai-assistant/PageAssistant.vue'
 import { filterGovernanceMenuItems, canAccessRouteScope, resolveGovernanceFallback } from './governanceMenu.js'
 import {
   House,
