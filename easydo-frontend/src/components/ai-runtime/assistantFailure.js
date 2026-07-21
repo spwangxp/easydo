@@ -57,10 +57,7 @@ function isAssistantFailureEntry(entry = {}) {
   return entry.entry_type === 'error' || entry.status === 'failed' || entry.status === 'cancelled'
 }
 
-/**
- * Stable public failure fields for AssistantFailureCard (P2-04).
- * Always returns a non-empty reason so the card never renders blank when trace is missing.
- */
+/** Stable failure fields for rendering terminal timeline events and recovery actions. */
 function assistantFailureDetails(entry = {}) {
   const records = errorRecords(entry)
   const status = entry.status === 'cancelled' ? 'cancelled' : 'failed'
@@ -140,6 +137,85 @@ function hasAssistantPartialContent(entry = {}) {
   return Boolean(partial.answer || partial.reasoning)
 }
 
+/** Fill transport-only failure details into their chronological timeline positions. */
+function runtimeEventsWithFailureTerminal(entry = {}, events = []) {
+  if (!isAssistantFailureEntry(entry)) return events
+  const details = assistantFailureDetails(entry)
+  const partial = assistantPartialContent(entry)
+  const terminalEvent = details.status === 'cancelled' ? 'run.cancelled' : 'run.failed'
+  const entryId = firstText(entry.id, entry.idempotency_key, 'unknown')
+  const syntheticEvents = []
+
+  if (partial.reasoning && !hasRuntimeEvent(events, ['session.reasoning.started', 'session.reasoning.delta', 'session.reasoning.ended', 'reasoning_delta'])) {
+    syntheticEvents.push(syntheticRuntimeEvent(entryId, 'session.reasoning.ended', details, { text: partial.reasoning }))
+  }
+  if (partial.answer && !hasRuntimeEvent(events, ['session.text.started', 'session.text.delta', 'session.text.ended', 'answer_delta'])) {
+    syntheticEvents.push(syntheticRuntimeEvent(entryId, 'session.text.ended', details, { text: partial.answer }))
+  }
+
+  const terminalIndex = events.findIndex((event) => runtimeEventNames(event).includes(terminalEvent))
+  const timelineEvents = terminalIndex < 0
+    ? [...events, ...syntheticEvents]
+    : [...events.slice(0, terminalIndex), ...syntheticEvents, ...events.slice(terminalIndex)]
+  if (terminalIndex >= 0) return timelineEvents
+  return [...timelineEvents, syntheticRuntimeEvent(entryId, terminalEvent, details, {
+    status: details.status,
+    message: details.reason,
+    code: details.code,
+    category: details.category,
+    retryable: details.retryable
+  })]
+}
+
+function syntheticRuntimeEvent(entryId, eventName, details, fields = {}) {
+  const eventId = `assistant-entry-${entryId}-${eventName}`
+  const data = {
+    event_id: eventId,
+    event_type: eventName,
+    runtime_run_id: details.runtime_run_id,
+    timestamp: details.occurred_at,
+    synthetic: true,
+    ...fields
+  }
+  return {
+    event_id: eventId,
+    event: eventName,
+    timestamp: details.occurred_at,
+    runtime_run_id: details.runtime_run_id,
+    payload: data,
+    data,
+    display_json: {
+      event_type: eventName,
+      runtime_run_id: details.runtime_run_id,
+      timestamp: details.occurred_at,
+      status: fields.status,
+      summary: fields.message,
+      code: fields.code,
+      category: fields.category,
+      retryable: fields.retryable
+    }
+  }
+}
+
+function hasRuntimeEvent(events = [], names = []) {
+  const nameSet = new Set(names)
+  return events.some((event) => runtimeEventNames(event).some((name) => nameSet.has(name)))
+}
+
+function runtimeEventNames(event) {
+  return [
+    event?.event,
+    event?.type,
+    event?.display_json?.event_type,
+    event?.data?.event_type,
+    event?.payload?.event_type,
+    event?.data?.event?.event,
+    event?.data?.event?.type,
+    event?.payload?.event?.event,
+    event?.payload?.event?.type
+  ].map((value) => String(value || '')).filter(Boolean)
+}
+
 /**
  * Locate the user prompt that produced a failed assistant entry for retry.
  * Prefer parent_entry_id, then the nearest preceding user entry.
@@ -190,5 +266,6 @@ export {
   entryRuntimeRunId,
   hasAssistantPartialContent,
   isAssistantFailureEntry,
-  precedingUserPrompt
+  precedingUserPrompt,
+  runtimeEventsWithFailureTerminal
 }

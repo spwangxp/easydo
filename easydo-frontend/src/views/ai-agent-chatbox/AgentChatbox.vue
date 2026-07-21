@@ -74,7 +74,7 @@
 
           <div v-else-if="entry.role === 'assistant'" class="agent-card">
             <div class="chatbox-message__body">
-              <div v-if="!isAssistantFailureEntry(entry) && (chatboxStatusText(entry) || chatboxPhaseTimings(entry).length || entryRuntimeRunId(entry))" class="chatbox-message__meta-row">
+              <div v-if="chatboxStatusText(entry) || chatboxPhaseTimings(entry).length || entryRuntimeRunId(entry)" class="chatbox-message__meta-row">
                 <span v-if="chatboxStatusText(entry)" class="chatbox-status">{{ chatboxStatusText(entry) }}</span>
                 <div v-if="chatboxPhaseTimings(entry).length" class="chatbox-stage-timings">
                   <span v-for="item in chatboxPhaseTimings(entry)" :key="item.key">{{ item.label }} {{ item.value }}</span>
@@ -89,36 +89,6 @@
                 >
                   刷新轨迹
                 </el-button>
-              </div>
-              <AssistantFailureCard
-                v-if="isAssistantFailureEntry(entry)"
-                :entry="entry"
-                :refreshing="chatboxStore.isRuntimeEventsRefreshing(entryRuntimeRunId(entry))"
-                :can-continue="canContinueAfterFailure"
-                :can-retry="canRetryFailedEntry(entry)"
-                :continuing="chatboxStore.sending"
-                @refresh="refreshRuntimeTrace(entry)"
-                @continue="continueAfterFailure"
-                @retry="retryFailedEntry(entry)"
-              />
-              <div
-                v-if="isAssistantFailureEntry(entry) && hasAssistantPartialContent(entry)"
-                class="chatbox-partial-answer"
-              >
-                <div class="chatbox-partial-answer__label">已生成内容（未完成）</div>
-                <div v-if="assistantPartialContent(entry).reasoning" class="chatbox-partial-answer__reasoning">
-                  {{ assistantPartialContent(entry).reasoning }}
-                </div>
-                <div v-if="assistantPartialContent(entry).answer" class="chatbox-partial-answer__body">
-                  <template v-for="(block, index) in messageContentBlocks(entry)" :key="`${entry.id || entry.idempotency_key}-partial-${index}`">
-                    <div
-                      v-if="block.kind === 'markdown'"
-                      class="chatbox-content chatbox-content--markdown"
-                      v-html="renderMessageMarkdown(block.text)"
-                    />
-                    <div v-else class="chatbox-content chatbox-content--text">{{ block.text }}</div>
-                  </template>
-                </div>
               </div>
               <RuntimeTrace
                 ref="runtimeTraceRefs"
@@ -185,6 +155,38 @@
                       @click="submitSteer(agentAction)"
                     >
                       调整
+                    </el-button>
+                  </div>
+                </template>
+                <template #terminal-actions="{ item }">
+                  <div v-if="isFailureTerminalItem(item, entry)" class="chatbox-terminal-actions">
+                    <el-button
+                      v-if="entryRuntimeRunId(entry)"
+                      size="small"
+                      text
+                      :icon="Refresh"
+                      :loading="chatboxStore.isRuntimeEventsRefreshing(entryRuntimeRunId(entry))"
+                      @click="refreshRuntimeTrace(entry)"
+                    >
+                      刷新轨迹
+                    </el-button>
+                    <el-button
+                      size="small"
+                      :icon="Position"
+                      :disabled="failureActionDisabled"
+                      @click="continueAfterFailure(entry)"
+                    >
+                      继续
+                    </el-button>
+                    <el-button
+                      v-if="canRetryFailedEntry(entry)"
+                      size="small"
+                      type="primary"
+                      :icon="Refresh"
+                      :disabled="failureActionDisabled"
+                      @click="retryFailedEntry(entry)"
+                    >
+                      重试
                     </el-button>
                   </div>
                 </template>
@@ -330,15 +332,13 @@ import { getAgentChatboxArtifact, listAgentChatboxRunEvents } from '@/api/agentC
 import { useStickyScroll } from '@/composables/useStickyScroll'
 import RuntimeTrace from '@/components/ai-runtime/RuntimeTrace.vue'
 import RuntimeSessionQueue from '@/components/ai-runtime/RuntimeSessionQueue.vue'
-import AssistantFailureCard from '@/components/ai-runtime/AssistantFailureCard.vue'
 import { actionInputPreview, actionMeta, actionSummary, actionTitle } from '@/components/ai-runtime/actionDisplay'
 import {
   assistantFailureDetails,
-  assistantPartialContent,
   entryRuntimeRunId,
-  hasAssistantPartialContent,
   isAssistantFailureEntry,
-  precedingUserPrompt
+  precedingUserPrompt,
+  runtimeEventsWithFailureTerminal
 } from '@/components/ai-runtime/assistantFailure'
 import { buildHtmlPreviewDocument, contentBlocksFromEntry, renderMarkdownToHtml } from '@/components/ai-runtime/messageContent'
 import {
@@ -391,7 +391,7 @@ const sessionUrl = computed(() => {
   return `${window.location.origin}/store/ai-agents/chat/${chatboxStore.session?.id || route.params.session_id || ''}`
 })
 const inputDisabled = computed(() => chatboxStore.sending || chatboxStore.loading || !chatboxStore.session?.id)
-const canContinueAfterFailure = computed(() => Boolean(chatboxStore.session?.id) && !chatboxStore.sending && !chatboxStore.loading && !chatboxStore.hasActiveRun)
+const failureActionDisabled = computed(() => chatboxStore.sending || chatboxStore.loading || !chatboxStore.session?.id)
 const canSend = computed(() => {
   if (!draft.value.trim() || inputDisabled.value) return false
   if (chatboxStore.queueMode === 'steer' && !chatboxStore.hasActiveRun) return false
@@ -543,26 +543,29 @@ async function refreshRuntimeTrace(entry) {
   await chatboxStore.refreshRuntimeEvents(runtimeRunId).catch(() => {})
 }
 
-async function continueAfterFailure() {
-  await chatboxStore.continueSession().catch(() => {})
+function isFailureTerminalItem(item, entry) {
+  if (!isAssistantFailureEntry(entry)) return false
+  const details = assistantFailureDetails(entry)
+  const terminalEvent = details.status === 'cancelled' ? 'run.cancelled' : 'run.failed'
+  return String(item?.event || '') === terminalEvent
 }
 
 function canRetryFailedEntry(entry) {
-  if (!canContinueAfterFailure.value) return false
-  const details = assistantFailureDetails(entry)
-  if (!details.retryable) return false
-  const prompt = precedingUserPrompt(chatboxStore.entries, entry)
-  return Boolean(prompt.content)
+  return Boolean(precedingUserPrompt(chatboxStore.entries, entry).content)
+}
+
+async function continueAfterFailure(entry) {
+  if (!isAssistantFailureEntry(entry) || failureActionDisabled.value) return
+  await chatboxStore.continueSession('继续').catch(() => {})
 }
 
 async function retryFailedEntry(entry) {
+  if (!isAssistantFailureEntry(entry) || failureActionDisabled.value) return
   const prompt = precedingUserPrompt(chatboxStore.entries, entry)
-  if (!prompt.content) {
-    await continueAfterFailure()
-    return
-  }
+  if (!prompt.content) return
+  requestScrollToBottom()
   await chatboxStore.sendMessage(prompt.content, {
-    mode: chatboxStore.queueMode,
+    mode: 'follow_up',
     attachments: prompt.attachments
   }).catch(() => {})
 }
@@ -606,17 +609,15 @@ function chatboxAnswerText(entry) {
 
 function isCompletedAssistantEntry(entry) {
   if (entry?.role !== 'assistant') return false
-  if (isAssistantFailureEntry(entry)) return false
   return entry.status === 'completed' || Boolean(chatboxAnswerText(entry) && entry.status !== 'streaming')
 }
 
 function showFinalAnswer(entry) {
-  // Failures render partial content in a dedicated partition, not final-answer.
-  if (isAssistantFailureEntry(entry)) return false
   if (!messageContentBlocks(entry).length) return false
-  if (entry?.status === 'streaming') {
-    return !chatboxRuntimeEvents(entry, chatboxStore.entries).length && !chatboxReasoningText(entry)
+  if (chatboxRuntimeEvents(entry, chatboxStore.entries).length || chatboxReasoningText(entry)) {
+    return false
   }
+  if (entry?.status === 'streaming') return true
   return isCompletedAssistantEntry(entry)
 }
 
@@ -695,7 +696,8 @@ function chatboxPhaseTimings(entry) {
 }
 
 function chatboxRuntimeEvents(entry, allEntries = []) {
-  return displayRuntimeEventsForEntry(entry, allEntries)
+  const events = displayRuntimeEventsForEntry(entry, allEntries)
+  return runtimeEventsWithFailureTerminal(entry, events)
 }
 
 function chatboxStructuredOutput(entry) {
@@ -1166,34 +1168,6 @@ function firstReasoningText(...values) {
   line-height: 1.6;
 }
 
-.chatbox-partial-answer {
-  display: grid;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px dashed color-mix(in srgb, var(--warning-color, #c9892d) 40%, var(--border-color-light));
-  border-radius: var(--border-radius-base, 8px);
-  background: color-mix(in srgb, var(--warning-color, #c9892d) 8%, var(--surface-overlay, transparent));
-}
-
-.chatbox-partial-answer__label {
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.chatbox-partial-answer__reasoning {
-  color: var(--text-secondary);
-  font-size: 13px;
-  white-space: pre-wrap;
-  line-height: 1.5;
-}
-
-.chatbox-partial-answer__body {
-  color: var(--text-primary);
-  font-size: 14px;
-  line-height: 1.6;
-}
-
 details.raw {
   margin-top: 2px;
 
@@ -1371,11 +1345,18 @@ details.raw {
 }
 
 .chatbox-approval-button.is-selected {
-  font-weight: 600;
+  font-weight: 700;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary-color) 55%, transparent);
 }
 
-.chatbox-approval-button.is-selected.is-disabled {
-  opacity: 0.86;
+.chatbox-approval-button.is-selected.is-disabled,
+.chatbox-approval-button.is-selected:disabled {
+  opacity: 1;
+  filter: none;
+}
+
+.chatbox-approval-button:disabled:not(.is-selected) {
+  opacity: 0.45;
 }
 
 .chatbox-approval-steer {
@@ -1384,6 +1365,13 @@ details.raw {
   gap: 6px;
   width: min(100%, 520px);
   margin-top: 6px;
+}
+
+.chatbox-terminal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 
 .chatbox-model-popover {

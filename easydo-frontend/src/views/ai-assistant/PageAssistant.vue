@@ -30,7 +30,7 @@
               </template>
             </template>
 
-            <div v-if="!isAssistantFailureEntry(entry) && (assistantStatusText(entry) || assistantPhaseTimings(entry).length || entryRuntimeRunId(entry))" class="assistant-message__meta-row">
+            <div v-if="assistantStatusText(entry) || assistantPhaseTimings(entry).length || entryRuntimeRunId(entry)" class="assistant-message__meta-row">
               <div>
                 <div v-if="assistantStatusText(entry)" class="assistant-status">{{ assistantStatusText(entry) }}</div>
                 <div v-if="assistantPhaseTimings(entry).length" class="assistant-stage-timings">
@@ -47,38 +47,6 @@
               >
                 刷新轨迹
               </el-button>
-            </div>
-
-            <AssistantFailureCard
-              v-if="entry.role === 'assistant' && isAssistantFailureEntry(entry)"
-              :entry="entry"
-              :refreshing="assistantStore.isRuntimeEventsRefreshing(entryRuntimeRunId(entry))"
-              :can-continue="canContinueAfterFailure"
-              :can-retry="canRetryFailedEntry(entry)"
-              :continuing="assistantStore.sending"
-              @refresh="refreshRuntimeTrace(entry)"
-              @continue="continueAfterFailure"
-              @retry="retryFailedEntry(entry)"
-            />
-
-            <div
-              v-if="entry.role === 'assistant' && isAssistantFailureEntry(entry) && hasAssistantPartialContent(entry)"
-              class="assistant-partial-answer"
-            >
-              <div class="assistant-partial-answer__label">已生成内容（未完成）</div>
-              <div v-if="assistantPartialContent(entry).reasoning" class="assistant-partial-answer__reasoning">
-                {{ assistantPartialContent(entry).reasoning }}
-              </div>
-              <div v-if="assistantPartialContent(entry).answer" class="assistant-partial-answer__body">
-                <template v-for="(block, index) in messageContentBlocks(entry)" :key="`${entry.id || entry.idempotency_key}-partial-${index}`">
-                  <div
-                    v-if="block.kind === 'markdown'"
-                    class="assistant-content assistant-content--markdown"
-                    v-html="renderMessageMarkdown(block.text)"
-                  />
-                  <div v-else class="assistant-content assistant-content--text">{{ block.text }}</div>
-                </template>
-              </div>
             </div>
 
             <RuntimeTrace
@@ -145,6 +113,38 @@
                     @click="submitSteer(agentAction)"
                   >
                     调整
+                  </el-button>
+                </div>
+              </template>
+              <template #terminal-actions="{ item }">
+                <div v-if="isFailureTerminalItem(item, entry)" class="assistant-terminal-actions">
+                  <el-button
+                    v-if="entryRuntimeRunId(entry)"
+                    size="small"
+                    text
+                    :icon="Refresh"
+                    :loading="assistantStore.isRuntimeEventsRefreshing(entryRuntimeRunId(entry))"
+                    @click="refreshRuntimeTrace(entry)"
+                  >
+                    刷新轨迹
+                  </el-button>
+                  <el-button
+                    size="small"
+                    :icon="Position"
+                    :disabled="failureActionDisabled"
+                    @click="continueAfterFailure(entry)"
+                  >
+                    继续
+                  </el-button>
+                  <el-button
+                    v-if="canRetryFailedEntry(entry)"
+                    size="small"
+                    type="primary"
+                    :icon="Refresh"
+                    :disabled="failureActionDisabled"
+                    @click="retryFailedEntry(entry)"
+                  >
+                    重试
                   </el-button>
                 </div>
               </template>
@@ -283,15 +283,13 @@ import { useStickyScroll } from '@/composables/useStickyScroll'
 import { getPageAssistantArtifact, listPageAssistantRunEvents } from '@/api/pageAiAssistant'
 import RuntimeTrace from '@/components/ai-runtime/RuntimeTrace.vue'
 import RuntimeSessionQueue from '@/components/ai-runtime/RuntimeSessionQueue.vue'
-import AssistantFailureCard from '@/components/ai-runtime/AssistantFailureCard.vue'
 import { actionInputPreview, actionMeta, actionSummary, actionTitle } from '@/components/ai-runtime/actionDisplay'
 import {
   assistantFailureDetails,
-  assistantPartialContent,
   entryRuntimeRunId,
-  hasAssistantPartialContent,
   isAssistantFailureEntry,
-  precedingUserPrompt
+  precedingUserPrompt,
+  runtimeEventsWithFailureTerminal
 } from '@/components/ai-runtime/assistantFailure'
 import { buildHtmlPreviewDocument, contentBlocksFromEntry, renderMarkdownToHtml } from '@/components/ai-runtime/messageContent'
 import {
@@ -348,7 +346,7 @@ const assistantContext = computed(() => ({
 }))
 
 const inputDisabled = computed(() => assistantStore.sending || assistantStore.loading)
-const canContinueAfterFailure = computed(() => !assistantStore.sending && !assistantStore.loading && !assistantStore.hasActiveRun)
+const failureActionDisabled = computed(() => assistantStore.sending || assistantStore.loading)
 const canSend = computed(() => {
   if (!draft.value.trim() || inputDisabled.value) return false
   if (assistantStore.queueMode === 'steer' && !assistantStore.hasActiveRun) return false
@@ -436,24 +434,28 @@ async function handleSessionModelSwitch(option) {
   ElMessage.success('页面助手模型已切换')
 }
 
-async function continueAfterFailure() {
+function isFailureTerminalItem(item, entry) {
+  if (!isAssistantFailureEntry(entry)) return false
+  const details = assistantFailureDetails(entry)
+  const terminalEvent = details.status === 'cancelled' ? 'run.cancelled' : 'run.failed'
+  return String(item?.event || '') === terminalEvent
+}
+
+async function continueAfterFailure(entry) {
+  if (!isAssistantFailureEntry(entry) || failureActionDisabled.value) return
   await assistantStore.sendMessage('继续', assistantContext.value, { mode: 'follow_up' }).catch(() => {})
 }
 
 function canRetryFailedEntry(entry) {
-  if (!canContinueAfterFailure.value) return false
-  const details = assistantFailureDetails(entry)
-  if (!details.retryable) return false
   const prompt = precedingUserPrompt(assistantStore.entries, entry)
   return Boolean(prompt.content)
 }
 
 async function retryFailedEntry(entry) {
+  if (!isAssistantFailureEntry(entry) || failureActionDisabled.value) return
   const prompt = precedingUserPrompt(assistantStore.entries, entry)
-  if (!prompt.content) {
-    await continueAfterFailure()
-    return
-  }
+  if (!prompt.content) return
+  requestScrollToBottom()
   await assistantStore.sendMessage(prompt.content, assistantContext.value, {
     mode: 'follow_up',
     attachments: prompt.attachments
@@ -510,16 +512,15 @@ function assistantAnswerText(entry) {
 
 function isCompletedAssistantEntry(entry) {
   if (entry?.role !== 'assistant') return false
-  if (isAssistantFailureEntry(entry)) return false
   return entry.status === 'completed' || Boolean(assistantAnswerText(entry) && entry.status !== 'streaming')
 }
 
 function showFinalAnswer(entry) {
-  if (isAssistantFailureEntry(entry)) return false
   if (!messageContentBlocks(entry).length) return false
-  if (entry?.status === 'streaming') {
-    return !assistantRuntimeEvents(entry, assistantStore.entries).length && !assistantReasoningText(entry)
+  if (assistantRuntimeEvents(entry, assistantStore.entries).length || assistantReasoningText(entry)) {
+    return false
   }
+  if (entry?.status === 'streaming') return true
   return isCompletedAssistantEntry(entry)
 }
 
@@ -619,7 +620,10 @@ function assistantRuntimeEvents(entry, allEntries = []) {
   }
   const enrichedEntry = { ...entry, output }
   const enrichedEntries = allEntries.map((item) => sameEntry(item, entry) ? enrichedEntry : item)
-  return displayRuntimeEventsForEntry(enrichedEntry, enrichedEntries)
+  return runtimeEventsWithFailureTerminal(
+    enrichedEntry,
+    displayRuntimeEventsForEntry(enrichedEntry, enrichedEntries)
+  )
 }
 
 function assistantStructuredOutput(entry) {
@@ -1160,33 +1164,11 @@ function viewportHeight() {
   margin-top: 6px;
 }
 
-.assistant-partial-answer {
-  display: grid;
-  gap: 8px;
-  margin: 0 0 8px;
-  padding: 10px 12px;
-  border: 1px dashed color-mix(in srgb, var(--warning-color, #c9892d) 40%, var(--border-color-light));
-  border-radius: var(--border-radius-base, 8px);
-  background: color-mix(in srgb, var(--warning-color, #c9892d) 8%, var(--surface-overlay, transparent));
-}
-
-.assistant-partial-answer__label {
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.assistant-partial-answer__reasoning {
-  color: var(--text-secondary);
-  font-size: 13px;
-  white-space: pre-wrap;
-  line-height: 1.5;
-}
-
-.assistant-partial-answer__body {
-  color: var(--text-primary);
-  font-size: 14px;
-  line-height: 1.6;
+.assistant-terminal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 
 .assistant-agent-footer {

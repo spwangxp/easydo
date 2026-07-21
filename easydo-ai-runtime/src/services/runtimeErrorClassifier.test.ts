@@ -43,7 +43,7 @@ describe('classifyRuntimeError', () => {
     expect(classifyRuntimeError(error, context)).toMatchObject(expected)
   })
 
-  it('sanitizes unknown internal failures and never exposes secret-bearing input', () => {
+  it('keeps the real internal failure text while redacting secrets for display', () => {
     const classified = classifyRuntimeError(
       new Error('provider failed api_key=sk-sensitive password=hunter2 https://example.test?token=secret'),
       { source: 'runtime' }
@@ -55,12 +55,72 @@ describe('classifyRuntimeError', () => {
       retryable: false,
       terminal_status: 'failed',
       http_status: 500,
-      source: 'runtime',
-      user_message: 'The AI runtime encountered an internal error.'
+      source: 'runtime'
     })
+    expect(classified.user_message).toBe(classified.message)
+    expect(classified.message).toContain('provider failed')
     expect(classified.message).not.toContain('sk-sensitive')
     expect(classified.message).not.toContain('hunter2')
-    expect(classified.message).not.toContain('secret')
+    expect(classified.message).not.toContain('token=secret')
+  })
+
+  it('classifies upstream ResourceExhausted as provider rate limit without masking the message', () => {
+    const classified = classifyRuntimeError(
+      new Error('Upstream error from Nvidia: ResourceExhausted: Worker local total request limit reached (274/32)')
+    )
+
+    expect(classified).toMatchObject({
+      code: 'provider_rate_limit',
+      category: 'provider_rate_limit',
+      source: 'provider',
+      retryable: true,
+      http_status: 429,
+      terminal_status: 'failed'
+    })
+    expect(classified.user_message).toContain('ResourceExhausted')
+    expect(classified.user_message).toContain('request limit reached')
+  })
+
+  it('does not re-mask a RuntimeSourceError that already carries the real message', () => {
+    const first = classifyRuntimeError(
+      new Error('Upstream error from Nvidia: ResourceExhausted: Worker local total request limit reached (274/32)')
+    )
+    const second = classifyRuntimeError(new RuntimeSourceError({
+      source: first.source,
+      code: first.code,
+      message: first.message,
+      http_status: first.http_status,
+      retryable: first.retryable
+    }))
+
+    expect(second).toMatchObject({
+      code: 'provider_rate_limit',
+      category: 'provider_rate_limit',
+      source: 'provider',
+      user_message: first.user_message
+    })
+  })
+
+  it('keeps internal classification when reclassifying a concrete internal failure with http 500', () => {
+    const first = classifyRuntimeError(new Error('Agent run failed and failure reporting failed'))
+    const second = classifyRuntimeError(new RuntimeSourceError({
+      source: first.source,
+      code: first.code,
+      message: first.message,
+      http_status: first.http_status,
+      retryable: first.retryable
+    }))
+
+    expect(first).toMatchObject({
+      code: 'runtime_internal_error',
+      category: 'internal',
+      user_message: 'Agent run failed and failure reporting failed'
+    })
+    expect(second).toMatchObject({
+      code: 'runtime_internal_error',
+      category: 'internal',
+      user_message: 'Agent run failed and failure reporting failed'
+    })
   })
 
   it('keeps an explicit stable code while applying canonical retry semantics', () => {

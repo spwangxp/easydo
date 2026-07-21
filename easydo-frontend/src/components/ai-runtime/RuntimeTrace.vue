@@ -14,7 +14,10 @@
       >
         <div class="ai-runtime-event-line__rail event-dot" aria-hidden="true"></div>
         <div class="ai-runtime-event-line__content event-content">
-          <div class="ai-runtime-event-line__header event-header">
+          <div
+            class="ai-runtime-event-line__header event-header"
+            :class="{ 'ai-runtime-event-line__header--breathing': item.lineKind === 'action' && item.status === 'waiting' }"
+          >
             <span class="ai-runtime-event-line__meta event-meta">{{ item.lineMeta }}</span>
             <strong v-if="item.lineTitle" class="ai-runtime-event-line__title event-title-text">{{ item.lineTitle }}</strong>
             <code v-if="item.lineTarget" class="ai-runtime-event-line__target">{{ item.lineTarget }}</code>
@@ -33,12 +36,12 @@
           </div>
           <p v-else-if="item.lineSummary && !['action', 'subagent'].includes(item.lineKind)" class="ai-runtime-event-line__summary event-body">{{ item.lineSummary }}</p>
 
-          <div v-if="item.inputPreviewText" class="ai-runtime-event-line__input event-body">
+          <div v-if="item.inputPreviewText && item.lineKind !== 'action'" class="ai-runtime-event-line__input event-body">
             <span>输入</span>
             <code>{{ item.inputPreviewText }}</code>
           </div>
 
-          <div v-if="item.reasonText" class="ai-runtime-event-line__reason event-body">
+          <div v-if="item.reasonText && item.lineKind !== 'action'" class="ai-runtime-event-line__reason event-body">
             <span>调用理由</span>
             <p>{{ item.reasonText }}</p>
           </div>
@@ -76,7 +79,7 @@
           </section>
 
           <div
-            v-if="item.resultSummary && item.lineKind !== 'subagent'"
+            v-if="item.resultSummary && item.lineKind !== 'subagent' && !(item.lineKind === 'action' && item.status === 'waiting')"
             class="ai-runtime-event-line__result"
             :class="[
               item.lineKind === 'subagent' ? 'subagent-result' : 'tool-result',
@@ -86,11 +89,15 @@
             {{ item.resultSummary }}
           </div>
 
-          <div v-if="item.lineKind === 'action' && item.lineSummary" class="ai-runtime-event-line__approval approval">
-            <span>{{ item.lineSummary }}</span>
+          <div v-if="item.lineKind === 'action'" class="ai-runtime-event-line__approval approval">
+            <span v-if="item.status !== 'waiting' && (item.lineSummary || item.resultSummary)">{{ item.lineSummary || item.resultSummary }}</span>
             <div v-if="approvalActionForItem(item)" class="approval-actions" @click.stop>
               <slot name="approval-actions" :item="item" :agent-action="approvalActionForItem(item)" />
             </div>
+          </div>
+
+          <div v-if="isRuntimeTerminalItem(item)" class="ai-runtime-event-line__terminal-actions" @click.stop>
+            <slot name="terminal-actions" :item="item" />
           </div>
 
           <div v-if="item.artifactRefs.length || (item.childRunLinkId && item.lineKind !== 'subagent')" class="ai-runtime-trace__actions" @click.stop>
@@ -168,7 +175,10 @@
         >
           <div class="ai-runtime-event-line__rail event-dot" aria-hidden="true"></div>
           <div class="ai-runtime-event-line__content event-content">
-            <div class="ai-runtime-event-line__header event-header">
+            <div
+              class="ai-runtime-event-line__header event-header"
+              :class="{ 'ai-runtime-event-line__header--breathing': item.lineKind === 'action' && item.status === 'waiting' }"
+            >
               <span class="ai-runtime-event-line__meta event-meta">{{ item.lineMeta }}</span>
               <strong v-if="item.lineTitle" class="ai-runtime-event-line__title event-title-text">{{ item.lineTitle }}</strong>
               <code v-if="item.lineTarget" class="ai-runtime-event-line__target">{{ item.lineTarget }}</code>
@@ -186,11 +196,11 @@
               </section>
             </div>
             <p v-else-if="item.lineSummary && !['action', 'subagent'].includes(item.lineKind)" class="ai-runtime-event-line__summary event-body">{{ item.lineSummary }}</p>
-            <div v-if="item.inputPreviewText" class="ai-runtime-event-line__input event-body">
+            <div v-if="item.inputPreviewText && item.lineKind !== 'action'" class="ai-runtime-event-line__input event-body">
               <span>输入</span>
               <code>{{ item.inputPreviewText }}</code>
             </div>
-            <div v-if="item.reasonText" class="ai-runtime-event-line__reason event-body">
+            <div v-if="item.reasonText && item.lineKind !== 'action'" class="ai-runtime-event-line__reason event-body">
               <span>调用理由</span>
               <p>{{ item.reasonText }}</p>
             </div>
@@ -213,7 +223,7 @@
               </div>
             </section>
             <div
-              v-if="item.resultSummary && item.lineKind !== 'subagent'"
+              v-if="item.resultSummary && item.lineKind !== 'subagent' && !(item.lineKind === 'action' && item.status === 'waiting')"
               class="ai-runtime-event-line__result"
               :class="[
                 item.lineKind === 'subagent' ? 'subagent-result' : 'tool-result',
@@ -221,6 +231,12 @@
               ]"
             >
               {{ item.resultSummary }}
+            </div>
+            <div v-if="item.lineKind === 'action'" class="ai-runtime-event-line__approval approval">
+              <span v-if="item.status !== 'waiting' && (item.lineSummary || item.resultSummary)">{{ item.lineSummary || item.resultSummary }}</span>
+              <div v-if="approvalActionForItem(item)" class="approval-actions" @click.stop>
+                <slot name="approval-actions" :item="item" :agent-action="approvalActionForItem(item)" />
+              </div>
             </div>
           </div>
         </li>
@@ -539,6 +555,12 @@ function isMarkdownThoughtSection(section) {
   return section?.kind === 'reasoning' || section?.kind === 'answer'
 }
 
+function isRuntimeTerminalItem(item) {
+  return ['run.failed', 'run.cancelled', 'run.timeout', 'run.interrupted'].includes(String(item?.event || '')) ||
+    (['failed', 'cancelled', 'timeout', 'interrupted'].includes(String(item?.status || '')) &&
+      ['model', 'result'].includes(String(item?.lineKind || '')))
+}
+
 function pendingActionForItem(item) {
   const ids = new Set(itemActionIds(item))
   if (!ids.size) return null
@@ -571,74 +593,68 @@ function actionCandidateIds(action = {}) {
 }
 
 function approvalActionForItem(item) {
-  if (item?.status !== 'waiting') return null
+  if (item?.lineKind !== 'action' && item?.lineKind !== 'subagent') return null
+  if (!['waiting', 'success', 'rejected', 'approved'].includes(String(item?.status || ''))) return null
   const pending = pendingActionForItem(item)
-  if (pending) return pending
-  if (item?.lineKind !== 'action') return null
+  if (pending && item.status === 'waiting') return pending
   const id = itemActionId(item)
   if (!id) return null
-  // Waiting rows must still expose Approve/Reject even when pendingActions is empty
-  // (e.g. live permission.asked before runtime_run_id is attached to the draft entry).
-  if (item.status === 'waiting') {
-    const callId = firstString(
-      item.data?.call_id,
-      item.data?.tool_call_id,
-      item.data?.provider_tool_call_id,
-      item.display?.call_id,
-      item.display?.provider_tool_call_id
-    )
-    const toolName = firstString(item.data?.tool_name, item.data?.tool, item.display?.name, item.lineTarget)
-    return {
-      id,
-      action_id: id,
-      action_kind: firstString(item.data?.action_kind, item.event) === 'permission.asked'
-        ? 'pi.tool_approval'
-        : firstString(item.data?.action_kind, item.data?.action?.action_kind, item.event),
-      capability_id: toolName,
-      runtime_run_id: firstString(item.data?.runtime_run_id, item.display?.runtime_run_id),
-      input_json: {
-        provider_tool_call_id: callId,
-        tool_name: toolName,
-        arguments: item.data?.input || item.data?.input_json || {}
-      },
-      target_json: item.data?.target_json || {},
-      policy_json: {
-        requires_decision: true,
-        risk_summary: firstString(item.data?.reason, item.lineSummary)
-      },
-      display_json: {
-        title: firstString(item.lineTitle, toolName ? `需要确认 ${toolName}` : '需要确认'),
-        name: toolName,
-        summary: firstString(item.data?.reason, item.lineSummary),
-        approval_request: {
-          approval_id: id,
-          request_id: id,
-          provider_tool_call_id: callId,
-          call_id: callId,
-          tool_name: toolName,
-          reason: firstString(item.data?.reason, item.lineSummary)
-        }
-      },
-      result_json: {},
-      status: 'awaiting_decision',
-      decision: '',
-      pi_approval: item.event === 'permission.asked' || String(id).startsWith('approval:')
-    }
-  }
+  const callId = firstString(
+    item.data?.call_id,
+    item.data?.tool_call_id,
+    item.data?.provider_tool_call_id,
+    item.display?.call_id,
+    item.display?.provider_tool_call_id,
+    asRecord(item.data?.approval_request).call_id,
+    asRecord(item.data?.approval_request).provider_tool_call_id
+  )
+  const toolName = firstString(item.data?.tool_name, item.data?.tool, item.display?.name, item.lineTarget)
+  const decision = firstString(item.data?.decision, item.display?.decision, item.data?.result, item.display?.result)
+  const resolvedStatus = item.status === 'waiting'
+    ? 'awaiting_decision'
+    : item.status === 'rejected'
+      ? 'rejected'
+      : 'approved'
   return {
     id,
     action_id: id,
-    action_kind: firstString(item.data?.action_kind, item.data?.action?.action_kind, item.event),
-    capability_id: firstString(item.data?.capability_id, item.data?.tool_name, item.display?.name),
+    action_kind: firstString(item.data?.action_kind, item.event) === 'permission.asked' || String(id).startsWith('approval:')
+      ? 'pi.tool_approval'
+      : firstString(item.data?.action_kind, item.data?.action?.action_kind, item.event),
+    capability_id: toolName,
     runtime_run_id: firstString(item.data?.runtime_run_id, item.display?.runtime_run_id),
-    input_json: item.data?.input_json || item.data?.action?.input_json || {},
-    target_json: item.data?.target_json || item.data?.action?.target_json || {},
-    policy_json: item.data?.policy_json || item.data?.action?.policy_json || {},
-    display_json: item.display || item.data?.display_json || item.data?.action?.display_json || {},
-    result_json: item.data?.result_json || item.data?.action?.result_json || {},
-    status: item.status === 'success' ? 'approved' : item.status,
-    decision: firstString(item.data?.decision, item.display?.decision, item.data?.result)
+    input_json: {
+      provider_tool_call_id: callId,
+      tool_name: toolName,
+      arguments: item.data?.input || item.data?.input_json || {}
+    },
+    target_json: item.data?.target_json || {},
+    policy_json: {
+      requires_decision: item.status === 'waiting',
+      risk_summary: firstString(item.data?.reason, item.lineSummary)
+    },
+    display_json: {
+      title: firstString(item.lineTitle, toolName ? `需要确认 ${toolName}` : '需要确认'),
+      name: toolName,
+      summary: firstString(item.data?.reason, item.lineSummary, item.resultSummary),
+      approval_request: {
+        approval_id: id,
+        request_id: id,
+        provider_tool_call_id: callId,
+        call_id: callId,
+        tool_name: toolName,
+        reason: firstString(item.data?.reason, item.lineSummary, item.resultSummary)
+      }
+    },
+    result_json: item.data?.result_json || {},
+    status: resolvedStatus,
+    decision,
+    pi_approval: item.event === 'permission.asked' || item.event === 'permission.resolved' || String(id).startsWith('approval:')
   }
+}
+
+function asRecord(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 }
 
 function itemActionId(item) {
@@ -761,6 +777,25 @@ defineExpose({
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 4px;
+}
+
+.ai-runtime-event-line__header--breathing {
+  animation: ai-runtime-approval-breathe 1.8s ease-in-out infinite;
+}
+
+.ai-runtime-event-line--waiting .ai-runtime-event-line__title {
+  color: var(--warning-color);
+  font-weight: 650;
+}
+
+@keyframes ai-runtime-approval-breathe {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .ai-runtime-event-line__meta {
@@ -1108,6 +1143,14 @@ defineExpose({
   gap: 4px;
   margin-top: 2px;
   align-items: center;
+}
+
+.ai-runtime-event-line__terminal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
 }
 
 .ai-runtime-artifact {

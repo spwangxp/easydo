@@ -24,7 +24,10 @@ logs/
 .sisyphus
 /tests
 easydo-server/tests/
-scripts/tests/
+scripts/tests/*
+!scripts/tests/
+!scripts/tests/test_add_workload_tolerations.py
+!scripts/tests/test_llm_openai_proxy.py
 .git
 test-results
 

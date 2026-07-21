@@ -90,11 +90,10 @@ test('page assistant renders assistant reasoning through runtime trace instead o
   assert.match(source, /assistantReasoningText/)
   assert.match(source, /reasoning_details/)
   assert.match(source, /:reasoning="assistantReasoningText\(entry\)"/)
-  // Completed answers render in the dedicated final-answer block; streaming still
-  // feeds RuntimeTrace via assistantAnswerText to avoid duplicate markdown.
   assert.match(source, /:answer="runtimeTraceAnswer\(entry\)"/)
   assert.match(source, /function runtimeTraceAnswer\(/)
   assert.match(source, /showFinalAnswer\(/)
+  assert.match(source, /function showFinalAnswer\(entry\)[\s\S]*?assistantRuntimeEvents\(entry, assistantStore\.entries\)\.length \|\| assistantReasoningText\(entry\)/s)
   assert.match(source, /:timings="entry\.output\?\.timings \|\| \{\}"/)
   assert.doesNotMatch(source, /class="assistant-reasoning"/)
 })
@@ -284,29 +283,23 @@ test('page assistant exposes a visible replay refresh control for runtime traces
   assert.match(storeSource, /pendingActions\.value = derivePendingActions\(entries\.value\)/)
 })
 
-test('page assistant renders failed and cancelled assistant entries through the shared failure card', async () => {
-  const [source, failureCardSource] = await Promise.all([
-    readFile(join(currentDir, 'PageAssistant.vue'), 'utf8'),
-    readFile(join(currentDir, '../../components/ai-runtime/AssistantFailureCard.vue'), 'utf8')
-  ])
+test('page assistant renders failure recovery inside terminal timeline rows', async () => {
+  const source = await readFile(join(currentDir, 'PageAssistant.vue'), 'utf8')
 
-  assert.match(source, /import AssistantFailureCard from '@\/components\/ai-runtime\/AssistantFailureCard\.vue'/)
-  assert.match(source, /<AssistantFailureCard/)
-  assert.match(source, /v-if="entry\.role === 'assistant' && isAssistantFailureEntry\(entry\)"/)
-  assert.match(source, /@refresh="refreshRuntimeTrace\(entry\)"/)
-  assert.match(source, /@continue="continueAfterFailure"/)
-  assert.match(source, /@retry="retryFailedEntry\(entry\)"/)
-  assert.match(source, /assistant-partial-answer/)
+  assert.doesNotMatch(source, /AssistantFailureCard/)
+  assert.doesNotMatch(source, /assistant-partial-answer/)
+  assert.match(source, /<template #terminal-actions="\{ item \}">/)
+  assert.match(source, /isFailureTerminalItem\(item, entry\)/)
+  assert.match(source, /@click="refreshRuntimeTrace\(entry\)"/)
+  assert.match(source, /@click="continueAfterFailure\(entry\)"/)
+  assert.match(source, /@click="retryFailedEntry\(entry\)"/)
   assert.match(source, /precedingUserPrompt/)
+  assert.match(source, /runtimeEventsWithFailureTerminal/)
   assert.match(source, /attachments:\s*prompt\.attachments/)
   assert.match(source, /assistantStore\.sendMessage\('继续',\s*assistantContext\.value,\s*\{ mode: 'follow_up' \}\)/)
-  assert.match(source, /function showFinalAnswer\(entry\)[\s\S]*?if \(isAssistantFailureEntry\(entry\)\) return false/s)
+  assert.match(source, /function showFinalAnswer\(entry\)[\s\S]*?assistantRuntimeEvents\(entry, assistantStore\.entries\)\.length \|\| assistantReasoningText\(entry\)/s)
   assert.doesNotMatch(source, /function assistantReasoningText\(entry\)[\s\S]*?if \(isAssistantFailureEntry\(entry\)\) return ''[\s\S]*?function assistantAnswerText/)
   assert.doesNotMatch(source, /function assistantAnswerText\(entry\)[\s\S]*?if \(isAssistantFailureEntry\(entry\)\) return ''[\s\S]*?function isCompletedAssistantEntry/)
-  assert.match(failureCardSource, /assistantFailureDetails/)
-  assert.match(failureCardSource, /var\(--status-danger-soft\)/)
-  assert.match(failureCardSource, /var\(--danger-color\)/)
-  assert.doesNotMatch(failureCardSource, /#[\da-f]{3,8}\b/i)
 })
 
 test('page assistant store forwards retry attachments into stream and queue payloads', async () => {

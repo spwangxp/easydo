@@ -288,7 +288,7 @@ export interface AISession {
   source?: string
   model_override?: SessionModelOverride
   title: string
-  title_source?: 'fallback' | 'generated' | 'manual'
+  title_source?: 'fallback' | 'generated' | 'manual' | 'user_fallback'
   title_generated_at?: string
   title_generation_error?: string
   entry_count: number

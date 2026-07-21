@@ -199,7 +199,12 @@ export function mergeRuntimeEvents(existingEvents, replayEvents) {
 function compareRuntimeEventOrder(left, right) {
   const leftSeq = runtimeEventSequence(left.event)
   const rightSeq = runtimeEventSequence(right.event)
-  if (Number.isFinite(leftSeq) && Number.isFinite(rightSeq) && leftSeq !== rightSeq) return leftSeq - rightSeq
+  const leftHasSeq = Number.isFinite(leftSeq)
+  const rightHasSeq = Number.isFinite(rightSeq)
+  if (leftHasSeq && rightHasSeq && leftSeq !== rightSeq) return leftSeq - rightSeq
+  // Persisted events have an authoritative sequence. Keep them ahead of
+  // unsequenced live-only events regardless of their client-side timestamps.
+  if (leftHasSeq !== rightHasSeq) return leftHasSeq ? -1 : 1
   const leftTime = runtimeEventTimestamp(left.event)
   const rightTime = runtimeEventTimestamp(right.event)
   if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime
@@ -207,13 +212,26 @@ function compareRuntimeEventOrder(left, right) {
 }
 
 function runtimeEventSequence(event = {}) {
-  const payload = event?.payload || event?.data || {}
-  const value = Number(event?.event_seq ?? event?.seq ?? payload.event_seq ?? payload.seq)
+  const value = Number(
+    event?.event_seq
+    ?? event?.seq
+    ?? event?.payload?.event_seq
+    ?? event?.payload?.seq
+    ?? event?.data?.event_seq
+    ?? event?.data?.seq
+  )
   return Number.isFinite(value) && value > 0 ? value : Number.NaN
 }
 
 function runtimeEventTimestamp(event = {}) {
-  const payload = event?.payload || event?.data || {}
-  const value = Date.parse(event?.created_at || event?.timestamp || payload.timestamp || '')
+  const value = Date.parse(
+    event?.created_at
+    || event?.timestamp
+    || event?.payload?.created_at
+    || event?.payload?.timestamp
+    || event?.data?.created_at
+    || event?.data?.timestamp
+    || ''
+  )
   return Number.isFinite(value) ? value : Number.NaN
 }

@@ -206,6 +206,8 @@ function fallbackSessionTitle(timestamp: string) {
   return `新会话 - ${pad(safeDate.getMonth() + 1)}-${pad(safeDate.getDate())} ${pad(safeDate.getHours())}:${pad(safeDate.getMinutes())}`
 }
 
+const SESSION_TITLE_USER_FALLBACK_MAX_CHARS = 24
+
 function sanitizeGeneratedSessionTitle(value: unknown) {
   let title = firstString(value)
   if (!title) return ''
@@ -229,9 +231,36 @@ function sanitizeGeneratedSessionTitle(value: unknown) {
 }
 
 function deterministicSessionTitleFromUserContent(userContent: string) {
-  return sanitizeGeneratedSessionTitle(userContent)
-    .replace(/^(帮我|请帮我|请|麻烦|麻烦你)\s*/i, '')
+  let title = sanitizeGeneratedSessionTitle(userContent)
+  title = title
+    .replace(/^(帮我|请帮我|请你帮我|请你|请|麻烦你|麻烦|我想要|我想|我要|我现在|能不能|可以帮我)\s*/i, '')
     .trim()
+  const clauses = title
+    .split(/[，,。！？!?；;]/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+  if (clauses.length > 1) {
+    title = clauses[0]
+  }
+  const chars = Array.from(title)
+  if (chars.length > SESSION_TITLE_USER_FALLBACK_MAX_CHARS) {
+    title = chars
+      .slice(0, SESSION_TITLE_USER_FALLBACK_MAX_CHARS)
+      .join('')
+      .replace(/[的了呢吧啊哦嗯]+$/g, '')
+      .trim()
+  }
+  return title
+}
+
+function isEchoedUserSessionTitle(generatedTitle: string, userContent: string) {
+  const generated = sanitizeGeneratedSessionTitle(generatedTitle)
+  const user = sanitizeGeneratedSessionTitle(userContent)
+  if (!generated || !user) return false
+  if (generated === user) return true
+  const generatedChars = Array.from(generated)
+  const userChars = Array.from(user)
+  return generatedChars.length >= 20 && generatedChars.length >= userChars.length * 0.85
 }
 
 function sessionTitleRequestContent(userContent: string) {
@@ -427,42 +456,68 @@ function piApprovalFromPermissionEvent(event: Record<string, unknown>): Record<s
 }
 
 function pendingPiApprovalsFromRuntimeEvents(events: unknown[]) {
+  // Open permission.asked stays pending until resolved or a true agent-loop bypass.
+  // Pair by call_id / error.code only — never by failure message text.
   const pendingByID = new Map<string, Record<string, unknown>>()
+  const openApprovalCallIDs = new Set<string>()
   let hasApprovalResolution = false
   for (const event of events.map(asRecord)) {
     if (event.type === 'permission.asked') {
       const approvalID = firstString(event.request_id, event.approval_id)
       const callID = firstString(event.call_id, event.tool_call_id, event.provider_tool_call_id)
       for (const id of [approvalID, callID].filter(Boolean)) pendingByID.set(id, event)
+      if (callID) openApprovalCallIDs.add(callID)
       continue
     }
     if (event.type === 'permission.resolved') {
       const approvalID = firstString(event.request_id, event.approval_id)
       const callID = firstString(event.call_id, event.tool_call_id, event.provider_tool_call_id)
       for (const id of [approvalID, callID].filter(Boolean)) pendingByID.delete(id)
+      if (callID) openApprovalCallIDs.delete(callID)
       hasApprovalResolution = true
       continue
     }
-    if (pendingByID.size > 0 && isPiApprovalBypassBoundaryEvent(event, hasApprovalResolution)) {
+    if (pendingByID.size > 0 && isPiApprovalBypassBoundaryEvent(event, hasApprovalResolution, openApprovalCallIDs)) {
       pendingByID.clear()
+      openApprovalCallIDs.clear()
     }
   }
   return [...new Set(pendingByID.values())].map(piApprovalFromPermissionEvent).filter((approval): approval is Record<string, unknown> => approval !== null)
 }
 
-function isApprovalRequiredToolFailureEvent(event: Record<string, unknown>) {
-  if (event.type !== 'session.tool.failed') return false
-  const error = asRecord(event.error)
-  const message = firstString(event.message, error.message, typeof event.error === 'string' ? event.error : '')
-  return /requires approval|需要.*审批|需要.*确认/i.test(message)
+function eventToolCallID(event: Record<string, unknown>) {
+  return firstString(event.call_id, event.tool_call_id, event.provider_tool_call_id)
 }
 
-function isPiApprovalBypassBoundaryEvent(event: Record<string, unknown>, hasApprovalResolution: boolean) {
+function isApprovalRequiredToolFailureEvent(event: Record<string, unknown>, openApprovalCallIDs: ReadonlySet<string> = new Set()) {
+  const type = firstString(event.type)
+  if (!['session.tool.failed', 'tool.failed', 'action.execution_failed'].includes(type)) return false
+  const callID = eventToolCallID(event)
+  if (callID && openApprovalCallIDs.has(callID)) return true
+  const error = asRecord(event.error)
+  const code = firstString(error.code, event.code)
+  return code === 'tool_approval_required' || code === 'approval_required'
+}
+
+function isPiApprovalBypassBoundaryEvent(
+  event: Record<string, unknown>,
+  hasApprovalResolution: boolean,
+  openApprovalCallIDs: ReadonlySet<string> = new Set()
+) {
   if (['session.step.started', 'model.call_started', 'model.continuation_started', 'provider.call_started', 'provider.continuation_started'].includes(firstString(event.type))) return true
   if (!hasApprovalResolution) return false
+  const callID = eventToolCallID(event)
+  if (callID && openApprovalCallIDs.has(callID)) {
+    if (['session.tool.called', 'session.tool.success', 'tool.executed', 'action.execution_started', 'action.execution_succeeded'].includes(firstString(event.type))) {
+      return false
+    }
+    if (['session.tool.failed', 'tool.failed', 'action.execution_failed'].includes(firstString(event.type))) {
+      return false
+    }
+  }
   if (['session.tool.called', 'session.tool.success', 'tool.executed', 'action.execution_started', 'action.execution_succeeded'].includes(firstString(event.type))) return true
   if (['session.tool.failed', 'tool.failed', 'action.execution_failed'].includes(firstString(event.type))) {
-    return !isApprovalRequiredToolFailureEvent(event)
+    return !isApprovalRequiredToolFailureEvent(event, openApprovalCallIDs)
   }
   return false
 }
@@ -502,22 +557,27 @@ function approvedPiApprovalsReadyForExecution(events: unknown[]) {
   const askedByID = new Map<string, Record<string, unknown>>()
   const approvedIDs = new Set<string>()
   const executedCallIDs = new Set<string>()
+  const openApprovalCallIDs = new Set<string>()
   for (const event of events.map(asRecord)) {
     if (event.type === 'permission.asked') {
       const approvalID = firstString(event.request_id, event.approval_id)
+      const callID = eventToolCallID(event)
       if (approvalID && !askedByID.has(approvalID)) askedByID.set(approvalID, event)
+      if (callID) openApprovalCallIDs.add(callID)
       continue
     }
     if (event.type === 'permission.resolved') {
       const approvalID = firstString(event.request_id, event.approval_id)
+      const callID = eventToolCallID(event)
+      if (callID) openApprovalCallIDs.delete(callID)
       if (!approvalID) continue
       const result = piApprovalResolutionResult(event)
       if (result === 'approved') approvedIDs.add(approvalID)
       if (result === 'rejected') approvedIDs.delete(approvalID)
       continue
     }
-    if (event.type === 'session.tool.success' || (event.type === 'session.tool.failed' && !isApprovalRequiredToolFailureEvent(event))) {
-      const callID = firstString(event.call_id, event.tool_call_id, event.provider_tool_call_id)
+    if (event.type === 'session.tool.success' || (event.type === 'session.tool.failed' && !isApprovalRequiredToolFailureEvent(event, openApprovalCallIDs))) {
+      const callID = eventToolCallID(event)
       if (callID) executedCallIDs.add(callID)
     }
   }
@@ -3525,7 +3585,7 @@ export class SessionService {
   private async generateSessionTitle(actor: RuntimeActor, session: AISession, profile: AgentProfileSnapshot, userContent: string) {
     try {
       const latest = await this.store.getSession(actor.workspace_id, session.id)
-      if (!latest || latest.title_source !== 'fallback') return
+      if (!latest || !this.canAttemptSessionTitleGeneration(latest)) return
       const titleProfile: AgentProfileSnapshot = {
         ...profile,
         inference: {
@@ -3551,11 +3611,15 @@ export class SessionService {
       })
       const title = sanitizeGeneratedSessionTitle(completion?.text)
       if (!title) {
-        await this.recordSessionTitleGenerationError(latest, 'empty_title')
+        await this.applyUserFallbackSessionTitle(latest, userContent, 'empty_title')
+        return
+      }
+      if (isEchoedUserSessionTitle(title, userContent)) {
+        await this.applyUserFallbackSessionTitle(latest, userContent, 'echoed_user_content')
         return
       }
       const current = await this.store.getSession(actor.workspace_id, session.id)
-      if (!current || current.title_source !== 'fallback') return
+      if (!current || !this.canAttemptSessionTitleGeneration(current)) return
       await this.store.saveSession({
         ...current,
         title,
@@ -3566,21 +3630,35 @@ export class SessionService {
       })
     } catch (error) {
       const latest = await this.store.getSession(actor.workspace_id, session.id)
-      if (!latest || latest.title_source !== 'fallback') return
-      const deterministicTitle = deterministicSessionTitleFromUserContent(userContent)
-      if (deterministicTitle) {
-        await this.store.saveSession({
-          ...latest,
-          title: deterministicTitle,
-          title_source: 'generated',
-          title_generated_at: now(),
-          title_generation_error: undefined,
-          updated_at: now()
-        })
-        return
-      }
-      await this.recordSessionTitleGenerationError(latest, error instanceof Error ? error.message : String(error))
+      if (!latest || !this.canAttemptSessionTitleGeneration(latest)) return
+      await this.applyUserFallbackSessionTitle(
+        latest,
+        userContent,
+        error instanceof Error ? error.message : String(error)
+      )
     }
+  }
+
+  private canAttemptSessionTitleGeneration(session: AISession) {
+    const source = firstString(session.title_source) || 'fallback'
+    return source === 'fallback' || source === 'user_fallback'
+  }
+
+  private async applyUserFallbackSessionTitle(session: AISession, userContent: string, errorMessage: string) {
+    const boundedMessage = String(errorMessage || '').trim().slice(0, 500) || 'session_title_generation_failed'
+    const deterministicTitle = deterministicSessionTitleFromUserContent(userContent)
+    if (!deterministicTitle) {
+      await this.recordSessionTitleGenerationError(session, boundedMessage)
+      return
+    }
+    await this.store.saveSession({
+      ...session,
+      title: deterministicTitle,
+      title_source: 'user_fallback',
+      title_generated_at: now(),
+      title_generation_error: boundedMessage,
+      updated_at: now()
+    })
   }
 
   private async recordSessionTitleGenerationError(session: AISession, message: string) {
@@ -3593,7 +3671,7 @@ export class SessionService {
   }
 
   private async retryFailedSessionTitleGeneration(actor: RuntimeActor, session: AISession) {
-    if (session.title_source !== 'fallback' || !firstString(session.title_generation_error)) return session
+    if (!this.canAttemptSessionTitleGeneration(session) || !firstString(session.title_generation_error)) return session
     if (!session.agent_profile_id) return session
     const entries = await this.store.listEntries(actor.workspace_id, session.id)
     const firstUserEntry = entries.find((entry) => entry.role === 'user' && entry.entry_type === 'message' && firstString(entry.content))
@@ -8946,10 +9024,11 @@ export class SessionService {
         continuationAwaitingApproval = true
         assistantContent = textFromRuntimeEvents(await replayCurrentRunEvents())
       } else {
-        continuationError = classifyRuntimeError(error).user_message
+        const classified = classifyRuntimeError(error)
+        continuationError = classified.message || classified.user_message
         assistantContent = hasToolFailure
           ? `工具执行失败：${lastToolError || continuationError}`
-          : `工具已执行，结果：${firstString(JSON.stringify(toolResults.map((result) => result.structured_content)), toolResults.map((result) => result.content).join('\n'), '已完成')}`
+          : `模型续写失败：${continuationError}`
       }
     }
     const runtimeEvents = await replayCurrentRunEvents()

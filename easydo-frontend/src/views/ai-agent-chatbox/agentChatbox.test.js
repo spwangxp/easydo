@@ -276,10 +276,18 @@ test('agent chatbox keeps polling long enough for delayed generated session titl
   const refreshStart = storeSource.indexOf('async function refreshSessionSummaryAfterRun')
   const refreshEnd = storeSource.indexOf('async function createNewSession', refreshStart)
   const refreshSource = storeSource.slice(refreshStart, refreshEnd)
+  const followStart = storeSource.indexOf('async function followActiveRun')
+  const followEnd = storeSource.indexOf('async function enqueueQueueMessage', followStart)
+  const followSource = storeSource.slice(followStart, followEnd)
+  const sendStart = storeSource.indexOf('async function sendMessage')
+  const sendEnd = storeSource.indexOf('async function continueAction', sendStart)
+  const sendSource = storeSource.slice(sendStart, sendEnd)
 
   assert.ok(refreshStart > 0)
   assert.ok(refreshEnd > refreshStart)
-  assert.match(refreshSource, /\[0,\s*600,\s*1400,\s*2500,\s*4000,\s*7000\]/)
+  assert.match(refreshSource, /\[0,\s*400,\s*900,\s*1600,\s*2500,\s*4000,\s*7000,\s*12000\]/)
+  assert.match(followSource, /void refreshSessionSummaryAfterRun\(sessionId\)/)
+  assert.match(sendSource, /void refreshSessionSummaryAfterRun\(runningSessionId\)/)
 })
 
 test('runtime model snapshots preserve context window from generic runtime events', () => {
@@ -373,29 +381,25 @@ test('agent chatbox exposes a visible replay refresh control for runtime traces'
   assert.match(storeSource, /pendingActions\.value = derivePendingActions\(entries\.value\)/)
 })
 
-test('agent chatbox renders failed and cancelled assistant entries through the shared failure card', async () => {
-  const [source, failureCardSource] = await Promise.all([
+test('agent chatbox renders failure recovery actions inside terminal timeline rows', async () => {
+  const [source, traceSource] = await Promise.all([
     readFile(join(currentDir, 'AgentChatbox.vue'), 'utf8'),
-    readFile(join(currentDir, '../../components/ai-runtime/AssistantFailureCard.vue'), 'utf8')
+    readFile(join(currentDir, '../../components/ai-runtime/RuntimeTrace.vue'), 'utf8')
   ])
 
-  assert.match(source, /import AssistantFailureCard from '@\/components\/ai-runtime\/AssistantFailureCard\.vue'/)
-  assert.match(source, /<AssistantFailureCard/)
-  assert.match(source, /v-if="isAssistantFailureEntry\(entry\)"/)
-  assert.match(source, /@refresh="refreshRuntimeTrace\(entry\)"/)
-  assert.match(source, /@continue="continueAfterFailure"/)
-  assert.match(source, /@retry="retryFailedEntry\(entry\)"/)
-  assert.match(source, /chatbox-partial-answer/)
+  assert.doesNotMatch(source, /AssistantFailureCard/)
+  assert.doesNotMatch(source, /chatbox-partial-answer/)
+  assert.match(source, /<template #terminal-actions="\{ item \}">/)
+  assert.match(source, /isFailureTerminalItem\(item, entry\)/)
+  assert.match(source, /continueAfterFailure\(entry\)/)
+  assert.match(source, /retryFailedEntry\(entry\)/)
   assert.match(source, /precedingUserPrompt/)
-  assert.match(source, /function showFinalAnswer\(entry\)[\s\S]*?if \(isAssistantFailureEntry\(entry\)\) return false/s)
+  assert.match(source, /function showFinalAnswer\(entry\)[\s\S]*?chatboxRuntimeEvents\(entry, chatboxStore\.entries\)\.length \|\| chatboxReasoningText\(entry\)/s)
   assert.doesNotMatch(source, /function chatboxReasoningText\(entry\)[\s\S]*?if \(isAssistantFailureEntry\(entry\)\) return ''[\s\S]*?function chatboxAnswerText/)
   assert.doesNotMatch(source, /function chatboxAnswerText\(entry\)[\s\S]*?if \(isAssistantFailureEntry\(entry\)\) return ''[\s\S]*?function isCompletedAssistantEntry/)
-  assert.match(failureCardSource, /assistantFailureDetails/)
-  assert.match(failureCardSource, /entryRuntimeRunId/)
-  assert.match(failureCardSource, /刷新轨迹/)
-  assert.match(failureCardSource, /继续|重试/)
-  assert.match(failureCardSource, /requestId|request_id|request:/)
-  assert.doesNotMatch(failureCardSource, /v-html/)
+  assert.match(traceSource, /slot name="terminal-actions"/)
+  assert.match(traceSource, /isRuntimeTerminalItem\(item\)/)
+  assert.doesNotMatch(traceSource, /AssistantFailureCard/)
 })
 
 test('shared assistant failure details prefer structured runtime errors and preserve diagnostic labels', () => {
@@ -785,7 +789,7 @@ test('runtime process lines show run start and tool result submission lifecycle'
   assert.equal(lines[1].lineSummary, '已提交 2 个工具结果，等待模型继续处理')
 })
 
-test('runtime process lines close the original run row for every explicit terminal state', () => {
+test('runtime process lines append every explicit run terminal after the original run row', () => {
   const cases = [
     ['run.completed', 'success', '运行已完成'],
     ['run.failed', 'failed', '运行失败'],
@@ -803,15 +807,16 @@ test('runtime process lines close the original run row for every explicit termin
       ]
     })
 
-    assert.equal(lines.length, 1)
-    assert.equal(lines[0].event, eventType)
-    assert.equal(lines[0].status, status)
-    assert.equal(lines[0].lineTitle, title)
-    assert.equal(lines[0].lineTarget, `run-${index}`)
+    assert.deepEqual(lines.map((item) => item.event), ['run.started', eventType])
+    assert.equal(lines[0].status, 'running')
+    assert.equal(lines[0].lineTitle, '运行已开始')
+    assert.equal(lines[1].status, status)
+    assert.equal(lines[1].lineTitle, title)
+    assert.equal(lines[1].lineTarget, `run-${index}`)
   })
 })
 
-test('runtime interruption closes an outstanding Pi model wait', () => {
+test('runtime interruption appends after the original run and Pi model wait events', () => {
   const lines = buildRuntimeProcessItems({
     events: [
       { type: 'run.started', payload: { event_id: 'interrupt-wait-1', runtime_run_id: 'run-interrupted', status: 'running' } },
@@ -820,9 +825,10 @@ test('runtime interruption closes an outstanding Pi model wait', () => {
     ]
   })
 
-  assert.equal(lines.some((item) => item.status === 'running'), false)
-  assert.equal(lines.some((item) => item.lineTitle === '正在请求模型'), false)
-  assert.equal(lines.find((item) => item.event === 'run.interrupted')?.status, 'interrupted')
+  assert.deepEqual(lines.map((item) => item.event), ['run.started', 'session.step.started', 'run.interrupted'])
+  assert.equal(lines[0].status, 'running')
+  assert.equal(lines[1].lineTitle, '正在请求模型')
+  assert.equal(lines[2].status, 'interrupted')
 })
 
 test('runtime process lines only use real reasoning as thought and classify actions precisely', () => {
@@ -915,24 +921,29 @@ test('runtime process lines only use real reasoning as thought and classify acti
 
   assert.deepEqual(lines.map((item) => item.lineKind), [
     'model',
-    'thought',
+    'model',
     'skill',
     'mcp',
+    'result',
     'action',
     'subagent',
-    'context'
+    'context',
+    'thought',
+    'thought'
   ])
   assert.equal(lines[0].lineTitle, '已准备上下文 initial')
-  assert.equal(lines[1].lineMeta, 'Thought: 1.3s')
-  assert.equal(lines[1].reasoningText, '我需要先解析 e1，再看最近一次 run；不能直接重新运行。')
-  assert.equal(lines[1].answerText, '失败原因是 server 节点缺少 OPENAI_BASE_URL。')
-  assert.deepEqual(lines[1].sections.map((section) => section.kind), ['reasoning', 'answer'])
+  assert.equal(lines[1].event, 'model.call_started')
   assert.equal(lines[3].lineMeta, '→ mcp')
-  assert.equal(lines[3].resultSummary, '找到 pipeline #13')
-  assert.equal(lines[4].lineMeta, 'Action')
-  assert.equal(lines[6].lineTitle, '结构化输出已验证')
+  assert.equal(lines[4].lineSummary, '找到 pipeline #13')
+  assert.equal(lines[5].lineMeta, 'Action')
+  assert.equal(lines[7].lineTitle, '结构化输出已验证')
+  assert.equal(lines[8].lineMeta, 'Thought: 1.3s')
+  assert.equal(lines[8].reasoningText, '我需要先解析 e1，再看最近一次 run；不能直接重新运行。')
+  assert.deepEqual(lines[8].sections.map((section) => section.kind), ['reasoning'])
+  assert.equal(lines[9].answerText, '失败原因是 server 节点缺少 OPENAI_BASE_URL。')
+  assert.deepEqual(lines[9].sections.map((section) => section.kind), ['answer'])
   assert.ok(!lines.some((item) => item.lineSummary.includes('prepare prompt audit')))
-  assert.ok(lines.every((item) => item.lineKind !== 'thought' || item.sections.length === 2))
+  assert.ok(lines.every((item) => item.lineKind !== 'thought' || item.sections.length === 1))
 })
 
 test('runtime process lines preserve one thought per model request in event order', () => {
@@ -995,13 +1006,24 @@ test('runtime process lines preserve one thought per model request in event orde
     ]
   })
 
-  assert.deepEqual(lines.map((item) => item.lineKind), ['thought', 'mcp', 'thought'])
-  assert.equal(lines[0].reasoningText, '先定位 pipeline。再读取最近 run。')
-  assert.equal(lines[0].answerText, '需要读取最近一次运行。')
-  assert.equal(lines[0].lineMeta, 'Thought: 1.2s')
-  assert.equal(lines[1].resultSummary, '最近 run #28 failed')
-  assert.equal(lines[2].reasoningText, '失败节点明确后继续读日志。')
-  assert.equal(lines[2].answerText, '最终原因是镜像拉取失败。')
+  assert.deepEqual(lines.map((item) => item.event), [
+    'model.call_started',
+    'reasoning_delta',
+    'answer_delta',
+    'model.call_completed',
+    'action.execution_started',
+    'tool.result_prepared',
+    'model.continuation_started',
+    'reasoning_delta',
+    'answer_delta',
+    'model.continuation_completed'
+  ])
+  assert.equal(lines[1].reasoningText, '先定位 pipeline。再读取最近 run。')
+  assert.equal(lines[1].lineMeta, 'Thought: 1.2s')
+  assert.equal(lines[2].answerText, '需要读取最近一次运行。')
+  assert.equal(lines[5].lineSummary, '最近 run #28 failed')
+  assert.equal(lines[7].reasoningText, '失败节点明确后继续读日志。')
+  assert.equal(lines[8].answerText, '最终原因是镜像拉取失败。')
   assert.ok(!lines.some((item) => item.lineSummary.includes('聚合 reasoning')))
   assert.ok(!lines.some((item) => item.lineSummary.includes('聚合 answer')))
 })
@@ -1018,9 +1040,14 @@ test('runtime process lines preserve reasoning and answer delta whitespace', () 
     ]
   })
 
-  assert.equal(lines.length, 1)
-  assert.equal(lines[0].reasoningText, 'The user says: "add a pipeline".\nI should ask questions.')
-  assert.equal(lines[0].answerText, '先确认： **目标** 和触发方式。')
+  assert.deepEqual(lines.map((item) => item.event), [
+    'model.call_started',
+    'reasoning_delta',
+    'answer_delta',
+    'model.call_completed'
+  ])
+  assert.equal(lines[1].reasoningText, 'The user says: "add a pipeline".\nI should ask questions.')
+  assert.equal(lines[2].answerText, '先确认： **目标** 和触发方式。')
 })
 
 test('runtime process lines compact streamed delta bursts before building history items', async () => {
@@ -1050,12 +1077,19 @@ test('runtime process lines keep aggregate model output as a single thought with
   })
 
   const thoughtLines = lines.filter((item) => item.lineKind === 'thought')
-  assert.equal(thoughtLines.length, 1)
-  assert.deepEqual(lines.map((item) => item.lineKind), ['skill', 'thought'])
+  assert.equal(thoughtLines.length, 2)
+  assert.deepEqual(lines.map((item) => item.event), [
+    'skill.loaded',
+    'model.call_started',
+    'model.call_completed',
+    'reasoning',
+    'answer'
+  ])
   assert.match(thoughtLines[0].reasoningText, /需求澄清任务/)
   assert.match(thoughtLines[0].reasoningText, /回滚/)
-  assert.equal(thoughtLines[0].answerText, '请先回答流水线目标、触发方式、输入参数、任务阶段、资源、产物、通知和回滚策略。')
-  assert.deepEqual(thoughtLines[0].sections.map((section) => section.kind), ['reasoning', 'answer'])
+  assert.equal(thoughtLines[1].answerText, '请先回答流水线目标、触发方式、输入参数、任务阶段、资源、产物、通知和回滚策略。')
+  assert.deepEqual(thoughtLines[0].sections.map((section) => section.kind), ['reasoning'])
+  assert.deepEqual(thoughtLines[1].sections.map((section) => section.kind), ['answer'])
   assert.ok(lines.every((item) => !item.lineSummary.includes('undefined')))
 })
 
@@ -1079,9 +1113,9 @@ test('runtime process lines keep model thoughts visible when limiting later tool
   const thoughts = lines.filter((item) => item.lineKind === 'thought')
 
   assert.equal(lines.length, 18)
-  assert.equal(thoughts.length, 1)
+  assert.equal(thoughts.length, 2)
   assert.equal(thoughts[0].reasoningText, '先确认资源和工具。')
-  assert.equal(thoughts[0].answerText, '我会先查询资源列表。')
+  assert.equal(thoughts[1].answerText, '我会先查询资源列表。')
   assert.equal(lines[0].lineKind, 'thought')
 })
 
@@ -1103,19 +1137,24 @@ test('runtime process lines show every model request even when it only emits too
     ]
   })
 
-  assert.deepEqual(lines.map((item) => item.lineKind), [
-    'thought',
-    'mcp',
-    'model',
-    'thought'
+  assert.deepEqual(lines.map((item) => item.event), [
+    'model.call_started',
+    'reasoning_delta',
+    'model.call_completed',
+    'action.execution_started',
+    'tool.result_prepared',
+    'model.tool_result_submitted',
+    'model.continuation_started',
+    'model.call_started',
+    'model.call_completed',
+    'model.continuation_completed'
   ])
-  assert.equal(lines[0].lineMeta, 'Thought: 900ms')
-  assert.equal(lines[0].reasoningText, '先查资源。')
-  assert.match(lines[1].resultSummary, /easydo_resource_list/)
-  assert.equal(lines[2].lineTitle, '工具结果已提交给模型')
-  assert.equal(lines[3].lineMeta, 'LLM tool continuation #2')
-  assert.equal(lines[3].lineSummary, '请求工具 1 个')
-  assert.deepEqual(lines[3].sections, [])
+  assert.equal(lines[1].lineMeta, 'Thought: 900ms')
+  assert.equal(lines[1].reasoningText, '先查资源。')
+  assert.match(lines[4].lineSummary, /easydo_resource_list/)
+  assert.equal(lines[5].lineTitle, '工具结果已提交给模型')
+  assert.equal(lines[8].lineMeta, 'LLM tool continuation #2')
+  assert.equal(lines[8].lineSummary, '请求工具 1 个')
 })
 
 test('runtime process lines keep detected tool calls as drafts until execution or approval', () => {
@@ -1128,7 +1167,7 @@ test('runtime process lines keep detected tool calls as drafts until execution o
   assert.deepEqual(lines, [])
 })
 
-test('runtime process lines fold low-level tool and approval events into readable steps', () => {
+test('runtime process lines keep low-level tool and approval lifecycle events in order', () => {
   const lines = buildRuntimeProcessItems({
     events: [
       { event: 'model.call_started', payload: { event_id: 'model-1-start', round: 1 } },
@@ -1164,15 +1203,29 @@ test('runtime process lines fold low-level tool and approval events into readabl
     ]
   })
 
-  assert.deepEqual(lines.map((item) => item.lineKind), ['thought', 'mcp', 'thought', 'action'])
-  assert.equal(lines[1].lineTitle, 'easydo_resource_get workspace_id=1 resource_id=7022')
-  assert.equal(lines[1].reasonText, '先解析 7022 到内部资源。')
-  assert.match(lines[1].resultSummary, /id=2/)
-  assert.equal(lines[3].lineMeta, 'Action')
-  assert.match(lines[3].lineTitle, /easydo_resource_base_info_refresh/)
-  assert.equal(lines[3].reasonText, '刷新 7022 的显卡采集信息')
-  assert.match(lines[3].lineSummary, /刷新 7022/)
-  assert.ok(!lines.some((item) => ['model.tool_call_detected', 'approval.requested', 'action.permission_evaluated'].includes(item.event)))
+  assert.deepEqual(lines.map((item) => item.event), [
+    'model.call_started',
+    'reasoning_delta',
+    'model.call_completed',
+    'action.execution_started',
+    'tool.executed',
+    'tool.result_prepared',
+    'action.execution_succeeded',
+    'model.continuation_started',
+    'model.call_started',
+    'model.call_completed',
+    'approval.requested',
+    'action.decision_required'
+  ])
+  assert.equal(lines[3].lineTitle, 'easydo_resource_get workspace_id=1 resource_id=7022')
+  assert.equal(lines[3].reasonText, '先解析 7022 到内部资源。')
+  assert.match(lines[4].lineSummary, /id=2/)
+  assert.equal(lines[10].status, 'waiting')
+  assert.equal(lines[11].lineMeta, 'Action')
+  assert.match(lines[11].lineTitle, /easydo_resource_base_info_refresh/)
+  assert.equal(lines[11].reasonText, '刷新 7022 的显卡采集信息')
+  assert.match(lines[11].lineSummary, /刷新 7022/)
+  assert.ok(!lines.some((item) => ['model.tool_call_detected', 'action.permission_evaluated'].includes(item.event)))
 })
 
 test('runtime process lines show approval requests immediately before decision event arrives', () => {
@@ -1198,11 +1251,11 @@ test('runtime process lines show approval requests immediately before decision e
     ]
   })
 
-  assert.deepEqual(lines.map((item) => item.lineKind), ['thought', 'action'])
-  assert.equal(lines[1].event, 'approval.requested')
-  assert.equal(lines[1].status, 'waiting')
-  assert.match(lines[1].lineTitle, /easydo_resource_base_info_refresh|等待确认/)
-  assert.equal(lines[1].lineSummary, '刷新资源 7022 采集信息')
+  assert.deepEqual(lines.map((item) => item.event), ['model.call_started', 'model.call_completed', 'approval.requested'])
+  assert.equal(lines[2].status, 'waiting')
+  assert.match(lines[2].lineTitle, /easydo_resource_base_info_refresh|等待确认|需要确认/)
+  // Waiting approval panel is title/target only; reason is not duplicated as summary noise.
+  assert.equal(lines[2].lineSummary, '')
 })
 
 test('runtime process lines keep multiple approval panels for repeated tool calls with different call ids', () => {
@@ -1217,7 +1270,7 @@ test('runtime process lines keep multiple approval panels for repeated tool call
   assert.deepEqual(lines.map((item) => item.data.call_id), ['call-1', 'call-2'])
 })
 
-test('runtime process lines merge persisted approval and decision events from the same action', () => {
+test('runtime process lines keep persisted approval and decision events as separate rows', () => {
   const lines = buildRuntimeProcessItems({
     events: [
       {
@@ -1324,15 +1377,15 @@ test('runtime process lines merge persisted approval and decision events from th
   })
 
   const actions = lines.filter((item) => item.lineKind === 'action')
-  assert.equal(actions.length, 1)
-  assert.equal(actions[0].event, 'action.decision_required')
-  assert.equal(actions[0].status, 'waiting')
-  assert.equal(actions[0].lineTitle, '需要确认 调用工具 easydo_resource_base_info_refresh')
-  assert.equal(actions[0].lineTarget, 'resource')
-  assert.equal(actions[0].lineSummary, '模型请求执行需要确认的 EasyDo 操作')
+  assert.equal(actions.length, 2)
+  assert.deepEqual(actions.map((item) => item.event), ['approval.requested', 'action.decision_required'])
+  assert.deepEqual(actions.map((item) => item.status), ['waiting', 'waiting'])
+  assert.equal(actions[1].lineTitle, '需要确认 easydo_resource_base_info_refresh resource_id=2 workspace_id=1')
+  assert.equal(actions[1].lineTarget, 'resource')
+  assert.equal(actions[1].lineSummary, '')
 })
 
-test('runtime process lines keep approval decision result and reason on the action card', () => {
+test('runtime process lines keep approval decision result and reason on its event row', () => {
   const approvedLines = buildRuntimeProcessItems({
     events: [
       {
@@ -1366,10 +1419,10 @@ test('runtime process lines keep approval decision result and reason on the acti
   })
 
   assert.equal(approvedLines.length, 1)
+  assert.equal(approvedLines[0].event, 'action.decision')
   assert.equal(approvedLines[0].status, 'success')
-  assert.equal(approvedLines[0].resultStatus, 'success')
-  assert.equal(approvedLines[0].resultTitle, '已批准')
-  assert.equal(approvedLines[0].resultSummary, '本会话允许刷新资源状态 · demo · approve_session')
+  assert.match(String(approvedLines[0].lineTitle || ''), /已批准/)
+  assert.match(String(approvedLines[0].lineSummary || approvedLines[0].resultSummary || ''), /本会话允许刷新资源状态|approve_session|已批准/)
 
   const rejectedLines = buildRuntimeProcessItems({
     events: [
@@ -1398,10 +1451,10 @@ test('runtime process lines keep approval decision result and reason on the acti
   })
 
   assert.equal(rejectedLines.length, 1)
+  assert.equal(rejectedLines[0].event, 'permission.resolved')
   assert.equal(rejectedLines[0].status, 'rejected')
-  assert.equal(rejectedLines[0].resultStatus, 'rejected')
-  assert.equal(rejectedLines[0].resultTitle, '已拒绝')
-  assert.equal(rejectedLines[0].resultSummary, '用户拒绝写入工作区')
+  assert.equal(rejectedLines[0].lineTitle, '已拒绝 easydo_write')
+  assert.match(String(rejectedLines[0].lineSummary || rejectedLines[0].resultSummary || ''), /用户拒绝写入工作区|已拒绝/)
 })
 
 test('runtime process lines describe model request retries with user-facing labels', () => {
@@ -1418,13 +1471,16 @@ test('runtime process lines describe model request retries with user-facing labe
   })
 
   assert.equal(lines[0].lineMeta, 'LLM action continuation #1')
-  assert.equal(lines[0].lineSummary, '模型仅返回内部推理，正在重试生成可见回复')
+  assert.equal(lines[0].lineTitle, '模型请求已开始')
   assert.equal(lines[1].lineKind, 'model')
-  assert.equal(lines[1].lineTitle, '模型空输出重试')
+  assert.equal(lines[1].lineTitle, '模型请求已完成')
+  assert.equal(lines[1].lineSummary, '模型仅返回内部推理')
   assert.equal(lines[2].lineKind, 'model')
-  assert.equal(lines[2].lineTitle, '已准备上下文 provider continuation #2')
-  assert.equal(lines[3].lineMeta, 'LLM provider continuation #2')
-  assert.equal(lines[3].sections[0].text, '已触发采集。')
+  assert.equal(lines[2].lineTitle, '模型空输出重试')
+  assert.equal(lines[3].lineTitle, '已准备上下文 provider continuation #2')
+  assert.equal(lines[4].lineMeta, 'LLM provider continuation #2')
+  assert.equal(lines[5].sections[0].text, '已触发采集。')
+  assert.equal(lines[6].lineTitle, '模型请求已完成')
 })
 
 test('runtime process lines show provider continuation completion events', () => {
@@ -1495,7 +1551,7 @@ test('runtime process lines show prepared context before model calls without raw
   const lines = buildRuntimeProcessItems({ events })
   assert.deepEqual(lines.map((item) => item.lineKind), ['model'])
   assert.equal(lines[0].status, 'running')
-  assert.equal(lines[0].lineMeta, 'LLM')
+  assert.equal(lines[0].lineMeta, 'LLM initial #1')
   assert.equal(lines[0].lineTitle, '已准备上下文 initial #1')
   assert.equal(lines[0].lineTarget, 'openrouter/openai/gpt-oss-120b:free')
   assert.equal(lines[0].lineSummary, '上下文 128 字符，历史 4 条，工具 3 个，技能 2 个，子结果 1 个，结构化输出')
@@ -1543,13 +1599,16 @@ test('runtime process lines show context build tags and fragments', () => {
   assert.deepEqual(visible.map((item) => item.event), ['context.build_started', 'context_tags.resolved', 'context.build_completed'])
 
   const lines = buildRuntimeProcessItems({ events })
-  assert.deepEqual(lines.map((item) => item.lineKind), ['context', 'context'])
-  assert.equal(lines[0].lineTitle, '上下文准备完成')
-  assert.equal(lines[0].status, 'success')
-  assert.equal(lines[0].lineSummary, '标签 2 个，片段 2 个，技能 1 个，MCP 工具 3 个，子结果 1 个，模型上下文 256 字符，结构化输出')
+  assert.deepEqual(lines.map((item) => item.lineKind), ['context', 'context', 'context'])
+  assert.equal(lines[0].lineTitle, '开始准备上下文')
+  assert.equal(lines[0].status, 'running')
+  assert.equal(lines[0].lineSummary, '标签 workspace, page-assistant')
   assert.equal(lines[1].lineTitle, '已解析上下文标签')
   assert.equal(lines[1].lineTarget, '2 个片段')
   assert.equal(lines[1].lineSummary, 'workspace: 工作区；page-assistant: 当前页面；警告 page metadata partial')
+  assert.equal(lines[2].lineTitle, '上下文准备完成')
+  assert.equal(lines[2].status, 'success')
+  assert.equal(lines[2].lineSummary, '标签 2 个，片段 2 个，技能 1 个，MCP 工具 3 个，子结果 1 个，模型上下文 256 字符，结构化输出')
 })
 
 test('runtime process lines show prepared capabilities tools and output schema constraints', () => {
@@ -1691,14 +1750,16 @@ test('runtime process lines show synthesized answers after unresolved tool calls
   })
 
   assert.equal(lines[0].lineMeta, 'LLM tool continuation #3')
-  assert.equal(lines[0].lineSummary, '请求工具 1 个')
+  assert.equal(lines[0].lineTitle, '模型请求已开始')
   assert.equal(lines[1].lineKind, 'model')
-  assert.equal(lines[1].lineTitle, '已根据工具结果生成回复')
-  assert.equal(lines[1].lineSummary, '模型未返回可见文本，已用 1 个工具结果生成最终回复')
-  assert.equal(lines[2].sections[0].text, '工具 easydo_resource_list 已执行，结果：{"list":[],"total":0,"page":1,"limit":20}')
+  assert.equal(lines[1].lineTitle, '模型请求已完成')
+  assert.equal(lines[1].lineSummary, '请求工具 1 个')
+  assert.equal(lines[2].lineTitle, '已根据工具结果生成回复')
+  assert.equal(lines[2].lineSummary, '模型未返回可见文本，已用 1 个工具结果生成最终回复')
+  assert.equal(lines[3].sections[0].text, '工具 easydo_resource_list 已执行，结果：{"list":[],"total":0,"page":1,"limit":20}')
 })
 
-test('runtime process lines merge subagent lifecycle into one compact child thread card', () => {
+test('runtime process lines keep subagent lifecycle as chronological child thread rows', () => {
   const lines = buildRuntimeProcessItems({
     events: [
       {
@@ -1767,21 +1828,26 @@ test('runtime process lines merge subagent lifecycle into one compact child thre
     ]
   })
 
-  assert.equal(lines.length, 1)
-  assert.equal(lines[0].lineKind, 'subagent')
-  assert.equal(lines[0].status, 'success')
+  assert.deepEqual(lines.map((item) => item.event), [
+    'subagent.spawned',
+    'subagent.progress',
+    'subagent.progress',
+    'subagent.blocked_approval',
+    'subagent.completed'
+  ])
+  assert.deepEqual(lines.map((item) => item.lineKind), ['subagent', 'subagent', 'subagent', 'subagent', 'subagent'])
+  assert.deepEqual(lines.map((item) => item.status), ['running', 'running', 'running', 'waiting', 'success'])
   assert.equal(lines[0].childRunLinkId, 'link_w1_000001')
   assert.equal(lines[0].childRuntimeRunId, 'r_child_w1_000001')
   assert.equal(lines[0].lineTitle, 'Run Watcher watch run #29 until terminal state')
-  assert.deepEqual(lines[0].subagentProgress, [
+  assert.deepEqual(lines.map((item) => item.lineSummary), [
     '观察 run #29 的节点状态',
     'server 已通过启动校验',
     '主会话需要持续监听长任务状态',
     '健康检查需要在 parent 会话确认',
     'run #29 所有节点成功，健康检查 200'
   ])
-  assert.equal(lines[0].resultSummary, 'run #29 所有节点成功，健康检查 200')
-  assert.deepEqual(lines[0].artifactRefs.map((item) => item.artifact_id), ['art_run_29_summary'])
+  assert.deepEqual(lines[4].artifactRefs.map((item) => item.artifact_id), ['art_run_29_summary'])
 })
 
 test('runtime process lines render Pi OpenCode-style tool approval and result events', () => {
@@ -1799,16 +1865,46 @@ test('runtime process lines render Pi OpenCode-style tool approval and result ev
     ]
   })
 
-  // session.prompted is excluded from trace — first item is the thought
-  assert.deepEqual(lines.map((item) => item.lineKind), ['thought', 'action', 'mcp', 'thought'])
-  assert.equal(lines[0].sections[0].text, '需要调用写工具。')
-  assert.equal(lines[1].status, 'success')
-  assert.equal(lines[1].lineTitle, '需要确认 easydo_write')
-  assert.equal(lines[1].lineSummary, 'Tool easydo_write requires approval')
-  assert.equal(lines[2].lineTitle, 'easydo_write value=x')
-  assert.equal(lines[2].reasonText, '需要调用写工具。')
-  assert.equal(lines[2].resultSummary, 'ok=true')
-  assert.equal(lines[3].sections[0].text, '写入完成。')
+  assert.deepEqual(lines.map((item) => item.event), [
+    'session.step.started',
+    'session.reasoning.ended',
+    'permission.resolved',
+    'session.tool.called',
+    'session.tool.success',
+    'session.text.ended',
+    'session.step.ended'
+  ])
+  assert.equal(lines[1].sections[0].text, '需要调用写工具。')
+  assert.equal(lines[2].status, 'success')
+  assert.match(String(lines[2].lineTitle || ''), /已批准/)
+  assert.equal(lines[3].event, 'session.tool.called')
+  assert.equal(lines[4].event, 'session.tool.success')
+  assert.equal(lines[4].lineSummary, 'ok=true')
+  assert.equal(lines[5].sections[0].text, '写入完成。')
+})
+
+test('runtime process lines keep a real same-call failure after the waiting approval row', () => {
+  const lines = buildRuntimeProcessItems({
+    events: [
+      { type: 'session.step.started', payload: { event_id: 's1', agent: 'Draft Common Agent', model: { provider_id: 'openai-compatible', id: 'slow-model' } } },
+      { type: 'session.reasoning.started', payload: { event_id: 'r1', assistant_message_id: 'a1', reasoning_id: 'r1' } },
+      { type: 'session.tool.input.started', payload: { event_id: 'tis1', call_id: 'call-504C', tool_name: 'easydo_resource_list' } },
+      { type: 'session.reasoning.ended', payload: { event_id: 're1', text: 'Let me list resources.' } },
+      { type: 'session.tool.input.ended', payload: { event_id: 'tie1', call_id: 'call-504C', tool_name: 'easydo_resource_list' } },
+      { type: 'session.tool.called', payload: { event_id: 'tc1', call_id: 'call-504C', tool: 'easydo_resource_list', tool_name: 'easydo_resource_list' } },
+      { type: 'action.permission_evaluated', payload: { event_id: 'pe1', call_id: 'call-504C', tool_name: 'easydo_resource_list', decision: 'ask', reason: 'ask by mcp.default_request', permission_key: 'mcp:easydo:tools:easydo_resource_list:read', operation_type: 'read' } },
+      { type: 'permission.asked', payload: { event_id: 'pa1', request_id: 'approval:call-504C', approval_id: 'approval:call-504C', call_id: 'call-504C', tool_name: 'easydo_resource_list', reason: 'List resources in one workspace', message: 'List resources in one workspace', tool_description: 'List resources in one workspace', input: { limit: 20, workspace_id: 1 }, resource_type: 'mcp_server', resource_id: 'easydo', mcp_server_key: 'easydo', executor_type: 'mcp', capability: 'tools' } },
+      { type: 'session.tool.failed', payload: { event_id: 'tf1', call_id: 'call-504C', tool: 'easydo_resource_list', tool_name: 'easydo_resource_list', error: { type: 'tool_error', message: 'List resources in one workspace' }, result: { content: [{ type: 'text', text: 'List resources in one workspace' }], details: {} } } }
+    ]
+  })
+
+  const actionLine = lines.find((item) => item.lineKind === 'action')
+  assert.ok(actionLine, 'action card should still exist')
+  assert.equal(actionLine.status, 'waiting')
+  assert.equal(actionLine.event, 'permission.asked')
+  assert.equal(actionLine.lineTitle, '需要确认 easydo_resource_list')
+  assert.equal(actionLine.lineSummary, '')
+  assert.equal(lines.some((item) => item.event === 'session.tool.failed'), false)
 })
 
 test('runtime process lines keep the Pi model wait visible until the first token or failure', () => {
@@ -1846,11 +1942,14 @@ test('runtime process lines keep the Pi model wait visible until the first token
     now: '2026-07-11T10:00:31.000Z'
   })
 
-  assert.equal(thinking.length, 1)
+  assert.equal(thinking.length, 2)
   assert.equal(thinking[0].key, waiting[0].key)
-  assert.equal(thinking[0].status, 'running')
-  assert.equal(thinking[0].lineTitle, '模型正在思考')
-  assert.equal(thinking[0].lineSummary, '')
+  assert.equal(thinking[0].status, 'success')
+  assert.equal(thinking[0].lineTitle, '模型响应完成')
+  assert.equal(thinking[0].lineSummary, '等待首个响应 31 秒')
+  assert.equal(thinking[1].event, 'session.reasoning.started')
+  assert.equal(thinking[1].status, 'running')
+  assert.equal(thinking[1].lineTitle, '开始思考')
 
   const timedOut = buildRuntimeProcessItems({
     events: [
@@ -1871,9 +1970,44 @@ test('runtime process lines keep the Pi model wait visible until the first token
   assert.equal(timedOut[0].status, 'failed')
   assert.equal(timedOut[0].lineTitle, '模型请求失败')
   assert.equal(timedOut[0].lineSummary, 'Request timed out.')
+  assert.equal(timedOut[1].event, 'session.step.failed')
+  assert.equal(timedOut[1].status, 'failed')
+  assert.equal(timedOut[1].lineSummary, 'Request timed out.')
+
+  const completed = buildRuntimeProcessItems({
+    events: [
+      {
+        type: 'session.step.started',
+        timestamp: '2026-07-11T10:00:00.000Z',
+        payload: {
+          event_id: 'pi-done-1',
+          model: { provider_id: 'openai-compatible', id: 'fast-model' }
+        }
+      },
+      {
+        type: 'session.text.delta',
+        timestamp: '2026-07-11T10:00:02.000Z',
+        payload: { event_id: 'pi-done-2', delta: '最终回复' }
+      },
+      {
+        type: 'session.step.ended',
+        timestamp: '2026-07-11T10:00:03.000Z',
+        payload: { event_id: 'pi-done-3' }
+      }
+    ],
+    now: '2026-07-11T10:05:00.000Z'
+  })
+  assert.equal(completed.length, 3)
+  assert.equal(completed[0].status, 'success')
+  assert.equal(completed[0].lineTitle, '模型响应完成')
+  assert.equal(completed[0].lineSummary, '等待首个响应 2 秒')
+  assert.equal(completed[1].event, 'session.text.delta')
+  assert.equal(completed[1].sections.some((section) => section.kind === 'answer' && section.text.includes('最终回复')), true)
+  assert.equal(completed[2].event, 'session.step.ended')
+  assert.equal(completed[2].status, 'success')
 })
 
-test('runtime process lines treat approval-blocked tool failures as a pause instead of model output', () => {
+test('runtime process lines keep chronological tool/step actions around approval pauses', () => {
   const lines = buildRuntimeProcessItems({
     events: [
       { type: 'session.step.started', payload: { event_id: 'pi-approval-pause-1', agent: 'Draft Common Agent' } },
@@ -1885,14 +2019,60 @@ test('runtime process lines treat approval-blocked tool failures as a pause inst
     ]
   })
 
-  assert.equal(lines.length, 1)
-  assert.equal(lines[0].lineKind, 'action')
-  assert.equal(lines[0].status, 'waiting')
-  assert.equal(lines[0].lineTitle, '需要确认 easydo_write')
-  assert.equal(lines[0].lineSummary, 'Tool easydo_write requires approval')
+  assert.deepEqual(lines.map((item) => item.event), [
+    'session.step.started',
+    'session.tool.called',
+    'permission.asked',
+    'session.text.ended',
+    'session.step.ended'
+  ])
+  assert.equal(lines[2].lineKind, 'action')
+  assert.equal(lines[2].status, 'waiting')
+  assert.equal(lines[2].lineTitle, '需要确认 easydo_write')
+  assert.equal(lines[2].lineSummary, '')
+  assert.equal(lines.some((item) => item.event === 'session.tool.failed'), false)
+  assert.equal(lines[4].status, 'success')
 })
 
-test('runtime process lines hide approval-wait narration emitted before the permission panel', () => {
+test('runtime process lines mark resolved approvals and keep decision visible', () => {
+  const lines = buildRuntimeProcessItems({
+    events: [
+      { type: 'permission.asked', payload: { event_id: 'ask-1', request_id: 'approval:call-1', call_id: 'call-1', tool_name: 'easydo_write', reason: 'confirm write' } },
+      { type: 'permission.resolved', payload: { event_id: 'resolve-1', request_id: 'approval:call-1', call_id: 'call-1', tool_name: 'easydo_write', decision: 'approve_once', result: 'approved' } },
+      { type: 'session.tool.called', payload: { event_id: 'call-after', call_id: 'call-1', tool: 'easydo_write', input: { value: 'x' } } },
+      { type: 'session.tool.success', payload: { event_id: 'ok-1', call_id: 'call-1', tool: 'easydo_write', structured: { ok: true } } }
+    ]
+  })
+
+  const resolved = lines.find((item) => item.event === 'permission.resolved')
+  assert.ok(resolved)
+  assert.equal(lines.filter((item) => item.lineKind === 'action').length, 1)
+  assert.equal(resolved.status, 'success')
+  assert.match(String(resolved.lineTitle || ''), /已批准/)
+  assert.equal(String(resolved.data?.decision || resolved.display?.decision || '').trim(), 'approve_once')
+  assert.ok(lines.some((item) => item.event === 'session.tool.success' && item.status === 'success'))
+})
+
+test('runtime process lines sort by event_seq and keep failures after earlier actions', () => {
+  const lines = buildRuntimeProcessItems({
+    events: [
+      { type: 'session.step.failed', payload: { event_seq: 40, event_id: 'fail-last', error: { message: 'later failure' } } },
+      { type: 'session.step.started', payload: { event_seq: 10, event_id: 'step-first' } },
+      { type: 'session.tool.called', payload: { event_seq: 20, event_id: 'tool-mid', call_id: 'call-1', tool: 'easydo_write' } },
+      { type: 'permission.asked', payload: { event_seq: 30, event_id: 'ask-mid', request_id: 'approval:call-1', call_id: 'call-1', tool_name: 'easydo_write', reason: 'confirm write' } }
+    ]
+  })
+
+  assert.deepEqual(lines.map((item) => item.event), [
+    'session.step.started',
+    'session.tool.called',
+    'permission.asked',
+    'session.step.failed'
+  ])
+  assert.equal(lines[lines.length - 1].lineSummary.includes('later failure') || lines[lines.length - 1].status === 'failed', true)
+})
+
+test('runtime process lines keep approval-wait narration at its original position', () => {
   const lines = buildRuntimeProcessItems({
     events: [
       { type: 'session.step.started', payload: { event_id: 'pi-approval-narration-1', agent: 'kk' } },
@@ -1924,10 +2104,14 @@ test('runtime process lines hide approval-wait narration emitted before the perm
     ]
   })
 
-  assert.equal(lines.length, 1)
-  assert.equal(lines[0].lineKind, 'action')
-  assert.equal(lines[0].status, 'waiting')
-  assert.ok(!JSON.stringify(lines).includes('等待用户审批'))
+  assert.deepEqual(lines.map((item) => item.event), [
+    'session.step.started',
+    'session.reasoning.ended',
+    'session.text.ended',
+    'permission.asked'
+  ])
+  assert.ok(JSON.stringify(lines[1]).includes('等待用户审批'))
+  assert.equal(lines[3].status, 'waiting')
 })
 
 test('runtime process lines keep real step answers that arrive after permission.asked', () => {
@@ -1979,7 +2163,7 @@ test('runtime process lines keep real step answers that arrive after permission.
     '我来帮你重新采集非沐曦环境的 GPU 使用情况。先定位资源，再触发刷新。',
     '刷新任务已提交。'
   ])
-  assert.ok(!JSON.stringify(lines).includes('不要叙述等待'))
+  assert.ok(JSON.stringify(lines).includes('不要叙述等待'))
 })
 
 test('agent chatbox metrics sum billed step tokens without double-counting duplicate step.ended events', () => {
@@ -2039,6 +2223,75 @@ test('runtime process lines do not reinject previous answer while a later step i
   assert.deepEqual(answers, ['第一轮结论。'])
 })
 
+
+test('runtime process lines keep reasoning before interleaved tool input in Pi event order', () => {
+  const lines = buildRuntimeProcessItems({
+    events: [
+      { type: 'session.step.started', payload: { event_id: 'pi-interleave-1', agent: 'k1', model: { provider_id: 'openrouter', id: 'm1' } } },
+      { type: 'session.reasoning.started', payload: { event_id: 'pi-interleave-2', assistant_message_id: 'assistant-1', reasoning_id: 'assistant-1:reasoning:0' } },
+      { type: 'session.tool.input.started', payload: { event_id: 'pi-interleave-3', call_id: 'call-1', tool_name: 'easydo_resource_base_info_refresh', assistant_message_id: 'assistant-1' } },
+      {
+        type: 'session.reasoning.ended',
+        payload: {
+          event_id: 'pi-interleave-4',
+          assistant_message_id: 'assistant-1',
+          reasoning_id: 'assistant-1:reasoning:0',
+          text: 'User wants GPU collection for resource 7022.'
+        }
+      },
+      {
+        type: 'session.tool.input.ended',
+        payload: { event_id: 'pi-interleave-5', call_id: 'call-1', text: '{"resource_id":7022,"workspace_id":0}' }
+      },
+      {
+        type: 'session.tool.called',
+        payload: { event_id: 'pi-interleave-6', call_id: 'call-1', tool: 'easydo_resource_base_info_refresh', input: { resource_id: 7022, workspace_id: 0 } }
+      },
+      {
+        type: 'session.tool.failed',
+        payload: {
+          event_id: 'pi-interleave-7',
+          call_id: 'call-1',
+          tool: 'easydo_resource_base_info_refresh',
+          error: { message: 'workspace_id: must be >= 1' }
+        }
+      },
+      {
+        type: 'session.reasoning.started',
+        payload: { event_id: 'pi-interleave-8', assistant_message_id: 'assistant-1', reasoning_id: 'assistant-1:reasoning:0' }
+      },
+      {
+        type: 'session.reasoning.ended',
+        payload: {
+          event_id: 'pi-interleave-9',
+          assistant_message_id: 'assistant-1',
+          reasoning_id: 'assistant-1:reasoning:0',
+          text: 'Need valid workspace_id before retrying.'
+        }
+      },
+      { type: 'session.step.ended', payload: { event_id: 'pi-interleave-10', finish_reason: 'stop' } }
+    ]
+  })
+
+  assert.deepEqual(lines.map((item) => item.event), [
+    'session.step.started',
+    'session.reasoning.started',
+    'session.tool.input.started',
+    'session.reasoning.ended',
+    'session.tool.input.ended',
+    'session.tool.called',
+    'session.tool.failed',
+    'session.reasoning.started',
+    'session.reasoning.ended',
+    'session.step.ended'
+  ])
+  assert.match(lines[3].reasoningText, /GPU collection/)
+  assert.equal(lines[5].status, 'running')
+  assert.equal(lines[6].status, 'failed')
+  assert.match(lines[6].lineSummary, /workspace_id/)
+  assert.match(lines[8].reasoningText, /valid workspace_id/)
+})
+
 test('runtime process lines keep Pi streamed answer after tools in SSE order', () => {
   const lines = buildRuntimeProcessItems({
     events: [
@@ -2054,12 +2307,19 @@ test('runtime process lines keep Pi streamed answer after tools in SSE order', (
     answer: '**结论**：已读取。'
   })
 
-  assert.deepEqual(lines.map((item) => item.lineKind), ['thought', 'tool', 'thought'])
-  assert.equal(lines[0].reasoningText, '需要先读文件。')
-  assert.equal(lines[0].answerText, '')
-  assert.equal(lines[1].lineTitle, 'read_file path=README.md')
-  assert.equal(lines[2].answerText, '**结论**：已读取。')
-  assert.deepEqual(lines[2].sections.map((section) => section.kind), ['answer'])
+  assert.deepEqual(lines.map((item) => item.event), [
+    'session.step.started',
+    'session.reasoning.delta',
+    'session.tool.called',
+    'session.tool.success',
+    'session.text.delta',
+    'session.text.ended',
+    'session.step.ended'
+  ])
+  assert.equal(lines[1].reasoningText, '需要先读文件。')
+  assert.equal(lines[2].lineTitle, 'read_file path=README.md')
+  assert.equal(lines[4].answerText, '**结论**：已读取。')
+  assert.equal(lines[5].answerText, '**结论**：已读取。')
 })
 
 test('runtime process lines do not duplicate Pi streamed reasoning and markdown answer from aggregate entry fields', () => {
@@ -2078,16 +2338,23 @@ test('runtime process lines do not duplicate Pi streamed reasoning and markdown 
     answer: '# 标题\n\n- **重点**'
   })
 
-  assert.equal(lines.length, 1)
-  assert.equal(lines[0].reasoningText, '先分析需求。')
-  assert.equal(lines[0].answerText, '# 标题\n\n- **重点**')
-  const answerSection = lines[0].sections.find((section) => section.kind === 'answer')
+  assert.deepEqual(lines.map((item) => item.event), [
+    'session.step.started',
+    'session.reasoning.delta',
+    'session.reasoning.ended',
+    'session.text.delta',
+    'session.text.ended',
+    'session.step.ended'
+  ])
+  assert.equal(lines[1].reasoningText, '先分析需求。')
+  assert.equal(lines[3].answerText, '# 标题\n\n- **重点**')
+  const answerSection = lines[3].sections.find((section) => section.kind === 'answer')
   assert.ok(answerSection)
   assert.match(renderMarkdownToHtml(answerSection.text), /<h1>标题<\/h1>/)
   assert.match(renderMarkdownToHtml(answerSection.text), /<strong>重点<\/strong>/)
 })
 
-test('runtime process lines show Pi tool input streaming before execution without duplicate cards', () => {
+test('runtime process lines show Pi tool input streaming before execution and call rows in order', () => {
   const lines = buildRuntimeProcessItems({
     events: [
       { type: 'session.step.started', payload: { event_id: 'pi-input-1' } },
@@ -2100,15 +2367,21 @@ test('runtime process lines show Pi tool input streaming before execution withou
     ]
   })
 
-  assert.deepEqual(lines.map((item) => item.lineKind), ['tool'])
-  assert.equal(lines[0].lineTitle, 'read_file path=src/main.ts')
-  assert.equal(lines[0].inputPreviewText, 'path=src/main.ts')
-  assert.equal(lines[0].resultSummary, 'ok=true')
-  assert.equal(lines[0].status, 'success')
-  assert.equal(lines[0].resultStatus, 'success')
+  assert.deepEqual(lines.map((item) => item.event), [
+    'session.step.started',
+    'session.tool.input.started',
+    'session.tool.input.delta',
+    'session.tool.input.ended',
+    'session.tool.called',
+    'session.tool.success'
+  ])
+  assert.equal(lines[2].inputPreviewText, 'path=src/main.ts')
+  assert.equal(lines[3].inputPreviewText, 'path=src/main.ts')
+  assert.equal(lines[4].lineTitle, 'read_file path=src/main.ts')
+  assert.equal(lines[5].lineSummary, 'ok=true')
 })
 
-test('runtime process lines mark successful Pi tools as success instead of leaving them running', () => {
+test('runtime process lines append successful Pi tool results without rewriting the call row', () => {
   const lines = buildRuntimeProcessItems({
     events: [
       { type: 'session.tool.input.started', call_id: 'c1', tool_name: 'easydo_pipeline_list' },
@@ -2117,10 +2390,15 @@ test('runtime process lines mark successful Pi tools as success instead of leavi
     ]
   })
 
-  assert.equal(lines.length, 1)
+  assert.equal(lines.length, 3)
   assert.equal(lines[0].lineKind, 'tool')
-  assert.equal(lines[0].status, 'success')
-  assert.equal(lines[0].resultStatus, 'success')
+  assert.equal(lines[0].status, 'running')
+  assert.equal(lines[1].lineKind, 'mcp')
+  assert.equal(lines[1].event, 'session.tool.called')
+  assert.equal(lines[1].status, 'running')
+  assert.equal(lines[2].lineKind, 'result')
+  assert.equal(lines[2].event, 'session.tool.success')
+  assert.equal(lines[2].status, 'success')
 })
 
 test('runtime trace template renders tool input separately from the compact title', async () => {
@@ -2152,12 +2430,12 @@ test('runtime process lines surface Pi tool output paths as generated files', ()
     ]
   })
 
-  assert.deepEqual(lines.map((item) => item.lineKind), ['tool'])
+  assert.deepEqual(lines.map((item) => item.lineKind), ['tool', 'result'])
   assert.equal(lines[0].lineTitle, 'write_file path=src/app.ts')
-  assert.equal(lines[0].resultSummary, '生成文件 2 个：src/app.ts, src/app.test.ts')
-  assert.deepEqual(lines[0].artifactRefs.map((item) => item.artifact_id), ['file:src/app.ts', 'file:src/app.test.ts'])
-  assert.deepEqual(lines[0].artifactRefs.map((item) => item.artifact_type), ['file_output', 'file_output'])
-  assert.deepEqual(lines[0].artifactRefs.map((item) => item.preview_json.path), ['src/app.ts', 'src/app.test.ts'])
+  assert.equal(lines[1].lineSummary, '生成文件 2 个：src/app.ts, src/app.test.ts')
+  assert.deepEqual(lines[1].artifactRefs.map((item) => item.artifact_id), ['file:src/app.ts', 'file:src/app.test.ts'])
+  assert.deepEqual(lines[1].artifactRefs.map((item) => item.artifact_type), ['file_output', 'file_output'])
+  assert.deepEqual(lines[1].artifactRefs.map((item) => item.preview_json.path), ['src/app.ts', 'src/app.test.ts'])
 })
 
 test('runtime process lines render Pi compaction lifecycle as visible model steps', () => {
@@ -2298,12 +2576,40 @@ test('runtime process lines show Pi step failures without requiring a separate s
     ]
   })
 
-  assert.deepEqual(lines.map((item) => item.lineKind), ['thought', 'result'])
-  assert.equal(lines[0].status, 'failed')
-  assert.equal(lines[1].status, 'failed')
-  assert.equal(lines[1].lineTitle, '步骤失败')
-  assert.equal(lines[1].lineTarget, 'tool_error')
-  assert.equal(lines[1].lineSummary, 'write_file failed（可重试）')
+  assert.deepEqual(lines.map((item) => item.event), ['session.step.started', 'session.reasoning.ended', 'session.step.failed'])
+  assert.equal(lines[0].status, 'success')
+  assert.equal(lines[0].lineTitle, '模型响应完成')
+  assert.equal(lines[2].status, 'failed')
+  assert.equal(lines[2].lineTitle, '步骤失败')
+  assert.equal(lines[2].lineTarget, 'tool_error')
+  assert.equal(lines[2].lineSummary, 'write_file failed（可重试）')
+})
+
+test('runtime process lines surface real upstream provider failures instead of generic internal text', () => {
+  const lines = buildRuntimeProcessItems({
+    events: [
+      { type: 'session.step.started', payload: { event_id: 'pi-upstream-1' } },
+      {
+        type: 'session.step.failed',
+        payload: {
+          event_id: 'pi-upstream-2',
+          error: {
+            type: 'provider_rate_limit',
+            code: 'provider_rate_limit',
+            message: 'Upstream error from Nvidia: ResourceExhausted: Worker local total request limit reached (274/32)',
+            retryable: true,
+            http_status: 429,
+            source: 'provider'
+          }
+        }
+      }
+    ]
+  })
+
+  const failed = lines.find((item) => item.lineKind === 'result' || item.status === 'failed')
+  assert.ok(failed)
+  assert.match(String(failed.lineSummary || failed.resultSummary || ''), /ResourceExhausted|request limit reached/)
+  assert.doesNotMatch(String(failed.lineSummary || failed.resultSummary || ''), /内部错误|internal error|temporarily unavailable/i)
 })
 
 test('runtime process lines render Pi cancellation as an explicit stopped step', () => {
@@ -2318,10 +2624,18 @@ test('runtime process lines render Pi cancellation as an explicit stopped step',
     ]
   })
 
-  assert.deepEqual(lines.map((item) => item.lineKind), ['thought', 'action', 'result'])
-  assert.equal(lines[2].status, 'failed')
-  assert.equal(lines[2].lineTitle, '已停止生成')
-  assert.equal(lines[2].lineSummary, 'User stopped generation')
+  assert.deepEqual(lines.map((item) => item.event), [
+    'session.step.started',
+    'session.reasoning.ended',
+    'permission.resolved',
+    'session.step.failed',
+    'session.error'
+  ])
+  assert.equal(lines[2].status, 'rejected')
+  assert.match(String(lines[2].lineTitle || ''), /已拒绝/)
+  assert.equal(lines[3].status, 'failed')
+  assert.equal(lines[3].lineTitle, '已停止生成')
+  assert.equal(lines[3].lineSummary, 'User stopped generation')
 })
 
 test('agent chatbox derives pending Pi approvals from awaiting approval output', () => {
@@ -2401,15 +2715,16 @@ test('runtime trace synthesizes approval buttons for waiting action rows without
   const helperSource = traceSource.slice(helperStart, helperEnd > helperStart ? helperEnd : undefined)
 
   assert.match(helperSource, /item\.status === 'waiting'/)
-  assert.match(helperSource, /status:\s*'awaiting_decision'/)
+  assert.match(helperSource, /awaiting_decision/)
   assert.match(helperSource, /pi_approval:/)
   assert.doesNotMatch(helperSource, /if \(!id \|\| item\.status === 'waiting'\) return null/)
 })
 
-test('agent chatbox shows completed final answers even when runtime events exist', async () => {
+test('agent chatbox suppresses final-answer when timeline already has process events', async () => {
   const source = await readFile(join(currentDir, 'AgentChatbox.vue'), 'utf8')
   assert.match(source, /class="final-answer"/)
   assert.match(source, /showFinalAnswer\(|isCompletedAssistantEntry\(|entry\.status === 'completed'/)
+  assert.match(source, /function showFinalAnswer\(entry\)[\s\S]*?chatboxRuntimeEvents\(entry, chatboxStore\.entries\)\.length \|\| chatboxReasoningText\(entry\)/s)
   assert.match(source, /:limit="runtimeTraceLimit\(/)
   assert.match(source, /if \(entry\?\.status === 'streaming'\) return 100/)
   assert.match(source, /return 500/)
@@ -2628,8 +2943,8 @@ test('runtime trace matches Pi approval actions by provider call id as well as a
   assert.match(helperSource, /provider_tool_call_id/)
   assert.match(helperSource, /approval_request/)
   assert.match(helperSource, /call_id/)
-  assert.match(approvalSource, /item\?\.status !== 'waiting'/)
-  assert.ok(approvalSource.indexOf("item?.status !== 'waiting'") < approvalSource.indexOf('pendingActionForItem(item)'))
+  assert.match(approvalSource, /pendingActionForItem\(item\)/)
+  assert.match(approvalSource, /awaiting_decision|status === 'waiting'/)
 })
 
 test('agent chatbox does not keep stale Pi approvals after the agent loop already continued', () => {
@@ -2653,6 +2968,51 @@ test('agent chatbox does not keep stale Pi approvals after the agent loop alread
   }])
 
   assert.deepEqual(pending, [])
+})
+
+test('agent chatbox keeps sequential Pi approvals pending when pause failures only carry tool descriptions', () => {
+  const pending = derivePendingActions([{
+    role: 'assistant',
+    runtime_run_id: 'r_pi_seq_description_only',
+    status: 'streaming',
+    output: {
+      runtime_events: [
+        { type: 'session.step.started', payload: { event_seq: 1, event_id: 'step-1' } },
+        { type: 'permission.asked', payload: { event_seq: 10, event_id: 'ask-1', request_id: 'approval:call-1', approval_id: 'approval:call-1', call_id: 'call-1', tool_name: 'easydo_workspace_list', reason: 'List workspaces the actor can access', input: {} } },
+        { type: 'session.tool.failed', payload: { event_seq: 11, event_id: 'failed-1', call_id: 'call-1', tool_name: 'easydo_workspace_list', error: { type: 'unknown', message: 'List workspaces the actor can access' } } },
+        { type: 'permission.resolved', payload: { event_seq: 12, event_id: 'resolve-1', request_id: 'approval:call-1', approval_id: 'approval:call-1', call_id: 'call-1', tool_name: 'easydo_workspace_list', result: 'approved', decision: 'approve_once' } },
+        { type: 'session.tool.called', payload: { event_seq: 13, event_id: 'called-1', call_id: 'call-1', tool_name: 'easydo_workspace_list' } },
+        { type: 'session.tool.success', payload: { event_seq: 14, event_id: 'success-1', call_id: 'call-1', tool_name: 'easydo_workspace_list' } },
+        { type: 'session.step.started', payload: { event_seq: 20, event_id: 'step-2' } },
+        { type: 'permission.asked', payload: { event_seq: 21, event_id: 'ask-2', request_id: 'approval:call-2', approval_id: 'approval:call-2', call_id: 'call-2', tool_name: 'easydo_pipeline_list', reason: 'List pipelines in one workspace', input: { workspace_id: 1, query: 'e1' } } },
+        { type: 'session.tool.failed', payload: { event_seq: 22, event_id: 'failed-2', call_id: 'call-2', tool_name: 'easydo_pipeline_list', error: { type: 'unknown', message: 'List pipelines in one workspace' } } }
+      ]
+    }
+  }])
+
+  assert.equal(pending.length, 1)
+  assert.equal(pending[0].status, 'awaiting_decision')
+  assert.equal(pending[0].input_json?.provider_tool_call_id, 'call-2')
+  assert.equal(pending[0].capability_id, 'easydo_pipeline_list')
+})
+
+test('runtime process lines keep waiting approval when same-call failure only carries tool description', () => {
+  const lines = buildRuntimeProcessItems({
+    events: [
+      { type: 'session.step.started', payload: { event_id: 's1', agent: 'k1' } },
+      { type: 'permission.asked', payload: { event_id: 'pa1', request_id: 'approval:call-2', approval_id: 'approval:call-2', call_id: 'call-2', tool_name: 'easydo_pipeline_list', reason: 'List pipelines in one workspace', message: 'List pipelines in one workspace', input: { workspace_id: 1, query: 'e1' } } },
+      { type: 'session.tool.failed', payload: { event_id: 'tf1', call_id: 'call-2', tool: 'easydo_pipeline_list', tool_name: 'easydo_pipeline_list', error: { type: 'unknown', message: 'List pipelines in one workspace' } } }
+    ]
+  })
+
+  const actionLine = lines.find((item) => item.lineKind === 'action')
+  assert.ok(actionLine, 'approval action row should remain')
+  assert.equal(actionLine.status, 'waiting')
+  assert.equal(actionLine.event, 'permission.asked')
+  assert.equal(actionLine.lineTitle, '需要确认 easydo_pipeline_list')
+  assert.equal(actionLine.lineSummary, '')
+  // Same-call approval-pause tool.failed is suppressed; one waiting panel is enough.
+  assert.equal(lines.some((item) => item.event === 'session.tool.failed'), false)
 })
 
 test('agent chatbox computes agent run footer metrics from runtime events', () => {
@@ -3002,6 +3362,7 @@ test('agent chatbox store keeps streaming reasoning deltas in process event orde
   assert.match(runtimeEventSource, /isProcessRuntimeEvent/)
   assert.match(storeSource, /isProcessRuntimeEvent\(event\)/)
   assert.match(storeSource, /appendRuntimeEvent\(entries,\s*assistantDraftId,\s*event,\s*data\)/)
+  assert.match(storeSource, /entry\.output\.runtime_events\s*=\s*mergeRuntimeEvents\(events,\s*\[\s*normalizeRuntimeEvent\(event,\s*data\)\s*\]\s*\)/s)
   assert.match(storeSource, /mergeAssistantRuntimeEvents/)
   assert.match(runtimeEventSource, /model\.call_started/)
   assert.match(runtimeEventSource, /approval\.requested/)

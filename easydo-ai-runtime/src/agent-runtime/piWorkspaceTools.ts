@@ -225,7 +225,14 @@ function withWorkspaceToolPermission(tool: ModeAwareAgentTool, hooks: WorkspaceT
       }
       if (permission.decision === 'ask') {
         const approvalID = `approval:${toolCallId}`
-        const reason = firstString(permission.reason, `Tool ${tool.name} requires approval`)
+        const reason = firstString(
+          asRecord(args).risk_summary,
+          asRecord(args).reason,
+          asRecord(args).invocation_reason,
+          permission.reason,
+          tool.description,
+          `Tool ${tool.name} requires approval`
+        )
         const decision = await hooks.decideTool?.({
           approvalID,
           callID: toolCallId,
@@ -245,6 +252,7 @@ function withWorkspaceToolPermission(tool: ModeAwareAgentTool, hooks: WorkspaceT
             reason,
             input: args,
             message: reason,
+            tool_description: tool.description,
             operation_type: permission.operation_type,
             permission_key: permission.permission_key,
             matched_rule: permission.matched_rule,

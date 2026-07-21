@@ -22,11 +22,7 @@ const ACTION_EVENTS = new Set([
 
 const SUPPORT_EVENTS = new Set([
   'model.tool_call_detected',
-  'action.permission_evaluated',
-  'approval.session_granted',
-  'action.decision',
-  'tool.executed',
-  'action.execution_succeeded'
+  'action.permission_evaluated'
 ])
 
 const TOOL_CALL_EVENTS = new Set([
@@ -45,9 +41,7 @@ const TOOL_RESULT_EVENTS = new Set([
 
 const MODEL_CALL_END_EVENTS = new Set([
   'model.call_completed',
-  'model.continuation_completed',
-  'session.step.ended',
-  'session.step.failed'
+  'model.continuation_completed'
 ])
 
 const RUN_STATE_EVENTS = new Set([
@@ -72,7 +66,8 @@ export function visibleRuntimeProcessEvents(events = []) {
 }
 
 export function buildRuntimeProcessItems({ events = [], reasoning = '', answer = '', timings = {}, limit = 18, now = Date.now() } = {}) {
-  const normalizedEvents = suppressApprovalPauseNoise(compactStreamingDeltaEvents(normalizeInputEvents(events)))
+  // Strict timeline: sort first and only compact adjacent streaming deltas.
+  const normalizedEvents = compactStreamingDeltaEvents(normalizeInputEvents(events))
   const items = []
   const reasoningText = firstString(reasoning)
   const answerText = firstString(answer)
@@ -86,18 +81,7 @@ export function buildRuntimeProcessItems({ events = [], reasoning = '', answer =
     item.eventName === 'session.text.delta' ||
     item.eventName === 'session.text.ended'
   )
-  const hasSynthesizedAnswerEvent = normalizedEvents.some((item) => item.eventName === 'model.answer_synthesized')
-  let currentThought = null
-  let pendingContinuationStart = null
   const toolDrafts = new Map()
-
-  const ensureThought = (event, index, fallbackKey = 'thought-synthetic') => {
-    if (currentThought) return currentThought
-    currentThought = createThoughtItem(pendingContinuationStart || event, index, fallbackKey)
-    pendingContinuationStart = null
-    items.push(currentThought)
-    return currentThought
-  }
 
   normalizedEvents.forEach((event, index) => {
     if (event.eventName === 'runtime_event') {
@@ -106,21 +90,22 @@ export function buildRuntimeProcessItems({ events = [], reasoning = '', answer =
     // Skip user input events — the trace is for model output only.
     if (event.eventName === 'session.prompted') return
     if (event.eventName === 'session.step.started') {
-      currentThought = createThoughtItem(event, index)
-      setThoughtPhase(currentThought, 'waiting', event, now)
-      pendingContinuationStart = null
-      items.push(currentThought)
+      const item = createThoughtItem(event, index)
+      setThoughtPhase(item, 'waiting', event, now)
+      items.push(item)
       return
     }
     if (event.eventName === 'session.reasoning.started' || event.eventName === 'session.text.started') {
-      const targetThought = ensureThought(event, index, event.eventName === 'session.reasoning.started' ? 'pi-reasoning' : 'pi-answer')
-      setThoughtPhase(targetThought, event.eventName === 'session.reasoning.started' ? 'reasoning' : 'answer', event, now)
+      closeOpenModelWaits(items, event, now)
+      const item = createThoughtItem(event, index)
+      setThoughtPhase(item, event.eventName === 'session.reasoning.started' ? 'reasoning' : 'answer', event, now)
+      item.lineTitle = event.eventName === 'session.reasoning.started' ? '开始思考' : '开始生成回复'
+      items.push(item)
       return
     }
     if (event.eventName === 'session.tool.input.started') {
+      closeOpenModelWaits(items, event, now)
       toolDrafts.set(toolContextKey(event), event)
-      removeEmptyModelWait(items, currentThought)
-      currentThought = null
       const item = toProcessItem(event, { lineKind: 'tool', status: 'running' }, index)
       attachInheritedReason(item, items)
       items.push(item)
@@ -129,102 +114,100 @@ export function buildRuntimeProcessItems({ events = [], reasoning = '', answer =
     if (event.eventName === 'session.tool.input.delta') {
       const key = toolContextKey(event)
       const draft = toolDrafts.get(key)
-      if (draft) {
-        const prev = firstString(draft.data.input_draft)
-        draft.data = { ...draft.data, input_draft: prev + firstString(event.data.delta) }
+      const deltaEvent = {
+        ...event,
+        data: { ...event.data, input_draft: firstString(event.data.delta) }
       }
-      const target = findRelatedProcessItem(items, event)
-      if (target?.lineKind === 'tool') {
-        mergeProcessEventIntoItem(target, draft || event, { lineKind: 'tool', status: 'running' })
-      }
+      const item = toProcessItem(deltaEvent, { lineKind: 'tool', status: 'running' }, index)
+      if (draft) mergeDraftIntoItem(item, draft)
+      toolDrafts.set(key, deltaEvent)
+      items.push(item)
       return
     }
     if (event.eventName === 'session.tool.input.ended') {
       const key = toolContextKey(event)
       const draft = toolDrafts.get(key)
-      if (draft) {
-        draft.data = { ...draft.data, input_text: firstString(event.data.text), input_draft: '' }
-      } else {
-        toolDrafts.set(key, event)
-      }
-      const target = findRelatedProcessItem(items, event)
-      if (target?.lineKind === 'tool') {
-        mergeProcessEventIntoItem(target, draft || event, { lineKind: 'tool', status: 'running' })
-      }
+      const item = toProcessItem(event, { lineKind: 'tool', status: 'success' }, index)
+      if (draft) mergeDraftIntoItem(item, draft)
+      toolDrafts.set(key, event)
+      items.push(item)
       return
     }
     if (event.eventName === 'session.reasoning.delta') {
-      const targetThought = currentThought || ensureThought(event, index, 'pi-reasoning')
-      setThoughtPhase(targetThought, 'reasoning', event, now)
-      appendThoughtText(targetThought, 'reasoning', deltaText(event.data.delta, event.display.summary), event)
+      closeOpenModelWaits(items, event, now)
+      const item = createThoughtItem(event, index)
+      setThoughtPhase(item, 'reasoning', event, now)
+      appendThoughtText(item, 'reasoning', deltaText(event.data.delta, event.display.summary), event)
+      items.push(item)
       return
     }
     if (event.eventName === 'session.reasoning.ended') {
-      const targetThought = currentThought || ensureThought(event, index, 'pi-reasoning')
-      setThoughtPhase(targetThought, 'reasoning', event, now)
-      setThoughtText(targetThought, 'reasoning', deltaText(event.data.text, event.data.delta, event.display.summary), event)
+      closeOpenModelWaits(items, event, now)
+      const item = createThoughtItem(event, index)
+      setThoughtPhase(item, 'reasoning', event, now)
+      setThoughtText(item, 'reasoning', deltaText(event.data.text, event.data.delta, event.display.summary), event)
+      item.status = 'success'
+      item.lineTitle = '思考完成'
+      items.push(item)
       return
     }
     if (event.eventName === 'session.text.delta') {
-      const targetThought = currentThought || ensureThought(event, index, 'pi-answer')
-      setThoughtPhase(targetThought, 'answer', event, now)
-      appendThoughtText(targetThought, 'answer', deltaText(event.data.delta, event.display.summary), event)
+      closeOpenModelWaits(items, event, now)
+      const item = createThoughtItem(event, index)
+      setThoughtPhase(item, 'answer', event, now)
+      appendThoughtText(item, 'answer', deltaText(event.data.delta, event.display.summary), event)
+      items.push(item)
       return
     }
     if (event.eventName === 'session.text.ended') {
-      const targetThought = currentThought || ensureThought(event, index, 'pi-answer')
-      setThoughtPhase(targetThought, 'answer', event, now)
-      setThoughtText(targetThought, 'answer', deltaText(event.data.text, event.data.delta, event.display.summary), event)
+      closeOpenModelWaits(items, event, now)
+      const item = createThoughtItem(event, index)
+      setThoughtPhase(item, 'answer', event, now)
+      setThoughtText(item, 'answer', deltaText(event.data.text, event.data.delta, event.display.summary), event)
+      item.status = 'success'
+      item.lineTitle = '回复生成完成'
+      items.push(item)
       return
     }
     if (event.eventName === 'model.continuation_started') {
-      pendingContinuationStart = event
+      items.push(toProcessItem(event, { lineKind: 'model', status: 'running' }, index))
       return
     }
     if (event.eventName === 'model.call_started') {
-      currentThought = createThoughtItem(event, index)
-      pendingContinuationStart = null
-      items.push(currentThought)
+      items.push(toProcessItem(event, { lineKind: 'model', status: 'running' }, index))
       return
     }
     if (event.eventName === 'reasoning_delta') {
-      const targetThought = ensureThought(event, index, 'reasoning')
-      setThoughtPhase(targetThought, 'reasoning', event, now)
-      appendThoughtText(targetThought, 'reasoning', deltaText(event.data.delta, event.display.summary), event)
+      closeOpenModelWaits(items, event, now)
+      const item = createThoughtItem(event, index)
+      setThoughtPhase(item, 'reasoning', event, now)
+      appendThoughtText(item, 'reasoning', deltaText(event.data.delta, event.display.summary), event)
+      items.push(item)
       return
     }
     if (event.eventName === 'answer_delta') {
-      const targetThought = ensureThought(event, index, 'answer')
-      setThoughtPhase(targetThought, 'answer', event, now)
-      appendThoughtText(targetThought, 'answer', deltaText(event.data.delta, event.display.summary), event)
+      closeOpenModelWaits(items, event, now)
+      const item = createThoughtItem(event, index)
+      setThoughtPhase(item, 'answer', event, now)
+      appendThoughtText(item, 'answer', deltaText(event.data.delta, event.display.summary), event)
+      items.push(item)
+      return
+    }
+    if (event.eventName === 'session.step.failed' || event.eventName === 'session.step.ended') {
+      closeOpenModelWaits(items, event, now, event.eventName === 'session.step.failed' ? 'failed' : 'completed')
+      items.push(toProcessItem(event, classifyRuntimeEvent(event), index))
       return
     }
     if (MODEL_CALL_END_EVENTS.has(event.eventName)) {
-      if (currentThought) {
-        updateThoughtCompletion(currentThought, event)
-        if (event.eventName === 'session.step.failed') {
-          setThoughtPhase(currentThought, 'failed', event, now)
-        } else if (event.eventName === 'session.step.ended') {
-          setThoughtPhase(currentThought, 'completed', event, now)
-        }
-      }
-      currentThought = null
-      if (event.eventName === 'model.continuation_completed') {
-        pendingContinuationStart = null
-      }
-      if (event.eventName === 'session.step.failed' && !hasFollowingSessionError(normalizedEvents, index)) {
-        items.push(toProcessItem(event, { lineKind: 'result', status: 'failed' }, index))
-      }
+      closeOpenModelWaits(items, event, now)
+      items.push(toProcessItem(event, { lineKind: 'model', status: 'success' }, index))
       return
     }
     if (event.eventName === 'provider.empty_output_detected') {
-      currentThought = null
       items.push(toProcessItem(event, { lineKind: 'model', status: 'running' }, index))
       return
     }
     if (event.eventName === 'model.answer_synthesized') {
-      currentThought = null
-      pendingContinuationStart = null
       items.push(toProcessItem(event, { lineKind: 'model', status: 'success' }, index))
       return
     }
@@ -233,90 +216,86 @@ export function buildRuntimeProcessItems({ events = [], reasoning = '', answer =
       return
     }
     if (event.eventName === 'approval.requested' || event.eventName === 'permission.asked') {
-      removeEmptyModelWait(items, currentThought)
-      currentThought = null
+      closeOpenModelWaits(items, event, now)
       const classification = { lineKind: 'action', status: 'waiting' }
-      const target = findRelatedProcessItem(items, event)
-      if (target?.lineKind === 'action') {
-        mergeProcessEventIntoItem(target, event, classification)
-        return
-      }
       const item = toProcessItem(event, classification, index)
       attachInheritedReason(item, items)
       const draft = toolDrafts.get(toolContextKey(event))
       if (draft) mergeDraftIntoItem(item, draft)
+      // Waiting approval panel is intentionally minimal: title + target + buttons only.
+      item.lineSummary = ''
+      item.resultSummary = ''
+      item.resultStatus = ''
+      item.resultTitle = ''
+      sanitizeActionApprovalCopy(item)
       items.push(item)
       return
     }
-    if (SUPPORT_EVENTS.has(event.eventName)) {
+    if (
+      event.eventName === 'permission.resolved' ||
+      event.eventName === 'action.decision' ||
+      event.eventName === 'approval.session_granted' ||
+      event.eventName === 'action.approved' ||
+      event.eventName === 'action.rejected'
+    ) {
+      closeOpenModelWaits(items, event, now)
+      const status = actionStatus(event.data, event.display)
+      const decision = firstString(event.data.decision, event.display.decision, event.data.result, event.display.result)
       const target = findRelatedProcessItem(items, event)
-      if (target) applySupportEvent(target, event)
+      // One approval = one panel. Merge decision into the waiting row; do not open a second panel.
+      if (target?.lineKind === 'action') {
+        target.status = status
+        target.event = event.eventName
+        target.raw = event.raw || target.raw
+        target.data = {
+          ...target.data,
+          ...event.data,
+          decision: firstString(decision, target.data.decision),
+          result: firstString(event.data.result, event.display.result, target.data.result)
+        }
+        target.display = {
+          ...target.display,
+          ...event.display,
+          decision: firstString(decision, target.display.decision)
+        }
+        target.resultStatus = status
+        target.resultTitle = approvalDecisionTitle(status)
+        target.resultSummary = approvalDecisionSummary(event.data, event.display) || approvalDecisionTitle(status)
+        target.lineTitle = compactJoin([approvalDecisionTitle(status), toolName(target.data, target.display)], ' ')
+        target.lineSummary = firstString(target.resultSummary, target.lineSummary)
+        sanitizeActionApprovalCopy(target)
+        return
+      }
+      const item = toProcessItem(event, { lineKind: 'action', status }, index)
+      item.resultStatus = status
+      item.resultTitle = approvalDecisionTitle(status)
+      item.resultSummary = approvalDecisionSummary(event.data, event.display) || approvalDecisionTitle(status)
+      if (!item.lineSummary) item.lineSummary = item.resultSummary
+      items.push(item)
+      return
+    }
+    if (event.eventName === 'session.tool.failed' && isApprovalPauseToolFailure(event, items)) {
+      // Pi approval pause emits a synthetic tool.failed; keep the waiting action panel only.
+      closeOpenModelWaits(items, event, now)
+      return
+    }
+    if (SUPPORT_EVENTS.has(event.eventName)) {
       return
     }
     if (RUN_STATE_EVENTS.has(event.eventName)) {
-      const classification = classifyRuntimeEvent(event)
-      if (currentThought) {
-        removeEmptyModelWait(items, currentThought)
-        if (items.includes(currentThought)) {
-          currentThought.status = classification.status
-          currentThought.lineTitle = runStateThoughtTitle(classification.status)
-          if (!currentThought.lineSummary) {
-            currentThought.lineSummary = firstString(event.display.summary, event.data.reason, event.data.message)
-          }
-        }
-      }
-      currentThought = null
-      const runtimeRunID = runEventRuntimeRunID(event)
-      const target = runtimeRunID
-        ? [...items].reverse().find((item) =>
-            item.lineKind === 'model' &&
-            item.event === 'run.started' &&
-            runItemRuntimeRunID(item) === runtimeRunID
-          )
-        : null
-      if (target) {
-        mergeProcessEventIntoItem(target, event, classification)
+      // Avoid a second "awaiting decision" banner when an action panel already shows the same wait.
+      if (event.eventName === 'run.awaiting_decision' && items.some((item) => item.lineKind === 'action' && item.status === 'waiting')) {
         return
       }
+      const classification = classifyRuntimeEvent(event)
       items.push(toProcessItem(event, classification, index))
       return
     }
-    if (event.eventName === 'permission.resolved') {
-      const target = findRelatedProcessItem(items, event)
-      if (target) applySupportEvent(target, event)
-      return
-    }
-    if (event.eventName === 'context.build_completed') {
-      const target = [...items].reverse().find((item) => item.event === 'context.build_started')
-      if (target) {
-        mergeProcessEventIntoItem(target, event, { lineKind: 'context', status: 'success' })
-        return
-      }
+    if (event.eventName === 'session.tool.called' || event.eventName === 'session.tool.success' || event.eventName === 'session.tool.failed') {
+      closeOpenModelWaits(items, event, now)
     }
     const classification = classifyRuntimeEvent(event)
     if (classification.lineKind === 'audit') return
-    currentThought = null
-    if (classification.lineKind === 'mcp' || classification.lineKind === 'tool') {
-      const target = findRelatedProcessItem(items, event)
-      if (target && (target.lineKind === 'mcp' || target.lineKind === 'tool')) {
-        mergeProcessEventIntoItem(target, event, classification)
-        return
-      }
-    }
-    if (classification.lineKind === 'subagent') {
-      const target = findRelatedProcessItem(items, event)
-      if (target?.lineKind === 'subagent') {
-        mergeProcessEventIntoItem(target, event, classification)
-        return
-      }
-    }
-    if (classification.lineKind === 'action') {
-      const target = findRelatedProcessItem(items, event)
-      if (target?.lineKind === 'action') {
-        mergeProcessEventIntoItem(target, event, classification)
-        return
-      }
-    }
     const item = toProcessItem(event, classification, index)
     attachInheritedReason(item, items)
     if (item.lineKind === 'subagent') appendSubagentProgress(item, event)
@@ -327,9 +306,10 @@ export function buildRuntimeProcessItems({ events = [], reasoning = '', answer =
     items.push(item)
   })
 
+  // Never unshift synthetic content ahead of real events — only append or fill an existing thought.
   if (reasoningText && !hasReasoningEvent) {
     appendThoughtText(
-      firstThoughtItem(items) || prependSyntheticThought(items, 'reasoning-synthetic'),
+      appendSyntheticThought(items, 'reasoning-synthetic'),
       'reasoning',
       reasoningText,
       { data: { elapsed_ms: timings.first_reasoning_ms ?? timings.first_reasoning }, display: {} }
@@ -337,7 +317,7 @@ export function buildRuntimeProcessItems({ events = [], reasoning = '', answer =
   }
   if (answerText && !hasAnswerEvent) {
     appendThoughtText(
-      (hasSynthesizedAnswerEvent ? null : lastThoughtItem(items)) || appendSyntheticThought(items, 'answer-synthetic'),
+      appendSyntheticThought(items, 'answer-synthetic'),
       'answer',
       answerText,
       { data: { elapsed_ms: timings.first_answer_ms ?? timings.first_answer }, display: {} }
@@ -346,30 +326,41 @@ export function buildRuntimeProcessItems({ events = [], reasoning = '', answer =
 
   const finalizedItems = items
     .map(finalizeThoughtItem)
-    .filter((item) => item.lineKind !== 'thought' || item.sections.length > 0 || item.modelCall)
+    .filter((item) => item.lineKind !== 'thought' || item.sections.length > 0 || item.modelCall || item.raw)
   const safeLimit = Number.isFinite(Number(limit)) ? Number(limit) : 18
-  return applyProcessItemLimit(mergeResultItems(finalizedItems), safeLimit)
+  return applyProcessItemLimit(finalizedItems, safeLimit)
+}
+
+function isProtectedTimelineItem(item = {}) {
+  if (item.lineKind === 'thought') return true
+  if (item.lineKind === 'action' || item.lineKind === 'result') return true
+  if (['failed', 'cancelled', 'timeout', 'interrupted', 'waiting'].includes(String(item.status || ''))) return true
+  return [
+    'session.step.started',
+    'session.step.ended',
+    'session.step.failed',
+    'session.error',
+    'session.tool.called',
+    'permission.asked',
+    'permission.resolved',
+    'run.failed',
+    'run.cancelled',
+    'run.timeout',
+    'run.interrupted',
+    'run.awaiting_decision',
+    'run.completed'
+  ].includes(String(item.event || ''))
 }
 
 function applyProcessItemLimit(items, limit) {
   if (limit <= 0 || items.length <= limit) return items
-  const kept = []
-  let remainingRegularSlots = limit - items.filter((item) => item.lineKind === 'thought').length
-  items.forEach((item, index) => {
-    if (item.lineKind === 'thought') {
-      kept.push(item)
-      return
-    }
-    const regularItemsAfter = items
-      .slice(index + 1)
-      .filter((nextItem) => nextItem.lineKind !== 'thought')
-      .length
-    if (regularItemsAfter < remainingRegularSlots) {
-      kept.push(item)
-      remainingRegularSlots -= 1
-    }
-  })
-  return kept.slice(-limit)
+  const protectedItems = items.filter((item) => isProtectedTimelineItem(item))
+  if (protectedItems.length >= limit) return protectedItems.slice(-limit)
+  const remaining = limit - protectedItems.length
+  const optional = items.filter((item) => !isProtectedTimelineItem(item))
+  const keptOptional = new Set(optional.slice(-remaining))
+  const keptProtected = new Set(protectedItems)
+  return items.filter((item) => keptProtected.has(item) || keptOptional.has(item))
 }
 
 function toProcessItem(event, classification, index) {
@@ -410,34 +401,6 @@ function toProcessItem(event, classification, index) {
   }
 }
 
-function mergeResultItems(items) {
-  const merged = []
-  for (const item of items) {
-    if (item.lineKind === 'result') {
-      const target = [...merged].reverse().find((candidate) =>
-        ['mcp', 'tool', 'subagent'].includes(candidate.lineKind) &&
-        sameToolContext(candidate, item)
-      )
-      if (target) {
-        if (!target.resultSummary || item.status === 'failed' || item.status === 'rejected') {
-          target.resultSummary = item.lineSummary
-        }
-        target.resultStatus = item.status || target.resultStatus
-        target.resultTitle = item.lineTitle || target.resultTitle
-        target.artifactRefs = mergeArtifactRefs(target.artifactRefs, item.artifactRefs)
-        // Success/failure both must flip the tool row out of "running", otherwise
-        // completed Pi/MCP calls keep looking like an in-progress agent loop.
-        if (item.status) {
-          target.status = item.status
-        }
-        continue
-      }
-    }
-    merged.push(item)
-  }
-  return merged
-}
-
 function mergeDraftIntoItem(item, draft) {
   item.data = { ...draft.data, ...item.data }
   item.display = { ...draft.display, ...item.display }
@@ -472,14 +435,39 @@ function refreshProcessItemPresentation(item) {
   item.lineTarget = lineTarget(item.lineKind, item.event, item.data, item.display)
   item.lineSummary = lineSummary(item.lineKind, item.event, item.data, item.display, item.artifactRefs)
   item.inputPreviewText = processInputPreview(item.lineKind, item.data)
-    item.reasonText = processReasonText(item.lineKind, item.data, item.display, item.reasonText)
+  item.reasonText = processReasonText(item.lineKind, item.data, item.display, item.reasonText)
+  if (item.lineKind === 'action') sanitizeActionApprovalCopy(item)
 }
 
 function attachInheritedReason(item, items = []) {
-  if (item.reasonText || !['mcp', 'tool', 'action', 'subagent'].includes(item.lineKind)) return
+  if (!['mcp', 'tool', 'action', 'subagent'].includes(item.lineKind)) return
+  if (item.reasonText && !isGenericToolApprovalText(item.reasonText)) {
+    if (item.lineKind === 'action') sanitizeActionApprovalCopy(item)
+    return
+  }
   const thought = lastThoughtItem(items)
-  const inherited = firstString(thought?.reasoningText)
+  const inherited = firstMeaningfulApprovalText(thought?.reasoningText)
   if (inherited) item.reasonText = inherited
+  else if (isGenericToolApprovalText(item.reasonText)) item.reasonText = ''
+  if (item.lineKind === 'action') sanitizeActionApprovalCopy(item)
+}
+
+// Clear generic boilerplate ("Tool X requires approval") from action copy.
+// We DO NOT collapse a meaningful reason/summary that happens to be identical —
+// the RuntimeTrace template renders reasonText and lineSummary in different
+// partitions and the approval card may legitimately want to surface the same
+// phrasing twice (once as a reason block, once inside the approval panel).
+function sanitizeActionApprovalCopy(item = {}) {
+  if (item.lineKind !== 'action') return
+  if (isGenericToolApprovalText(item.reasonText)) item.reasonText = ''
+  if (isGenericToolApprovalText(item.lineSummary)) item.lineSummary = ''
+  if (isGenericToolApprovalText(item.resultSummary)) {
+    item.resultSummary = item.resultSummary
+      .split(' · ')
+      .map((part) => part.trim())
+      .filter((part) => part && !isGenericToolApprovalText(part))
+      .join(' · ')
+  }
 }
 
 function findRelatedProcessItem(items, event) {
@@ -496,33 +484,6 @@ function findRelatedProcessItem(items, event) {
     if (!['mcp', 'tool', 'action', 'subagent'].includes(item.lineKind)) return false
     return toolContextKey({ data: item.data, display: item.display, eventName: item.event }) === key
   })
-}
-
-function hasFollowingSessionError(events, index) {
-  return events.slice(index + 1).some((event) => {
-    const candidate = event.eventName === 'runtime_event' ? normalizeRuntimeEventWrapper(event) : event
-    return candidate.eventName === 'session.error'
-  })
-}
-
-function applySupportEvent(item, event) {
-  if (event.eventName === 'action.execution_succeeded') {
-    item.status = 'success'
-    if (!item.resultSummary) item.resultSummary = firstString(event.display.summary, event.data.status, '已完成')
-    return
-  }
-  if (event.eventName === 'tool.executed') {
-    item.resultSummary = resultSummary(event.eventName, event.data, event.display, item.artifactRefs)
-    item.resultStatus = resultStatus(event.eventName, event.data, event.display)
-    return
-  }
-  if (event.eventName === 'action.decision' || event.eventName === 'approval.session_granted' || event.eventName === 'permission.resolved') {
-    const status = actionStatus(event.data, event.display)
-    item.status = status
-    item.resultStatus = status
-    item.resultTitle = approvalDecisionTitle(status)
-    item.resultSummary = approvalDecisionSummary(event.data, event.display)
-  }
 }
 
 function toolContextKey(event = {}) {
@@ -549,18 +510,6 @@ function toolContextKey(event = {}) {
     toolName(data, display),
     event.eventName
   )
-}
-
-function sameToolContext(candidate, result) {
-  const candidateTool = toolName(candidate.data, candidate.display)
-  const resultTool = toolName(result.data, result.display)
-  const candidateActionId = firstString(candidate.data.action_id, asRecord(candidate.data.action).action_id)
-  const resultActionId = firstString(result.data.action_id, asRecord(result.data.action).action_id)
-  if (candidateActionId && resultActionId) return candidateActionId === resultActionId
-  const candidateCallId = firstString(candidate.data.call_id, candidate.data.provider_tool_call_id, candidate.data.tool_call_id)
-  const resultCallId = firstString(result.data.call_id, result.data.provider_tool_call_id, result.data.tool_call_id)
-  if (candidateCallId && resultCallId) return candidateCallId === resultCallId
-  return Boolean(candidateTool && resultTool && candidateTool === resultTool)
 }
 
 function mergeArtifactRefs(current = [], next = []) {
@@ -593,6 +542,7 @@ function classifyRuntimeEvent({ eventName, data, display }) {
   if (eventName === 'session.tool.input.started' || eventName === 'session.tool.input.delta' || eventName === 'session.tool.input.ended') return { lineKind: 'tool', status: 'running' }
   if (eventName === 'permission.asked') return { lineKind: 'action', status: 'waiting' }
   if (eventName === 'permission.resolved') return { lineKind: 'action', status: actionStatus(data, display) }
+  if (eventName === 'approval.session_granted' || eventName === 'action.decision') return { lineKind: 'action', status: actionStatus(data, display) }
   if (eventName === 'session.steered' || eventName === 'session.steer.applied' || eventName === 'session.follow_up.started') return { lineKind: 'action', status: 'success' }
   if (eventName === 'session.queue.added' || eventName === 'session.queue.claimed') return { lineKind: 'action', status: 'running' }
   if (eventName === 'session.queue.cancelled') return { lineKind: 'action', status: 'cancelled' }
@@ -601,6 +551,7 @@ function classifyRuntimeEvent({ eventName, data, display }) {
   if (eventName === 'session.tool.called') return { lineKind: isMcpEvent(eventName, data, display) ? 'mcp' : 'tool', status: 'running' }
   if (eventName === 'session.tool.progress') return { lineKind: isMcpEvent(eventName, data, display) ? 'mcp' : 'tool', status: 'running' }
   if (eventName === 'session.tool.success' || eventName === 'session.tool.failed') return { lineKind: 'result', status: resultStatus(eventName, data, display) }
+  if (eventName === 'session.step.ended') return { lineKind: 'result', status: 'success' }
   if (eventName === 'session.step.failed' || eventName === 'session.error') return { lineKind: 'result', status: 'failed' }
   if (eventName === 'run.started') return { lineKind: 'model', status: 'running' }
   if (eventName === 'run.completed') return { lineKind: 'model', status: 'success' }
@@ -684,60 +635,92 @@ function setThoughtPhase(item, phase, event = {}, currentTime = Date.now()) {
   const data = asRecord(event.data)
   const display = asRecord(event.display)
   if (phase === 'waiting') {
+    if (item.reasoningText || item.answerText || item.sections?.length || isTerminalThoughtStatus(item.status) || item.thoughtPhase === 'reasoning' || item.thoughtPhase === 'answer' || item.modelWaitClosed) {
+      return
+    }
+    item.thoughtPhase = 'waiting'
     item.status = 'running'
     item.lineMeta = 'LLM'
     item.lineTitle = '正在请求模型'
     item.lineTarget = firstString(item.lineTarget, modelTarget(data, display))
-    item.lineSummary = modelWaitSummary(event, currentTime)
+    item.modelWaitStartedAt = firstString(item.modelWaitStartedAt, event.raw?.timestamp, data.timestamp, display.timestamp)
+    item.lineSummary = modelWaitSummary(item.modelWaitStartedAt, currentTime)
     return
   }
   if (phase === 'reasoning') {
+    item.thoughtPhase = 'reasoning'
     item.status = 'running'
     item.lineTitle = '模型正在思考'
-    if (!item.reasoningText && !item.answerText) item.lineSummary = ''
+    if (isModelWaitSummary(item.lineSummary) || (!item.reasoningText && !item.answerText)) {
+      item.lineSummary = ''
+    }
     return
   }
   if (phase === 'answer') {
+    item.thoughtPhase = 'answer'
     item.status = 'running'
     item.lineTitle = '正在生成回复'
-    if (!item.reasoningText && !item.answerText) item.lineSummary = ''
+    if (isModelWaitSummary(item.lineSummary) || (!item.reasoningText && !item.answerText)) {
+      item.lineSummary = ''
+    }
     return
   }
   if (phase === 'failed') {
+    item.thoughtPhase = 'failed'
     item.status = 'failed'
     item.lineTitle = '模型请求失败'
-    item.lineSummary = firstString(asRecord(data.error).message, display.summary, data.message, item.lineSummary)
+    const failureSummary = firstString(asRecord(data.error).message, display.summary, data.message)
+    item.lineSummary = failureSummary || (isModelWaitSummary(item.lineSummary) ? '' : item.lineSummary)
     return
   }
   if (phase === 'completed') {
+    item.thoughtPhase = 'completed'
     item.status = 'success'
     item.lineTitle = '模型响应完成'
+    if (isModelWaitSummary(item.lineSummary)) item.lineSummary = ''
   }
 }
 
-function removeEmptyModelWait(items, item) {
-  if (!item || item.event !== 'session.step.started' || item.reasoningText || item.answerText || item.sections.length > 0) return
-  const index = items.indexOf(item)
-  if (index >= 0) items.splice(index, 1)
+// Freeze historical "等待首个响应 N 秒" once the model produced any follow-up signal.
+// Without this, RuntimeTrace's 1s clock keeps inflating elapsed time forever.
+function closeOpenModelWaits(items = [], event = {}, currentTime = Date.now(), phase = 'completed') {
+  const endAt = firstString(event.raw?.timestamp, event.data?.timestamp, event.display?.timestamp, currentTime)
+  items.forEach((item) => {
+    if (item.lineKind !== 'thought') return
+    if (item.thoughtPhase !== 'waiting' || item.modelWaitClosed) return
+    const startedAt = firstString(item.modelWaitStartedAt, item.raw?.timestamp, item.data?.timestamp, item.display?.timestamp)
+    const frozenSummary = modelWaitSummary(startedAt, endAt)
+    item.modelWaitClosed = true
+    item.modelWaitEndedAt = endAt
+    if (phase === 'failed') {
+      item.thoughtPhase = 'failed'
+      item.status = 'failed'
+      item.lineTitle = '模型请求失败'
+      item.lineSummary = firstString(asRecord(event.data?.error).message, event.display?.summary, event.data?.message, frozenSummary)
+      return
+    }
+    item.thoughtPhase = 'completed'
+    item.status = 'success'
+    item.lineTitle = '模型响应完成'
+    // Keep the frozen wait duration as a short historical note, not a live counter.
+    item.lineSummary = frozenSummary && frozenSummary !== '等待首个响应' ? frozenSummary : ''
+  })
 }
 
-function runStateThoughtTitle(status) {
-  if (status === 'success') return '模型响应完成'
-  if (status === 'failed') return '模型请求失败'
-  if (status === 'cancelled') return '模型请求已取消'
-  if (status === 'timeout') return '模型请求超时'
-  if (status === 'interrupted') return '模型请求已中断'
-  if (status === 'waiting') return '等待确认'
-  return '模型请求已结束'
-}
-
-function modelWaitSummary(event = {}, currentTime = Date.now()) {
-  const startedAt = firstString(event.raw?.timestamp, event.data?.timestamp, event.display?.timestamp)
-  const startedMs = Date.parse(startedAt)
+function modelWaitSummary(startedAt = '', currentTime = Date.now()) {
+  const startedMs = Date.parse(firstString(startedAt))
   const currentMs = typeof currentTime === 'number' ? currentTime : Date.parse(firstString(currentTime))
   if (!Number.isFinite(startedMs) || !Number.isFinite(currentMs)) return '等待首个响应'
   const elapsedSeconds = Math.max(0, Math.floor((currentMs - startedMs) / 1000))
   return elapsedSeconds > 0 ? `等待首个响应 ${elapsedSeconds} 秒` : '等待首个响应'
+}
+
+function isModelWaitSummary(value) {
+  return /^等待首个响应(?:\s+\d+\s*秒)?$/.test(String(value || '').trim())
+}
+
+function isTerminalThoughtStatus(status) {
+  return ['success', 'failed', 'cancelled', 'timeout', 'interrupted'].includes(String(status || ''))
 }
 
 function modelTarget(data = {}, display = {}) {
@@ -783,30 +766,6 @@ function writeThoughtText(item, kind, text, event = {}, mode = 'append') {
   item.sections = buildThoughtSections(item)
 }
 
-function updateThoughtCompletion(item, event = {}) {
-  const data = asRecord(event.data)
-  const display = asRecord(event.display)
-  const toolCallCount = Number(data.tool_call_count ?? display.tool_call_count)
-  const textChars = Number(data.text_chars ?? display.text_chars)
-  if (Number.isFinite(toolCallCount) && toolCallCount > 0) {
-    item.lineSummary = `请求工具 ${toolCallCount} 个`
-    return
-  }
-  const reasoningChars = Number(data.reasoning_chars ?? display.reasoning_chars)
-  const status = firstString(display.status, data.status).toLowerCase()
-  if (status === 'empty' && Number.isFinite(reasoningChars) && reasoningChars > 0) {
-    item.lineSummary = '模型仅返回内部推理，正在重试生成可见回复'
-    return
-  }
-  if (Number.isFinite(textChars) && textChars > 0 && !item.lineSummary) {
-    item.lineSummary = `生成 ${textChars} 字符`
-    return
-  }
-  if (!item.lineSummary) {
-    item.lineSummary = firstString(display.summary, data.status)
-  }
-}
-
 function deltaText(...values) {
   for (const value of values) {
     if (value === undefined || value === null) continue
@@ -818,33 +777,33 @@ function deltaText(...values) {
 
 function finalizeThoughtItem(item) {
   if (item.lineKind !== 'thought') return item
+  const sections = buildThoughtSections(item)
+  let lineSummary = item.lineSummary
+  // Keep frozen wait duration only when the wait row never got content and was closed by a later signal.
+  if (isModelWaitSummary(lineSummary) && !item.modelWaitClosed && (sections.length > 0 || item.reasoningText || item.answerText || isTerminalThoughtStatus(item.status))) {
+    lineSummary = ''
+  }
+  if (item.reasoningText || item.answerText) {
+    if (!lineSummary || lineSummary === item.answerText || lineSummary === item.reasoningText || isModelWaitSummary(lineSummary)) {
+      lineSummary = ''
+    }
+  }
   return {
     ...item,
-    sections: buildThoughtSections(item),
-    lineSummary: item.reasoningText || item.answerText || item.lineSummary
+    sections,
+    lineSummary
   }
-}
-
-function firstThoughtItem(items) {
-  return items.find((item) => item.lineKind === 'thought') || null
 }
 
 function lastThoughtItem(items) {
   return [...items].reverse().find((item) => item.lineKind === 'thought') || null
 }
 
-function prependSyntheticThought(items, key) {
-  const item = createThoughtItem({ eventName: 'reasoning', data: {}, display: {}, raw: null }, 0, key)
-  item.key = key
-  item.event = 'reasoning'
-  items.unshift(item)
-  return item
-}
-
 function appendSyntheticThought(items, key) {
-  const item = createThoughtItem({ eventName: 'reasoning', data: {}, display: {}, raw: null }, items.length, key)
+  const eventName = String(key).startsWith('answer') ? 'answer' : 'reasoning'
+  const item = createThoughtItem({ eventName, data: {}, display: {}, raw: null }, items.length, key)
   item.key = key
-  item.event = 'reasoning'
+  item.event = eventName
   items.push(item)
   return item
 }
@@ -853,7 +812,11 @@ function lineMeta(lineKind, eventName, data = {}, display = {}) {
   if (lineKind === 'prompt') return 'User'
   if (lineKind === 'context') return 'Context'
   if (lineKind === 'thought') return compactJoin(['Thought:', formatTiming(display.elapsed_ms ?? data.elapsed_ms)], ' ')
-  if (lineKind === 'model') return 'LLM'
+  if (lineKind === 'model') {
+    const phase = readablePhase(firstString(data.phase, display.phase))
+    const round = firstString(data.round, display.round)
+    return compactJoin(['LLM', phase, round ? `#${round}` : ''], ' ')
+  }
   if (lineKind === 'mcp') return '→ mcp'
   if (lineKind === 'tool') return '→ tool'
   if (lineKind === 'skill') return '→ skill'
@@ -893,6 +856,13 @@ function lineTitle(lineKind, eventName, data = {}, display = {}) {
     if (eventName === 'session.queue.expired') return '队列项已过期'
     if (eventName === 'session.queue.failed') return '队列项失败'
     if (eventName === 'permission.asked') return compactJoin(['需要确认', toolName(data, display)], ' ')
+    if (eventName === 'permission.resolved' || eventName === 'action.decision') {
+      return compactJoin([approvalDecisionTitle(actionStatus(data, display)), toolName(data, display)], ' ')
+    }
+    if (eventName === 'approval.session_granted') return compactJoin(['本会话已批准', toolName(data, display)], ' ')
+    if (eventName === 'action.decision_required') return compactJoin(['需要确认', actionTitle(data)], ' ')
+    if (eventName === 'action.approved') return compactJoin(['已批准', actionTitle(data)], ' ')
+    if (eventName === 'action.rejected') return compactJoin(['已拒绝', actionTitle(data)], ' ')
     return firstString(display.title, display.name, actionTitle(data), approvalTitle(data), '等待确认')
   }
   if (lineKind === 'result') {
@@ -927,14 +897,20 @@ function lineSummary(lineKind, eventName, data = {}, display = {}, artifactRefs 
     if (eventName === 'session.steer.applied') return firstString(display.summary, queueItemContent(data), data.instruction, data.message)
     if (eventName === 'session.follow_up.started') return firstString(display.summary, queueItemContent(data), data.consumed_runtime_run_id, data.runtime_run_id)
     if (String(eventName || '').startsWith('session.queue.')) return firstString(display.summary, queueItemContent(data), data.error_code, data.status)
-    return firstString(display.summary, data.reason, approvalSummary(data), data.risk_level)
+    return firstMeaningfulApprovalText(
+      display.summary,
+      data.reason,
+      approvalSummary(data),
+      data.risk_level,
+      data.message
+    )
   }
   if (lineKind === 'result') return resultSummary(eventName, data, display, artifactRefs)
   if (lineKind === 'subagent') {
     if (String(eventName || '').startsWith('orchestration.')) {
       return firstString(display.summary, formatOrchestrationSummary(eventName, data, display), data.result_summary, data.final_summary, data.error_msg, data.summary)
     }
-    return firstString(display.summary, data.summary, data.result, data.child_run_link_id)
+    return firstString(display.summary, data.summary, data.progress, data.reason, data.message, data.result, data.child_run_link_id)
   }
   return firstString(display.summary, data.summary, data.status, data.name)
 }
@@ -1014,6 +990,7 @@ function resultTitle(eventName) {
   if (eventName === 'model_provider.failed') return '模型调用失败'
   if (eventName === 'run.error') return '运行失败'
   if (eventName === 'session.error') return '运行异常'
+  if (eventName === 'session.step.ended') return '步骤完成'
   if (eventName === 'session.step.failed') return '步骤失败'
   if (eventName === 'tool.rejected') return '工具已拒绝'
   return 'Result'
@@ -1033,12 +1010,14 @@ function isFailureResultEvent(eventName) {
 
 function failureSummary(eventName, data = {}, display = {}) {
   const error = asRecord(data.error || display.error)
+  // Prefer raw error message over generic display titles so UI never masks upstream failures.
   const message = firstString(
-    display.summary,
     error.message,
     data.message,
     typeof data.error === 'string' ? data.error : '',
+    display.summary,
     data.code,
+    error.code,
     error.type
   )
   if (!message) return ''
@@ -1074,11 +1053,70 @@ function approvalDecisionTitle(status) {
 }
 
 function approvalDecisionSummary(data = {}, display = {}) {
-  return compactJoin([
-    firstString(display.summary, data.reason, data.summary, data.message, data.result),
-    firstString(display.decided_by, data.decided_by, data.actor, data.user),
-    firstString(display.decision, data.decision)
-  ], ' · ')
+  const decision = firstString(display.decision, data.decision, data.result)
+  const reason = firstMeaningfulApprovalText(display.summary, data.reason, data.summary, data.message)
+  const actor = firstString(display.decided_by, data.decided_by, data.actor, data.user)
+  return compactJoin([approvalDecisionTitle(actionStatus(data, display)), reason, actor, decision], ' · ')
+}
+
+function isApprovalPauseToolFailure(event = {}, items = []) {
+  if (event.eventName !== 'session.tool.failed' && event.event !== 'session.tool.failed') return false
+  const callID = eventCallID(event)
+  if (!callID) return false
+  // Match same-call approval rows even after they were resolved, so late pause failures stay hidden.
+  const relatedApproval = [...items].reverse().find((item) => {
+    if (item.lineKind !== 'action') return false
+    const itemCallID = firstString(
+      item.data?.call_id,
+      item.data?.tool_call_id,
+      item.data?.provider_tool_call_id,
+      item.display?.call_id,
+      item.display?.provider_tool_call_id,
+      asRecord(item.data?.approval_request).call_id,
+      asRecord(item.data?.approval_request).provider_tool_call_id
+    )
+    return itemCallID === callID
+  })
+  if (relatedApproval) return true
+  const error = asRecord(event.data?.error || event.display?.error)
+  const code = firstString(error.code, event.data?.code, event.display?.code)
+  return code === 'tool_approval_required' || code === 'approval_required'
+}
+
+function eventCallID(event = {}) {
+  const data = asRecord(event.data)
+  const display = asRecord(event.display)
+  const action = asRecord(data.action)
+  const input = asRecord(data.input_json || action.input_json)
+  const approval = asRecord(data.approval_request || display.approval_request || asRecord(action.display_json).approval_request)
+  return firstString(
+    data.call_id,
+    data.tool_call_id,
+    data.provider_tool_call_id,
+    input.provider_tool_call_id,
+    input.tool_call_id,
+    approval.call_id,
+    approval.tool_call_id,
+    approval.provider_tool_call_id
+  )
+}
+
+function isGenericToolApprovalText(value) {
+  const text = String(value || '').trim()
+  if (!text) return true
+  if (/^Tool\s+\S+\s+requires approval\.?$/i.test(text)) return true
+  if (/^Tool execution requires approval\.?$/i.test(text)) return true
+  if (/^模型请求执行需要确认的 EasyDo 操作$/.test(text)) return true
+  if (/^需要用户审批$|^等待用户审批$|^待用户批准$/.test(text)) return true
+  return false
+}
+
+function firstMeaningfulApprovalText(...values) {
+  for (const value of values) {
+    const text = firstString(value)
+    if (text && !isGenericToolApprovalText(text)) return text
+  }
+  return ''
 }
 
 function resultStatus(eventName, data = {}, display = {}) {
@@ -1220,20 +1258,26 @@ function processReasonText(lineKind, data = {}, display = {}, fallback = '') {
   const action = asRecord(data.action)
   const actionDisplay = asRecord(action.display_json)
   const approval = asRecord(data.approval_request || display.approval_request || actionDisplay.approval_request)
-  const explicit = firstString(
+  const explicit = firstMeaningfulApprovalText(
     display.reason,
-    data.reason,
     data.invocation_reason,
     data.call_reason,
     data.spawn_reason,
     data.decision_reason,
+    data.reason,
     approval.reason,
-    approval.summary
+    approval.summary,
+    data.tool_description,
+    display.tool_description,
+    display.summary,
+    data.summary,
+    fallback
   )
   if (explicit) return explicit
-  if (lineKind === 'action') return firstString(display.summary, data.summary, fallback)
-  if (lineKind === 'subagent') return firstString(display.summary, data.summary, fallback)
-  return firstString(fallback)
+  if (lineKind === 'action' || lineKind === 'subagent') {
+    return firstMeaningfulApprovalText(display.summary, data.summary, fallback)
+  }
+  return firstMeaningfulApprovalText(fallback)
 }
 
 function parseJsonRecord(value) {
@@ -1424,6 +1468,10 @@ function resourceCount(value) {
 }
 
 function modelEventTitle(eventName, data = {}, display = {}) {
+  if (eventName === 'model.call_started') return '模型请求已开始'
+  if (eventName === 'model.call_completed') return '模型请求已完成'
+  if (eventName === 'model.continuation_started') return '模型续写已开始'
+  if (eventName === 'model.continuation_completed') return '模型续写已完成'
   if (eventName === 'run.started') return '运行已开始'
   if (eventName === 'run.completed') return '运行已完成'
   if (eventName === 'run.failed') return '运行失败'
@@ -1459,6 +1507,19 @@ function modelEventTitle(eventName, data = {}, display = {}) {
 }
 
 function modelEventSummary(eventName, data = {}, display = {}) {
+  if (eventName === 'model.call_started' || eventName === 'model.continuation_started') {
+    return firstString(display.summary, modelEventTarget(data, display))
+  }
+  if (eventName === 'model.call_completed' || eventName === 'model.continuation_completed') {
+    const toolCallCount = Number(data.tool_call_count ?? display.tool_call_count)
+    const textChars = Number(data.text_chars ?? display.text_chars)
+    const reasoningChars = Number(data.reasoning_chars ?? display.reasoning_chars)
+    const status = firstString(display.status, data.status).toLowerCase()
+    if (Number.isFinite(toolCallCount) && toolCallCount > 0) return `请求工具 ${toolCallCount} 个`
+    if (status === 'empty' && Number.isFinite(reasoningChars) && reasoningChars > 0) return '模型仅返回内部推理'
+    if (Number.isFinite(textChars) && textChars > 0) return `生成 ${textChars} 字符`
+    return firstString(display.summary, data.status)
+  }
   if (eventName === 'run.started') return firstString(display.summary, data.summary, compactJoin(['runtime', data.status || display.status], ' '), 'runtime running')
   if (RUN_STATE_EVENTS.has(eventName)) return firstString(display.summary, data.summary, data.message, data.code, data.status, display.status)
   if (eventName === 'context.budget.evaluated') return firstString(display.summary, formatContextBudgetSummary(data, display), '已按当前绑定模型窗口评估上下文预算')
@@ -1599,17 +1660,6 @@ function modelEventTarget(data = {}, display = {}) {
   )
 }
 
-function runEventRuntimeRunID(event = {}) {
-  const data = asRecord(event.data)
-  const display = asRecord(event.display)
-  const run = asRecord(data.run || display.run)
-  return firstString(data.runtime_run_id, display.runtime_run_id, run.runtime_run_id)
-}
-
-function runItemRuntimeRunID(item = {}) {
-  return runEventRuntimeRunID({ data: item.data, display: item.display })
-}
-
 function readablePhase(value) {
   const text = firstString(value)
   if (!text) return ''
@@ -1630,8 +1680,9 @@ function objectPreview(value = {}) {
 }
 
 function normalizeInputEvents(events = []) {
-  return Array.isArray(events)
-    ? events.map((item) => {
+  if (!Array.isArray(events)) return []
+  return events
+    .map((item, sourceIndex) => {
       const data = asRecord(item?.data || item?.payload || item)
       const display = asRecord(item?.display_json || data.display_json)
       const eventName = firstString(item?.event, item?.type, display.event_type, data.event_type, 'event')
@@ -1640,10 +1691,45 @@ function normalizeInputEvents(events = []) {
         data,
         display,
         event: eventName,
-        eventName
+        eventName,
+        sourceIndex,
+        eventSeq: eventSequenceValue(item, data, display),
+        eventTime: eventTimestampValue(item, data, display)
       }
     })
-    : []
+    .sort((left, right) => {
+      if (left.eventSeq !== right.eventSeq) {
+        if (left.eventSeq === null) return 1
+        if (right.eventSeq === null) return -1
+        return left.eventSeq - right.eventSeq
+      }
+      if (left.eventTime !== right.eventTime) {
+        if (left.eventTime === null) return 1
+        if (right.eventTime === null) return -1
+        return left.eventTime - right.eventTime
+      }
+      return left.sourceIndex - right.sourceIndex
+    })
+}
+
+function eventSequenceValue(item = {}, data = {}, display = {}) {
+  const value = Number(
+    firstString(
+      item.event_seq,
+      item.seq,
+      data.event_seq,
+      data.seq,
+      display.event_seq,
+      display.seq
+    )
+  )
+  return Number.isFinite(value) ? value : null
+}
+
+function eventTimestampValue(item = {}, data = {}, display = {}) {
+  const raw = firstString(item.timestamp, item.created_at, data.timestamp, data.created_at, display.timestamp)
+  const value = Date.parse(raw)
+  return Number.isFinite(value) ? value : null
 }
 
 function compactStreamingDeltaEvents(events = []) {
@@ -1680,139 +1766,6 @@ function streamingDeltaKey(event = {}) {
     data.assistant_message_id,
     event.eventName
   )
-}
-
-function suppressApprovalPauseNoise(events = []) {
-  const approvalByCallID = new Map()
-  events.forEach((event, index) => {
-    if (event.eventName !== 'permission.asked') return
-    const callID = eventCallID(event)
-    if (!callID || approvalByCallID.has(callID)) return
-    approvalByCallID.set(callID, index)
-  })
-  if (approvalByCallID.size === 0) return events
-
-  const resolvedByCallID = new Map()
-  events.forEach((event, index) => {
-    if (event.eventName !== 'permission.resolved') return
-    const callID = eventCallID(event)
-    if (!callID || !approvalByCallID.has(callID) || resolvedByCallID.has(callID)) return
-    resolvedByCallID.set(callID, index)
-  })
-
-  const firstApprovalIndex = Math.min(...approvalByCallID.values())
-
-  return events.filter((event, index) => {
-    const callID = eventCallID(event)
-    const approvalIndex = callID ? approvalByCallID.get(callID) : undefined
-    if (approvalIndex !== undefined && index < approvalIndex && isToolDraftForApprovalPause(event)) {
-      return false
-    }
-    if (event.eventName === 'session.step.started' && stepOnlyLeadsToApprovalPause(events, index, approvalByCallID)) {
-      return false
-    }
-    // Models often narrate "waiting for approval" in the same step before the
-    // permission panel is emitted. Hide that meta-prose; the UI already shows
-    // the waiting action row.
-    if (index < firstApprovalIndex && isApprovalWaitNarrationEvent(event)) {
-      return false
-    }
-    const withinAnyPause = isWithinAnyApprovalPause(index, approvalByCallID, resolvedByCallID)
-    if (withinAnyPause && isApprovalPauseContinuationNoise(event, callID)) return false
-    if (approvalIndex === undefined || index <= approvalIndex) return true
-    const resolvedIndex = resolvedByCallID.get(callID)
-    if (resolvedIndex !== undefined && index >= resolvedIndex) return true
-    return !isApprovalPauseContinuationNoise(event, callID)
-  })
-}
-
-function eventCallID(event = {}) {
-  const data = asRecord(event.data)
-  const display = asRecord(event.display)
-  const action = asRecord(data.action)
-  const input = asRecord(data.input_json || action.input_json)
-  const approval = asRecord(data.approval_request || display.approval_request || asRecord(action.display_json).approval_request)
-  return firstString(
-    data.call_id,
-    data.tool_call_id,
-    data.provider_tool_call_id,
-    input.provider_tool_call_id,
-    input.tool_call_id,
-    action.input_json?.provider_tool_call_id,
-    approval.call_id,
-    approval.tool_call_id,
-    approval.provider_tool_call_id
-  )
-}
-
-function isToolDraftForApprovalPause(event = {}) {
-  return [
-    'session.tool.input.started',
-    'session.tool.input.delta',
-    'session.tool.input.ended',
-    'session.tool.called'
-  ].includes(event.eventName)
-}
-
-function stepOnlyLeadsToApprovalPause(events = [], stepIndex = 0, approvalByCallID = new Map()) {
-  const nextApprovalIndex = Math.min(
-    ...[...approvalByCallID.values()].filter((index) => index > stepIndex)
-  )
-  if (!Number.isFinite(nextApprovalIndex)) return false
-  return !events.slice(stepIndex + 1, nextApprovalIndex).some((event) =>
-    event.eventName === 'session.reasoning.delta' ||
-    event.eventName === 'session.reasoning.ended' ||
-    event.eventName === 'session.text.delta' ||
-    event.eventName === 'session.text.ended'
-  )
-}
-
-function isApprovalPauseContinuationNoise(event = {}, callID = '') {
-  // Only suppress approval-lifecycle noise after permission.asked.
-  // Real session.text / session.reasoning for the same step often arrives after
-  // the ask (Pi emits the final answer while tools are paused) and must stay visible.
-  if (event.eventName === 'session.tool.failed' && callID && eventCallID(event) === callID && isApprovalRequiredFailure(event)) {
-    return true
-  }
-  if (isApprovalWaitNarrationEvent(event)) return true
-  return false
-}
-
-function isApprovalWaitNarrationEvent(event = {}) {
-  if (![
-    'session.reasoning.delta',
-    'session.reasoning.ended',
-    'session.text.delta',
-    'session.text.ended',
-    'answer_delta',
-    'reasoning_delta'
-  ].includes(event.eventName)) return false
-  const data = asRecord(event.data)
-  const display = asRecord(event.display)
-  const text = firstString(data.text, data.delta, display.summary)
-  return isApprovalWaitNarrationText(text)
-}
-
-function isApprovalWaitNarrationText(text = '') {
-  const normalized = String(text || '').trim()
-  if (!normalized) return false
-  return /等待用户审批|需要用户审批|已触发审批|待用户批准|不要叙述等|我应该停止，等待审批|requires approval|waiting for (user )?approval|approval queue|我不能自己批准/i.test(normalized)
-}
-
-function isWithinAnyApprovalPause(index, approvalByCallID = new Map(), resolvedByCallID = new Map()) {
-  return [...approvalByCallID.entries()].some(([callID, approvalIndex]) => {
-    if (index <= approvalIndex) return false
-    const resolvedIndex = resolvedByCallID.get(callID)
-    return resolvedIndex === undefined || index < resolvedIndex
-  })
-}
-
-function isApprovalRequiredFailure(event = {}) {
-  const data = asRecord(event.data)
-  const display = asRecord(event.display)
-  const error = asRecord(data.error || display.error)
-  const message = firstString(display.summary, data.message, error.message, typeof data.error === 'string' ? data.error : '')
-  return /requires approval|需要.*审批|需要.*确认/i.test(message)
 }
 
 function normalizeArtifactRefs(value) {

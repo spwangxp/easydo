@@ -329,7 +329,8 @@ describe('SessionService Agent Profile Chatbox', () => {
     await waitFor(async () => {
       const generated = await store.getSession(actor.workspace_id, session.id)
       expect(generated?.title).toBe('触发 7023 的 gpu 使用采集')
-      expect(generated?.title_source).toBe('generated')
+      expect(generated?.title_source).toBe('user_fallback')
+      expect(generated?.title_generation_error).toBe('NOT_FOUND')
     })
     const generated = await store.getSession(actor.workspace_id, session.id)
     await store.saveSession({
@@ -343,9 +344,46 @@ describe('SessionService Agent Profile Chatbox', () => {
     const reloaded = await service.getSession(actor, session.id)
 
     expect(reloaded.title).toBe('触发 7023 的 gpu 使用采集')
-    expect(reloaded.title_source).toBe('generated')
-    expect(reloaded.title_generation_error).toBeUndefined()
+    expect(reloaded.title_source).toBe('user_fallback')
+    expect(reloaded.title_generation_error).toBe('NOT_FOUND')
     expect(titleAttempts).toBe(2)
+  })
+
+  it('does not mark provider-echoed user content as a generated session title', async () => {
+    const store = createMemoryRuntimeStore()
+    const eventStore = new FakeAgentEventStore()
+    const profiles = new AgentProfileService(store)
+    const userMessage = '我现在有一些流水线，想要执行一下e3流水线，你帮我弄吧'
+    const modelClient: ChatModelClient = {
+      async complete() {
+        return { text: userMessage }
+      },
+      async *stream() {
+        throw new Error('title generation must not use streaming')
+      }
+    }
+    const service = new SessionService(store, profiles, modelClient, undefined, {}, undefined, {
+      runner: fakePiRunner(eventStore, 'pi answer'),
+      eventStore
+    })
+    const profile = await profiles.createProfile(actor, profilePayload({
+      model: { provider_id: 'test', id: 'fake' }
+    }))
+    const session = await service.getCurrentSession(actor, automaticTitleSessionPayload(profile.id))
+
+    await service.createEntryRun(actor, session.id, {
+      runtime_engine: 'pi',
+      content: userMessage,
+      client_entry_id: 'pi-title-entry-echo-1'
+    })
+
+    await waitFor(async () => {
+      const updated = await store.getSession(actor.workspace_id, session.id)
+      expect(updated?.title_source).toBe('user_fallback')
+      expect(updated?.title_generation_error).toBe('echoed_user_content')
+      expect(updated?.title).toBe('有一些流水线')
+      expect(updated?.title).not.toBe(userMessage)
+    })
   })
 
   it('does not replace an explicitly provided manual session title', async () => {
@@ -2656,6 +2694,118 @@ describe('SessionService Agent Profile Chatbox', () => {
       expect.objectContaining({ tool_call_id: 'call-pi-multi-1', status: 'completed' }),
       expect.objectContaining({ tool_call_id: 'call-pi-multi-2', status: 'completed' })
     ])
+  })
+
+  it('keeps sequential Pi approvals pending when pause failures use tool descriptions instead of approval phrases', async () => {
+    const store = createMemoryRuntimeStore()
+    const eventStore = new FakeAgentEventStore()
+    const profiles = new AgentProfileService(store)
+    const executed: RuntimeToolCall[] = []
+    const toolExecutor: RuntimeToolExecutor = {
+      async execute(call) {
+        executed.push(call)
+        return {
+          content: JSON.stringify({ ok: true, tool: call.tool_name }),
+          structured_content: { ok: true, tool: call.tool_name }
+        }
+      }
+    }
+    let continuationCount = 0
+    const service = new SessionService(store, profiles, chatClient('legacy'), toolExecutor, {}, undefined, {
+      runner: {
+        async prompt(input: AgentHarnessRunInput): Promise<AgentHarnessRunResult> {
+          if (String(input.prompt).includes('tool_result')) {
+            continuationCount += 1
+            const userMessageID = `pi-user-seq-approval-cont-${continuationCount}`
+            const assistantMessageID = `pi-assistant-seq-approval-cont-${continuationCount}`
+            await eventStore.append({ type: 'session.prompted', session_id: input.sessionID, event_id: '', seq: 0, timestamp: nowForTest(), message_id: userMessageID, prompt: input.prompt, files: [], delivery: 'prompt' })
+            await eventStore.append({ type: 'session.step.started', session_id: input.sessionID, event_id: '', seq: 0, timestamp: nowForTest(), assistant_message_id: assistantMessageID, parent_message_id: userMessageID, agent: input.agent, model: input.model })
+            if (continuationCount === 1) {
+              await eventStore.append({ type: 'session.tool.called', session_id: input.sessionID, event_id: '', seq: 0, timestamp: nowForTest(), assistant_message_id: assistantMessageID, call_id: 'call-pi-seq-2', tool: 'easydo_pipeline_list', tool_name: 'easydo_pipeline_list', input: { workspace_id: 1, query: 'e1' } } as unknown as AgentRuntimeEvent)
+              await eventStore.append({ type: 'permission.asked', session_id: input.sessionID, event_id: '', seq: 0, timestamp: nowForTest(), request_id: 'approval:call-pi-seq-2', approval_id: 'approval:call-pi-seq-2', call_id: 'call-pi-seq-2', tool_name: 'easydo_pipeline_list', reason: 'List pipelines in one workspace', input: { workspace_id: 1, query: 'e1' }, message: 'List pipelines in one workspace' } as unknown as AgentRuntimeEvent)
+              await eventStore.append({ type: 'session.tool.failed', session_id: input.sessionID, event_id: '', seq: 0, timestamp: nowForTest(), assistant_message_id: assistantMessageID, call_id: 'call-pi-seq-2', error: { type: 'unknown', message: 'List pipelines in one workspace' } })
+              throw new PiToolApprovalRequiredError(
+                'approval:call-pi-seq-2',
+                'call-pi-seq-2',
+                'easydo_pipeline_list',
+                'List pipelines in one workspace'
+              )
+            }
+            await eventStore.append({ type: 'session.text.ended', session_id: input.sessionID, event_id: '', seq: 0, timestamp: nowForTest(), assistant_message_id: assistantMessageID, text_id: 'pi-text-seq-approval-done', text: 'pipeline listed' })
+            await eventStore.append({ type: 'session.step.ended', session_id: input.sessionID, event_id: '', seq: 0, timestamp: nowForTest(), assistant_message_id: assistantMessageID, finish_reason: 'stop' })
+            return { session_id: input.sessionID, user_message_id: userMessageID, assistant_message_id: assistantMessageID }
+          }
+          const userMessageID = 'pi-user-seq-approval-1'
+          const assistantMessageID = 'pi-assistant-seq-approval-1'
+          await eventStore.append({ type: 'session.prompted', session_id: input.sessionID, event_id: '', seq: 0, timestamp: nowForTest(), message_id: userMessageID, prompt: input.prompt, files: [], delivery: 'prompt' })
+          await eventStore.append({ type: 'session.step.started', session_id: input.sessionID, event_id: '', seq: 0, timestamp: nowForTest(), assistant_message_id: assistantMessageID, parent_message_id: userMessageID, agent: input.agent, model: input.model })
+          await eventStore.append({ type: 'session.tool.called', session_id: input.sessionID, event_id: '', seq: 0, timestamp: nowForTest(), assistant_message_id: assistantMessageID, call_id: 'call-pi-seq-1', tool: 'easydo_workspace_list', tool_name: 'easydo_workspace_list', input: {} } as unknown as AgentRuntimeEvent)
+          await eventStore.append({ type: 'permission.asked', session_id: input.sessionID, event_id: '', seq: 0, timestamp: nowForTest(), request_id: 'approval:call-pi-seq-1', approval_id: 'approval:call-pi-seq-1', call_id: 'call-pi-seq-1', tool_name: 'easydo_workspace_list', reason: 'List workspaces the actor can access', input: {}, message: 'List workspaces the actor can access' } as unknown as AgentRuntimeEvent)
+          await eventStore.append({ type: 'session.tool.failed', session_id: input.sessionID, event_id: '', seq: 0, timestamp: nowForTest(), assistant_message_id: assistantMessageID, call_id: 'call-pi-seq-1', error: { type: 'unknown', message: 'List workspaces the actor can access' } })
+          throw new PiToolApprovalRequiredError(
+            'approval:call-pi-seq-1',
+            'call-pi-seq-1',
+            'easydo_workspace_list',
+            'List workspaces the actor can access'
+          )
+        }
+      },
+      eventStore
+    })
+    const profile = await profiles.createProfile(actor, profilePayload({
+      model: { provider_id: 'test', id: 'fake' }
+    }))
+    const session = await service.getCurrentSession(actor, chatboxSessionPayload(profile.id))
+    const first = await service.createEntryRun(actor, session.id, {
+      runtime_engine: 'pi',
+      content: 'trigger pipeline e1',
+      client_entry_id: 'pi-entry-seq-approval-1'
+    })
+
+    expect(first.run?.status).toBe('awaiting_decision')
+    expect(first.run?.result.awaiting_approvals).toEqual([
+      expect.objectContaining({
+        approval_id: 'approval:call-pi-seq-1',
+        call_id: 'call-pi-seq-1',
+        tool_name: 'easydo_workspace_list'
+      })
+    ])
+
+    const continued = await service.decidePiApproval(actor, String(first.run?.runtime_run_id), {
+      decision: 'approve_once',
+      approval_id: 'approval:call-pi-seq-1',
+      client_decision_id: 'approve-pi-seq-1'
+    })
+
+    expect(executed).toEqual([
+      expect.objectContaining({ tool_call_id: 'call-pi-seq-1', tool_name: 'easydo_workspace_list' })
+    ])
+    expect(continued.run.status).toBe('awaiting_decision')
+    expect(continued.run.result.awaiting_approvals).toEqual([
+      expect.objectContaining({
+        approval_id: 'approval:call-pi-seq-2',
+        call_id: 'call-pi-seq-2',
+        tool_name: 'easydo_pipeline_list',
+        reason: 'List pipelines in one workspace'
+      })
+    ])
+    expect(continued.run.result.awaiting_approval).toMatchObject({
+      approval_id: 'approval:call-pi-seq-2',
+      call_id: 'call-pi-seq-2'
+    })
+
+    const finished = await service.decidePiApproval(actor, String(continued.run.runtime_run_id), {
+      decision: 'approve_once',
+      approval_id: 'approval:call-pi-seq-2',
+      client_decision_id: 'approve-pi-seq-2'
+    })
+
+    expect(executed).toEqual([
+      expect.objectContaining({ tool_call_id: 'call-pi-seq-1', tool_name: 'easydo_workspace_list' }),
+      expect.objectContaining({ tool_call_id: 'call-pi-seq-2', tool_name: 'easydo_pipeline_list' })
+    ])
+    expect(finished.run.status).toBe('completed')
+    expect(finished.run.result.awaiting_approvals).toBeUndefined()
   })
 
   it('recovers Pi approval decisions for runs that were incorrectly completed with unresolved replay approvals', async () => {

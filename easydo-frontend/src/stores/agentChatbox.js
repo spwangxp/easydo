@@ -126,10 +126,9 @@ function uniquePendingActions(agentActions) {
 function appendRuntimeEvent(entriesRef, entryId, event, data) {
   patchEntry(entriesRef, entryId, (entry) => {
     const events = Array.isArray(entry.output.runtime_events) ? entry.output.runtime_events : []
-    entry.output.runtime_events = [
-      ...events,
+    entry.output.runtime_events = mergeRuntimeEvents(events, [
       normalizeRuntimeEvent(event, data)
-    ]
+    ])
   })
 }
 
@@ -397,9 +396,7 @@ export const useAgentChatboxStore = defineStore('agentChatbox', () => {
   async function refreshSessionSummaryAfterRun(sessionId = session.value?.id) {
     if (!sessionId) return null
     let latest = null
-    // Title generation is intentionally background-only; poll long enough for
-    // slower model/provider title calls without polluting the agent event stream.
-    for (const delay of [0, 600, 1400, 2500, 4000, 7000]) {
+    for (const delay of [0, 400, 900, 1600, 2500, 4000, 7000, 12000]) {
       if (delay) await sleep(delay)
       if (!session.value?.id || String(session.value.id) !== String(sessionId)) return latest
       latest = await refreshSessionSummary(sessionId).catch(() => null)
@@ -667,6 +664,7 @@ export const useAgentChatboxStore = defineStore('agentChatbox', () => {
           await loadEntries(sessionId)
           connectionState.value = 'terminal'
           reconnectAttempt.value = 0
+          void refreshSessionSummaryAfterRun(sessionId)
           return finalRef.value
         }
         const runtimeRunId = summary.active_run.runtime_run_id
@@ -693,6 +691,7 @@ export const useAgentChatboxStore = defineStore('agentChatbox', () => {
         if (!activeRuntimeRun.value?.runtime_run_id) {
           connectionState.value = 'terminal'
           reconnectAttempt.value = 0
+          void refreshSessionSummaryAfterRun(sessionId)
           return finalRef.value
         }
       } catch (err) {
@@ -763,6 +762,7 @@ export const useAgentChatboxStore = defineStore('agentChatbox', () => {
     try {
       connectionState.value = 'connecting'
       activeStreamController.value = new AbortController()
+      void refreshSessionSummaryAfterRun(runningSessionId)
       await sendAgentChatboxMessageStream(session.value.id, {
         content,
         client_entry_id: clientEntryId,

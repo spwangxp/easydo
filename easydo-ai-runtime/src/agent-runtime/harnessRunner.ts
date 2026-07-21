@@ -326,7 +326,7 @@ export class AgentHarnessRunner {
         assistant_message_id: assistantMessageID,
         error: {
           type: descriptor.category,
-          message: descriptor.user_message,
+          message: descriptor.message,
           code: descriptor.code,
           category: descriptor.category,
           retryable: descriptor.retryable,
@@ -339,7 +339,9 @@ export class AgentHarnessRunner {
         ...logContext,
         outcome: descriptor.terminal_status,
         code: descriptor.code,
-        category: descriptor.category
+        category: descriptor.category,
+        message: descriptor.message,
+        error_message: descriptor.message
       })
       throw sourceError
     } finally {

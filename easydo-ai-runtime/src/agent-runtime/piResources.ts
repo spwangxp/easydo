@@ -270,7 +270,16 @@ function agentToolFromMcpDefinition(resource: AgentResource, ref: AgentResourceR
       }
       if (permission.decision === 'ask') {
         const approvalID = `approval:${toolCallId}`
-        const reason = firstString(record.risk_summary, record.riskSummary, `Tool ${name} requires approval`)
+        const reason = firstString(
+          asRecord(args).risk_summary,
+          asRecord(args).reason,
+          asRecord(args).invocation_reason,
+          record.risk_summary,
+          record.riskSummary,
+          record.description,
+          description,
+          `Tool ${name} requires approval`
+        )
         const decision = await input.decideTool?.({
           approvalID,
           callID: toolCallId,
@@ -295,6 +304,7 @@ function agentToolFromMcpDefinition(resource: AgentResource, ref: AgentResourceR
           reason,
           input: args,
           message: reason,
+          tool_description: description,
           operation_type: permission.operation_type,
           permission_key: permission.permission_key,
           matched_rule: permission.matched_rule,

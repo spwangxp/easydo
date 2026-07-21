@@ -241,11 +241,8 @@ export function derivePendingActions(entries = []) {
     const liveAction = byID.get(actionID(action)) || action
     return isActionAwaitingDecision(liveAction)
   })
-  // Secondary dedup: for PI tool approvals with the same tool+args, keep only
-  // the latest instance. This catches the case where an old permission.asked
-  // from a previous entry wasn't properly resolved (e.g. permission.resolved
-  // was in a transient entry not persisted during replay), preventing the same
-  // approval card from appearing twice across entry boundaries.
+  // Deduplicate replay copies of the same approval without collapsing distinct
+  // provider calls that happen to use identical tool arguments.
   const piByContent = new Map()
   const nonPi = []
   for (const action of awaitingActions) {
@@ -255,7 +252,8 @@ export function derivePendingActions(entries = []) {
         action.display_json?.approval_request?.tool_name
       )
       const args = action.input_json?.arguments || action.target_json || {}
-      const contentKey = `${action.runtime_run_id}:${toolName}:${stableStringify(args)}`
+      const callID = actionStableIdentity(action)
+      const contentKey = `${action.runtime_run_id}:${toolName}:${stableStringify(args)}:${callID}`
       // Later iteration wins (entries are processed in chronological order,
       // so the last one with the same content key is the most recent).
       piByContent.set(contentKey, action)
@@ -338,8 +336,10 @@ function actionResolutionsFromEntries(entries = []) {
 }
 
 function stalePiApprovalIdsFromEvents(events = []) {
+  // Mirror backend: open permission.asked stays live until resolved or true bypass (by call_id, not message).
   const staleIDs = new Set()
   const pendingEventsByID = new Map()
+  const openApprovalCallIDs = new Set()
   let hasApprovalResolution = false
   events.forEach((event) => {
     const name = runtimeEventName(event)
@@ -348,6 +348,7 @@ function stalePiApprovalIdsFromEvents(events = []) {
       const approvalID = firstString(data.request_id, data.approval_id)
       const callID = firstString(data.call_id, data.tool_call_id, data.provider_tool_call_id)
       ;[approvalID, callID].filter(Boolean).forEach((id) => pendingEventsByID.set(id, event))
+      if (callID) openApprovalCallIDs.add(callID)
       return
     }
     if (name === 'permission.resolved') {
@@ -355,34 +356,54 @@ function stalePiApprovalIdsFromEvents(events = []) {
       const approvalID = firstString(data.request_id, data.approval_id)
       const callID = firstString(data.call_id, data.tool_call_id, data.provider_tool_call_id)
       ;[approvalID, callID].filter(Boolean).forEach((id) => pendingEventsByID.delete(id))
+      if (callID) openApprovalCallIDs.delete(callID)
       hasApprovalResolution = true
       return
     }
-    if (!pendingEventsByID.size || !isPiApprovalBypassBoundaryEvent(event, hasApprovalResolution)) return
+    if (!pendingEventsByID.size || !isPiApprovalBypassBoundaryEvent(event, hasApprovalResolution, openApprovalCallIDs)) return
     pendingEventsByID.forEach((pendingEvent) => {
       actionResolutionIds(pendingEvent).forEach((id) => staleIDs.add(id))
     })
     pendingEventsByID.clear()
+    openApprovalCallIDs.clear()
   })
   return staleIDs
 }
 
-function isPiApprovalBypassBoundaryEvent(event = {}, hasApprovalResolution = false) {
+function eventToolCallIDFromEvent(event = {}) {
+  const data = runtimeEventData(event)
+  return firstString(data.call_id, data.tool_call_id, data.provider_tool_call_id)
+}
+
+function isPiApprovalBypassBoundaryEvent(event = {}, hasApprovalResolution = false, openApprovalCallIDs = new Set()) {
   const name = runtimeEventName(event)
   if (['session.step.started', 'model.call_started', 'model.continuation_started', 'provider.call_started', 'provider.continuation_started'].includes(name)) return true
   if (!hasApprovalResolution) return false
+  const callID = eventToolCallIDFromEvent(event)
+  if (callID && openApprovalCallIDs.has(callID)) {
+    if (['session.tool.called', 'session.tool.success', 'tool.executed', 'action.execution_started', 'action.execution_succeeded'].includes(name)) {
+      return false
+    }
+    if (name === 'session.tool.failed' || name === 'tool.failed' || name === 'action.execution_failed') {
+      return false
+    }
+  }
   if (['session.tool.called', 'session.tool.success', 'tool.executed', 'action.execution_started', 'action.execution_succeeded'].includes(name)) return true
   if (name === 'session.tool.failed' || name === 'tool.failed' || name === 'action.execution_failed') {
-    return !isApprovalRequiredRuntimeFailure(event)
+    return !isApprovalRequiredRuntimeFailure(event, openApprovalCallIDs)
   }
   return false
 }
 
-function isApprovalRequiredRuntimeFailure(event = {}) {
+function isApprovalRequiredRuntimeFailure(event = {}, openApprovalCallIDs = new Set()) {
+  const name = runtimeEventName(event)
+  if (name !== 'session.tool.failed' && name !== 'tool.failed' && name !== 'action.execution_failed') return false
+  const callID = eventToolCallIDFromEvent(event)
+  if (callID && openApprovalCallIDs.has(callID)) return true
   const data = runtimeEventData(event)
   const error = data.error && typeof data.error === 'object' && !Array.isArray(data.error) ? data.error : {}
-  const message = firstString(data.message, error.message, typeof data.error === 'string' ? data.error : '')
-  return /requires approval|需要.*审批|需要.*确认/i.test(message)
+  const code = firstString(error.code, data.code)
+  return code === 'tool_approval_required' || code === 'approval_required'
 }
 
 function actionResolutionFromEvent(event) {

@@ -56,9 +56,10 @@ export class RuntimeSourceError extends Error {
 
 export function classifyRuntimeError(error: unknown, context: RuntimeErrorContext = {}): RuntimeErrorDescriptor {
   const record = asRecord(error)
-  const rawMessage = error instanceof Error ? error.message : firstString(record.message, String(error || ''))
+  const rawMessage = unwrapErrorMessage(error) || firstString(record.message, String(error || ''))
+  // Truthful surface text: redacted real error only. Never replace with generic masks.
   const message = redactSensitiveText(rawMessage || 'Unknown runtime error')
-  const source = context.source || runtimeErrorSource(record.source) || inferSource(record)
+  const source = context.source || runtimeErrorSource(record.source) || inferSource(record, rawMessage)
   const suppliedCode = firstString(context.code, record.code)
   const httpStatus = context.http_status || positiveStatus(record.status) || positiveStatus(record.http_status) || statusFromMessage(rawMessage)
   const explicitRetryable = typeof record.retryable === 'boolean' ? record.retryable : undefined
@@ -66,7 +67,7 @@ export function classifyRuntimeError(error: unknown, context: RuntimeErrorContex
   const text = `${suppliedCode} ${errorName} ${rawMessage}`.toLowerCase()
 
   if (source === 'user' || /user_cancelled|cancelled_by_user|canceled_by_user/.test(text)) {
-    return descriptor(suppliedCode || 'runtime_cancelled', 'cancelled', message, 'The run was cancelled.', false, httpStatus || 409, 'user', 'cancelled')
+    return descriptor(suppliedCode || 'runtime_cancelled', 'cancelled', message, false, httpStatus || 409, 'user', 'cancelled')
   }
   if (
     suppliedCode === 'runtime_cancelled' ||
@@ -77,7 +78,6 @@ export function classifyRuntimeError(error: unknown, context: RuntimeErrorContex
       suppliedCode || 'runtime_cancelled',
       'cancelled',
       message,
-      'The run was cancelled.',
       false,
       httpStatus || 409,
       source === 'harness' ? 'harness' : 'runtime',
@@ -85,41 +85,48 @@ export function classifyRuntimeError(error: unknown, context: RuntimeErrorContex
     )
   }
   if (source === 'permission' || httpStatus === 403 || /permission|forbidden|approval.?denied|access.?denied/.test(text)) {
-    return descriptor(suppliedCode || 'runtime_permission_denied', 'permission', message, 'Permission was denied.', false, httpStatus || 403, source === 'runtime' ? 'permission' : source, 'failed')
+    return descriptor(suppliedCode || 'runtime_permission_denied', 'permission', message, false, httpStatus || 403, source === 'runtime' ? 'permission' : source, 'failed')
   }
   if (source === 'validation' || [400, 404, 409, 422].includes(httpStatus || 0) || /validation|invalid|requires?|required|not.?found|conflict|no api.?key|missing.*credential|credential.*required/.test(text)) {
-    return descriptor(suppliedCode || 'runtime_validation_failed', 'validation', message, message, false, httpStatus || 400, source === 'runtime' ? 'validation' : source, 'failed')
+    return descriptor(suppliedCode || 'runtime_validation_failed', 'validation', message, false, httpStatus || 400, source === 'runtime' ? 'validation' : source, 'failed')
   }
   if (source === 'mcp' || /^mcp[_-]/.test(suppliedCode)) {
     const retryable = explicitRetryable ?? (isTimeout(text) || isTransientTransport(text, httpStatus))
-    return descriptor(suppliedCode || 'mcp_request_failed', 'mcp', message, 'An MCP tool request failed.', retryable, httpStatus || (isTimeout(text) ? 504 : 502), 'mcp', 'failed')
+    return descriptor(suppliedCode || 'mcp_request_failed', 'mcp', message, retryable, httpStatus || (isTimeout(text) ? 504 : 502), 'mcp', 'failed')
   }
   if (isTimeout(text)) {
     if (source === 'provider') {
-      return descriptor(stableProviderCode(suppliedCode, 'provider_timeout'), 'provider_timeout', message, 'The model provider timed out. Try again.', explicitRetryable ?? true, httpStatus || 504, source, 'timeout')
+      return descriptor(stableProviderCode(suppliedCode, 'provider_timeout'), 'provider_timeout', message, explicitRetryable ?? true, httpStatus || 504, source, 'timeout')
     }
-    return descriptor(suppliedCode || `${source}_timeout`, 'transport', message, 'The AI runtime operation timed out. Try again.', explicitRetryable ?? true, httpStatus || 504, source, 'timeout')
+    return descriptor(suppliedCode || `${source}_timeout`, 'transport', message, explicitRetryable ?? true, httpStatus || 504, source, 'timeout')
   }
-  if (httpStatus === 429 || /rate.?limit|too many requests/.test(text)) {
-    if (source === 'provider') {
-      return descriptor(stableProviderCode(suppliedCode, 'provider_rate_limit'), 'provider_rate_limit', message, 'The model provider is rate limited. Try again shortly.', explicitRetryable ?? true, 429, source, 'failed')
+  if (isRateLimit(text, httpStatus)) {
+    if (source === 'provider' || isProviderUpstreamText(text)) {
+      return descriptor(
+        stableProviderCode(suppliedCode, 'provider_rate_limit'),
+        'provider_rate_limit',
+        message,
+        explicitRetryable ?? true,
+        httpStatus || 429,
+        source === 'runtime' ? 'provider' : source,
+        'failed'
+      )
     }
-    return descriptor(suppliedCode || `${source}_rate_limit`, 'transport', message, 'The AI runtime request was rate limited.', explicitRetryable ?? true, 429, source, 'failed')
+    return descriptor(suppliedCode || `${source}_rate_limit`, 'transport', message, explicitRetryable ?? true, httpStatus || 429, source, 'failed')
   }
   if (isTransientTransport(text, httpStatus)) {
-    const providerTransport = source === 'provider'
+    const providerTransport = source === 'provider' || isProviderUpstreamText(text)
     return descriptor(
       providerTransport ? stableProviderCode(suppliedCode, 'provider_transport_error') : suppliedCode || `${source}_transport_error`,
       'transport',
       message,
-      providerTransport ? 'The AI provider is temporarily unavailable. Try again.' : 'The AI runtime transport is temporarily unavailable. Try again.',
       explicitRetryable ?? true,
       httpStatus || 502,
-      source,
+      providerTransport && source === 'runtime' ? 'provider' : source,
       'failed'
     )
   }
-  return descriptor(suppliedCode || 'runtime_internal_error', 'internal', message, 'The AI runtime encountered an internal error.', false, httpStatus || 500, source, 'failed')
+  return descriptor(suppliedCode || 'runtime_internal_error', 'internal', message, false, httpStatus || 500, source, 'failed')
 }
 
 export function runtimeErrorPublicPayload(descriptor: RuntimeErrorDescriptor) {
@@ -139,7 +146,6 @@ function descriptor(
   code: string,
   category: RuntimeErrorCategory,
   message: string,
-  userMessage: string,
   retryable: boolean,
   httpStatus: number,
   source: RuntimeErrorSource,
@@ -149,7 +155,7 @@ function descriptor(
     code,
     category,
     message,
-    user_message: userMessage,
+    user_message: message,
     retryable,
     http_status: httpStatus,
     source,
@@ -157,18 +163,46 @@ function descriptor(
   }
 }
 
+function unwrapErrorMessage(error: unknown, depth = 0): string {
+  if (depth > 6 || error == null) return ''
+  if (typeof error === 'string') return error.trim()
+  if (error instanceof AggregateError && Array.isArray(error.errors) && error.errors.length > 0) {
+    const nested = unwrapErrorMessage(error.errors[0], depth + 1)
+    if (nested) return nested
+  }
+  if (error instanceof Error) {
+    const own = String(error.message || '').trim()
+    const cause = 'cause' in error ? unwrapErrorMessage((error as { cause?: unknown }).cause, depth + 1) : ''
+    if (cause && isWrapperErrorMessage(own)) return cause
+    if (own) return own
+    if (cause) return cause
+  }
+  const record = asRecord(error)
+  return firstString(record.message, record.error_message, record.errorMessage, record.detail, record.reason)
+}
+
+function isWrapperErrorMessage(message: string) {
+  return /agent run failed and failure reporting failed|failure reporting failed|the ai runtime encountered an internal error|the ai runtime transport is temporarily unavailable|the ai provider is temporarily unavailable|an mcp tool request failed/i.test(message)
+}
+
 function stableProviderCode(code: string, fallback: string) {
   return /^(ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|ABORT_ERR)$/i.test(code) ? fallback : code || fallback
 }
 
-function inferSource(record: Record<string, unknown>): RuntimeErrorSource {
+function inferSource(record: Record<string, unknown>, rawMessage = ''): RuntimeErrorSource {
   const code = firstString(record.code).toLowerCase()
+  const text = `${code} ${rawMessage}`.toLowerCase()
   if (code.startsWith('mcp_')) return 'mcp'
   if (code.startsWith('provider_') || code.startsWith('openrouter_') || code.startsWith('openai_')) return 'provider'
+  if (isProviderUpstreamText(text)) return 'provider'
   if (code.includes('permission') || code.includes('approval')) return 'permission'
   if (code.includes('cancel')) return 'user'
   if (code.includes('validation') || code.includes('invalid')) return 'validation'
   return 'runtime'
+}
+
+function isProviderUpstreamText(text: string) {
+  return /upstream error from|openrouter|nvidia|resourceexhausted|model provider|provider request|chat\.completions|openai/i.test(text)
 }
 
 function runtimeErrorSource(value: unknown): RuntimeErrorSource | undefined {
@@ -181,11 +215,24 @@ function isTimeout(text: string) {
   return /timed?\s*out|timeout|deadline exceeded|etimedout/.test(text)
 }
 
-function isTransientTransport(text: string, httpStatus?: number) {
+function isRateLimit(text: string, httpStatus?: number) {
   return Boolean(
-    (httpStatus && httpStatus >= 500 && httpStatus <= 599) ||
-    /econnreset|econnrefused|eai_again|enetunreach|socket hang up|network error|service.?unavailable|temporarily unavailable|upstream.?connect|connection reset|connection refused/.test(text)
+    httpStatus === 429 ||
+    /rate.?limit|too many requests|resourceexhausted|resource exhausted|request limit reached|worker local total request limit|quota.?exceeded|capacity.?exceeded|throttl/i.test(text)
   )
+}
+
+function isTransientTransport(text: string, httpStatus?: number) {
+  if (/econnreset|econnrefused|eai_again|enetunreach|socket hang up|network error|service.?unavailable|temporarily unavailable|upstream.?connect|connection reset|connection refused|bad gateway|gateway timeout|fetch failed/i.test(text)) {
+    return true
+  }
+  // HTTP 5xx alone is not enough — only treat as transport when the body is empty/generic.
+  // Concrete application failures (including AggregateError wrappers) stay internal/provider.
+  if (!(httpStatus && httpStatus >= 500 && httpStatus <= 599)) return false
+  if (/resourceexhausted|rate.?limit|request limit|agent run failed|failure reporting failed|internal error/i.test(text)) {
+    return false
+  }
+  return !text.trim() || /unknown runtime error|request failed|http\s*5\d\d|status\s*5\d\d/i.test(text)
 }
 
 function statusFromMessage(message: string) {
