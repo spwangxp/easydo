@@ -3,10 +3,8 @@
     <div class="ai-agent-layout">
       <main class="agent-page">
         <div class="content-toolbar store-page-toolbar agent-toolbar">
-          <div class="content-toolbar__start">
+          <div class="content-toolbar__start agent-toolbar-start">
             <StoreKindSwitch :model-value="storeKind" @update:model-value="handleStoreTabChange" />
-          </div>
-          <div class="content-toolbar__actions agent-toolbar-actions">
             <div class="agent-mode-switch" role="tablist" aria-label="AI Agent workspace modes">
               <button
                 v-for="item in agentModeItems"
@@ -21,9 +19,14 @@
                 {{ item.label }}
               </button>
             </div>
+          </div>
+          <div class="content-toolbar__actions agent-toolbar-actions">
             <StoreHeaderActions>
               <el-input v-if="activeAgentStoreView !== 'tools'" v-model="keyword" clearable placeholder="搜索 Agent / MCP / Skills" style="width: 260px" />
               <el-button :icon="Refresh" @click="refreshCurrentView">刷新</el-button>
+              <el-button v-if="activeAgentStoreView === 'agent'" type="primary" :icon="Plus" @click="openCreateDialog">新建 Agent</el-button>
+              <el-button v-else-if="activeAgentStoreView === 'mcp'" type="primary" :icon="Plus" @click="openMcpServerDialog()">新建 MCP Server</el-button>
+              <el-button v-else-if="activeAgentStoreView === 'skills'" type="primary" :icon="Plus" @click="openSkillRepoDialog()">添加仓库</el-button>
             </StoreHeaderActions>
           </div>
         </div>
@@ -36,7 +39,6 @@
                   <h1>Agent Profiles</h1>
                   <p>模型、Prompt、MCP Server、Skills、Subagents、Schema、Memory、Confirmation 的发布单元</p>
                 </div>
-                <el-button type="primary" :icon="Plus" @click="openCreateDialog">新建</el-button>
               </div>
               <div class="agent-panel-body">
                 <div class="agent-filters">
@@ -146,7 +148,6 @@
                           <h3>MCP Server</h3>
                           <p>按标准 MCP Server 配置维护连接信息，工具发现结果挂在 Server 下，不作为独立资源。</p>
                         </div>
-                        <el-button type="primary" :icon="Plus" @click="openMcpServerDialog()">新建 MCP Server</el-button>
                       </div>
                       <el-table :data="mcpServerRows" row-key="id" empty-text="暂无 MCP Server">
                         <el-table-column label="名称" min-width="200">
@@ -190,7 +191,6 @@
                               <h3>Skills 仓库</h3>
                               <p>添加仓库后扫描，扫描结果会弹窗展示并支持勾选导入。</p>
                             </div>
-                            <el-button type="primary" :icon="Plus" @click="openSkillRepoDialog()">添加仓库</el-button>
                           </div>
                           <el-table :data="skillRepositoryRows" row-key="id" empty-text="暂无 Skills 仓库">
                             <el-table-column prop="name" label="仓库" min-width="190" />
@@ -2861,7 +2861,7 @@ function errorMessage(error, fallback = '请求失败') {
 @import '@/assets/styles/variables.scss';
 
 .ai-agent-store-page {
-  padding-top: 10px;
+  padding-top: 0;
 }
 
 .ai-agent-layout {
@@ -2878,6 +2878,11 @@ function errorMessage(error, fallback = '请求失败') {
   min-height: 46px;
   margin-bottom: 14px;
   align-items: center;
+}
+
+.agent-toolbar-start {
+  gap: 14px;
+  overflow: hidden;
 }
 
 .agent-toolbar-actions {
@@ -3674,6 +3679,16 @@ function errorMessage(error, fallback = '请求失败') {
 
 @media (max-width: 760px) {
   .agent-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .agent-toolbar-start,
+  .agent-toolbar-actions {
+    width: 100%;
+  }
+
+  .agent-toolbar-start {
     align-items: stretch;
     flex-direction: column;
   }

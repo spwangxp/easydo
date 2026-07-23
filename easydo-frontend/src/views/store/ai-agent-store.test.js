@@ -225,7 +225,7 @@ test('ai agent store official layout follows the interaction demo workspace shel
   assert.doesNotMatch(source, /<section class="card-shell section-shell">/)
 })
 
-test('ai agent store top agent actions are workspace mode switches only', async () => {
+test('ai agent store top navigation exposes workspace mode switches', async () => {
   const source = await readFile(join(currentDir, 'ai-agent-store.vue'), 'utf8')
 
   assert.match(source, /agentModeItems\s*=\s*\[/)
@@ -243,6 +243,23 @@ test('ai agent store top agent actions are workspace mode switches only', async 
   assert.doesNotMatch(source, />Workspace Settings</)
   assert.doesNotMatch(source, /新增资源/)
   assert.doesNotMatch(source, /场景绑定<\/el-button>/)
+})
+
+test('ai agent store keeps view navigation left and page actions in the shared top toolbar', async () => {
+  const source = await readFile(join(currentDir, 'ai-agent-store.vue'), 'utf8')
+  const toolbarStart = source.indexOf('<div class="content-toolbar store-page-toolbar agent-toolbar">')
+  const toolbarEnd = source.indexOf('\n\n        <section', toolbarStart)
+  const toolbar = source.slice(toolbarStart, toolbarEnd)
+
+  assert.ok(toolbarStart >= 0)
+  assert.ok(toolbarEnd > toolbarStart)
+  assert.match(toolbar, /content-toolbar__start agent-toolbar-start[\s\S]*agent-mode-switch/)
+  assert.match(toolbar, /<StoreHeaderActions>[\s\S]*@click="openCreateDialog"[\s\S]*新建 Agent/)
+  assert.match(toolbar, /<StoreHeaderActions>[\s\S]*@click="openMcpServerDialog\(\)"[\s\S]*新建 MCP Server/)
+  assert.match(toolbar, /<StoreHeaderActions>[\s\S]*@click="openSkillRepoDialog\(\)"[\s\S]*添加仓库/)
+  assert.equal(source.match(/@click="openCreateDialog"/g)?.length, 1)
+  assert.equal(source.match(/@click="openMcpServerDialog\(\)"/g)?.length, 1)
+  assert.equal(source.match(/@click="openSkillRepoDialog\(\)"/g)?.length, 1)
 })
 
 test('builtin easydo mcp server is visible but cannot be edited discovered or deleted', async () => {
