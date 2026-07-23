@@ -57,6 +57,15 @@ export function buildModelRows({ models = [], providers = [], deployments = [], 
         const providerBindings = provider.bindings.filter((binding) => String(binding.model_id) === String(model.id))
         return buildProviderRow(provider, providerBindings)
       })
+      const contextWindows = providerRows
+        .flatMap((provider) => provider.bindings || [])
+        .map((binding) => resolveBindingContextWindowTokens(binding, model))
+        .filter((value) => Number.isFinite(value) && value > 0)
+      const catalogWindow = numberOrNull(model.context_window || model.context_window_tokens)
+      if (catalogWindow && catalogWindow > 0 && contextWindows.length === 0) {
+        contextWindows.push(catalogWindow)
+      }
+      const contextWindowLabel = formatContextWindowRange(contextWindows)
 
       const row = {
         id: model.id,
@@ -64,6 +73,9 @@ export function buildModelRows({ models = [], providers = [], deployments = [], 
         parameterSize: model.parameter_size || model.parameterSize || '',
         modalitiesText: formatModalities(model.modalities),
         source: model.source || '',
+        contextWindows,
+        contextWindowLabel,
+        context_window_label: contextWindowLabel,
         deploymentCount: modelDeployments.length,
         providerCount: modelProviders.length,
         providers: providerRows,
@@ -73,7 +85,8 @@ export function buildModelRows({ models = [], providers = [], deployments = [], 
           model.parameter_size,
           formatModalities(model.modalities),
           model.source,
-          ...providerRows.flatMap((provider) => [provider.name, provider.source, provider.endpoint, provider.status, provider.binding_key]),
+          contextWindowLabel,
+          ...providerRows.flatMap((provider) => [provider.name, provider.source, provider.endpoint, provider.status, provider.binding_key, provider.context_window_label]),
           ...modelDeployments.flatMap((deployment) => [deployment.resource_name, deployment.template_name, deployment.version_label, deployment.provider_name])
         ]
           .filter(Boolean)
@@ -454,6 +467,22 @@ export function getInvalidJsonFieldLabels(fields = []) {
 
 function buildProviderRow(provider, bindings = []) {
   const firstBinding = bindings[0] || null
+  const enrichedBindings = bindings.map((binding) => {
+    const contextWindow = resolveBindingContextWindowTokens(binding)
+    return {
+      ...binding,
+      context_window_tokens: contextWindow,
+      context_window: contextWindow,
+      context_window_label: formatContextLengthLabel(contextWindow),
+      max_output_tokens: firstPositiveNumber(
+        binding.max_output_tokens,
+        parseMaybeObject(binding.metadata_json || binding.metadata).max_output_tokens
+      )
+    }
+  })
+  const contextWindows = enrichedBindings
+    .map((binding) => binding.context_window_tokens)
+    .filter((value) => Number.isFinite(value) && value > 0)
 
   return {
     id: provider.id,
@@ -463,7 +492,67 @@ function buildProviderRow(provider, bindings = []) {
     status: provider.status || '',
     binding_id: firstBinding?.id ?? null,
     binding_key: firstBinding?.provider_model_key || firstBinding?.binding_key || '',
-    binding_count: bindings.length
+    binding_count: bindings.length,
+    bindings: enrichedBindings,
+    context_window_tokens: contextWindows[0] || null,
+    context_window_label: formatContextWindowRange(contextWindows)
+  }
+}
+
+export function resolveBindingContextWindowTokens(binding = {}, catalogModel = {}) {
+  const metadata = parseMaybeObject(binding.metadata_json || binding.metadata)
+  const model = catalogModel && typeof catalogModel === 'object' ? catalogModel : (binding.model || {})
+  const modelMetadata = parseMaybeObject(model.metadata || model.metadata_json)
+  return firstPositiveNumber(
+    binding.context_window_tokens,
+    binding.context_window,
+    binding.contextWindow,
+    metadata.context_window_tokens,
+    metadata.context_window,
+    metadata.contextWindow,
+    model.context_window_tokens,
+    model.context_window,
+    model.contextWindow,
+    modelMetadata.context_window_tokens,
+    modelMetadata.context_window
+  )
+}
+
+export function formatContextLengthLabel(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number) || number <= 0) return '-'
+  if (number % 1024 === 0 && number >= 1024) return `${Math.round(number / 1024)}K`
+  if (number >= 1000) return `${Math.round(number / 1000)}K`
+  return String(Math.round(number))
+}
+
+export function formatContextWindowRange(values = []) {
+  const numbers = [...new Set(
+    (Array.isArray(values) ? values : [])
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0)
+  )].sort((a, b) => a - b)
+  if (numbers.length === 0) return '-'
+  if (numbers.length === 1) return formatContextLengthLabel(numbers[0])
+  return `${formatContextLengthLabel(numbers[0])}–${formatContextLengthLabel(numbers[numbers.length - 1])}`
+}
+
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const number = Number(value)
+    if (Number.isFinite(number) && number > 0) return Math.floor(number)
+  }
+  return null
+}
+
+function parseMaybeObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value
+  if (typeof value !== 'string' || !value.trim()) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
   }
 }
 

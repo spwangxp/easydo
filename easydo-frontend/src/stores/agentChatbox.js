@@ -30,7 +30,9 @@ import {
   asRecord,
   buildSessionModelOverride,
   createStreamingAssistantEntry,
+  firstPositiveNumber,
   firstString,
+  formatContextLengthLabel,
   hasPendingActionDecision,
   isPiApprovalAction,
   modelKeyFromBinding,
@@ -39,7 +41,8 @@ import {
   patchConversationEntry as patchEntry,
   piApprovalRequestPayload,
   replaceOptimisticEntry,
-  resolveAgentActionRef
+  resolveAgentActionRef,
+  resolveBindingContextWindow
 } from '@/stores/agentConversationShared'
 import {
   agentRuntimeErrorMessage,
@@ -260,23 +263,39 @@ export const useAgentChatboxStore = defineStore('agentChatbox', () => {
     const hasRuntimeModel = Object.keys(asRecord(runtimeModel)).length > 0
     const provider = asRecord(hasRuntimeModel ? runtimeModel : (override.provider || profile.provider))
     const model = asRecord(hasRuntimeModel ? runtimeModel : (override.model || profile.model))
+    const binding = asRecord(override.binding || profile.binding)
     const inference = asRecord(hasRuntimeModel ? (runtimeModel.inference || runtimeModel) : (override.inference || profile.inference))
+    const contextWindow = firstPositiveNumber(
+      runtimeModel.context_window,
+      runtimeModel.context_window_tokens,
+      model.context_window_tokens,
+      model.context_window,
+      binding.context_window_tokens,
+      binding.context_window
+    )
     return {
       provider: resolveProviderDisplayName(provider, providerDisplayCandidates.value),
       model: firstString(model.provider_model_key, model.model, model.name, model.id, model.model_id, '-'),
+      context_window: contextWindow,
+      context_window_label: formatContextLengthLabel(contextWindow),
       thinking_level: normalizeThinkingLevel(firstString(inference.thinking_level, inference.reasoning, inference.reasoning_effort, 'medium'))
     }
   })
   const canSwitchSessionModel = computed(() => Boolean(session.value?.id) && !sending.value && !hasActiveRun.value && !loading.value)
   const modelSwitchOptions = computed(() => aiProviders.value.flatMap((provider) => {
     const bindings = modelBindingsByProvider.value[String(provider.id)] || []
-    return bindings.map((binding) => ({
-      key: `${provider.id}:${binding.id || modelKeyFromBinding(binding)}`,
-      provider,
-      binding,
-      provider_label: firstString(provider.display_name, provider.displayName, provider.name, provider.provider_id, provider.id, provider.provider_type),
-      model_label: modelKeyFromBinding(binding)
-    }))
+    return bindings.map((binding) => {
+      const contextWindow = resolveBindingContextWindow(binding)
+      return {
+        key: `${provider.id}:${binding.id || modelKeyFromBinding(binding)}`,
+        provider,
+        binding,
+        provider_label: firstString(provider.display_name, provider.displayName, provider.name, provider.provider_id, provider.id, provider.provider_type),
+        model_label: modelKeyFromBinding(binding),
+        context_window: contextWindow,
+        context_window_label: formatContextLengthLabel(contextWindow)
+      }
+    })
   }).filter((item) => item.provider_label && item.model_label))
 
   function nextClientEntryId(purpose = 'msg') {

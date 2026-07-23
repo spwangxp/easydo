@@ -9,7 +9,6 @@ import { classifyRuntimeError, RuntimeSourceError } from '../services/runtimeErr
 import { runtimeLogger, type RuntimeLogger, type RuntimeLogInput } from '../observability/runtimeLogger.js'
 import type { SubagentMode } from '../services/subagentMode.js'
 import {
-  MissingBindingContextWindowError,
   buildHistoryCompactionSummary,
   contextBudgetEventPayload,
   contextCompactionEventPayload,
@@ -204,7 +203,8 @@ export class AgentHarnessRunner {
       if (budgetEvaluation?.should_compact && compactionPlan && compactionPlan.compacted.length > 0) {
         const summary = buildHistoryCompactionSummary(
           compactionPlan.compacted,
-          Math.min(compactionPlan.max_chars, 1200)
+          Math.min(compactionPlan.max_chars, 1200),
+          budgetEvaluation.reason
         )
         await this.append(input.runtimeRunID, {
           type: 'context.compaction.completed',
@@ -485,29 +485,27 @@ function tryPrepareProviderBindingContextBudget(input: AgentHarnessRunInput): {
     model.context_window_tokens,
     model.context_window
   )
-  if (!contextWindow) return undefined
   const history = Array.isArray(input.history)
     ? input.history.map((message) => ({ role: message.role, content: message.content }))
     : []
-  try {
-    const evaluation = evaluateContextBudget({
-      binding: {
-        provider_id: firstString(modelConfig.provider_id, model.provider_id),
-        provider_model_key: firstString(modelConfig.id, model.id, model.provider_model_key),
-        context_window_tokens: contextWindow,
-        max_output_tokens: firstNumber(modelConfig.max_tokens, model.max_tokens, model.max_output_tokens),
-        capability_source: firstString(asRecord(modelConfig.inference).capability_source, model.capability_source, 'binding_snapshot'),
-        capability_snapshot_hash: firstString(asRecord(modelConfig.inference).capability_snapshot_hash, model.capability_snapshot_hash)
-      },
-      history,
-      system_prompt: input.systemPrompt,
-      prompt: input.prompt
-    })
-    return { evaluation, plan: planHistoryCompaction(history, evaluation) }
-  } catch (error) {
-    if (error instanceof MissingBindingContextWindowError) return undefined
-    throw error
-  }
+  const evaluation = evaluateContextBudget({
+    binding: {
+      provider_id: firstString(modelConfig.provider_id, model.provider_id),
+      provider_model_key: firstString(modelConfig.id, model.id, model.provider_model_key),
+      context_window_tokens: contextWindow || undefined,
+      max_output_tokens: firstNumber(modelConfig.max_tokens, model.max_tokens, model.max_output_tokens) || undefined,
+      capability_source: firstString(
+        asRecord(modelConfig.inference).capability_source,
+        model.capability_source,
+        contextWindow ? 'binding_snapshot' : 'prompt_count_fallback'
+      ),
+      capability_snapshot_hash: firstString(asRecord(modelConfig.inference).capability_snapshot_hash, model.capability_snapshot_hash)
+    },
+    history,
+    system_prompt: input.systemPrompt,
+    prompt: input.prompt
+  })
+  return { evaluation, plan: planHistoryCompaction(history, evaluation) }
 }
 
 function firstString(...values: unknown[]) {

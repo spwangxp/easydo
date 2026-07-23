@@ -212,6 +212,53 @@ test('ai store model rows omit agent profile usage', async () => {
   assert.equal(Object.prototype.hasOwnProperty.call(rows[0], 'runtimeCount'), false)
 })
 
+test('ai store model rows show provider-specific context window min-max range', async () => {
+  const { buildModelRows, formatContextLengthLabel, formatContextWindowRange } = await import('./aiStoreConfig.js')
+
+  assert.equal(formatContextLengthLabel(131072), '128K')
+  assert.equal(formatContextWindowRange([8192, 131072]), '8K–128K')
+
+  const rows = buildModelRows({
+    models: [{ id: 101, name: 'Qwen 3', context_window: 32768 }],
+    providers: [
+      {
+        id: 1,
+        name: 'openrouter',
+        bindings: [{
+          id: 11,
+          model_id: 101,
+          provider_model_key: 'qwen/qwen3',
+          context_window_tokens: 131072
+        }]
+      },
+      {
+        id: 2,
+        name: 'ollama',
+        bindings: [{
+          id: 22,
+          model_id: 101,
+          provider_model_key: 'qwen3',
+          context_window_tokens: 8192
+        }]
+      }
+    ],
+    deployments: []
+  })
+
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].contextWindowLabel, '8K–128K')
+  assert.equal(rows[0].providers[0].context_window_label, '128K')
+  assert.equal(rows[0].providers[1].context_window_label, '8K')
+})
+
+test('ai store page renders context length columns for models and provider bindings', async () => {
+  const source = await readViewSource()
+  assert.match(source, /label="上下文长度"/)
+  assert.match(source, /row\.contextWindowLabel \|\| row\.context_window_label/)
+  assert.match(source, /binding\.context_window_label/)
+  assert.match(source, /formatDiscoveredContextLabel/)
+})
+
 test('ai store synchronizes selected gpu devices into deploy parameters', async () => {
   const source = await readViewSource()
 

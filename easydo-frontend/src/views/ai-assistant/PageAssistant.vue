@@ -230,9 +230,10 @@
                 :disabled="!assistantStore.canSwitchSessionModel"
                 :title="assistantStore.canSwitchSessionModel ? '切换本会话模型' : 'Agent 运行中或等待审批，处理完成后才能切换模型'"
               >
-                <span>{{ assistantStore.currentSessionModel.provider }}</span>
-                <span>{{ assistantStore.currentSessionModel.model }}</span>
-                <span>{{ assistantStore.currentSessionModel.thinking_level }}</span>
+              <span>{{ assistantStore.currentSessionModel.provider }}</span>
+              <span>{{ assistantStore.currentSessionModel.model }}</span>
+              <span v-if="assistantStore.currentSessionModel.context_window_label && assistantStore.currentSessionModel.context_window_label !== '-'">{{ assistantStore.currentSessionModel.context_window_label }}</span>
+              <span>{{ assistantStore.currentSessionModel.thinking_level }}</span>
                 <el-icon><ArrowDown /></el-icon>
               </button>
             </template>
@@ -247,8 +248,9 @@
                   :disabled="assistantStore.switchingModel"
                   @click="handleSessionModelSwitch(option)"
                 >
-                  <strong>{{ option.provider_label }}</strong>
-                  <span>{{ option.model_label }}</span>
+                <strong>{{ option.provider_label }}</strong>
+                <span>{{ option.model_label }}</span>
+                <span v-if="option.context_window_label && option.context_window_label !== '-'">Ctx {{ option.context_window_label }}</span>
                 </button>
                 <div v-if="!assistantStore.modelSwitchOptions.length" class="assistant-empty">暂无可用模型</div>
               </div>

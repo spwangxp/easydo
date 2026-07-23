@@ -28,6 +28,49 @@ export function firstPositiveNumber(...values) {
   return undefined
 }
 
+export function formatContextLengthLabel(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number) || number <= 0) return '-'
+  if (number % 1024 === 0 && number >= 1024) return `${Math.round(number / 1024)}K`
+  if (number >= 1000) return `${Math.round(number / 1000)}K`
+  return String(Math.round(number))
+}
+
+export function resolveBindingContextWindow(binding = {}, catalogModel = {}) {
+  const bindingMetadata = parseRecord(binding?.metadata_json || binding?.metadata)
+  const hasCatalog = catalogModel && typeof catalogModel === 'object' && Object.keys(catalogModel).length > 0
+  const model = asRecord(hasCatalog ? catalogModel : binding?.model)
+  const catalogMetadata = parseRecord(model.metadata || model.metadata_json)
+  return firstPositiveNumber(
+    binding?.context_window_tokens,
+    binding?.context_window,
+    binding?.contextWindow,
+    bindingMetadata.context_window_tokens,
+    bindingMetadata.context_window,
+    bindingMetadata.contextWindow,
+    binding?.model?.context_window_tokens,
+    binding?.model?.context_window,
+    binding?.model?.contextWindow,
+    model.context_window_tokens,
+    model.context_window,
+    model.contextWindow,
+    catalogMetadata.context_window_tokens,
+    catalogMetadata.context_window,
+    catalogMetadata.contextWindow
+  )
+}
+
+export function formatContextWindowRangeLabel(values = []) {
+  const numbers = [...new Set(
+    (Array.isArray(values) ? values : [])
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0)
+  )].sort((a, b) => a - b)
+  if (numbers.length === 0) return '-'
+  if (numbers.length === 1) return formatContextLengthLabel(numbers[0])
+  return `${formatContextLengthLabel(numbers[0])}–${formatContextLengthLabel(numbers[numbers.length - 1])}`
+}
+
 export function piApprovalRequestPayload(agentAction = {}) {
   const input = asRecord(agentAction.input_json)
   const display = asRecord(agentAction.display_json)
@@ -120,23 +163,7 @@ export function buildSessionModelOverride(provider, binding, thinkingLevel) {
   const bindingMetadata = parseRecord(binding?.metadata_json || binding?.metadata)
   const catalogModel = asRecord(binding?.model)
   const catalogMetadata = parseRecord(catalogModel.metadata || catalogModel.metadata_json)
-  const contextWindow = firstPositiveNumber(
-    binding?.context_window_tokens,
-    binding?.context_window,
-    binding?.contextWindow,
-    bindingMetadata.context_window_tokens,
-    bindingMetadata.context_window,
-    bindingMetadata.contextWindow,
-    binding?.model?.context_window_tokens,
-    binding?.model?.context_window,
-    binding?.model?.contextWindow,
-    catalogModel.context_window_tokens,
-    catalogModel.context_window,
-    catalogModel.contextWindow,
-    catalogMetadata.context_window_tokens,
-    catalogMetadata.context_window,
-    catalogMetadata.contextWindow
-  )
+  const contextWindow = resolveBindingContextWindow(binding, catalogModel)
   const maxOutputTokens = firstPositiveNumber(
     binding?.max_output_tokens,
     bindingMetadata.max_output_tokens,

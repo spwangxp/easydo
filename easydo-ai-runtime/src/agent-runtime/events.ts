@@ -229,19 +229,19 @@ export interface ContextBudgetEvaluatedEvent extends RuntimeEventBase, ContextBu
   type: 'context.budget.evaluated'
   message_id: string
   should_compact: boolean
-  reason: 'within_budget' | 'over_threshold' | 'history_message_cap' | string
+  reason: 'within_budget' | 'context-window' | 'prompt-count' | 'over_threshold' | 'history_message_cap' | string
 }
 
 export interface CompactionStartedEvent extends RuntimeEventBase, ContextBudgetSnapshot {
   type: 'session.compaction.started' | 'context.compaction.started'
   message_id: string
-  reason: 'auto' | 'manual' | 'over_threshold' | 'history_message_cap' | string
+  reason: 'auto' | 'manual' | 'context-window' | 'prompt-count' | 'over_threshold' | 'history_message_cap' | string
 }
 
 export interface CompactionEndedEvent extends RuntimeEventBase, ContextBudgetSnapshot {
   type: 'session.compaction.ended' | 'context.compaction.completed' | 'context.compaction.failed'
   message_id: string
-  reason: 'auto' | 'manual' | 'over_threshold' | 'history_message_cap' | string
+  reason: 'auto' | 'manual' | 'context-window' | 'prompt-count' | 'over_threshold' | 'history_message_cap' | string
   summary: string
   recent: string
   error?: string

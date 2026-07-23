@@ -51,6 +51,9 @@
                   <el-table-column prop="endpoint" label="Endpoint" min-width="240" />
                   <el-table-column prop="status" label="状态" width="120" />
                   <el-table-column prop="binding_key" label="Binding Key" min-width="180" />
+                  <el-table-column label="上下文长度" width="140">
+                    <template #default="{ row: provider }">{{ provider.context_window_label || '-' }}</template>
+                  </el-table-column>
                   <el-table-column label="操作" width="180" fixed="right">
                     <template #default>
                       <div class="table-actions">
@@ -95,6 +98,9 @@
         <el-table-column prop="parameterSize" label="参数大小" min-width="120" />
         <el-table-column prop="modalitiesText" label="模态" min-width="160" />
         <el-table-column prop="source" label="来源" min-width="120" />
+        <el-table-column label="上下文长度" min-width="140">
+          <template #default="{ row }">{{ row.contextWindowLabel || row.context_window_label || '-' }}</template>
+        </el-table-column>
         <el-table-column prop="deploymentCount" label="已部署数" width="120" />
         <el-table-column prop="providerCount" label="Provider 数" width="120" />
         <el-table-column label="操作" width="180" fixed="right">
@@ -128,6 +134,12 @@
                   <el-table-column prop="modelName" label="模型" min-width="180" />
                   <el-table-column prop="provider_model_key" label="Provider Model Key" min-width="220" />
                   <el-table-column prop="status" label="状态" width="120" />
+                  <el-table-column label="上下文长度" width="140">
+                    <template #default="{ row: binding }">{{ binding.context_window_label || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="输出上限" width="120">
+                    <template #default="{ row: binding }">{{ binding.max_output_tokens || '-' }}</template>
+                  </el-table-column>
                   <el-table-column label="能力" min-width="180">
                     <template #default="{ row: binding }">
                       <div class="tag-list">
@@ -556,11 +568,19 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="上下文 / 输出" width="150">
+            <el-table-column label="上下文 / 输出" width="180">
               <template #default="{ row }">
                 <div class="provider-metric-pair">
-                  <span>Ctx {{ row.context_window || '-' }}</span>
-                  <span>Out {{ row.max_output_tokens || '-' }}</span>
+                  <el-input-number
+                    v-model="row.context_window"
+                    :min="0"
+                    :step="1024"
+                    controls-position="right"
+                    size="small"
+                    placeholder="Ctx"
+                    style="width: 100%"
+                  />
+                  <span class="field-tip">Ctx {{ formatDiscoveredContextLabel(row.context_window) }} · Out {{ row.max_output_tokens || '-' }}</span>
                 </div>
               </template>
             </el-table-column>
@@ -1554,12 +1574,36 @@ function providerBindingRows(provider) {
   return (provider?.bindings || []).map((binding) => {
     const model = mergedState.value.models.find((item) => String(item.id) === String(binding.model_id)) || {}
     const metadata = parseMaybeObject(binding.metadata_json)
+    const contextWindow = Number(
+      binding.context_window_tokens
+      || binding.context_window
+      || metadata.context_window_tokens
+      || metadata.context_window
+      || model.context_window
+      || 0
+    )
+    const maxOutput = Number(
+      binding.max_output_tokens
+      || metadata.max_output_tokens
+      || 0
+    )
     return {
       ...binding,
       modelName: model.name || metadata.model_name || binding.model_name || `Model #${binding.model_id}`,
-      capabilities: normalizeTagList(metadata.capabilities)
+      capabilities: normalizeTagList(metadata.capabilities),
+      context_window_tokens: contextWindow > 0 ? contextWindow : null,
+      context_window_label: formatDiscoveredContextLabel(contextWindow),
+      max_output_tokens: maxOutput > 0 ? maxOutput : null
     }
   })
+}
+
+function formatDiscoveredContextLabel(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number) || number <= 0) return '-'
+  if (number % 1024 === 0 && number >= 1024) return `${Math.round(number / 1024)}K`
+  if (number >= 1000) return `${Math.round(number / 1000)}K`
+  return String(Math.round(number))
 }
 
 function buildSelectedModelAssetOptions(model) {

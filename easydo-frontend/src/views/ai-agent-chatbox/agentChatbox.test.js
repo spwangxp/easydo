@@ -150,7 +150,27 @@ test('agent chatbox model switch labels prefer provider display name over provid
 
   assert.match(currentModelSource, /const runtimeModel = latestRuntimeModel\.value/)
   assert.match(currentModelSource, /provider:\s*resolveProviderDisplayName\(provider,\s*providerDisplayCandidates\.value\)/)
+  assert.match(currentModelSource, /context_window_label:\s*formatContextLengthLabel\(contextWindow\)/)
   assert.match(switchOptionsSource, /provider_label:\s*firstString\(provider\.display_name,\s*provider\.displayName,\s*provider\.name,/)
+  assert.match(switchOptionsSource, /context_window_label:\s*formatContextLengthLabel\(contextWindow\)/)
+})
+
+test('agent conversation shared formats binding context window labels', async () => {
+  const {
+    formatContextLengthLabel,
+    formatContextWindowRangeLabel,
+    resolveBindingContextWindow
+  } = await import('../../stores/agentConversationShared.js')
+
+  assert.equal(formatContextLengthLabel(131072), '128K')
+  assert.equal(formatContextWindowRangeLabel([8192, 131072]), '8K–128K')
+  assert.equal(resolveBindingContextWindow({
+    context_window_tokens: 262144,
+    model: { context_window: 8192 }
+  }), 262144)
+  assert.equal(resolveBindingContextWindow({
+    metadata_json: JSON.stringify({ context_window: 32768 })
+  }), 32768)
 })
 
 test('agent chatbox resolves numeric provider ids to provider names for current model display', () => {

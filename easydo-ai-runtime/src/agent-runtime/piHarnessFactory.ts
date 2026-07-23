@@ -8,6 +8,7 @@ import { AgentHarness, InMemorySessionRepo, formatSkillsForSystemPrompt, type Ag
 import type { AgentHarnessRunInput, PiHarnessLike } from './harnessRunner.js'
 import { createWorkspaceTools, filterWorkspaceToolsByPolicy } from './piWorkspaceTools.js'
 import {
+  DEFAULT_PROMPT_COUNT_COMPACTION_THRESHOLD,
   buildCompactionPersistenceRecord,
   buildHistoryCompactionSummary,
   contextBudgetEventPayload,
@@ -67,12 +68,10 @@ export function createPiHarnessFactory(options: PiHarnessFactoryOptions) {
     const { session, created } = await openOrCreateSession(sessionRepo, input.sessionID)
     if (created) {
       const historySnapshot = compactPiHistory(input.history ?? [], selection, model, options)
-      if (historySnapshot.evaluation.context_window_tokens > 0) {
-        await session.appendCustomEntry('context.budget.evaluated', {
-          version: PI_HISTORY_SNAPSHOT_VERSION,
-          ...contextBudgetEventPayload(historySnapshot.evaluation)
-        })
-      }
+      await session.appendCustomEntry('context.budget.evaluated', {
+        version: PI_HISTORY_SNAPSHOT_VERSION,
+        ...contextBudgetEventPayload(historySnapshot.evaluation)
+      })
       const compactionRecord = buildCompactionPersistenceRecord(
         historySnapshot.evaluation,
         historySnapshot.plan,
@@ -93,26 +92,30 @@ export function createPiHarnessFactory(options: PiHarnessFactoryOptions) {
         model_key: historySnapshot.evaluation.model_key || selection.id
       })
       if (historySnapshot.compacted.length > 0) {
-        if (historySnapshot.evaluation.context_window_tokens > 0) {
-          await session.appendCustomEntry('context.compaction.started', {
-            ...compactionRecord
-          })
-        }
+        await session.appendCustomEntry('context.compaction.started', {
+          ...compactionRecord
+        })
         await session.appendCustomMessageEntry(
           'easydo_history_compaction',
-          buildHistoryCompactionSummary(historySnapshot.compacted, historySnapshot.maxChars),
+          buildHistoryCompactionSummary(
+            historySnapshot.compacted,
+            historySnapshot.maxChars,
+            historySnapshot.evaluation.reason
+          ),
           false,
           {
             ...compactionRecord,
             compacted_message_count: historySnapshot.compacted.length
           }
         )
-        if (historySnapshot.evaluation.context_window_tokens > 0) {
-          await session.appendCustomEntry('context.compaction.completed', {
-            ...compactionRecord,
-            summary: buildHistoryCompactionSummary(historySnapshot.compacted, Math.min(historySnapshot.maxChars, 1200))
-          })
-        }
+        await session.appendCustomEntry('context.compaction.completed', {
+          ...compactionRecord,
+          summary: buildHistoryCompactionSummary(
+            historySnapshot.compacted,
+            Math.min(historySnapshot.maxChars, 1200),
+            historySnapshot.evaluation.reason
+          )
+        })
       }
       for (const historyMessage of historySnapshot.injected) {
         await session.appendMessage(piHistoryMessage(historyMessage, selection, model))
@@ -157,23 +160,24 @@ function compactPiHistory(
 ) {
   const historyRecords = history.map((message) => ({ role: message.role, content: message.content }))
   const bindingWindow = positiveInteger(selection.context_window, 0)
-  if (!bindingWindow) {
-    return compactPiHistoryByMessageCap(history, historyRecords, options)
-  }
+  const promptCountThreshold = positiveInteger(options.historyMaxMessages, DEFAULT_PROMPT_COUNT_COMPACTION_THRESHOLD)
   const evaluation = evaluateContextBudget({
     binding: {
       provider_id: selection.provider_id,
       provider_model_key: selection.id,
-      context_window_tokens: bindingWindow,
+      context_window_tokens: bindingWindow || undefined,
       max_output_tokens: selection.max_tokens,
-      capability_source: firstString((selection.inference || {}).capability_source, 'binding_snapshot'),
+      capability_source: firstString(
+        (selection.inference || {}).capability_source,
+        bindingWindow ? 'binding_snapshot' : 'prompt_count_fallback'
+      ),
       capability_snapshot_hash: firstString((selection.inference || {}).capability_snapshot_hash)
     },
     history: historyRecords,
-    history_max_messages: options.historyMaxMessages
+    prompt_count_threshold: promptCountThreshold,
+    history_max_messages: promptCountThreshold
   })
   const plan = planHistoryCompaction(historyRecords, evaluation, {
-    max_messages: options.historyMaxMessages,
     max_chars: options.historyMaxChars
   })
   return {
@@ -188,82 +192,6 @@ function compactPiHistory(
     })),
     maxMessages: plan.max_messages,
     maxChars: plan.max_chars,
-    evaluation,
-    plan
-  }
-}
-
-function compactPiHistoryByMessageCap(
-  history: NonNullable<AgentHarnessRunInput['history']>,
-  historyRecords: Array<{ role?: string, content?: string }>,
-  options: PiHarnessFactoryOptions
-) {
-  const maxMessages = positiveInteger(options.historyMaxMessages, 100)
-  const maxChars = positiveInteger(options.historyMaxChars, 200_000)
-  const injected: NonNullable<AgentHarnessRunInput['history']> = []
-  let usedChars = 0
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    const candidate = history[index]
-    const candidateChars = candidate.content.length
-    if (injected.length >= maxMessages || (injected.length > 0 && usedChars + candidateChars > maxChars)) break
-    injected.unshift(candidate)
-    usedChars += candidateChars
-  }
-  const compacted = history.slice(0, history.length - injected.length)
-  const evaluation = {
-    provider_id: '',
-    model_key: '',
-    capability_source: 'message_cap_fallback',
-    capability_snapshot_hash: '',
-    context_window_tokens: 0,
-    reserved_output_tokens: 0,
-    tool_schema_budget: 0,
-    safety_margin_tokens: 0,
-    usable_context_tokens: maxChars,
-    current_context_tokens: historyRecords.reduce((sum, message) => sum + Math.ceil(String(message.content || '').length / 4), 0),
-    system_tokens: 0,
-    history_tokens: historyRecords.reduce((sum, message) => sum + Math.ceil(String(message.content || '').length / 4), 0),
-    prompt_tokens: 0,
-    tool_schema_tokens: 0,
-    history_message_count: history.length,
-    history_max_messages: maxMessages,
-    threshold_ratio: 1,
-    threshold_tokens: maxChars,
-    should_compact: compacted.length > 0,
-    reason: compacted.length > 0 ? 'history_message_cap' as const : 'within_budget' as const
-  }
-  const dropEnd = historyRecords.length - injected.length
-  const retainedTokens = injected.reduce((sum, message) => sum + Math.ceil(message.content.length / 4), 0)
-  const droppedTokens = compacted.reduce((sum, message) => sum + Math.ceil(message.content.length / 4), 0)
-  const plan = {
-    injected: historyRecords.slice(dropEnd),
-    compacted: historyRecords.slice(0, dropEnd),
-    injected_tokens: retainedTokens,
-    compacted_tokens: droppedTokens,
-    retained_range: {
-      start_index: dropEnd,
-      end_index: historyRecords.length,
-      message_count: injected.length,
-      tokens: retainedTokens
-    },
-    dropped_range: dropEnd > 0
-      ? {
-        start_index: 0,
-        end_index: dropEnd,
-        message_count: compacted.length,
-        tokens: droppedTokens
-      }
-      : null,
-    max_messages: maxMessages,
-    max_chars: maxChars,
-    context_window_tokens: 0
-  }
-  return {
-    source: history,
-    injected,
-    compacted,
-    maxMessages,
-    maxChars,
     evaluation,
     plan
   }

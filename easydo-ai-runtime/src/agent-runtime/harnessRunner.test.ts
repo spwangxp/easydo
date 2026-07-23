@@ -337,6 +337,7 @@ describe('AgentHarnessRunner', () => {
     expect(events.map((event) => event.type)).toEqual([
       'session.prompted',
       'session.step.started',
+      'context.budget.evaluated',
       'session.text.delta',
       'session.tool.called',
       'session.tool.success',
@@ -456,7 +457,7 @@ describe('AgentHarnessRunner', () => {
     await expect(runner.prompt({ sessionID: 'sess-approval-1', runtimeRunID: 'run-approval-1', prompt: 'deploy', agent: 'ops' })).rejects.toBeInstanceOf(PiToolApprovalRequiredError)
 
     const events = await store.replay('sess-approval-1')
-    expect(events.map((event) => event.type)).toEqual(['session.prompted', 'session.step.started'])
+    expect(events.map((event) => event.type)).toEqual(['session.prompted', 'session.step.started', 'context.budget.evaluated'])
   })
 
   it('aborts the active harness when an external permission event pauses the run', async () => {
@@ -501,12 +502,13 @@ describe('AgentHarnessRunner', () => {
     expect(events.map((event) => event.type)).toEqual([
       'session.prompted',
       'session.step.started',
+      'context.budget.evaluated',
       'skill.used',
       'session.text.delta',
       'session.text.ended',
       'session.step.ended'
     ])
-    expect(events[2]).toMatchObject({ type: 'skill.used', name: 'grill-me', operation: 'invoked' })
+    expect(events[3]).toMatchObject({ type: 'skill.used', name: 'grill-me', operation: 'invoked' })
   })
 
   it('treats Pi failure messages as failed runs instead of completed empty answers', async () => {
@@ -526,9 +528,10 @@ describe('AgentHarnessRunner', () => {
     expect(events.map((event) => event.type)).toEqual([
       'session.prompted',
       'session.step.started',
+      'context.budget.evaluated',
       'session.step.failed'
     ])
-    expect(events[2]).toMatchObject({
+    expect(events[3]).toMatchObject({
       type: 'session.step.failed',
       error: {
         type: 'validation',
@@ -551,13 +554,14 @@ describe('AgentHarnessRunner', () => {
     expect(events.map((event) => event.type)).toEqual([
       'session.prompted',
       'session.step.started',
+      'context.budget.evaluated',
       'session.compaction.started',
       'session.compaction.ended',
       'session.text.ended',
       'session.step.ended'
     ])
-    expect(events[2]).toMatchObject({ type: 'session.compaction.started', message_id: 'compact-msg-1' })
-    expect(events[3]).toMatchObject({ type: 'session.compaction.ended', summary: 'Earlier context summarized.', recent: 'Current request remains active.' })
+    expect(events[3]).toMatchObject({ type: 'session.compaction.started', message_id: 'compact-msg-1' })
+    expect(events[4]).toMatchObject({ type: 'session.compaction.ended', summary: 'Earlier context summarized.', recent: 'Current request remains active.' })
   })
 
   it('aborts the active Pi harness for an exact runtime run', async () => {
@@ -653,6 +657,7 @@ describe('AgentHarnessRunner reasoning bridge', () => {
     expect(events.map((event) => event.type)).toEqual([
       'session.prompted',
       'session.step.started',
+      'context.budget.evaluated',
       'session.reasoning.started',
       'session.reasoning.delta',
       'session.reasoning.ended',
@@ -707,6 +712,7 @@ describe('AgentHarnessRunner reasoning bridge', () => {
     expect(types).toEqual([
       'session.prompted',
       'session.step.started',
+      'context.budget.evaluated',
       'session.reasoning.started',
       'session.reasoning.ended',
       'session.step.ended'

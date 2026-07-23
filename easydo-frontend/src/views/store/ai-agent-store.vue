@@ -389,6 +389,9 @@
             <el-form-item label="Provider Model Key">
               <el-input v-model="profileForm.model.provider_model_key" disabled />
             </el-form-item>
+            <el-form-item label="上下文长度">
+              <el-input :model-value="selectedProfileBindingContextLabel" disabled />
+            </el-form-item>
             <el-form-item label="Credential 引用">
               <el-input v-model="profileForm.provider_credential_ref.credential_id" disabled />
             </el-form-item>
@@ -987,11 +990,52 @@ const aiProviderOptions = computed(() => {
 
 const providerFirstModelOptions = computed(() => {
   const provider = selectedProfileAIProvider()
-  return (provider?.bindings || []).filter((binding) => String(binding.status || 'active') === 'active').map((binding) => ({
-    label: `${binding.provider_model_key || binding.binding_key || `Binding #${binding.id}`} · Model #${binding.model_id}`,
-    value: binding.id
-  }))
+  return (provider?.bindings || []).filter((binding) => String(binding.status || 'active') === 'active').map((binding) => {
+    const contextLabel = formatBindingContextLabel(binding)
+    const modelKey = binding.provider_model_key || binding.binding_key || `Binding #${binding.id}`
+    return {
+      label: contextLabel === '-'
+        ? `${modelKey} · Model #${binding.model_id}`
+        : `${modelKey} · Ctx ${contextLabel} · Model #${binding.model_id}`,
+      value: binding.id,
+      context_window_tokens: resolveBindingContextTokens(binding),
+      context_window_label: contextLabel
+    }
+  })
 })
+
+function resolveBindingContextTokens(binding = {}) {
+  const metadata = parseMaybeJSON(binding.metadata_json || binding.metadata)
+  const number = Number(
+    binding.context_window_tokens
+    || binding.context_window
+    || metadata.context_window_tokens
+    || metadata.context_window
+    || binding.model?.context_window_tokens
+    || binding.model?.context_window
+    || 0
+  )
+  return Number.isFinite(number) && number > 0 ? number : null
+}
+
+function formatBindingContextLabel(binding = {}) {
+  const number = resolveBindingContextTokens(binding)
+  if (!number) return '-'
+  if (number % 1024 === 0 && number >= 1024) return `${Math.round(number / 1024)}K`
+  if (number >= 1000) return `${Math.round(number / 1000)}K`
+  return String(Math.round(number))
+}
+
+function parseMaybeJSON(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value
+  if (typeof value !== 'string' || !value.trim()) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
 
 const subagentProfileOptions = computed(() => {
   return profiles.value.filter((profile) => !profileForm.id || Number(profile.id) !== Number(profileForm.id))
@@ -2015,6 +2059,10 @@ function selectedProfileModelBinding() {
   return (provider?.bindings || []).find((binding) => String(binding.id) === String(profileForm.model_provider_id)) || null
 }
 
+const selectedProfileBindingContextLabel = computed(() => {
+  return formatBindingContextLabel(selectedProfileModelBinding() || {})
+})
+
 function handleProfileProviderChange() {
   const provider = selectedProfileAIProvider()
   applyProfileProviderSnapshot(provider)
@@ -2029,15 +2077,21 @@ function handleProfileModelProviderChange() {
     profileForm.binding.binding_id = ''
     profileForm.binding.model_provider_id = ''
     profileForm.binding.provider_model_key = ''
+    profileForm.binding.context_window_tokens = null
     profileForm.model.model_id = ''
     profileForm.model.provider_model_key = ''
+    profileForm.model.context_window_tokens = null
+    profileForm.model.context_window = null
     return
   }
   profileForm.binding.binding_id = binding.id
   profileForm.binding.model_provider_id = binding.id
   profileForm.binding.provider_model_key = binding.provider_model_key || binding.binding_key || ''
+  profileForm.binding.context_window_tokens = resolveBindingContextTokens(binding)
   profileForm.model.model_id = binding.model_id
   profileForm.model.provider_model_key = binding.provider_model_key || binding.binding_key || ''
+  profileForm.model.context_window_tokens = resolveBindingContextTokens(binding)
+  profileForm.model.context_window = resolveBindingContextTokens(binding)
 }
 
 function hydrateProfileProviderSelection() {

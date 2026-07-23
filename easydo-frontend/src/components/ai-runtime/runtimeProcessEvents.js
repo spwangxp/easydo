@@ -1524,10 +1524,21 @@ function modelEventSummary(eventName, data = {}, display = {}) {
   if (RUN_STATE_EVENTS.has(eventName)) return firstString(display.summary, data.summary, data.message, data.code, data.status, display.status)
   if (eventName === 'context.budget.evaluated') return firstString(display.summary, formatContextBudgetSummary(data, display), '已按当前绑定模型窗口评估上下文预算')
   if (eventName === 'session.compaction.started' || eventName === 'context.compaction.started') {
-    return firstString(display.summary, formatContextCompactionSummary(data, display, 'start'), data.reason, '上下文过长，正在压缩历史信息')
+    return firstString(
+      display.summary,
+      formatContextCompactionSummary(data, display, 'start'),
+      compactionReasonDisplay(data, display) ? `理由 ${compactionReasonDisplay(data, display)}` : '',
+      '上下文过长，正在压缩历史信息'
+    )
   }
   if (eventName === 'session.compaction.ended' || eventName === 'context.compaction.completed') {
-    return firstString(display.summary, formatContextCompactionSummary(data, display, 'end'), data.summary, data.recent, '上下文整理完成')
+    return firstString(
+      formatContextCompactionSummary(data, display, 'end'),
+      display.summary,
+      data.summary,
+      data.recent,
+      '上下文整理完成'
+    )
   }
   if (eventName === 'context.compaction.failed') {
     return firstString(display.summary, data.error, data.message, '上下文整理失败')
@@ -1582,17 +1593,34 @@ function preparedContextSummary(data = {}, display = {}) {
   return parts.join('，') || '上下文已准备'
 }
 
+function compactionReasonDisplay(data = {}, display = {}) {
+  const reason = firstString(data.reason, display.reason)
+  if (reason === 'context-window' || reason === 'prompt-count') return reason
+  const label = firstString(data.reason_label, display.reason_label)
+  if (label.includes('context-window') || label.includes('prompt-count')) return label
+  return ''
+}
+
 function formatContextBudgetSummary(data = {}, display = {}) {
   const provider = firstString(data.provider_id, display.provider_id)
   const model = firstString(data.model_key, display.model_key)
   const windowTokens = Number(data.context_window_tokens ?? display.context_window_tokens)
   const currentTokens = Number(data.current_context_tokens ?? display.current_context_tokens)
   const thresholdTokens = Number(data.threshold_tokens ?? display.threshold_tokens)
+  const userPromptCount = Number(data.user_prompt_count ?? display.user_prompt_count)
+  const promptThreshold = Number(data.prompt_count_threshold ?? display.prompt_count_threshold)
+  const reason = compactionReasonDisplay(data, display)
   const parts = []
   if (provider || model) parts.push(compactJoin([provider, model], '/'))
   if (Number.isFinite(windowTokens) && windowTokens > 0) parts.push(`窗口 ${windowTokens}`)
   if (Number.isFinite(currentTokens) && currentTokens > 0) parts.push(`当前 ${currentTokens}`)
   if (Number.isFinite(thresholdTokens) && thresholdTokens > 0) parts.push(`阈值 ${thresholdTokens}`)
+  if (Number.isFinite(userPromptCount) && userPromptCount > 0) {
+    parts.push(Number.isFinite(promptThreshold) && promptThreshold > 0
+      ? `prompt ${userPromptCount}/${promptThreshold}`
+      : `prompt ${userPromptCount}`)
+  }
+  if (reason) parts.push(`理由 ${reason}`)
   if (data.should_compact ?? display.should_compact) parts.push('需压缩')
   return parts.join(' · ')
 }
@@ -1604,8 +1632,10 @@ function formatContextCompactionSummary(data = {}, display = {}, phase = 'end') 
   const compactedCount = Number(data.compacted_message_count ?? display.compacted_message_count)
   const provider = firstString(data.provider_id, display.provider_id)
   const model = firstString(data.model_key, display.model_key)
+  const reason = compactionReasonDisplay(data, display)
   const parts = []
   if (provider || model) parts.push(compactJoin([provider, model], '/'))
+  if (reason) parts.push(`理由 ${reason}`)
   if (Number.isFinite(windowTokens) && windowTokens > 0) parts.push(`窗口 ${windowTokens}`)
   if (Number.isFinite(before) && before > 0 && Number.isFinite(after) && after >= 0) {
     parts.push(phase === 'start' ? `预计 ${before}→${after}` : `${before}→${after} tokens`)

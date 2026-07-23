@@ -285,6 +285,7 @@
             >
               <span>{{ chatboxStore.currentSessionModel.provider }}</span>
               <span>{{ chatboxStore.currentSessionModel.model }}</span>
+              <span v-if="chatboxStore.currentSessionModel.context_window_label && chatboxStore.currentSessionModel.context_window_label !== '-'">{{ chatboxStore.currentSessionModel.context_window_label }}</span>
               <span>{{ chatboxStore.currentSessionModel.thinking_level }}</span>
               <el-icon><ArrowDown /></el-icon>
             </button>
@@ -302,6 +303,7 @@
               >
                 <strong>{{ option.provider_label }}</strong>
                 <span>{{ option.model_label }}</span>
+                <span v-if="option.context_window_label && option.context_window_label !== '-'">Ctx {{ option.context_window_label }}</span>
               </button>
               <div v-if="!chatboxStore.modelSwitchOptions.length" class="chatbox-empty-state">暂无可用模型</div>
             </div>
@@ -380,7 +382,10 @@ const profileStatusType = computed(() => {
 })
 const profileModelText = computed(() => {
   const profile = chatboxStore.currentProfile
-  return profile?.model?.provider_model_key || profile?.model?.model_id || 'model -'
+  const modelKey = profile?.model?.provider_model_key || profile?.model?.model_id || 'model -'
+  const contextLabel = chatboxStore.currentSessionModel?.context_window_label
+  if (contextLabel && contextLabel !== '-') return `${modelKey} · ${contextLabel}`
+  return modelKey
 })
 const profileVersionText = computed(() => `version ${chatboxStore.session?.agent_profile_version_key || chatboxStore.session?.agent_profile_version_id || 'latest'}`)
 const currentContextTags = computed(() => {
