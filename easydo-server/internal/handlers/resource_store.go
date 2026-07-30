@@ -559,16 +559,77 @@ func (h *ResourceHandler) DeleteResource(c *gin.Context) {
 		return
 	}
 
-	result := h.DB.Where("workspace_id = ?", workspaceID).Delete(&models.Resource{}, c.Param("id"))
+	resourceID := c.Param("id")
+	if resourceID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "资源ID不能为空"})
+		return
+	}
+
+	// 事务内分步清理关联记录，再删除资源本身
+	tx := h.DB.Begin()
+
+	// 1. 检查是否有进行中的部署引用该资源，有则阻止删除
+	var activeDeployCount int64
+	if err := tx.Model(&models.DeploymentRequest{}).
+		Where("target_resource_id = ? AND status IN ?", resourceID,
+			[]string{string(models.DeploymentRequestStatusPending),
+				string(models.DeploymentRequestStatusValidating),
+				string(models.DeploymentRequestStatusQueued),
+				string(models.DeploymentRequestStatusRunning)}).
+		Count(&activeDeployCount).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "检查部署状态失败"})
+		return
+	}
+	if activeDeployCount > 0 {
+		tx.Rollback()
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "该资源有进行中的部署，无法删除"})
+		return
+	}
+
+	// 2. 检查是否有活跃的终端会话，有则阻止删除
+	var activeSessionCount int64
+	if err := tx.Model(&models.ResourceTerminalSession{}).
+		Where("resource_id = ? AND status = ?", resourceID, models.ResourceTerminalSessionStatusActive).
+		Count(&activeSessionCount).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "检查终端会话状态失败"})
+		return
+	}
+	if activeSessionCount > 0 {
+		tx.Rollback()
+		c.JSON(http.StatusBadRequest, gin.H{"code": http.StatusBadRequest, "message": "该资源有活跃的终端会话，无法删除"})
+		return
+	}
+
+	// 3. 删除凭据绑定记录（凭据本身保留，仅移除关联关系）
+	if err := tx.Where("resource_id = ?", resourceID).Delete(&models.ResourceCredentialBinding{}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "删除凭据绑定失败"})
+		return
+	}
+
+	// 4. 删除健康检查快照
+	if err := tx.Where("resource_id = ?", resourceID).Delete(&models.ResourceHealthSnapshot{}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "删除健康检查记录失败"})
+		return
+	}
+
+	// 5. 删除资源本身
+	result := tx.Where("workspace_id = ?", workspaceID).Delete(&models.Resource{}, resourceID)
 	if result.Error != nil {
+		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"code": http.StatusInternalServerError, "message": "删除资源失败"})
 		return
 	}
 	if result.RowsAffected == 0 {
+		tx.Rollback()
 		c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "message": "资源不存在"})
 		return
 	}
 
+	tx.Commit()
 	c.JSON(http.StatusOK, gin.H{"code": http.StatusOK, "message": "删除成功"})
 }
 

@@ -482,10 +482,18 @@ const handleFormSubmit = async (formData) => {
 }
 
 const removeResource = async (row) => {
-  await ElMessageBox.confirm(`确认删除资源 ${row.name} 吗？`, '提示', { type: 'warning' })
-  await deleteResource(row.id)
-  ElMessage.success('资源已删除')
-  await fetchResources()
+  try {
+    await ElMessageBox.confirm(`确认删除资源 ${row.name} 吗？`, '提示', { type: 'warning' })
+    await deleteResource(row.id)
+    ElMessage.success('资源已删除')
+    await fetchResources()
+  } catch (error) {
+    if (error?.response?.data?.message) {
+      ElMessage.error(error.response.data.message)
+    } else if (error?.message) {
+      ElMessage.error(error.message)
+    }
+  }
 }
 
 const waitForTaskCompletion = async (taskId) => {
